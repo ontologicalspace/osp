@@ -153,6 +153,10 @@ pub fn analyze_repo_with_config(
         let coupling = coupling_axis.compute(node, &space);
         let instability = instability_axis.compute(node, &space);
         let cohesion = compute_module_cohesion(fd.path.as_path(), &repo, &semantic_index);
+        // Wire cohesion into Node → CoordinateSystem::CohesionAxis reads it (per-node y-axis)
+        if let Some(n) = space.nodes.get_mut(&node_id) {
+            n.cohesion = Some(cohesion.value);
+        }
         module_metrics.insert(
             node_id,
             ModuleMetrics {

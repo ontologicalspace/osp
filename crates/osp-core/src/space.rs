@@ -73,6 +73,12 @@ pub struct Node {
     pub mass: f64,
     /// `(x, y, z, w, v, u, ...)` koordinat — `CoordinateSystem::position_of` ile hesaplanır.
     pub position: Position,
+    /// Analyzer-tarafından set edilen LCOM4 cohesion `∈ [0, 1]` (Faz 3.6+).
+    /// `None` = ölçülmemiş → CohesionAxis fallback (0.5) kullanır.
+    /// CouplingAxis/InstabilityAxis graf'ten compute ettiği için burada yok —
+    /// sadece cohesion external (SCIP) veri gerektirir.
+    #[serde(default)]
+    pub cohesion: Option<f64>,
 }
 
 /// Tipleşmiş yönlü kenar (OSP-formalism.md §1.3).

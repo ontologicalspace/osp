@@ -168,28 +168,36 @@ impl Axis for InstabilityAxis {
 // y — Cohesion (LCOM4 proxy, precomputed) — Faz 1.9
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// `y` ekseni — **Kohezyon** (LCOM4 proxy).
+/// `y` ekseni — **Kohezyon** (LCOM4).
 ///
-/// Tree-sitter'a osp-core bağımlı olamaz (inv #8 — parser-free core) →
-/// `EntropyAxis`/`WitnessDepthAxis` gibi construction'da **precompute değer** alır.
-/// Gerçek LCOM4 hesabı (method-field erişim grafı, bağlı bileşen sayısı) `osp-spike`
-/// (Faz 1.10) veya SCIP (Faz 3) tarafında; osp-core değeri alır.
+/// **Per-node cohesion:** `compute(node, space)` öncelikle `node.cohesion` okur
+/// (analyzer tarafından SCIP LCOM4'ten set edilir, Faz 3.6+). Node'da değer yoksa
+/// (`None`), `fallback` kullanılır (test/repo-level sabit değer için backward-compat).
 ///
 /// `cohesion ∈ [0, 1]`: `1.0` = tam kohezif (LCOM4=1), `0.0` = kohezyon yok.
 #[derive(Debug, Clone, Copy)]
 pub struct CohesionAxis {
-    value: f64,
+    /// `node.cohesion == None` durumunda kullanılacak değer (backward-compat).
+    /// `None` = 0.5 nötr default.
+    fallback: Option<f64>,
 }
 
 impl CohesionAxis {
-    /// Pre-computed normalize kohezyon `[0,1]`. Upstream (tree-sitter/SCIP) hesaplar.
+    /// Per-node cohesion okuyan axis — analyzer `node.cohesion` set ettiğinde gerçek değer kullanılır.
+    /// Set edilmediyse 0.5 nötr default.
+    pub fn new() -> Self {
+        Self { fallback: None }
+    }
+
+    /// Sabit fallback cohesion `[0,1]` — `node.cohesion` None ise bu kullanılır.
+    /// Backward-compat için (eski test'ler `from_normalized`/`from_lcom4` kullanır).
     pub fn from_normalized(cohesion: f64) -> Self {
         Self {
-            value: cohesion.clamp(0.0, 1.0),
+            fallback: Some(cohesion.clamp(0.0, 1.0)),
         }
     }
 
-    /// LCOM4 raw değerinden basit mapping: `cohesion = 1 / lcom4`.
+    /// LCOM4 raw değerinden fallback mapping: `cohesion = 1 / lcom4`.
     /// `lcom4=1` → `1.0` (kohezif), `lcom4=2` → `0.5`, `lcom4≥4` → `≤0.25`.
     pub fn from_lcom4(lcom4: usize) -> Self {
         let cohesion = if lcom4 == 0 {
@@ -197,11 +205,19 @@ impl CohesionAxis {
         } else {
             (1.0 / lcom4 as f64).clamp(0.0, 1.0)
         };
-        Self { value: cohesion }
+        Self {
+            fallback: Some(cohesion),
+        }
     }
 
     pub fn value(&self) -> f64 {
-        self.value
+        self.fallback.unwrap_or(0.5)
+    }
+}
+
+impl Default for CohesionAxis {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -209,8 +225,9 @@ impl Axis for CohesionAxis {
     fn name(&self) -> &'static str {
         "cohesion"
     }
-    fn compute(&self, _node: &Node, _space: &Space) -> f64 {
-        self.value
+    fn compute(&self, node: &Node, _space: &Space) -> f64 {
+        // Per-node cohesion (analyzer SCIP LCOM4) → fallback → 0.5 neutral
+        node.cohesion.or(self.fallback).unwrap_or(0.5)
     }
 }
 
@@ -263,7 +280,7 @@ impl CoordinateSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::space::{Edge, Node};
+    use crate::space::{Edge, Node, NodeKind};
 
     fn node(id: u64) -> Node {
         Node {
@@ -548,6 +565,72 @@ mod tests {
     fn cohesion_axis_name_is_cohesion() {
         let a = CohesionAxis::from_normalized(0.5);
         assert_eq!(a.name(), "cohesion");
+    }
+
+    // --- CohesionAxis per-node reading (Faz 3.6) ---
+
+    #[test]
+    fn cohesion_axis_reads_per_node_value() {
+        // Node with cohesion=Some(0.8) → axis returns 0.8
+        let space = Space::new();
+        let node = Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            cohesion: Some(0.8),
+            ..Default::default()
+        };
+        let axis = CohesionAxis::new();
+        let y = axis.compute(&node, &space);
+        assert!((y - 0.8).abs() < 1e-9, "per-node cohesion should be 0.8, got {}", y);
+    }
+
+    #[test]
+    fn cohesion_axis_falls_back_to_0_5_when_node_has_no_cohesion() {
+        // Node with cohesion=None → axis returns default 0.5
+        let space = Space::new();
+        let node = Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            cohesion: None,
+            ..Default::default()
+        };
+        let axis = CohesionAxis::new();
+        let y = axis.compute(&node, &space);
+        assert!((y - 0.5).abs() < 1e-9, "no cohesion → default 0.5, got {}", y);
+    }
+
+    #[test]
+    fn cohesion_axis_fallback_used_when_node_none() {
+        // Node cohesion=None + CohesionAxis::from_lcom4(1) → fallback 1.0 wins
+        let space = Space::new();
+        let node = Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            cohesion: None,
+            ..Default::default()
+        };
+        let axis = CohesionAxis::from_lcom4(1); // fallback = Some(1.0)
+        let y = axis.compute(&node, &space);
+        assert!((y - 1.0).abs() < 1e-9, "fallback should be 1.0 when node has None, got {}", y);
+    }
+
+    #[test]
+    fn cohesion_axis_node_value_overrides_fallback() {
+        // Node cohesion=Some(0.6) + CohesionAxis::from_lcom4(1) → node wins (0.6)
+        let space = Space::new();
+        let node = Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            cohesion: Some(0.6),
+            ..Default::default()
+        };
+        let axis = CohesionAxis::from_lcom4(1); // fallback = Some(1.0)
+        let y = axis.compute(&node, &space);
+        assert!((y - 0.6).abs() < 1e-9, "node cohesion should override fallback, got {}", y);
     }
 
     // --- default_raw_five preset — Faz 1.9 ---
