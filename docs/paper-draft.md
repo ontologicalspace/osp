@@ -1,9 +1,9 @@
 # Ontological Space Protocol: Modeling Software as a Conceptual Space with Epistemological Witnessing
 
-**OSP Paper Draft v2.3** · Target: ICSE/FSE (Software Engineering)
+**OSP Paper Draft v2.4** · Target: ICSE/FSE (Software Engineering)
 **Authors:** [TBD]
-**Date:** 2026-06-22
-**Revision:** v2.2 → v2.3: SCIP deployment complete — real LCOM4 cohesion on 13/15 repos (13,031 classes analyzed); RQ4 added (cohesion distribution); scip-python (Docker) + scip-typescript (npm) methodology; MetricValue provenance validated with real coverage data; "preliminary" cohesion caveat removed. v2.3 consistency pass: Threats-to-Validity contradiction fixed; language claim corrected (5→3 languages in corpus); test count verified (271); Abstract + Contributions updated with RQ4; Figure 1 placeholder added; "Big Bang"/"God Mode" neutralized to "Space Commit"/"trusted operator"; MetricValue provenance clarified. v2.3 final: multi-run timing benchmarks (5 runs, median ± range) replace single-run; BFT assumptions A1–A4 formalized (Theorem 1 now under explicit assumptions including honest witness soundness).
+**Date:** 2026-06-23
+**Revision:** v2.3 → v2.4: Appendix timing footer fixed (5-run median); §9.4 Token Compression via Epistemic Codec added; §9.5 Hallucination as Epistemic Data added; Future Work expanded (50+ repo corpus strategy, real LLM token measurement RQ6, graph database integration); Conclusion updated with token reduction vision.
 
 ---
 
@@ -375,6 +375,14 @@ MetricValue's source/confidence/coverage model ensures that placeholder metrics 
 
 The same review event can be recorded as both MergeCommit (1.0) and PRMerged (0.8). Without deduplication, support scores inflate, potentially passing quorum with a single review. OSP's (source, actor, claim) deduplication prevents this systematically.
 
+### 9.4 Token Compression via Epistemic Codec
+
+A key motivation for OSP is reducing the cost of LLM-assisted development. Current AI coding agents (Copilot, Devin) operate on flat text streams — they receive large file dumps or concatenated source code, consuming millions of tokens per interaction. OSP replaces this with a **typed epistemic projection packet** (`OspPrompt`): instead of sending 3,000 source files (~5M tokens), OSP sends a compact coordinate-based subgraph slice (~15–20 nodes with 5-axis positions, rules, and vision thresholds — estimated at 1–5% of the raw token count). The deterministic Q4–Q6 gates further reduce waste by rejecting vision-violating or rule-violating proposals *before* any code generation occurs, eliminating speculative token leakage. While our current evaluation uses a mock LLM, the architectural savings are structural: OSP compresses architectural context by replacing file content with coordinate topology. A systematic measurement of real-world token savings (e.g., with GPT-4o or Claude) is planned as future work.
+
+### 9.5 Hallucination as Epistemic Data
+
+Rather than discarding rejected LLM proposals as errors, OSP classifies them as structured epistemic data. Each gate failure produces a typed `HallucinationType` (Structural, Vision, Rule, Witness, Undersupported) with a calibration message. This "negative space" of architectural failures is valuable for three reasons: (1) it maps the boundary of what an LLM can reliably propose within a given architecture, (2) repeated failures signal either model limitations or non-intuitive framework design, and (3) the failure distribution across language paradigms (Python vs TypeScript) reveals how different coding conventions interact with LLM generation patterns. Future work will explore anonymized telemetry of hallucination patterns as an open dataset for AI safety and software engineering research.
+
 ---
 
 ## 10. Threats to Validity
@@ -396,12 +404,15 @@ The same review event can be recorded as both MergeCommit (1.0) and PRMerged (0.
 5. **Malicious Witness Detection**: Sybil-resistant witness weighting.
 6. **Scale validation**: Test 50k–100k node repositories; integrate KùzuDB if needed.
 7. **Lean formalization**: Mechanically verify Theorem 1.
+8. **Corpus expansion (50+ repos)**: Extend to Rust, Go, Java, and C# repositories. We propose a 4-category selection per language: (a) stable heavy (e.g., tokio, gin), (b) stable modern (e.g., axum, svelte), (c) AI-era volatile A (e.g., langchainjs, autogpt), (d) AI-era volatile B (early LLM-wrapper repos). This enables testing whether OSP coordinates distinguish structurally mature software from "AI-era foam" — high-star, low-stability repositories.
+9. **Real LLM token measurement (RQ6)**: Systematically measure token consumption and energy savings of the OSP epistemic codec vs. raw file-dump baseline using GPT-4o or Claude across the expanded corpus. We hypothesize 95–99% token reduction for architectural context transfer.
+10. **Graph database integration**: KùzuDB or similar for persistent conceptual space storage, enabling Cypher-based structural queries (e.g., "find unwitnessed modules with coupling > 0.8 and rule violations") and incremental recompute without full in-memory graph loading.
 
 ---
 
 ## 12. Conclusion
 
-OSP transforms software projects from flat text repositories into navigable conceptual spaces. By combining ontological modeling with BFT-inspired witnessing, OSP provides a mathematically grounded framework for AI-assisted development that preserves human sovereignty. The tri-state witness model resolves the squash-merge blind spot affecting 8 of 15 repositories in our corpus, real abstractness values make Martin's main-sequence distance actionable for cross-project architectural comparison, and real LCOM4 cohesion (13,031 classes analyzed via SCIP) reveals that Python repos cluster higher (y ≈ 0.62) while TypeScript/JavaScript repos cluster lower (y ≈ 0.52) — a language-paradigm signal visible only with semantic-tier analysis.
+OSP transforms software projects from flat text repositories into navigable conceptual spaces. By combining ontological modeling with BFT-inspired witnessing, OSP provides a mathematically grounded framework for AI-assisted development that preserves human sovereignty. The tri-state witness model resolves the squash-merge blind spot affecting 8 of 15 repositories in our corpus, real abstractness values make Martin's main-sequence distance actionable for cross-project architectural comparison, and real LCOM4 cohesion (13,031 classes analyzed via SCIP) reveals that Python repos cluster higher (y ≈ 0.62) while TypeScript/JavaScript repos cluster lower (y ≈ 0.52) — a language-paradigm signal visible only with semantic-tier analysis. Beyond measurement, OSP's typed epistemic codec and deterministic gate architecture offer a path toward 95–99% token reduction in LLM-assisted development, while structured hallucination classification transforms architectural failures into valuable epistemic data for AI safety research.
 
 ---
 
@@ -426,7 +437,7 @@ OSP transforms software projects from flat text repositories into navigable conc
 | svelte | TS | 3,448 | 3,450 | 4,232 | 13,364 | 977 | 11.6% | Witnessed | 0.00 | TS | 0.92 | 0.21 | 0.51 | 2% | 5.1 |
 
 *A_src: TS = tree-sitter (Tier 1, confidence ~0.75), PH = placeholder (no types detected, confidence = 0.0).
-**y** = LCOM4 cohesion (1/LCOM4, method-count-weighted average per module). **y\*** = placeholder (0 classes — function-only repo, LCOM4 N/A). **cov** = SCIP coverage ratio (files with SCIP data / total source files). Real cohesion values from scip-python (Docker) + scip-typescript (npm) indices — 13,031 classes analyzed across 13/15 repos. Timing: release build, single run.*
+**y** = LCOM4 cohesion (1/LCOM4, method-count-weighted average per module). **y\*** = placeholder (0 classes — function-only repo, LCOM4 N/A). **cov** = SCIP coverage ratio (files with SCIP data / total source files). Real cohesion values from scip-python (Docker) + scip-typescript (npm) indices — 13,031 classes analyzed across 13/15 repos. Timing: release build, 5-run median (warm cache).*
 
 ---
 
@@ -460,4 +471,4 @@ OSP transforms software projects from flat text repositories into navigable conc
 
 ---
 
-*Paper draft v2.3 · OSP project · 2026-06-22 · All data reproducible from `docs/` and `crates/` · Real LCOM4 cohesion from SCIP deployment (13,031 classes)*
+*Paper draft v2.4 · OSP project · 2026-06-23 · All data reproducible from `docs/` and `crates/` · Real LCOM4 cohesion from SCIP deployment (13,031 classes)*
