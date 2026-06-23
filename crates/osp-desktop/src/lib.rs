@@ -133,3 +133,112 @@ pub fn cmd_analyze_repo(
 pub fn cmd_health() -> &'static str {
     "OSP Desktop v0.1 — ready"
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Command: vision config (get/set)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VisionConfigJson {
+    pub x: f64, // coupling target
+    pub y: f64, // cohesion target
+    pub z: f64, // instability target
+    pub w: f64, // entropy target
+    pub v: f64, // witness-depth target
+    pub theta_bound: f64,
+    pub theta_quorum: f64,
+    pub min_approvers: usize,
+}
+
+impl Default for VisionConfigJson {
+    fn default() -> Self {
+        Self {
+            x: 0.4,
+            y: 0.6,
+            z: 0.5,
+            w: 0.5,
+            v: 0.5,
+            theta_bound: 0.25,
+            theta_quorum: 1.5,
+            min_approvers: 2,
+        }
+    }
+}
+
+pub fn cmd_get_vision_config() -> VisionConfigJson {
+    VisionConfigJson::default()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Command: repo stats (git history → tri-state witness classification)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepoStatsJson {
+    pub commit_count: usize,
+    pub author_count: usize,
+    pub merge_count: usize,
+    pub merge_ratio: f64,
+    pub witness_status: String,
+    pub witness_detail: String,
+}
+
+/// Git geçmişini analiz et → tri-state witness classification.
+///
+/// `git log` subprocess ile çalışır (osp-spike'a bağımlılık yok).
+pub fn cmd_get_repo_stats(repo_path: &str) -> Result<RepoStatsJson, String> {
+    let path = std::path::Path::new(repo_path);
+
+    // git rev-list --count HEAD
+    let commit_count = git_int(path, &["rev-list", "--count", "HEAD"])?;
+    // git shortlog -sne HEAD | wc -l
+    let authors = git_output(path, &["shortlog", "-sne", "HEAD"])?;
+    let author_count = authors.lines().filter(|l| !l.trim().is_empty()).count();
+    // git rev-list --count --merges HEAD
+    let merge_count = git_int(path, &["rev-list", "--count", "--merges", "HEAD"])?;
+
+    let merge_ratio = if commit_count > 0 {
+        merge_count as f64 / commit_count as f64
+    } else {
+        0.0
+    };
+
+    // Tri-state classification (calibration-corpus.md threshold: 10%)
+    let (status, detail) = if author_count <= 1 {
+        ("Unwitnessed".to_string(), format!("Solo project ({} author)", author_count))
+    } else if merge_ratio >= 0.10 {
+        ("Witnessed".to_string(), format!("{:.1}% merge ratio, {} authors", merge_ratio * 100.0, author_count))
+    } else {
+        ("Unobservable-locally".to_string(), format!("{} authors but {:.1}% merge (squash/rebase hides evidence)", author_count, merge_ratio * 100.0))
+    };
+
+    Ok(RepoStatsJson {
+        commit_count,
+        author_count,
+        merge_count,
+        merge_ratio,
+        witness_status: status,
+        witness_detail: detail,
+    })
+}
+
+fn git_int(path: &std::path::Path, args: &[&str]) -> Result<usize, String> {
+    let output = git_output(path, args)?;
+    output.trim().parse().map_err(|e| format!("git parse error: {e}"))
+}
+
+fn git_output(path: &std::path::Path, args: &[&str]) -> Result<String, String> {
+    std::process::Command::new("git")
+        .args(["-C"])
+        .arg(path)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git failed: {e}"))
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).map_err(|e| format!("utf8: {e}"))
+            } else {
+                Err(format!("git error: {}", String::from_utf8_lossy(&o.stderr)))
+            }
+        })
+}

@@ -40,6 +40,28 @@ fn handle_request(mut request: tiny_http::Request) {
             respond_json(request, &body);
         }
 
+        (Method::Get, "/api/vision") => {
+            respond_json(request, &osp_desktop::cmd_get_vision_config());
+        }
+
+        (Method::Post, "/api/stats") => {
+            let mut content = String::new();
+            request.as_reader().read_to_string(&mut content).ok();
+            let req: Value = match serde_json::from_str(&content) {
+                Ok(v) => v,
+                Err(e) => { respond_error(request, 400, &format!("Invalid JSON: {e}")); return; }
+            };
+            let repo = req["repo"].as_str().unwrap_or("");
+            if repo.is_empty() {
+                respond_error(request, 400, "repo is required");
+            } else {
+                match osp_desktop::cmd_get_repo_stats(repo) {
+                    Ok(stats) => respond_json(request, &stats),
+                    Err(e) => respond_error(request, 500, &e),
+                }
+            }
+        }
+
         (Method::Post, "/api/analyze") => {
             let mut content = String::new();
             request.as_reader().read_to_string(&mut content).ok();
