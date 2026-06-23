@@ -11,7 +11,7 @@
 **Paper:** v2.3 (ICSE/FSE target) — 4 research questions, 15-repo corpus, 13,031 real LCOM4
 classes analyzed via SCIP. See [`docs/paper-draft.md`](docs/paper-draft.md).
 
-**Vision source:** [`SoftwarePhysics.txt`](SoftwarePhysics.txt) · **Roadmap:** [`docs/roadmap.md`](docs/roadmap.md)
+**Vision source:** [`SoftwarePhysics.txt`](SoftwarePhysics.txt) · **Paper:** [`docs/paper-draft.md`](docs/paper-draft.md)
 
 ---
 
@@ -149,13 +149,14 @@ Full formalism: [`docs/OSP-formalism.md`](docs/OSP-formalism.md)
 
 | Document | Content |
 |---|---|
+| [`docs/paper-draft.md`](docs/paper-draft.md) | ICSE/FSE paper v2.3 (4 RQs, real LCOM4 data) |
 | [`docs/OSP-formalism.md`](docs/OSP-formalism.md) | Mathematical model (coordinate system, BFT proof, commit operator) |
-| [`docs/agent-prompt-semantics.md`](docs/agent-prompt-semantics.md) | Faz 5 Agent/LLM protocol spec |
-| [`docs/implementation-invariants.md`](docs/implementation-invariants.md) | 15 structurally enforced invariants |
-| [`docs/paper-draft.md`](docs/paper-draft.md) | ICSE/FSE paper v2.3 |
-| [`docs/scip-cohesion-results.md`](docs/scip-cohesion-results.md) | 15-repo corpus LCOM4 results |
-| [`docs/multi-agent-coordination.md`](docs/multi-agent-coordination.md) | Faz 6 proposal (Shared Horizons) |
-| [`docs/roadmap.md`](docs/roadmap.md) | Phase roadmap + status |
+| [`docs/scip-cohesion-results.md`](docs/scip-cohesion-results.md) | 15-repo corpus LCOM4 cohesion results |
+| [`docs/calibration-corpus.md`](docs/calibration-corpus.md) | Corpus selection methodology |
+| [`docs/literature-scan.md`](docs/literature-scan.md) | Related work + originality analysis |
+
+*Internal design specs (agent semantics, invariants, core/engine/analyzer design,
+roadmap, UI design) are maintained privately during development.*
 
 ---
 

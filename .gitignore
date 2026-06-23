@@ -23,6 +23,16 @@ tmp/
 .playwright-mcp/
 space-browser-initial
 
+# Internal design docs — çalışma notları, GitHub'da paylaşılmaz
+docs/agent-prompt-semantics.md
+docs/implementation-invariants.md
+docs/multi-agent-coordination.md
+docs/osp-core-design.md
+docs/space-engine-design.md
+docs/scip-analyzer-design.md
+docs/roadmap.md
+docs/ui-design.md
+
 # Spike repo'ları (clone — workspace dışında P:\repos önerilir, ama içeride de olabilir)
 repos/
 /repo/
