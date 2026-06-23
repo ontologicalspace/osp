@@ -543,6 +543,70 @@ impl SpaceEngine {
     pub fn vision(&self) -> &VisionVector {
         &self.vision
     }
+
+    /// **Position computation from DeltaProposal** (inv #4 — epistemological integrity).
+    ///
+    /// Agent/LLM pozisyon **declare edemez** — engine structural ΔS'i hypothetical
+    /// graph'ta uygular, CoordinateSystem ile gerçek pozisyonları ölçer.
+    ///
+    /// Bu metod Agent kabuğu tarafından çağrılır:
+    /// 1. Agent DeltaProposal üretir (structural only — no positions)
+    /// 2. Agent kabuğu engine.compute_raw_from_delta() çağırır
+    /// 3. Dönen RawPosition ile Claim oluşturur (computed_raw)
+    /// 4. Engine.commit() → Q5 θ(computed_raw, vision) kontrol eder
+    ///
+    /// **Hypothetical graph:** Mevcut space'in klonu + delta uygulanır.
+    /// Coupling/Instability yeni edge'lerden compute edilir (actual measured).
+    /// Cohesion node.cohesion'dan (analyzer tarafından set edilmişse).
+    /// Entropy/WitnessDepth repo-level (CoordinateSystem stored values).
+    ///
+    /// **Centroid:** ΔS'deki tüm node'ların mass-weighted ortalama pozisyonu.
+    /// Bu, "bu değişiklik uzayın neresinde?" sorusunun cevabıdır.
+    pub fn compute_raw_from_delta(
+        &self,
+        delta_nodes: &[crate::space::Node],
+        delta_edges: &[crate::space::Edge],
+    ) -> RawPosition {
+        if delta_nodes.is_empty() {
+            return RawPosition::default();
+        }
+
+        // 1. Hypothetical graph: clone current space
+        let mut hypothetical = self.space.clone();
+
+        // 2. Apply structural changes (pre-mutation, no commit)
+        for node in delta_nodes {
+            hypothetical.insert_node(node.clone());
+        }
+        for edge in delta_edges {
+            hypothetical.insert_edge(*edge);
+        }
+
+        // 3. Compute raw position for each delta node in the hypothetical graph
+        let positions: Vec<(f64, RawPosition)> = delta_nodes
+            .iter()
+            .filter_map(|n| {
+                let node = hypothetical.nodes.get(&n.id)?;
+                let raw = self.coord_system.raw_position_of(node, &hypothetical);
+                // Mass as weight (minimum 0.01 to avoid div-by-zero)
+                Some((node.mass.max(0.01), raw))
+            })
+            .collect();
+
+        if positions.is_empty() {
+            return RawPosition::default();
+        }
+
+        // 4. Mass-weighted centroid
+        let total_mass: f64 = positions.iter().map(|(m, _)| m).sum();
+        RawPosition {
+            x: positions.iter().map(|(m, r)| m * r.x).sum::<f64>() / total_mass,
+            y: positions.iter().map(|(m, r)| m * r.y).sum::<f64>() / total_mass,
+            z: positions.iter().map(|(m, r)| m * r.z).sum::<f64>() / total_mass,
+            w: positions.iter().map(|(m, r)| m * r.w).sum::<f64>() / total_mass,
+            v: positions.iter().map(|(m, r)| m * r.v).sum::<f64>() / total_mass,
+        }
+    }
 }
 
 fn current_time_ms() -> u64 {
@@ -559,7 +623,7 @@ fn current_time_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::axes::{EntropyAxis, WitnessDepthAxis};
+    use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
     use crate::coords::CoordinateSystem;
     use crate::space::{Edge, EdgeKind, Node, NodeKind};
     use crate::witness::{EvidenceEvent, EvidenceId, Intent, WitnessKind};
@@ -1093,5 +1157,122 @@ v = 0.5
         );
         let result = engine.check_claim_rules(&claim);
         assert!(result.is_ok(), "valid claim should pass Q6: {:?}", result);
+    }
+
+    // --- Position computation from DeltaProposal (inv #4) ---
+
+    /// Full 5-axis engine for position computation tests (coupling + cohesion + instability + entropy + witness)
+    fn make_engine_full() -> SpaceEngine {
+        let cs = CoordinateSystem::default_raw_five(
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(6.0),
+            WitnessDepthAxis::from_witness(0.3, 5),
+        );
+        let vision = VisionVector::new(RawPosition {
+            x: 0.5, y: 0.5, z: 0.5, w: 0.5, v: 0.5,
+        });
+        SpaceEngine::new(Space::new(), cs, vision, EngineConfig::default_calibrated())
+    }
+
+    #[test]
+    fn compute_raw_empty_delta_returns_default() {
+        let engine = make_engine();
+        let raw = engine.compute_raw_from_delta(&[], &[]);
+        assert_eq!(raw, RawPosition::default(), "empty delta → default position");
+    }
+
+    #[test]
+    fn compute_raw_does_not_mutate_real_space() {
+        let mut engine = make_engine();
+        let initial_count = engine.space().node_count();
+
+        let nodes = vec![Node {
+            id: 999,
+            kind: NodeKind::Module,
+            mass: 10.0,
+            ..Default::default()
+        }];
+        let _ = engine.compute_raw_from_delta(&nodes, &[]);
+
+        assert_eq!(
+            engine.space().node_count(),
+            initial_count,
+            "hypothetical graph must not mutate real space"
+        );
+    }
+
+    #[test]
+    fn compute_raw_single_isolated_node_has_zero_coupling() {
+        let engine = make_engine_full();
+        let nodes = vec![Node {
+            id: 42,
+            kind: NodeKind::Module,
+            mass: 10.0,
+            ..Default::default()
+        }];
+        let raw = engine.compute_raw_from_delta(&nodes, &[]);
+        // Isolated node: coupling = out_degree / (1 + out_degree) = 0 / 1 = 0
+        assert!((raw.x - 0.0).abs() < 1e-9, "isolated node coupling should be 0, got {}", raw.x);
+        // Isolated node: Ce=Ca=0 → instability = 0.5 (convention)
+        assert!((raw.z - 0.5).abs() < 1e-9, "isolated node instability should be 0.5, got {}", raw.z);
+    }
+
+    #[test]
+    fn compute_raw_edge_increases_coupling() {
+        let engine = make_engine_full();
+        // Two nodes + one import edge: node 1 imports node 2
+        let nodes = vec![
+            Node { id: 1, kind: NodeKind::Module, mass: 10.0, ..Default::default() },
+            Node { id: 2, kind: NodeKind::Module, mass: 10.0, ..Default::default() },
+        ];
+        let edges = vec![Edge { from: 1, to: 2, kind: EdgeKind::Imports }];
+
+        let raw = engine.compute_raw_from_delta(&nodes, &edges);
+
+        // Node 1: out_degree(Imports) = 1 → coupling = 1/(1+1) = 0.5
+        // Node 2: out_degree(Imports) = 0 → coupling = 0
+        // Centroid (equal mass): (0.5 + 0.0) / 2 = 0.25
+        assert!(
+            (raw.x - 0.25).abs() < 1e-9,
+            "centroid coupling with 1 edge should be 0.25, got {}",
+            raw.x
+        );
+    }
+
+    #[test]
+    fn compute_raw_is_mass_weighted() {
+        let engine = make_engine_full();
+        let nodes = vec![
+            Node { id: 1, kind: NodeKind::Module, mass: 100.0, ..Default::default() },
+            Node { id: 2, kind: NodeKind::Module, mass: 1.0, ..Default::default() },
+        ];
+        let edges = vec![Edge { from: 1, to: 2, kind: EdgeKind::Imports }];
+
+        let raw = engine.compute_raw_from_delta(&nodes, &edges);
+        let expected = 100.0 * 0.5 / 101.0;
+        assert!(
+            (raw.x - expected).abs() < 1e-6,
+            "mass-weighted centroid: expected {}, got {}",
+            expected,
+            raw.x
+        );
+    }
+
+    #[test]
+    fn compute_raw_cohesion_from_node() {
+        let engine = make_engine_full();
+        let nodes = vec![Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 10.0,
+            cohesion: Some(0.85),
+            ..Default::default()
+        }];
+        let raw = engine.compute_raw_from_delta(&nodes, &[]);
+        assert!(
+            (raw.y - 0.85).abs() < 1e-9,
+            "cohesion should come from node.cohesion, got {}",
+            raw.y
+        );
     }
 }
