@@ -127,8 +127,132 @@ pub fn cmd_analyze_repo(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Command: health check
+// Command: simulate claim (commit pipeline visualizer)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GateResultJson {
+    pub name: String,
+    pub passed: bool,
+    pub detail: String,
+    pub hallucination: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PipelineResultJson {
+    pub gates: Vec<GateResultJson>,
+    pub computed_raw: Vec<f64>,
+    pub outcome: String, // "Commit" | "Rejected" | "Hold"
+}
+
+/// Commit pipeline simülasyonu — senaryo seçerek gate akışını gösterir.
+///
+/// Senaryolar:
+/// - "valid": geçerli node + edge → tüm gate'ler geçer → Commit
+/// - "syntax_fail": self-import → Q4 reddeder
+/// - "vision_fail": zero-vector position → Q5 redder
+/// - "rule_fail": duplicate node → Q6 redder (default rules ile)
+pub fn cmd_simulate_claim(
+    repo_path: &str,
+    scenario: &str,
+) -> Result<PipelineResultJson, String> {
+    use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+    use osp_core::coords::CoordinateSystem;
+    use osp_core::engine::{EngineConfig, SpaceEngine};
+    use osp_core::space::{Edge, EdgeKind, Node, NodeKind};
+    use osp_core::vision::VisionVector;
+    use osp_core::witness::{EvidenceEvent, WitnessKind, WitnessSet};
+
+    // Build space from repo analysis
+    let config = AnalysisConfig::default();
+    let registry = AdapterRegistry::default_all();
+    let result = analyze_repo_with_config(Path::new(repo_path), &registry, &config)
+        .map_err(|e| e.to_string())?;
+
+    // Build engine with default rules + vision
+    let cs = CoordinateSystem::default_raw_five(
+        CohesionAxis::new(),
+        EntropyAxis::from_commit_entropy(6.0),
+        WitnessDepthAxis::from_witness(0.3, 5),
+    );
+    let vision = VisionVector::new(osp_core::coords::RawPosition {
+        x: 0.4, y: 0.6, z: 0.5, w: 0.5, v: 0.5,
+    });
+    let engine = SpaceEngine::with_default_rules(
+        result.space, cs, vision, EngineConfig::default_calibrated(),
+    );
+
+    // Scenario → delta
+    let next_id = engine.space().nodes.keys().max().copied().unwrap_or(0) + 1;
+    let (delta_nodes, delta_edges, computed_raw_override) = match scenario {
+        "valid" => (
+            vec![Node { id: next_id, kind: NodeKind::Module, mass: 50.0, ..Default::default() }],
+            vec![Edge { from: next_id, to: 1, kind: EdgeKind::Imports }],
+            None, // let engine compute
+        ),
+        "syntax_fail" => (
+            vec![Node { id: next_id, kind: NodeKind::Module, mass: 50.0, ..Default::default() }],
+            vec![Edge { from: next_id, to: next_id, kind: EdgeKind::Imports }], // self-import
+            None,
+        ),
+        "vision_fail" => (
+            vec![Node { id: next_id, kind: NodeKind::Module, mass: 50.0, ..Default::default() }],
+            vec![],
+            Some(osp_core::coords::RawPosition::default()), // zero-vector → max θ
+        ),
+        "rule_fail" => {
+            // Duplicate an existing node ID
+            let existing_id = engine.space().nodes.keys().next().copied().unwrap_or(1);
+            (
+                vec![Node { id: existing_id, kind: NodeKind::Module, mass: 99.0, ..Default::default() }],
+                vec![],
+                None,
+            )
+        }
+        _ => return Err(format!("Unknown scenario: {scenario}")),
+    };
+
+    // Compute position (or use override)
+    let computed_raw = computed_raw_override
+        .unwrap_or_else(|| engine.compute_raw_from_delta(&delta_nodes, &delta_edges));
+
+    // Build claim
+    let claim = osp_core::witness::Claim {
+        id: 1,
+        intent: osp_core::witness::Intent::new(42, osp_core::coords::RawPosition::default()),
+        author: 42,
+        computed_raw,
+        delta_nodes,
+        delta_edges,
+    };
+
+    // Mock witnesses (2 MergeCommit)
+    let omega = WitnessSet::new(vec![
+        EvidenceEvent::new(1, "github", WitnessKind::MergeCommit, 200, 1),
+        EvidenceEvent::new(2, "github", WitnessKind::MergeCommit, 201, 1),
+    ]);
+
+    // Run all gates
+    let gate_results = engine.check_all_gates(&claim, &omega);
+    let outcome = if gate_results.last().map(|g| g.passed).unwrap_or(false) {
+        "Commit".to_string()
+    } else if gate_results.iter().any(|g| !g.passed && g.name.starts_with("Q1")) {
+        "Hold".to_string()
+    } else {
+        "Rejected".to_string()
+    };
+
+    Ok(PipelineResultJson {
+        gates: gate_results.iter().map(|g| GateResultJson {
+            name: g.name.to_string(),
+            passed: g.passed,
+            detail: g.detail.clone(),
+            hallucination: g.hallucination.clone(),
+        }).collect(),
+        computed_raw: vec![computed_raw.x, computed_raw.y, computed_raw.z, computed_raw.w, computed_raw.v],
+        outcome,
+    })
+}
 
 pub fn cmd_health() -> &'static str {
     "OSP Desktop v0.1 — ready"

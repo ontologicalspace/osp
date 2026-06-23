@@ -67,6 +67,25 @@
   .tooltip { position: fixed; background: #161b22; border: 1px solid #58a6ff; padding: 8px 12px; border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 100; }
   select { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
   .footer { padding: 6px 24px; border-top: 1px solid #30363d; font-size: 11px; color: #484f58; }
+  .scenario-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 8px 16px; border-radius: 6px; font-size: 12px; cursor: pointer; }
+  .scenario-btn:hover { background: #30363d; border-color: #58a6ff; }
+  .pipeline-flow { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; justify-content: center; margin: 20px 0; }
+  .gate-box { padding: 16px 20px; border-radius: 8px; text-align: center; min-width: 100px; border: 2px solid; }
+  .gate-box.passed { background: #0d2818; border-color: #3fb950; }
+  .gate-box.failed { background: #2d1b1b; border-color: #f85149; }
+  .gate-box.skipped { background: #161b22; border-color: #30363d; opacity: 0.5; }
+  .gate-box .gate-name { font-size: 13px; font-weight: 700; }
+  .gate-box.passed .gate-name { color: #3fb950; }
+  .gate-box.failed .gate-name { color: #f85149; }
+  .gate-box.skipped .gate-name { color: #484f58; }
+  .gate-box .gate-status { font-size: 20px; margin: 4px 0; }
+  .gate-box .gate-detail { font-size: 10px; color: #8b949e; max-width: 120px; overflow: hidden; text-overflow: ellipsis; }
+  .gate-arrow { font-size: 18px; color: #30363d; }
+  .hallucination-card { padding: 16px; background: #2d1b1b; border: 1px solid #f85149; border-radius: 8px; margin-top: 20px; }
+  .hallucination-card .htype { color: #f85149; font-weight: 700; font-size: 14px; }
+  .hallucination-card .hmsg { color: #c9d1d9; font-size: 13px; margin-top: 8px; }
+  .commit-success { padding: 20px; background: #0d2818; border: 1px solid #3fb950; border-radius: 8px; text-align: center; margin-top: 20px; }
+  .commit-success .outcome { color: #3fb950; font-size: 20px; font-weight: 700; }
 </style>
 </head>
 <body>
@@ -86,7 +105,8 @@
 <div class="tabs">
   <div class="tab active" onclick="switchTab('topology')">Space Topology</div>
   <div class="tab" onclick="switchTab('vision')">Vision Editor</div>
-  <div class="tab" onclick="switchTab('witness')">Witness Dashboard</div>
+    <div class="tab" onclick="switchTab('witness')">Witness Dashboard</div>
+    <div class="tab" onclick="switchTab('pipeline')">Commit Pipeline</div>
 </div>
 
 <!-- ═══ Panel 1: Space Topology ═══ -->
@@ -146,6 +166,25 @@
     <div id="witnessContent">
       <div style="text-align:center;padding:60px;color:#484f58;">
         <p style="font-size:16px;">Analyze a repository to see witness status</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ Panel 4: Commit Pipeline ═══ -->
+<div class="panel" id="panel-pipeline">
+  <div style="padding:24px;max-width:800px;margin:0 auto;">
+    <h3 style="font-size:14px;color:#58a6ff;margin-bottom:16px;text-transform:uppercase;letter-spacing:0.5px;">Scenario</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:24px;">
+      <button class="scenario-btn" onclick="runPipeline('valid')">Valid Claim</button>
+      <button class="scenario-btn" onclick="runPipeline('syntax_fail')">Q4: Self-Import</button>
+      <button class="scenario-btn" onclick="runPipeline('vision_fail')">Q5: Vision Violation</button>
+      <button class="scenario-btn" onclick="runPipeline('rule_fail')">Q6: Duplicate Node</button>
+    </div>
+    <div id="pipelineContent">
+      <div style="text-align:center;padding:40px;color:#484f58;">
+        <p style="font-size:15px;">Select a scenario to simulate the commit pipeline</p>
+        <p style="font-size:12px;margin-top:8px;">Analyzes the loaded repo + applies a delta → runs Q4→Q5→Q6→Q1-Q3</p>
       </div>
     </div>
   </div>
@@ -343,6 +382,97 @@ async function loadWitnessData() {
   } catch (e) {
     content.innerHTML = `<div style="color:#f85149;padding:40px;">${e.message}</div>`;
   }
+}
+
+// ═══ Commit Pipeline ═══
+async function runPipeline(scenario) {
+  if (!repoPathCache) {
+    document.getElementById('pipelineContent').innerHTML =
+      '<div style="color:#f85149;padding:20px;">Analyze a repo first</div>';
+    return;
+  }
+
+  document.getElementById('pipelineContent').innerHTML =
+    '<div style="text-align:center;padding:40px;color:#58a6ff;">Running simulation...</div>';
+
+  try {
+    const resp = await fetch('/api/simulate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_path: repoPathCache, scenario }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      document.getElementById('pipelineContent').innerHTML =
+        `<div style="color:#f85149;padding:20px;">${data.error}</div>`;
+      return;
+    }
+    renderPipeline(data);
+  } catch (e) {
+    document.getElementById('pipelineContent').innerHTML =
+      `<div style="color:#f85149;padding:20px;">${e.message}</div>`;
+  }
+}
+
+function renderPipeline(data) {
+  const gates = data.gates;
+  const allGateNames = ['Q4 Syntax', 'Q5 Vision', 'Q6 Rule', 'Q1-Q3 Witness'];
+  const reached = new Set(gates.map(g => g.name));
+
+  // Build flowchart
+  let flowHtml = '<div class="pipeline-flow">';
+  allGateNames.forEach((name, i) => {
+    const gate = gates.find(g => g.name === name);
+    if (gate) {
+      const cls = gate.passed ? 'passed' : 'failed';
+      const icon = gate.passed ? '✅' : '❌';
+      flowHtml += `<div class="gate-box ${cls}">
+        <div class="gate-name">${name}</div>
+        <div class="gate-status">${icon}</div>
+        <div class="gate-detail">${gate.detail.substring(0, 50)}</div>
+      </div>`;
+    } else {
+      flowHtml += `<div class="gate-box skipped">
+        <div class="gate-name">${name}</div>
+        <div class="gate-status">⏸</div>
+        <div class="gate-detail">skipped</div>
+      </div>`;
+    }
+    if (i < allGateNames.length - 1) flowHtml += '<div class="gate-arrow">→</div>';
+  });
+  // Outcome box
+  const outcome = data.outcome;
+  const outCls = outcome === 'Commit' ? 'passed' : 'failed';
+  const outIcon = outcome === 'Commit' ? '✅' : '🛑';
+  flowHtml += `<div class="gate-arrow">→</div>
+    <div class="gate-box ${outCls}">
+      <div class="gate-name">${outcome}</div>
+      <div class="gate-status">${outIcon}</div>
+    </div>`;
+  flowHtml += '</div>';
+
+  // Computed position
+  const pos = data.computed_raw;
+  const posHtml = `<div style="font-size:12px;color:#8b949e;text-align:center;margin:12px;">
+    Engine-computed position: coupling=${pos[0]?.toFixed(3)} cohesion=${pos[1]?.toFixed(3)} instability=${pos[2]?.toFixed(3)}
+  </div>`;
+
+  // Hallucination or success
+  let resultHtml = '';
+  const failedGate = gates.find(g => !g.passed);
+  if (failedGate && failedGate.hallucination) {
+    resultHtml = `<div class="hallucination-card">
+      <div class="htype">${failedGate.hallucination.split(']')[0]}]</div>
+      <div class="hmsg">${failedGate.hallucination.split(']').slice(1).join(']').trim()}</div>
+    </div>`;
+  } else if (outcome === 'Commit') {
+    resultHtml = `<div class="commit-success">
+      <div class="outcome">✅ COMMIT — t_c advanced</div>
+      <div style="font-size:12px;color:#3fb950;margin-top:8px;">All gates passed. Space expanded.</div>
+    </div>`;
+  }
+
+  document.getElementById('pipelineContent').innerHTML = flowHtml + posHtml + resultHtml;
 }
 
 // ═══ Topology chart ═══

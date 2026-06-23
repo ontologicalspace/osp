@@ -95,6 +95,34 @@ pub struct DriftWarning {
     pub raw: RawPosition,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// GateResult — commit pipeline visualizer çıktısı
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Tek bir gate'in sonucu (commit pipeline visualizer için).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct GateResult {
+    pub name: &'static str,
+    pub passed: bool,
+    pub detail: String,
+    pub hallucination: Option<String>,
+}
+
+impl GateResult {
+    pub fn passed(name: &'static str, detail: &str) -> Self {
+        Self { name, passed: true, detail: detail.to_string(), hallucination: None }
+    }
+
+    pub fn failed(name: &'static str, detail: &str, h: Option<crate::agent::HallucinationType>) -> Self {
+        Self {
+            name,
+            passed: false,
+            detail: detail.to_string(),
+            hallucination: h.map(|ht| format!("{}", ht)),
+        }
+    }
+}
+
 /// Pre-mutation: claim θ > bound (Q5 ihlali — §4.1 REJECT, EngineCommitError::VisionViolation).
 #[derive(Debug, Clone, PartialEq)]
 pub struct VisionViolation {
@@ -114,8 +142,6 @@ impl std::fmt::Display for VisionViolation {
 }
 
 /// Engine-level commit error (thiserror). Claim-based (Q4-Q6) + witness-based (Q1-Q3).
-///
-/// bigbang modülü mutation-only (apply_delta infallible) — kendi error'ı yok
 /// (osp-core-design.md §3.4). Witness Reject/Hold `evaluate()` → `WitnessResult` üzerinden
 /// gelir, `Reason` wrap edilir (space-engine-design.md §6.1).
 ///
@@ -526,6 +552,69 @@ impl SpaceEngine {
 
     pub fn space(&self) -> &Space {
         &self.space
+    }
+
+    /// **Commit Pipeline visualizer** — tüm gate'leri sırayla çalıştırır, her gate'in
+    /// sonucunu döner (kısa-devre yok). Q4 fail → Q5/Q6 "skipped".
+    ///
+    /// Bu metod `commit()`'ten farklı olarak: hatada durmaz, tüm gate durumlarını raporlar.
+    /// Frontend visualizer için tasarlandı.
+    pub fn check_all_gates(
+        &self,
+        claim: &Claim,
+        omega: &WitnessSet,
+    ) -> Vec<GateResult> {
+        let mut results = vec![];
+
+        // Q4 Syntax
+        match self.check_claim_syntax(claim) {
+            Ok(()) => results.push(GateResult::passed("Q4 Syntax", "Schema valid")),
+            Err(e) => {
+                let h = crate::agent::HallucinationType::from_engine_error(&e);
+                results.push(GateResult::failed("Q4 Syntax", &e.to_string(), h));
+                return results; // pipeline stops
+            }
+        }
+
+        // Q5 Vision
+        match self.check_claim_vision(claim) {
+            Ok(()) => results.push(GateResult::passed("Q5 Vision", "θ within bound")),
+            Err(e) => {
+                let h = crate::agent::HallucinationType::from_engine_error(&e);
+                results.push(GateResult::failed("Q5 Vision", &e.to_string(), h));
+                return results;
+            }
+        }
+
+        // Q6 Rule
+        match self.check_claim_rules(claim) {
+            Ok(()) => results.push(GateResult::passed("Q6 Rule", "No rule violations")),
+            Err(e) => {
+                let h = crate::agent::HallucinationType::from_engine_error(&e);
+                results.push(GateResult::failed("Q6 Rule", &e.to_string(), h));
+                return results;
+            }
+        }
+
+        // Q1-Q3 Witness
+        match crate::witness::evaluate(claim, omega) {
+            crate::witness::WitnessResult::Commit { .. } => {
+                results.push(GateResult::passed("Q1-Q3 Witness", "Quorum met — Commit"));
+            }
+            crate::witness::WitnessResult::Hold(reason) => {
+                let h = Some(crate::agent::HallucinationType::Undersupported {
+                    support: 0.0,
+                    threshold: 1.5,
+                });
+                results.push(GateResult::failed("Q1-Q3 Witness", &format!("Hold: {:?}", reason), h));
+            }
+            crate::witness::WitnessResult::Reject(reason) => {
+                let h = Some(crate::agent::HallucinationType::Witness { witness: 0 });
+                results.push(GateResult::failed("Q1-Q3 Witness", &format!("Reject: {:?}", reason), h));
+            }
+        }
+
+        results
     }
 
     /// Mutable space reference (test/setup için — production'da commit() kullan).
