@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/osp-spike",
+    "crates/osp-core",
+    "crates/osp-analyzer",
+]
+
+# Gelecek Fazlar:
+#   "crates/osp-analyzer"   (Faz 3: code→space mapper, tree-sitter adapters)
+#   "crates/osp-cli"        (Faz 5: God-Mode CLI + LLM codec)
+#   "crates/osp-viz"        (Faz 6: WASM görselleştirme)
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+authors = ["OSP Authors"]
+repository = "https://github.com/TODO/osp"
+description = "Ontological Space Protocol — software as a conceptual space"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+debug = true   # profile-driven optimizasyon için semboller kalsın (Faz 3 scale test)

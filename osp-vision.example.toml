@@ -1,0 +1,29 @@
+# OSP Vision Declaration — Example Configuration
+#
+# Bu dosya projenin mimari vizyonunu deklare eder. OSP bunu kullanarak
+# sapma açısını (θ) hesaplar ve negatif-uzay işgalini tespit eder.
+#
+# §5.1 KARAR: Elle deklare (LLM önerir, asla otomatik uygulamaz).
+
+[raw]
+# İdeal koordinat pozisyonu (tüm değerler ∈ [0.0, 1.0], validated)
+x = 0.4    # coupling: moderate — DDD bounded contexts, düşük modüller-arası bağımlılık
+y = 0.7    # cohesion: high — single-responsibility, LCOM4≈1
+z = 0.5    # instability: balanced — Martin main sequence (A+I≈1)
+w = 0.5    # entropy: moderate — değişim dosyalara yayılmış (kararlı)
+v = 0.5    # witness-depth: moderate — review kültürü, çift-şahit
+
+[policies]
+# Şahitlik politikaları (§4)
+min_approvers = 2            # en az 2 bağımsız non-author approver (inv #1)
+quorum_threshold = 1.5       # θ_quorum (§4.2) — self-merge prevention
+merge_ratio_observable = 0.10  # tri-state heuristic eşiği (Faz 1.11 doğrulandı)
+
+[thresholds]
+# Engine eşikleri
+theta_bound = 0.3            # cosine deviation [0,1] limit: θ_max=0.5; 0.3 realistic (§5.2 NOT)
+milestone_interval = 1000    # tam snapshot sıklığı (event-sourcing)
+
+[diagnostics]
+# Faz 3 SCIP placeholder'ları
+abstractness = 0.5           # gerçek değer Faz 3 SCIP'ten (sınıf sayımı)

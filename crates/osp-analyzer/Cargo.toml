@@ -1,0 +1,33 @@
+[package]
+name = "osp-analyzer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "OSP production code→space mapper — two-tier analysis (tree-sitter + SCIP)"
+
+[[bin]]
+name = "osp-analyze"
+path = "src/bin/osp-analyze.rs"
+
+[dependencies]
+osp-core = { path = "../osp-core" }
+anyhow.workspace = true
+serde = { workspace = true }
+thiserror = "1"
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Faz 3.2: tree-sitter adapters
+tree-sitter = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-typescript = "0.23"
+tree-sitter-rust = "0.23"
+tree-sitter-go = "0.23"
+# Faz 3.6: SCIP semantic index parsing (SourceGraph official crate)
+scip = "0.5"
+protobuf = "3"
+# Faz 3.6: prost (SCIP protobuf partial parse)
+
+[dev-dependencies]
+tempfile = "3"

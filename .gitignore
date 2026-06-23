@@ -1,0 +1,26 @@
+# Rust
+/target
+**/*.rs.bk
+# Cargo.lock commit edilir: workspace bir binary crate (osp-spike) içeriyor;
+# Cargo'nun resmî önerisi binary'ler için lockfile commit etmektir (reprodüktörlik).
+# İlerleyen Faz'larda osp-cli gibi ek binary'ler eklenecek; kütüphane-only olana
+# kadar bu karar geçerli.
+
+# Editörler / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Spike çıktıları
+spike-output.json
+spike-output-v2.json
+spike-results.md
+
+# Test/corpus geçici dosyaları
+tmp/
+
+# Spike repo'ları (clone — workspace dışında P:\repos önerilir, ama içeride de olabilir)
+repos/
+/repo/

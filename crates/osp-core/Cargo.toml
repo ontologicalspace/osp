@@ -1,0 +1,19 @@
+[package]
+name = "osp-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ontological Space Protocol — core types (Node/Edge/Space, coordinate system)"
+
+[dependencies]
+thiserror = "1"                # CommitError, DeviationError (library-level typed errors)
+serde = { workspace = true }   # Serialize/Deserialize — Faz 2 persistence (workspace derive feature inherited)
+bincode = "1"                  # Binary snapshot serialization — Faz 2 event-sourcing
+toml = "0.8"                   # Vision config parsing — Faz 2 vision_config
+tracing = { workspace = true } # Faz 2.5 persistence logging
+# Faz 1.5: git2 = "0.18" (lokal God-mode witness — inv #8: osp-core DEĞİL, osp-analyzer)
+
+[dev-dependencies]
+tempfile = "3"           # Faz 2.5 persistence test'leri için temp directory
+serde_json = { workspace = true }  # Intent invariant test (serde roundtrip)
