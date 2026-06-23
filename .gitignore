@@ -20,6 +20,8 @@ spike-results.md
 
 # Test/corpus geçici dosyaları
 tmp/
+.playwright-mcp/
+space-browser-initial
 
 # Spike repo'ları (clone — workspace dışında P:\repos önerilir, ama içeride de olabilir)
 repos/
