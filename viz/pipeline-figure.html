@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>OSP Figure 1 — Commit Pipeline</title>
+<style>
+  body { font-family: -apple-system, 'Segoe UI', sans-serif; background: #ffffff; color: #1a1a1a; margin: 40px; }
+  h2 { font-size: 16px; margin-bottom: 16px; color: #333; }
+  .scenario-pair { display: flex; gap: 60px; }
+  .scenario { flex: 1; }
+  .scenario-title { font-size: 14px; font-weight: 700; margin-bottom: 20px; padding: 8px 12px; border-radius: 4px; }
+  .scenario-title.pass { background: #d4edda; color: #155724; }
+  .scenario-title.fail { background: #f8d7da; color: #721c24; }
+  .pipeline { display: flex; align-items: center; gap: 2px; margin-bottom: 20px; }
+  .gate { padding: 14px 16px; border-radius: 6px; text-align: center; min-width: 80px; border: 2px solid; }
+  .gate.pass { background: #d4edda; border-color: #28a745; }
+  .gate.fail { background: #f8d7da; border-color: #dc3545; }
+  .gate.skip { background: #f8f9fa; border-color: #dee2e6; opacity: 0.5; }
+  .gate .name { font-size: 12px; font-weight: 700; }
+  .gate.pass .name { color: #155724; }
+  .gate.fail .name { color: #721c24; }
+  .gate.skip .name { color: #6c757d; }
+  .gate .icon { font-size: 18px; margin: 4px 0; }
+  .gate .detail { font-size: 9px; color: #666; max-width: 90px; line-height: 1.2; }
+  .arrow { font-size: 16px; color: #adb5bd; }
+  .hallucination { padding: 12px; background: #fff3cd; border: 1px solid #ffeaa7; border-radius: 6px; margin-top: 16px; }
+  .hallucination .label { font-size: 11px; font-weight: 700; color: #856404; }
+  .hallucination .msg { font-size: 11px; color: #666; margin-top: 4px; }
+  .success-msg { padding: 12px; background: #d4edda; border: 1px solid #28a745; border-radius: 6px; margin-top: 16px; text-align: center; }
+  .success-msg .text { font-size: 12px; font-weight: 700; color: #155724; }
+  .position { font-size: 10px; color: #888; margin-top: 12px; text-align: center; }
+  .caption { margin-top: 30px; font-size: 11px; color: #666; border-top: 1px solid #eee; padding-top: 10px; }
+</style>
+</head>
+<body>
+
+<h2>Figure 1: OSP Commit Pipeline — Two-Layer Gate Architecture</h2>
+
+<div class="scenario-pair">
+
+  <!-- Scenario A: Valid Claim -->
+  <div class="scenario">
+    <div class="scenario-title pass">(a) Valid Claim — All Gates Pass</div>
+    <div class="pipeline">
+      <div class="gate pass">
+        <div class="name">Q4 Syntax</div><div class="icon">✓</div>
+        <div class="detail">Schema valid</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate pass">
+        <div class="name">Q5 Vision</div><div class="icon">✓</div>
+        <div class="detail">θ ≤ θ_bound</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate pass">
+        <div class="name">Q6 Rule</div><div class="icon">✓</div>
+        <div class="detail">No violations</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate pass">
+        <div class="name">Q1-Q3 Witness</div><div class="icon">✓</div>
+        <div class="detail">Quorum met</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate pass">
+        <div class="name">Commit</div><div class="icon">✓</div>
+      </div>
+    </div>
+    <div class="position">Engine-computed: coupling=0.500, cohesion=0.500, instability=1.000</div>
+    <div class="success-msg">
+      <div class="text">✓ COMMIT — Space expanded (t_c advanced)</div>
+    </div>
+  </div>
+
+  <!-- Scenario B: Rule Violation -->
+  <div class="scenario">
+    <div class="scenario-title fail">(b) Rule Violation — Q6 Gate Rejects</div>
+    <div class="pipeline">
+      <div class="gate pass">
+        <div class="name">Q4 Syntax</div><div class="icon">✓</div>
+        <div class="detail">Schema valid</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate pass">
+        <div class="name">Q5 Vision</div><div class="icon">✓</div>
+        <div class="detail">θ ≤ θ_bound</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate fail">
+        <div class="name">Q6 Rule</div><div class="icon">✗</div>
+        <div class="detail">Duplicate node</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate skip">
+        <div class="name">Q1-Q3 Witness</div><div class="icon">—</div>
+        <div class="detail">skipped</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="gate fail">
+        <div class="name">Rejected</div><div class="icon">✗</div>
+      </div>
+    </div>
+    <div class="position">Engine-computed: coupling=0.000, cohesion=0.500, instability=0.500</div>
+    <div class="hallucination">
+      <div class="label">[Q6 Rule] RuleHallucination</div>
+      <div class="msg">Rule 'structural.no_duplicate_node' violated — node 1 already exists in space. Find an alternative that respects this constraint.</div>
+    </div>
+  </div>
+
+</div>
+
+<div class="caption">
+  <b>Figure 1.</b> OSP commit pipeline showing deterministic claim-based gates (Q4–Q6) evaluated
+  before witness-based gates (Q1–Q3). (a) A valid claim passes all gates and commits.
+  (b) A claim violating a structural rule is rejected at Q6 before reaching witnesses —
+  the hallucination classification provides calibration feedback to the agent.
+  Green = passed, red = failed, gray = skipped. Positions are engine-computed (not LLM-declared).
+</div>
+
+</body>
+</html>

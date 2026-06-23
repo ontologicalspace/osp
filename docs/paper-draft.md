@@ -156,7 +156,7 @@ W(C, Ω) = Commit(δS)  iff
 
 Q5 (vision) is checked **before** any mutation (pre-commit safety gate). If Q5 fails, the claim is rejected and no code enters the objective space. The split into Q4 (Syntax), Q5 (Vision), Q6 (Rule) refines what was previously a single "Q4" gate — enabling distinct calibration feedback per gate (structural hallucination, vision hallucination, rule hallucination).
 
-> **Figure 1: Two-layer commit pipeline.** A flowchart showing the claim's path through deterministic claim-based gates (Q4 Syntax → Q5 Vision → Q6 Rule) followed by witness-based gates (Q1 min_approvers → Q2 quorum → Q3 no-honest-reject), culminating in `apply_delta` (space mutation) or rejection. *[To be rendered for camera-ready.]*
+> **Figure 1: Two-layer commit pipeline.** Panel (a): a valid claim passes Q4 Syntax → Q5 Vision → Q6 Rule (deterministic, claim-based) → Q1-Q3 Witness (quorum-based) → Commit. Panel (b): a rule-violating claim is rejected at Q6 with hallucination classification and calibration feedback. Green = passed, red = failed, gray = skipped. Positions are engine-computed (inv #4). *Rendered: `viz/figure1-commit-pipeline.png` and `viz/pipeline-figure.html`.*
 
 ### 4.3 Tri-State Witness Status
 
