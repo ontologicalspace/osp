@@ -1,0 +1,16 @@
+[package]
+name = "osp-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "OSP Desktop — conceptual space visualization (HTTP server + Tauri-ready)"
+
+[dependencies]
+osp-core = { path = "../osp-core" }
+osp-analyzer = { path = "../osp-analyzer" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tiny_http = "0.12"
+
+[[bin]]
+name = "osp-desktop"
+path = "src/main.rs"

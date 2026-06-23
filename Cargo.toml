@@ -4,6 +4,7 @@ members = [
     "crates/osp-spike",
     "crates/osp-core",
     "crates/osp-analyzer",
+    "crates/osp-desktop",
 ]
 
 # Gelecek Fazlar:

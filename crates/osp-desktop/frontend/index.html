@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OSP Desktop</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; height: 100vh; display: flex; flex-direction: column; }
+  .header { padding: 12px 24px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 16px; }
+  .header h1 { font-size: 18px; color: #58a6ff; }
+  .header .subtitle { font-size: 12px; color: #8b949e; }
+  .toolbar { padding: 12px 24px; border-bottom: 1px solid #21262d; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .toolbar input[type="text"] { background: #161b22; border: 1px solid #30363d; color: #c9d1d9; padding: 8px 12px; border-radius: 6px; font-size: 13px; width: 300px; }
+  .toolbar input[type="text"]::placeholder { color: #484f58; }
+  .toolbar button { background: #238636; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; }
+  .toolbar button:hover { background: #2ea043; }
+  .toolbar button:disabled { background: #21262d; color: #484f58; cursor: not-allowed; }
+  .toolbar label { font-size: 12px; color: #8b949e; }
+  .content { flex: 1; display: flex; overflow: hidden; }
+  .chart-area { flex: 1; display: flex; justify-content: center; align-items: center; overflow: auto; padding: 10px; }
+  .sidebar { width: 300px; border-left: 1px solid #30363d; padding: 16px; overflow-y: auto; }
+  .sidebar h3 { font-size: 13px; color: #58a6ff; margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .metric { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #21262d; font-size: 13px; }
+  .metric .label { color: #8b949e; }
+  .metric .value { color: #c9d1d9; font-family: monospace; }
+  .status { padding: 8px 12px; border-radius: 4px; font-size: 12px; margin: 8px 0; }
+  .status.idle { background: #161b22; color: #8b949e; }
+  .status.loading { background: #1f2937; color: #58a6ff; }
+  .status.error { background: #2d1b1b; color: #f85149; }
+  .status.success { background: #0d2818; color: #3fb950; }
+  .tooltip { position: fixed; background: #161b22; border: 1px solid #58a6ff; padding: 8px 12px; border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 100; }
+  select { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 8px; border-radius: 4px; font-size: 12px; }
+  .footer { padding: 8px 24px; border-top: 1px solid #30363d; font-size: 11px; color: #484f58; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>OSP Desktop</h1>
+  <span class="subtitle">Conceptual Space Visualization · v0.1</span>
+</div>
+
+<div class="toolbar">
+  <input type="text" id="repoPath" placeholder="/path/to/repository" value="">
+  <input type="text" id="scipPath" placeholder="SCIP index (optional)" value="">
+  <button id="analyzeBtn" onclick="doAnalyze()">Analyze</button>
+  <span id="statusText" class="status idle">Ready</span>
+</div>
+
+<div class="toolbar" id="vizControls" style="display:none;">
+  <label>X: <select id="xAxis" onchange="render()">
+    <option value="coupling">Coupling</option>
+    <option value="instability">Instability (I)</option>
+    <option value="cohesion">Cohesion (y)</option>
+    <option value="mass">Mass (LOC)</option>
+  </select></label>
+  <label>Y: <select id="yAxis" onchange="render()">
+    <option value="coupling">Coupling</option>
+    <option value="instability" selected>Instability (I)</option>
+    <option value="cohesion">Cohesion (y)</option>
+    <option value="mass">Mass (LOC)</option>
+  </select></label>
+  <label>Color: <select id="colorBy" onchange="render()">
+    <option value="cohesion">Cohesion</option>
+    <option value="instability">Instability</option>
+    <option value="coupling">Coupling</option>
+  </select></label>
+</div>
+
+<div class="content">
+  <div class="chart-area" id="chartArea">
+    <svg id="chart" width="900" height="550"></svg>
+  </div>
+  <div class="sidebar" id="sidebar">
+    <h3>Repository Metrics</h3>
+    <div id="repoMetrics"><div class="metric"><span class="label">Analyze a repo to see metrics</span></div></div>
+    <h3 style="margin-top:20px;">SCIP Coverage</h3>
+    <div id="scipInfo"><div class="metric"><span class="label">No SCIP data</span></div></div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<div class="footer">
+  OSP — Ontological Space Protocol · <a style="color:#58a6ff;text-decoration:none;" href="https://github.com/ervolkan/osp">github.com/ervolkan/osp</a>
+  · A=abstractness I=instability D=|A+I-1| y=LCOM4 cohesion
+</div>
+
+<script>
+let analysisData = null;
+
+const setStatus = (cls, msg) => {
+  const el = document.getElementById('statusText');
+  el.className = `status ${cls}`;
+  el.textContent = msg;
+};
+
+async function doAnalyze() {
+  const repoPath = document.getElementById('repoPath').value.trim();
+  const scipPath = document.getElementById('scipPath').value.trim();
+  if (!repoPath) { setStatus('error', 'Enter a repo path'); return; }
+
+  const btn = document.getElementById('analyzeBtn');
+  btn.disabled = true;
+  setStatus('loading', 'Analyzing...');
+
+  try {
+    const resp = await fetch('/api/analyze', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ repo_path: repoPath, scip_path: scipPath || null }),
+    });
+    const data = await resp.json();
+    if (data.error) { setStatus('error', data.error); return; }
+
+    analysisData = data;
+    setStatus('success', `Done — ${data.module_count} modules, ${data.space.edges.length} edges`);
+
+    // Show viz controls
+    document.getElementById('vizControls').style.display = 'flex';
+
+    // Render sidebar
+    renderSidebar(data);
+    // Render chart
+    render();
+  } catch (e) {
+    setStatus('error', `Error: ${e.message}`);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function renderSidebar(data) {
+  const m = data.repo_metrics;
+  const c = data.semantic_coverage;
+  document.getElementById('repoMetrics').innerHTML = `
+    <div class="metric"><span class="label">Modules</span><span class="value">${data.module_count}</span></div>
+    <div class="metric"><span class="label">Edges</span><span class="value">${data.space.edges.length}</span></div>
+    <div class="metric"><span class="label">Abstractness (A)</span><span class="value">${m.abstractness.toFixed(3)}</span></div>
+    <div class="metric"><span class="label">Main-seq dist (D)</span><span class="value">${m.main_sequence_distance.toFixed(3)}</span></div>
+  `;
+  document.getElementById('scipInfo').innerHTML = `
+    <div class="metric"><span class="label">Files total</span><span class="value">${c.files_total}</span></div>
+    <div class="metric"><span class="label">SCIP indexed</span><span class="value">${c.files_with_scip}</span></div>
+    <div class="metric"><span class="label">Coverage</span><span class="value">${(c.coverage_ratio * 100).toFixed(1)}%</span></div>
+    <div class="metric"><span class="label">Classes</span><span class="value">${c.classes_total}</span></div>
+  `;
+}
+
+function render() {
+  if (!analysisData) return;
+
+  const xKey = document.getElementById('xAxis').value;
+  const yKey = document.getElementById('yAxis').value;
+  const colorKey = document.getElementById('colorBy').value;
+
+  const nodes = analysisData.space.nodes;
+  if (nodes.length === 0) return;
+
+  const margin = { top: 30, right: 40, bottom: 50, left: 60 };
+  const width = 900 - margin.left - margin.right;
+  const height = 550 - margin.top - margin.bottom;
+
+  const svg = d3.select('#chart');
+  svg.selectAll('*').remove();
+  const g = svg.append('g').attr('transform', `translate(${margin.left},${margin.top})`);
+
+  const getVal = (n, key) => {
+    if (key === 'mass') return n.mass;
+    return n[key] !== null && n[key] !== undefined ? n[key] : 0.5;
+  };
+
+  const xExtent = d3.extent(nodes, d => getVal(d, xKey));
+  const yExtent = d3.extent(nodes, d => getVal(d, yKey));
+  const xPad = (xExtent[1] - xExtent[0]) * 0.1 || 0.05;
+  const yPad = (yExtent[1] - yExtent[0]) * 0.1 || 0.05;
+
+  const x = d3.scaleLinear().domain([xExtent[0] - xPad, xExtent[1] + xPad]).range([0, width]);
+  const y = d3.scaleLinear().domain([yExtent[0] - yPad, yExtent[1] + yPad]).range([height, 0]);
+
+  const colorScale = d3.scaleSequential(d3.interpolateRdYlGn).domain([0.4, 0.7]);
+  const sizeScale = d3.scaleSqrt().domain([0, d3.max(nodes, d => d.mass)]).range([4, 20]);
+
+  // Grid
+  g.append('g').attr('class', 'grid').attr('transform', `translate(0,${height})`)
+    .call(d3.axisBottom(x).tickSize(-height).tickFormat('').ticks(6));
+  g.append('g').attr('class', 'grid')
+    .call(d3.axisLeft(y).tickSize(-width).tickFormat('').ticks(6));
+
+  // Axes
+  g.append('g').attr('transform', `translate(0,${height})`).call(d3.axisBottom(x).ticks(6));
+  g.append('g').call(d3.axisLeft(y).ticks(6));
+
+  // Axis labels
+  g.append('text').attr('x', width / 2).attr('y', height + 40).attr('text-anchor', 'middle')
+    .attr('fill', '#8b949e').attr('font-size', '13px').text(xKey);
+  g.append('text').attr('transform', 'rotate(-90)').attr('x', -height / 2).attr('y', -45)
+    .attr('text-anchor', 'middle').attr('fill', '#8b949e').attr('font-size', '13px').text(yKey);
+
+  // Dots
+  const tooltip = d3.select('#tooltip');
+  g.selectAll('.dot')
+    .data(nodes)
+    .enter()
+    .append('circle')
+    .attr('class', 'dot')
+    .attr('cx', d => x(getVal(d, xKey)))
+    .attr('cy', d => y(getVal(d, yKey)))
+    .attr('r', d => sizeScale(d.mass))
+    .attr('fill', d => {
+      const v = getVal(d, colorKey);
+      return colorScale(v !== undefined ? v : 0.5);
+    })
+    .attr('stroke', '#30363d')
+    .attr('stroke-width', 1)
+    .attr('opacity', 0.85)
+    .style('cursor', 'pointer')
+    .on('mouseover', (event, d) => {
+      tooltip.style('opacity', 1)
+        .html(`<b>Node ${d.id}</b><br>
+          kind: ${d.kind}<br>
+          mass: ${d.mass}<br>
+          coupling: ${d.coupling !== null ? d.coupling.toFixed(3) : '—'}<br>
+          cohesion: ${d.cohesion !== null ? d.cohesion.toFixed(3) : '—'}<br>
+          instability: ${d.instability !== null ? d.instability.toFixed(3) : '—'}`)
+        .style('left', (event.clientX + 14) + 'px')
+        .style('top', (event.clientY - 10) + 'px');
+    })
+    .on('mouseout', () => tooltip.style('opacity', 0));
+}
+</script>
+</body>
+</html>
