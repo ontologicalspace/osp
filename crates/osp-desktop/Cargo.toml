@@ -4,12 +4,16 @@ version = "0.1.0"
 edition = "2021"
 description = "OSP Desktop — conceptual space visualization (HTTP server + Tauri-ready)"
 
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 osp-core = { path = "../osp-core" }
 osp-analyzer = { path = "../osp-analyzer" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tiny_http = "0.12"
+tauri = { version = "2", features = [] }
 
 [[bin]]
 name = "osp-desktop"

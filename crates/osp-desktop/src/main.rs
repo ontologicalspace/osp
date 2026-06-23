@@ -1,10 +1,13 @@
-//! OSP Desktop — HTTP server + static frontend.
+//! OSP Desktop — Tauri native window + HTTP API server.
 //!
 //! Çalıştırma: cargo run -p osp-desktop
-//! Browser: http://localhost:7878
+//! Native desktop window açılır (browser gerekmez).
 //!
-//! Tauri'ye migration: bu server'ı `tauri::Builder` ile değiştir,
-//! command handler'lar (`lib.rs`) aynı kalır.
+//! Mimari: tiny_http API server background thread'de çalışır,
+//! Tauri webview `http://localhost:7878`'i native window'da gösterir.
+//! Frontend fetch() ile API'ye erişir — zero frontend change.
+
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::path::PathBuf;
 
@@ -12,21 +15,26 @@ use serde_json::Value;
 use tiny_http::{Header, Method, Response, Server};
 
 const PORT: u16 = 7878;
-/// Frontend dizini — crate köküne göre absolute (CWD'den bağımsız).
 const FRONTEND_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/frontend");
 
 fn main() {
-    let addr = format!("127.0.0.1:{PORT}");
-    let server = Server::http(&addr).expect("Failed to bind");
-    println!("╔════════════════════════════════════════════╗");
-    println!("║  OSP Desktop v0.1                          ║");
-    println!("║  Open: http://localhost:{}              ║", PORT);
-    println!("║  Press Ctrl+C to stop                      ║");
-    println!("╚════════════════════════════════════════════╝");
+    // HTTP API server — background thread
+    std::thread::spawn(|| {
+        let addr = format!("127.0.0.1:{PORT}");
+        let server = Server::http(&addr).expect("Failed to bind API server");
+        eprintln!("API server on http://localhost:{PORT}");
+        for request in server.incoming_requests() {
+            handle_request(request);
+        }
+    });
 
-    for request in server.incoming_requests() {
-        handle_request(request);
-    }
+    // Tauri webview'a hazırlanması için kısa bekleme
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    // Tauri native window — http://localhost:7878'i gösterir
+    tauri::Builder::default()
+        .run(tauri::generate_context!())
+        .expect("error while running OSP Desktop");
 }
 
 fn handle_request(mut request: tiny_http::Request) {

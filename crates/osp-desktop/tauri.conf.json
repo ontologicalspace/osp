@@ -1,0 +1,27 @@
+{
+  "productName": "OSP Desktop",
+  "version": "0.1.0",
+  "identifier": "com.osp.desktop",
+  "build": {
+    "frontendDist": "frontend"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "OSP Desktop — Conceptual Space Visualization",
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "url": "http://localhost:7878"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false
+  }
+}
