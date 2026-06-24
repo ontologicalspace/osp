@@ -271,6 +271,28 @@ For each class, OSP builds a bipartite graph (methods ↔ fields) from SCIP fiel
 
 Full Space snapshots are stored at milestones (tags, periodic intervals). Per-commit deltas are stored individually. Time-travel: load nearest milestone ≤ t_c → replay deltas. Disk efficiency: 340 periodic snapshots (170 MB) vs. 1 milestone + 340 deltas (2.2 MB) — **98% reduction**.
 
+### 6.5 OSP Desktop — Project Reality Cockpit
+
+OSP Desktop is a native desktop application (Tauri v2, ~10 MB binary) that provides an interactive interface to the conceptual space. It is not a visualization dashboard or graph viewer — it is a **project reality cockpit** that makes the epistemological state of a software project navigable.
+
+**Architecture.** The application embeds `osp-core` and `osp-analyzer` directly in a Rust backend (no HTTP microservice). A lightweight `tiny_http` server runs in a background thread on localhost, serving a D3.js frontend rendered inside a Tauri native window. Repository analysis runs locally; no code leaves the machine.
+
+**Five interactive panels:**
+
+1. **Space Topology** — D3.js scatter plot of repository modules in ℝ⁵ coordinate space. Users select any two axes for X/Y projection, color by cohesion/instability/witness-status, and size by mass. Martin main-sequence overlay (A + I = 1) is shown when applicable. Interactive tooltips display per-module metrics including MetricValue provenance (source, confidence, coverage).
+
+2. **Vision Editor** — Sliders for all 5 vision axes (coupling, cohesion, instability, entropy, witness-depth targets) and 3 thresholds (θ_bound, θ_quorum, min_approvers). A live preview shows how many modules would pass or fail the current vision configuration, enabling interactive calibration of architectural constraints.
+
+3. **Witness Dashboard** — Tri-state witness classification (Witnessed / Unobservable-locally / Unwitnessed) computed from Git merge-commit history. Displays commit count, distinct author count, and merge ratio with a visual 10% threshold bar, making the squash-merge blind spot (Section 3) visible to practitioners.
+
+4. **Commit Pipeline** — Interactive simulation of the Q4→Q5→Q6→Q1-Q3 gate pipeline (Section 4). Users select scenarios (valid claim, syntax violation, vision deviation, rule violation) and observe which gates pass, fail, or skip. Hallucination classification and calibration feedback are displayed per failure.
+
+5. **Hallucination Graveyard** — A repository of rejected claims, presented as epistemic negative-space data (Section 9.5). Each entry shows which gate rejected the claim, the hallucination type (Structural, Vision, Rule, Witness, Undersupported), and the engine-computed position. A "what-if" impact analysis shows which modules would have entered negative space (θ > θ_bound) had the claim been accepted — visualizing the architectural damage that OSP's gates prevented.
+
+> **Figure 3: OSP Desktop.** The five-panel interface showing (a) Space Topology with cohesion-colored scatter plot and Martin main-sequence overlay, (b) Hallucination Graveyard with rejected claims and what-if impact analysis. *Rendered: `viz/space-browser.html` and `crates/osp-desktop/frontend/index.html`.*
+
+**Reproducibility.** OSP Desktop is built with `cargo run -p osp-desktop` and opens a native window. All analysis runs locally using the same `osp-analyzer` pipeline described in Sections 6.1–6.4. The token benchmark (Section 7.7) is executable via `cargo run --example token_benchmark -- <repo-path>`.
+
 ---
 
 ## 7. Evaluation
@@ -469,7 +491,7 @@ The deterministic Q4–Q6 gates may further reduce wasted generation by rejectin
 
 ### 9.5 Hallucination as Epistemic Data
 
-Rather than discarding rejected LLM proposals as errors, OSP classifies them as structured epistemic data. Each gate failure produces a typed `HallucinationType` (Structural, Vision, Rule, Witness, Undersupported) with a calibration message. This "negative space" of architectural failures is valuable for three reasons: (1) it maps the boundary of what an LLM can reliably propose within a given architecture, (2) repeated failures signal either model limitations or non-intuitive framework design, and (3) the failure distribution across language paradigms (Python vs TypeScript) reveals how different coding conventions interact with LLM generation patterns. Future work will explore anonymized telemetry of hallucination patterns as an open dataset for AI safety and software engineering research. Such telemetry must be treated as sensitive: even anonymized failures may leak proprietary architecture, rule sets, or product intent. Any public dataset therefore requires redaction, consent, and project-level privacy controls.
+Rather than discarding rejected LLM proposals as errors, OSP classifies them as structured epistemic data. Each gate failure produces a typed `HallucinationType` (Structural, Vision, Rule, Witness, Undersupported) with a calibration message. This "negative space" of architectural failures is valuable for three reasons: (1) it maps the boundary of what an LLM can reliably propose within a given architecture, (2) repeated failures signal either model limitations or non-intuitive framework design, and (3) the failure distribution across language paradigms (Python vs TypeScript) reveals how different coding conventions interact with LLM generation patterns. The OSP Desktop Graveyard panel (Section 6.5, Figure 3b) makes these rejected claims visible and explorable, with what-if impact analysis showing which modules would have entered negative space. Future work will explore anonymized telemetry of hallucination patterns as an open dataset for AI safety and software engineering research. Such telemetry must be treated as sensitive: even anonymized failures may leak proprietary architecture, rule sets, or product intent. Any public dataset therefore requires redaction, consent, and project-level privacy controls.
 
 ---
 
@@ -477,7 +499,7 @@ Rather than discarding rejected LLM proposals as errors, OSP classifies them as 
 
 **Internal validity.** SCIP coverage varies significantly across repositories (2.4%–100%). Low-coverage repositories (svelte 2.4%, commander 7.5%, pydantic 18.7%, serde 42%) report cohesion values derived from a subset of classes; their MetricValue confidence (0.95 × coverage) quantifies this uncertainty, but readers should weight these values accordingly. Rust and Go repositories have high SCIP coverage (87%–100%) but incomplete tree-sitter import edge extraction (edges = 0 for most), limiting coupling and instability values. LCOM4 cohesion is unaffected (SCIP-derived). Tree-sitter abstractness detection may miss indirect inheritance chains.
 
-**External validity.** The 15-repository corpus may not generalize across all language ecosystems, project sizes, or organizational workflows. The 10% merge-ratio threshold for tri-state classification is calibrated on GitHub-hosted Python/TypeScript/JavaScript projects and may differ for other platforms (GitLab, Bitbucket), organizations with formal merge policies, or repositories using unconventional branching strategies.
+**External validity.** The 23-repository corpus spans 5 languages but may not generalize across all language ecosystems, project sizes, or organizational workflows. The 10% merge-ratio threshold for tri-state classification is calibrated on GitHub-hosted Python/TypeScript/JavaScript projects and may differ for other platforms (GitLab, Bitbucket), organizations with formal merge policies, or repositories using unconventional branching strategies. The OSP Desktop application (Section 6.5) has been validated on repository analysis and simulated claim scenarios but has not yet been deployed in an active development workflow with real LLM agents — real-world usage data remains future work.
 
 **Construct validity.** The token benchmark (Section 7.7) measures **architectural context size compression**, not end-to-end task success rate. A smaller prompt does not guarantee better LLM output — the OSP coordinate prompt trades file content for geometric abstraction, which may lose information relevant to specific tasks (e.g., exact variable names, implementation patterns). The chars/4 token approximation does not capture model-specific tokenizer behavior (e.g., GPT-4o vs Claude token boundaries). CosineDeviation is a geometric proxy for architectural deviation with a structural θ_max = 0.5 limit in [0,1]-normalized spaces; Diffusion Distance (future work) may provide better sensitivity beyond this boundary. No comparative baseline against GraphRAG, RepoCoder, or production AI coding agents (Copilot, Devin) has been conducted — our baselines (full dump, 2-hop context) are structural lower bounds, not competitive system comparisons.
 
