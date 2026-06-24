@@ -32,6 +32,16 @@ docs/space-engine-design.md
 docs/scip-analyzer-design.md
 docs/roadmap.md
 docs/ui-design.md
+docs/usage-evidence-plan.md
+docs/usage-dogfooding.md
+docs/usage-llm-benchmark.md
+docs/usage-report.md
+
+# API keys — ASLA commit etme
+docs/llm-apikey.md
+*.apikey
+*.env
+.env*
 
 # Spike repo'ları (clone — workspace dışında P:\repos önerilir, ama içeride de olabilir)
 repos/
