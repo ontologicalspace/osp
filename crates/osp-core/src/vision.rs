@@ -19,7 +19,7 @@ use crate::space::Space;
 ///
 /// `RawPosition` sarmalar — derived değil (inv #4). Faz 2 Space Engine parse eder;
 /// Faz 5 LLM önerileri yine insan-onayıyla eklenir.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct VisionVector(pub RawPosition);
 
 impl VisionVector {

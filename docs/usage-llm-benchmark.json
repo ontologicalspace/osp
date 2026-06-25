@@ -1,18 +1,18 @@
 {
-  "timestamp": "2026-06-24T20:24:37.1407333+03:00",
-  "ratio": 2.2,
-  "raw": {
-    "prompt_tokens": 1238,
-    "total_tokens": 1738,
-    "completion_tokens": 500,
-    "input_chars": 4276
-  },
-  "osp": {
-    "prompt_tokens": 570,
-    "total_tokens": 818,
-    "completion_tokens": 248,
-    "input_chars": 1538
-  },
   "model": "gpt-4o-mini",
-  "savings_pct": 54.0
+  "osp": {
+    "completion_tokens": 173,
+    "input_chars": 936,
+    "prompt_tokens": 284,
+    "total_tokens": 457
+  },
+  "ratio": 3.4,
+  "raw": {
+    "completion_tokens": 500,
+    "input_chars": 4282,
+    "prompt_tokens": 963,
+    "total_tokens": 1463
+  },
+  "savings_pct": 70.5,
+  "timestamp": "unix:1782392220"
 }

@@ -31,7 +31,7 @@ use crate::witness::ClaimId;
 /// 1. `compute_space_slice()` — okuma izni olmayan düğümleri projeksiyondan çıkarır
 /// 2. Agent kabuğu — yazma izni olmayan mutasyonları erken reddeder
 /// 3. `SpaceEngine::commit()` — nihai zorunlu kontrol (atlanamaz)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct PermissionMask {
     /// Agent'ın tamamen GÖREMEYECEĞİ düğümler (hidden — space_slice'tan çıkarılır).
     pub hidden_nodes: HashSet<NodeId>,
@@ -97,7 +97,8 @@ impl PermissionMask {
 ///
 /// **KRİTİK (inv #4):** Pozisyon **içermez** — sadece yapısal değişiklikler.
 /// Pozisyonlar `SpaceEngine` tarafından compute edilir (agent-prompt-semantics.md §2.2).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct DeltaProposal {
     /// Yeni eklenecek ontolojik düğümler.
     pub new_nodes: Vec<NewNodeSpec>,
@@ -111,21 +112,21 @@ pub struct DeltaProposal {
     pub reasoning: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewNodeSpec {
     pub kind: crate::space::NodeKind,
     pub initial_mass: f64,
     pub connected_to: Vec<(NodeId, EdgeKind)>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NewEdgeSpec {
     pub from: NodeId,
     pub to: NodeId,
     pub kind: EdgeKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntityChangeSpec {
     pub node_id: NodeId,
     // Faz 5: pub changes: EntityChanges (kind/mass/metadata — RawPosition hariç)
@@ -133,7 +134,7 @@ pub struct EntityChangeSpec {
 
 /// LLM'in "bu node şu pozisyonda olmalı" tavsiyesi — engine tarafından authoritative
 /// kabul EDİLMEZ. Sadece diagnostic amaçlı (agent-prompt-semantics.md §2.2).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PositionHint {
     pub node_id: NodeId,
     pub suggested_raw: RawPosition,
@@ -150,7 +151,7 @@ pub struct PositionHint {
 /// **Faz 5 gerçek impl:** DeltaProposal yapısal bütünlüğünü doğrular.
 /// Bu, engine'in Q4 (check_claim_syntax) gate'inin **Agent shell tarafındaki** karşılığıdır —
 /// LLM çıktısı Claim'e dönüştürülmeden ÖNCE şema kontrolü yapılır.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct OutputContract {
     /// İzin verilen NodeKind'ler. `None` = tümü izinli.
     pub allowed_node_kinds: Option<HashSet<NodeKind>>,
@@ -425,7 +426,7 @@ impl std::fmt::Display for HallucinationType {
 ///
 /// `SpaceEngine` tarafından üretilen tiplenmiş veri paketi. LLM'e serialize edilir.
 /// Faz 5 stub — `compute_space_slice()` implementasyonu Faz 5'te gelir.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct OspPrompt {
     pub vision: crate::vision::VisionVector,
     pub time_ref: crate::space::TimeLayer,
@@ -442,7 +443,7 @@ pub struct OspPrompt {
 ///
 /// Space'in bir subset'i: sadece Agent'ın görmesine izin verilen node'lar ve
 /// bu node'lar arasındaki edge'ler. Agent bunu OspPrompt.space_slice olarak alır.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SpaceSlice {
     /// Görünür node'ların ID seti.
     pub node_ids: HashSet<NodeId>,
@@ -489,7 +490,7 @@ impl SpaceSlice {
 ///
 /// Bir önceki Claim Hold/reject edildiyse, şahitler "şu node'ları da görmen lazım"
 /// diyebilir. Bu node'lar space_slice'a eklenir (permission filter'dan geçerse).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct EvidenceSummary {
     /// Şahitlerin Agent'ın görmesini talep ettiği node'lar.
     pub required_nodes: Vec<NodeId>,
