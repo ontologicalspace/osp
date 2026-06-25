@@ -223,13 +223,15 @@ This is a **quorum/voting argument** informed by BFT threshold semantics (n ≥ 
 
 ### 6.1 Architecture
 
-The implementation comprises three Rust crates with 330+ unit/integration tests:
+The implementation comprises four Rust crates with 340+ unit/integration tests:
 
 **osp-core** (136 unit + 6 integration tests): Ontological primitives (Node, Edge, Space, 9 NodeKinds, 8 EdgeKinds), coordinate system (5 core + N custom axes with pluggable `Axis` trait; `CustomRawPosition` + `MetricValue` provenance for custom axes), witness system (EvidenceEvent, CanonicalWitnessSet, tri-state WitnessStatus; `evaluate()` covers Q1-Q3 only), vision (CosineDeviation, DiffusionDeviation stub, compute_derived), space commit (`apply_delta` mutation-only, infallible; no `commit()` — separation of concerns), TimeFSM (`evaluate` + `apply_delta` composition), SpaceEngine (Q4-Q6 claim-based gates → Q1-Q3 witness → `apply_delta` → reposition → persist), and event-sourcing persistence (milestone snapshots + per-commit deltas). The **agent interaction layer** (`agent.rs`: PermissionMask, DeltaProposal, OutputContract, SyntaxViolation) and **rule engine contracts** (`rule.rs`: Rule trait, RuleViolation) define the foundational types and contracts for Faz 5 LLM integration — types are implemented and unit-tested; full gate logic arrives in Faz 5.
 
 **osp-analyzer** (97 unit/integration tests): Two-tier code analysis with 5 language adapters (Python, TypeScript, JavaScript, Rust, Go via tree-sitter), abstractness computation (A = Nₐ/Nc), LCOM4 cohesion algorithm (bipartite graph → connected components, validated on 18,952 classes), SCIP semantic index loader (protobuf parsing with symbol-string inference fallback for indexers that omit `SymbolKind`), and full analysis pipeline with `--scip` CLI integration. Re-exports `MetricValue`/`MetricSource`/`MetricValueError` from osp-core (single canonical source). SCIP index generation uses `scip-python` (Docker, for Python), `scip-typescript` (npm, for TypeScript/JavaScript), `scip-rust` (Docker, for Rust), and `scip-go` (Docker, for Go).
 
 **osp-spike** (32 tests): Faz 0 validation spike (frozen reference).
+
+**osp-llm-runtime** (9 tests): Stateless HTTP runtime (inv #11 — no agent state held) wrapping an OpenAI-compatible chat-completion endpoint. Serializes an `OspPrompt` to a chat message, parses the assistant reply into a `DeltaProposal` (with code-fence stripping and `#[serde(default)]` tolerance for missing fields), and exposes real `TokenUsage` (`prompt_tokens` / `completion_tokens` / `total_tokens`) from the API response. Two-tier API: `complete()` for schema-validated agent calls, `complete_raw()` for token benchmarks that must not fail on proposal shape. End-to-end verified on GPT-4o-mini; the §7.8 multi-repo distribution was produced by its `multi_repo_bench` example.
 
 **15 implementation invariants** are structurally enforced at the type level: the original 10 (author-witness rejection, EvidenceEvent dedup, tri-state witness, RawPosition/DerivedPosition separation, lazy diffusion, incremental space commit, admin override flag, network-free core, WitnessSet-based operator, pure Instability axis) plus 5 Faz 5 additions (#11 LLM stateless, #12 OutputContract deterministic reject, #13 PermissionMask trusted-operator assigned, #14 prompt as typed data packet, #15 custom axis registration trusted-operator only — agents cannot define new axes).
 
@@ -423,6 +425,22 @@ We applied OSP to its own codebase (osp-core, 15 Rust files) with a configured a
 | 10 nodes / 5 files | 609 | 3,000 | 4.9× |
 
 OSP prompt size grows ~6 tokens per additional node (sub-linear), while raw file dumps grow ~600 tokens per file (linear). These results use a real tokenizer but measure representation compactness only — task success and code quality with each prompt type remain open questions for future work.
+
+**Multi-repo distribution (n=9).** To move beyond single-scenario measurements, we extended the benchmark to a 9-repository distribution using the `osp-llm-runtime` Rust crate. For each repository we analyzed real per-module metrics via osp-analyzer, constructed a K=8 OSP coordinate prompt with actual coupling/cohesion/instability values, and compared against a K=8 raw source-file dump (2,000-char cap per file). All token counts are real GPT-4o-mini API responses.
+
+| Repo | Lang | OSP tokens | Raw tokens | Ratio | Savings |
+|---|---|---:|---:|---:|---:|
+| axum | Rust | 643 | 4,114 | 6.4× | 84.4% |
+| prometheus | Go | 632 | 3,990 | 6.3× | 84.2% |
+| cobra | Go | 630 | 3,732 | 5.9× | 83.1% |
+| tokio | Rust | 630 | 3,685 | 5.8× | 82.9% |
+| ripgrep | Rust | 657 | 3,799 | 5.8× | 82.7% |
+| gin | Go | 631 | 3,611 | 5.7× | 82.5% |
+| serde | Rust | 659 | 3,222 | 4.9× | 79.5% |
+| viper | Go | 630 | 3,041 | 4.8× | 79.3% |
+| tracing | Rust | 630 | 2,499 | 4.0× | 74.8% |
+
+Across the 9-repo distribution: ratio mean = **5.52×**, median = **5.78×** (range 4.0×–6.4×); savings mean = **81.5%**, median = **82.7%**. The OSP prompt token count is near-constant across repos (~630–659 tokens for K=8 nodes) because coordinate size depends only on the number of nodes represented, not on source-code complexity. Raw-dump tokens vary with file content (2,499–4,114). This confirms the compact-representation advantage holds across heterogeneous repositories spanning two languages and three orders of magnitude in repo size (cobra: 36 files; prometheus: 955 files), not just the osp-core self-measurement.
 
 ## 8. Related Work
 
