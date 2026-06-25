@@ -164,14 +164,21 @@ pub struct OutputContract {
 impl OutputContract {
     /// DeltaProposal şema doğrulaması (Q4 Syntax Gate — Agent shell).
     ///
-    /// Kontroller:
-    /// 1. new_nodes: NodeKind valid, mass finite/non-negative, connected_to refs valid
-    /// 2. new_edges: from/to ≥ 0, EdgeKind valid, Imports self-loop reddi
-    /// 3. modified_entities: node_id ≥ 0
-    /// 4. position_hints: node_id ≥ 0, suggested_raw finite (advisory only)
-    /// 5. reasoning: require_reasoning ise boş olamaz
-    /// 6. max_nodes: limit aşımı
-    /// 7. Cross-ref: new_edges from/to → new_nodes veya existing space
+    /// Kontroller (proposal'ın kendi içinde doğrulanabilecekler):
+    /// 1. new_nodes: NodeKind allowed (varsa), mass finite/non-negative,
+    ///    connected_to duplicate-edge reddi
+    /// 2. new_edges: Imports self-loop reddi (from == to)
+    /// 3. position_hints: suggested_raw finite
+    /// 4. reasoning: require_reasoning ise boş olamaz
+    /// 5. max_nodes: limit aşımı
+    ///
+    /// **Kapsam dışı (Engine sorumluluğunda — `check_claim_syntax`):**
+    /// - Cross-ref: new_edges from/to ve connected_to target_id'lerin existing
+    ///   space node'larına işaret ettiği — `validate()` `&Space` göremiyor.
+    /// - Duplicate node IDs — `NewNodeSpec`'lerin ID'si yok (index tabanlı),
+    ///   Engine `Claim.delta_nodes` (resolved ID'ler) üzerinde kontrol eder.
+    /// - modified_entities: `EntityChangeSpec.changes` Faz 5 stub — doğrulanacak
+    ///   içerik henüz yok.
     pub fn validate(&self, proposal: &DeltaProposal) -> Result<(), SyntaxViolation> {
         // 6. Max nodes check
         if let Some(max) = self.max_nodes {
@@ -214,16 +221,28 @@ impl OutputContract {
                 });
             }
 
-            // connected_to: EdgeKind valid, NodeId ≥ 0
-            for (j, (target_id, edge_kind)) in node.connected_to.iter().enumerate() {
-                if *target_id == 0 && *target_id != 0 {
-                    // NodeId 0 is valid (first node), only check for overflow-like issues
+            // connected_to: duplicate (target_id, edge_kind) çifti reddi.
+            //
+            // connected_to, new_edges'te ayrıca listelenmemiş örtülü kenarlar için
+            // kısayoldur — target_id'ler existing space node'larıdır (agent shell
+            // mevcut space'i bilir). Dangling-ref kontrolü `validate()`'in
+            // kapsamı dışında (Space'e erişim yok) — bu Engine `check_claim_syntax`
+            // tarafından resolved-ID aşamasında yapılır.
+            //
+            // Imports self-loop connected_to yoluyla ifade edilemez: yeni node'un
+            // ID'si henüz atanmamış (index tabanlı provizyonel ID), bu yüzden
+            // "yeni node kendini import eder" senaryosu burada oluşamaz.
+            let mut seen_edges: HashSet<(NodeId, EdgeKind)> = HashSet::new();
+            for (target_id, edge_kind) in &node.connected_to {
+                if !seen_edges.insert((*target_id, *edge_kind)) {
+                    return Err(SyntaxViolation {
+                        claim_id: 0,
+                        detail: format!(
+                            "new_nodes[{}]: duplicate connected_to edge (target {}, {:?})",
+                            i, target_id, edge_kind
+                        ),
+                    });
                 }
-                // Self-connection via Imports is invalid
-                if *edge_kind == EdgeKind::Imports {
-                    // Will be caught by edge validation if explicit, but connected_to is implicit
-                }
-                let _ = j; // index for error messages if needed
             }
 
             new_node_ids.insert(i as NodeId); // index as provisional ID
@@ -243,10 +262,9 @@ impl OutputContract {
             }
         }
 
-        // 3. modified_entities validation
-        for (i, entity) in proposal.modified_entities.iter().enumerate() {
-            let _ = (i, entity); // node_id ≥ 0 is always true for u64
-        }
+        // 3. modified_entities: EntityChangeSpec.changes alanı Faz 5 stub —
+        //    doğrulanacak içerik henüz yok. Faz 5'te EntityChanges gelince
+        //    buraya validation eklenecek.
 
         // 4. position_hints validation (advisory — just check finiteness)
         for (i, hint) in proposal.position_hints.iter().enumerate() {
@@ -663,6 +681,65 @@ mod tests {
         };
         let result = contract.validate(&proposal);
         assert!(result.is_err(), "Imports self-loop should be rejected");
+    }
+
+    #[test]
+    fn connected_to_rejects_duplicate_edge() {
+        // Aynı target node'a aynı EdgeKind ile iki kez bağlanmak gereksiz/sorgulanabilir
+        let contract = OutputContract::default();
+        let proposal = DeltaProposal {
+            new_nodes: vec![NewNodeSpec {
+                kind: NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![
+                    (5, EdgeKind::Imports),
+                    (5, EdgeKind::Imports), // duplicate
+                ],
+            }],
+            ..Default::default()
+        };
+        let result = contract.validate(&proposal);
+        assert!(
+            result.is_err(),
+            "duplicate connected_to edge should be rejected"
+        );
+    }
+
+    #[test]
+    fn connected_to_accepts_distinct_edges_to_same_target() {
+        // Aynı target node'a FARKLI EdgeKind'ler geçerli (Imports + DependsOn)
+        let contract = OutputContract::default();
+        let proposal = DeltaProposal {
+            new_nodes: vec![NewNodeSpec {
+                kind: NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![
+                    (5, EdgeKind::Imports),
+                    (5, EdgeKind::DependsOn), // distinct kind → OK
+                ],
+            }],
+            ..Default::default()
+        };
+        let result = contract.validate(&proposal);
+        assert!(
+            result.is_ok(),
+            "distinct EdgeKinds to same target should be accepted"
+        );
+    }
+
+    #[test]
+    fn connected_to_accepts_empty() {
+        // Regression: boş connected_to geçerli (mevcut davranış korundu)
+        let contract = OutputContract::default();
+        let proposal = DeltaProposal {
+            new_nodes: vec![NewNodeSpec {
+                kind: NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }],
+            ..Default::default()
+        };
+        assert!(contract.validate(&proposal).is_ok());
     }
 
     #[test]
