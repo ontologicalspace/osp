@@ -13,7 +13,7 @@ AI-assisted software development lacks a persistent, verifiable representation o
 
 OSP positions every module in a coordinate system and advances project time only through a two-witness quorum. We prove that this quorum rule is a **safety-refinement** of authenticated Byzantine Fault Tolerance (BFT) for f = 1: it provides optimal safety against Byzantine witnesses while leaving liveness to standard distributed systems mechanisms (Theorem 1). We introduce a **tri-state witness classification** (Witnessed, Unwitnessed, Unobservable-locally) that resolves the "squash-merge blind spot" — in our 15-repository corpus, 8 repositories use workflows where review evidence is not locally observable from merge commits.
 
-We evaluate OSP on 23 repositories across 5 languages (Python, TypeScript, JavaScript, Rust, Go) using tree-sitter (Tier 1) and SCIP semantic indices (Tier 2, via scip-python, scip-typescript, scip-rust, and scip-go). SCIP-based LCOM4 cohesion is computed for 18,952 classes across 21 repositories, revealing an observed pattern in high-coverage repositories: Rust projects cluster highest in cohesion (median y = 0.70), followed by Go (0.65), Python (0.62), and TypeScript/JavaScript (0.52). A binary merge-based classifier would mark 8 repositories as unwitnessed; OSP instead classifies them as Unobservable-locally, avoiding unsupported negative claims. Tree-sitter-derived abstractness values (A = Nₐ/Nc) produce meaningful Martin main-sequence distances, distinguishing architectural balance across projects. A HashMap-based import resolver enables 3000-file analysis in 11.2 seconds median (5-run, release build). Finally, a token-size benchmark on 13 repositories shows that OSP coordinate prompts reduce architectural context size by 99.53% on average versus full repository dumps and by 89.19% versus a structure-aware 2-hop baseline, using a chars/4 token approximation. All data and implementations are open-source and reproducible.
+We evaluate OSP on 23 repositories across 5 languages (Python, TypeScript, JavaScript, Rust, Go) using tree-sitter (Tier 1) and SCIP semantic indices (Tier 2, via scip-python, scip-typescript, scip-rust, and scip-go). SCIP-based LCOM4 cohesion is computed for 18,952 classes across 21 repositories, revealing an observed pattern in high-coverage repositories: Go projects cluster highest in cohesion (median y = 0.65), followed by Python (0.62), Rust (0.57), and TypeScript/JavaScript (0.52). A binary merge-based classifier would mark 8 repositories as unwitnessed; OSP instead classifies them as Unobservable-locally, avoiding unsupported negative claims. Tree-sitter-derived abstractness values (A = Nₐ/Nc) produce meaningful Martin main-sequence distances, distinguishing architectural balance across projects. A HashMap-based import resolver enables 3000-file analysis in 11.2 seconds median (5-run, release build). Finally, a token-size benchmark on 13 repositories shows that OSP coordinate prompts reduce architectural context size by 99.53% on average versus full repository dumps and by 89.19% versus a structure-aware 2-hop baseline, using a chars/4 token approximation. All data and implementations are open-source and reproducible.
 
 ---
 
@@ -47,7 +47,7 @@ This paper makes four contributions:
 
 2. **Deterministic claim-based gate architecture** (Section 4, 6): We define a two-layer commit pipeline — deterministic Q4–Q6 gates (syntax, vision deviation θ, architectural rules) evaluated before witness-based Q1–Q3 gates — that rejects structurally invalid or architecturally deviating claims before any code generation or witness evaluation. Every metric carries provenance (source, confidence, coverage), ensuring epistemological honesty: "we don't know" is never conflated with "we measured 0.5."
 
-3. **Multi-language empirical evaluation** (Section 7): We analyze 23 repositories across 5 languages (Python, TypeScript, JavaScript, Rust, Go) using tree-sitter (Tier 1) and SCIP semantic indices (Tier 2). Real LCOM4 cohesion is computed for 18,952 classes across 21 repositories via four SCIP indexer tools (scip-python, scip-typescript, scip-rust, scip-go). In high-coverage repositories, results reveal an observed cohesion pattern: Rust (median y = 0.70) > Go (0.65) > Python (0.62) > TypeScript/JavaScript (0.52).
+3. **Multi-language empirical evaluation** (Section 7): We analyze 23 repositories across 5 languages (Python, TypeScript, JavaScript, Rust, Go) using tree-sitter (Tier 1) and SCIP semantic indices (Tier 2). Real LCOM4 cohesion is computed for 18,952 classes across 21 repositories via four SCIP indexer tools (scip-python, scip-typescript, scip-rust, scip-go). In high-coverage repositories, results reveal an observed cohesion pattern: Go (median y = 0.65) > Python (0.62) > Rust (0.57) > TypeScript/JavaScript (0.52).
 
 4. **Compact coordinate representation benchmark** (Section 7.7): A 13-repository benchmark measures the size of OSP's coordinate-based subgraph representation versus raw file content. OSP's representation is substantially smaller (median 155 tokens) than either full repository dumps or structure-aware 2-hop file context. However, this measures **representation size**, not information preservation: OSP substitutes coordinate topology for source text, which is a different kind of information, not a lossless compression of the same information.
 
@@ -346,14 +346,14 @@ We generated SCIP semantic indices for all 23 corpus repositories using `scip-py
 | fastapi | Py | 673 | **0.62** | 99.6% |
 | httpx | Py | 81 | **0.62** | 100% |
 | rich | Py | 213 | **0.60** | 100% |
-| **ripgrep** | **Rust** | **188** | **0.75** | **98%** |
-| **tokio** | **Rust** | **668** | **0.71** | **87%** |
-| **tracing** | **Rust** | **346** | **0.69** | **92%** |
+| **ripgrep** | **Rust** | **188** | **0.60** | **98%** |
+| **tokio** | **Rust** | **668** | **0.56** | **87%** |
+| **tracing** | **Rust** | **346** | **0.60** | **93%** |
 | **gin** | **Go** | **155** | **0.71** | **100%** |
 | **viper** | **Go** | **38** | **0.68** | **100%** |
 | vitest | TS | 705 | **0.54** | 91.0% |
 | chalk | JS | 10 | **0.54** | 38.5% |
-| **serde** | **Rust** | **291** | **0.59** | **42%** |
+| **serde** | **Rust** | **291** | **0.57** | **42%** |
 | pydantic | Py | 323 | **0.52** | 18.7% |
 | commander | JS | 23 | **0.52** | 7.5% |
 | **cobra** | **Go** | **15** | **0.57** | **100%** |
@@ -364,13 +364,13 @@ We generated SCIP semantic indices for all 23 corpus repositories using `scip-py
 | worms-supabase | Py | 0 | 0.50* | — |
 | lodash | JS | 0 | 0.50* | — |
 
-**Result.** LCOM4 cohesion values reveal a clear language-paradigm gradient:
+**Result.** LCOM4 cohesion values reveal a language-paradigm gradient:
 
-1. **Rust repos cluster highest** (y = 0.59–0.75, median 0.70) — trait-based design with explicit impl blocks produces tightly coupled method-field relationships.
+1. **Go repos cluster highest** (y = 0.57–0.71, median 0.65) — interface-based composition with receiver methods yields strong intra-type cohesion.
 
-2. **Go repos cluster high** (y = 0.57–0.71, median 0.65) — interface-based composition with receiver methods yields strong intra-type cohesion.
+2. **Python repos cluster moderate-high** (y = 0.49–0.67, median ~0.62) — class-based OOP with constructors that bridge fields.
 
-3. **Python repos cluster moderate** (y = 0.49–0.67, median ~0.62) — class-based OOP with constructors that bridge fields.
+3. **Rust repos cluster moderate** (y = 0.56–0.60, median 0.57) — trait-based design with explicit impl blocks; the 2026-06-27 corrected-loader rerun revised these values downward from placeholder-inflated estimates (previously 0.59–0.75), as Rust struct methods were previously not matched to their classes.
 
 4. **TypeScript/JavaScript repos cluster lower** (y = 0.51–0.54) — more functional style, fewer classes, lighter method-field coupling.
 
@@ -380,7 +380,7 @@ We generated SCIP semantic indices for all 23 corpus repositories using `scip-py
 
 7. **SCIP coverage varies** (2.4%–100%) — the MetricValue confidence formula (`0.95 × coverage × stale_penalty`) propagates this uncertainty into the coordinate position, ensuring that low-coverage repos (e.g., svelte at 2.4%) contribute proportionally less weight to vision comparisons. Rust/Go repos have notably high coverage (87%–100%) via scip-rust and scip-go.
 
-**Caveat.** The observed cohesion gradient (Rust > Go > Python > TS/JS) is consistent across high-coverage repositories (≥85%: django, fastapi, click, flask, httpx, rich, vitest, date-fns, ripgrep, tokio, tracing, cobra, viper, gin, prometheus). Tree-sitter import edge extraction now covers Rust (`use` statements with `crate::`/`super::`/`self::` prefix handling and grouped-import expansion) and Go (`import` declarations with `go.mod` module-path-aware package resolution), so coupling (x) and instability (z) values for these languages are no longer placeholder. The resulting main-sequence distances are notably small for prometheus (D = 0.06) and viper (D = 0.08), consistent with mature, well-balanced module architectures. LCOM4 cohesion values are derived from SCIP semantic indices and are independent of edge extraction. **Rust cohesion values caveat:** the Rust y values reported here were produced before the 2026-06-25 OSP loader fix that added `impl#[Type]` symbol-descriptor handling; prior to that fix, Rust struct methods were not matched to their classes, yielding placeholder-level LCOM4 (=1). A corpus rerun with the corrected loader is required before drawing quantitative conclusions about the Rust portion of the gradient. A formal statistical test of the language-paradigm hypothesis is planned for the extended journal version.
+**Caveat.** The observed cohesion gradient (Go > Python > Rust > TS/JS) is consistent across high-coverage repositories (≥85%: django, fastapi, click, flask, httpx, rich, vitest, date-fns, ripgrep, tokio, tracing, cobra, viper, gin, prometheus). Tree-sitter import edge extraction now covers Rust (`use` statements with `crate::`/`super::`/`self::` prefix handling and grouped-import expansion) and Go (`import` declarations with `go.mod` module-path-aware package resolution), so coupling (x) and instability (z) values for these languages are no longer placeholder. The resulting main-sequence distances are notably small for prometheus (D = 0.06) and viper (D = 0.08), consistent with mature, well-balanced module architectures. LCOM4 cohesion values are derived from SCIP semantic indices and are independent of edge extraction. **Rust cohesion values** (y = 0.56–0.60, median 0.57) were re-run on 2026-06-27 with the corrected loader that recognizes rust-analyzer's `impl#[Type]` symbol descriptor (previously only Python/TypeScript `Type#member` was recognized, which inflated Rust values to 0.59–0.75 by forcing LCOM4=1); the rerun revised Rust from the highest-cohesion language to a moderate band below Python. A formal statistical test of the language-paradigm hypothesis is planned for the extended journal version.
 
 ---
 
@@ -506,7 +506,7 @@ Rather than discarding rejected LLM proposals as errors, OSP classifies them as 
 
 ## 10. Threats to Validity
 
-**Internal validity.** SCIP coverage varies significantly across repositories (2.4%–100%). Low-coverage repositories (svelte 2.4%, commander 7.5%, pydantic 18.7%, serde 42%) report cohesion values derived from a subset of classes; their MetricValue confidence (0.95 × coverage) quantifies this uncertainty, but readers should weight these values accordingly. Rust and Go repositories have high SCIP coverage (87%–100%) and full tree-sitter import edge extraction (coupling/instability values are real, not placeholder). LCOM4 cohesion for Rust repos was previously affected by an OSP loader limitation: the loader did not recognize rust-analyzer's `impl#[Type]...method().` symbol descriptor pattern (only the Python/TypeScript `Type#member` pattern), so Rust struct methods were missed and classes computed LCOM4 = 1 (placeholder-level). This loader limitation was corrected on 2026-06-25 (the loader now handles both descriptor patterns via `symbol_belongs_to_class`); the Rust cohesion values reported in §7.6 (median y = 0.70) were produced before this correction and a corpus rerun is required for final values. Tree-sitter abstractness detection may miss indirect inheritance chains.
+**Internal validity.** SCIP coverage varies significantly across repositories (2.4%–100%). Low-coverage repositories (svelte 2.4%, commander 7.5%, pydantic 18.7%, serde 42%) report cohesion values derived from a subset of classes; their MetricValue confidence (0.95 × coverage) quantifies this uncertainty, but readers should weight these values accordingly. Rust and Go repositories have high SCIP coverage (87%–100%) and full tree-sitter import edge extraction (coupling/instability values are real, not placeholder). LCOM4 cohesion for Rust repos was initially affected by an OSP loader limitation: the loader did not recognize rust-analyzer's `impl#[Type]...method().` symbol descriptor pattern (only the Python/TypeScript `Type#member` pattern), so Rust struct methods were missed and classes computed LCOM4 = 1 (placeholder-level). This loader limitation was corrected on 2026-06-25 (the loader now handles both descriptor patterns via `symbol_belongs_to_class`) and all 5 Rust repositories were re-run on 2026-06-27 with the corrected loader; the revised Rust values (median y = 0.57, range 0.56–0.60) replaced the earlier placeholder-inflated estimates (median 0.70). Tree-sitter abstractness detection may miss indirect inheritance chains.
 
 **External validity.** The 23-repository corpus spans 5 languages but may not generalize across all language ecosystems, project sizes, or organizational workflows. The 10% merge-ratio threshold for tri-state classification is calibrated on GitHub-hosted Python/TypeScript/JavaScript projects and may differ for other platforms (GitLab, Bitbucket), organizations with formal merge policies, or repositories using unconventional branching strategies. The OSP Desktop application (Section 6.5) has been validated on repository analysis and simulated claim scenarios but has not yet been deployed in an active development workflow with real LLM agents — real-world usage data remains future work.
 
@@ -533,7 +533,7 @@ Rather than discarding rejected LLM proposals as errors, OSP classifies them as 
 
 ## 12. Conclusion
 
-OSP transforms software projects from flat text repositories into navigable conceptual spaces with provenance-aware metric tracking. The tri-state witness model addresses the squash-merge blind spot affecting 8 of 15 primary-corpus repositories; measured abstractness values make Martin's main-sequence distance actionable for cross-project architectural comparison; and real LCOM4 cohesion (18,952 classes analyzed via SCIP across 5 languages) reveals an observed pattern in high-coverage repositories: Rust (median y = 0.70) > Go (0.65) > Python (0.62) > TypeScript/JavaScript (0.52), a language-paradigm signal that requires larger-corpus validation. A token-size benchmark demonstrates that OSP's coordinate-based representation is substantially more compact than raw file content (median 155 tokens vs. 225K–5.3M for full dumps), though this measures representation size, not task success. The deterministic gate architecture (Q4–Q6) and LLM codec are designed and partially implemented; full integration with real LLM agents remains future work.
+OSP transforms software projects from flat text repositories into navigable conceptual spaces with provenance-aware metric tracking. The tri-state witness model addresses the squash-merge blind spot affecting 8 of 15 primary-corpus repositories; measured abstractness values make Martin's main-sequence distance actionable for cross-project architectural comparison; and real LCOM4 cohesion (18,952 classes analyzed via SCIP across 5 languages) reveals an observed pattern in high-coverage repositories: Go (median y = 0.65) > Python (0.62) > Rust (0.57) > TypeScript/JavaScript (0.52), a language-paradigm signal that requires larger-corpus validation. A token-size benchmark demonstrates that OSP's coordinate-based representation is substantially more compact than raw file content (median 155 tokens vs. 225K–5.3M for full dumps), though this measures representation size, not task success. The deterministic gate architecture (Q4–Q6) and LLM codec are designed and partially implemented; full integration with real LLM agents remains future work.
 
 Beyond measurement, OSP's typed epistemic codec and deterministic gate architecture provide a compact, verifiable interface between LLM agents and project state. A 13-repository token-size benchmark shows 99.53% average reduction versus full repository dumps and 89.19% versus a structure-aware 2-hop baseline under a chars/4 approximation. This supports the claim that architectural context can be transferred as coordinate topology rather than raw file content. Structured hallucination classification further reframes rejected proposals as epistemic data: not merely errors, but measurements of the boundary between agent belief and project reality.
 
@@ -633,10 +633,10 @@ The OSP prompt includes 5-axis coordinates, typed edges, vision thresholds, rule
 
 | repo | lang | nodes | edges | SCIP classes | A | I | D | **y** | SCIP coverage |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| ripgrep | Rust | 100 | 93 | 188 | 0.02 | 0.52 | 0.36 | **0.75** | 98% |
-| tokio | Rust | 786 | 600 | 668 | 0.08 | 0.60 | 0.27 | **0.71** | 87% |
-| tracing | Rust | 256 | 100 | 346 | 0.12 | 0.53 | 0.22 | **0.69** | 92% |
-| serde | Rust | 208 | 111 | 291 | 0.05 | 0.53 | 0.34 | **0.59** | 42% |
+| ripgrep | Rust | 100 | 93 | 188 | 0.02 | 0.52 | 0.36 | **0.60** | 98% |
+| tokio | Rust | 786 | 600 | 668 | 0.08 | 0.60 | 0.27 | **0.56** | 87% |
+| tracing | Rust | 256 | 100 | 346 | 0.12 | 0.53 | 0.22 | **0.60** | 93% |
+| serde | Rust | 208 | 111 | 291 | 0.05 | 0.53 | 0.34 | **0.57** | 42% |
 | gin | Go | 99 | 29 | 155 | 0.10 | 0.58 | 0.18 | **0.71** | 100% |
 | viper | Go | 33 | 6 | 38 | 0.24 | 0.45 | 0.08 | **0.68** | 100% |
 | prometheus | Go | 955 | 2271 | 4,415 | 0.10 | 0.69 | 0.06 | **0.61** | 100% |
@@ -648,9 +648,9 @@ Edge counts derived from tree-sitter `use` (Rust) and `import` (Go) extraction w
 
 | Language | Repos | Median y | Range |
 |---|---|---:|---|
-| Rust | 4 | **0.70** | 0.59–0.75 |
 | Go | 4 | **0.65** | 0.57–0.71 |
 | Python | 8 | **0.62** | 0.49–0.67 |
+| Rust | 4 | **0.57** | 0.56–0.60 |
 | TypeScript | 3 | **0.51** | 0.51–0.54 |
 | JavaScript | 3 | **0.52** | 0.50*–0.54 |
 

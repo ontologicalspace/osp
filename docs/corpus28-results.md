@@ -30,11 +30,11 @@
 
 | # | Repo | Lang | Nodes | Edges | κ | A | I | D | **y** | SCIP Cov | Category |
 |---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| 16 | serde | Rust | 208 | 111 | 0.53 | 0.05 | 0.53 | 0.34 | **0.59** | 42% | Stable heavy |
-| 17 | ripgrep | Rust | 100 | 93 | 0.93 | 0.02 | 0.52 | 0.36 | **0.75** | 98% | Stable heavy |
-| 18 | tracing | Rust | 256 | 100 | 0.39 | 0.12 | 0.53 | 0.22 | **0.69** | 92% | Stable modern |
-| 19 | axum | Rust | 302 | 72 | 0.24 | 0.06 | 0.53 | 0.28 | **0.61** | 32% | Stable modern |
-| 20 | tokio | Rust | 786 | 600 | 0.76 | 0.08 | 0.60 | 0.27 | **0.71** | 87% | Stable heavy |
+| 16 | serde | Rust | 208 | 111 | 0.53 | 0.05 | 0.53 | 0.34 | **0.57** | 42% | Stable heavy |
+| 17 | ripgrep | Rust | 100 | 93 | 0.93 | 0.02 | 0.52 | 0.36 | **0.60** | 98% | Stable heavy |
+| 18 | tracing | Rust | 256 | 100 | 0.39 | 0.12 | 0.53 | 0.22 | **0.60** | 93% | Stable modern |
+| 19 | axum | Rust | 302 | 72 | 0.24 | 0.06 | 0.53 | 0.28 | **0.56** | 32% | Stable modern |
+| 20 | tokio | Rust | 786 | 600 | 0.76 | 0.08 | 0.60 | 0.27 | **0.56** | 87% | Stable heavy |
 | 21 | cobra | Go | 36 | 1 | 0.03 | 0.08 | 0.50 | 0.43 | **0.57** | 100% | Stable heavy |
 | 22 | viper | Go | 33 | 6 | 0.18 | 0.24 | 0.45 | 0.08 | **0.68** | 100% | Stable |
 | 23 | gin | Go | 99 | 29 | 0.29 | 0.10 | 0.58 | 0.18 | **0.71** | 100% | Stable modern |
@@ -45,6 +45,7 @@
 | 28 | llama_index | Py | 3833 | 7470 | **1.95** | 0.03 | 0.74 | 0.23 | 0.50* | — | **AI-era foam** |
 
 **y\*** = placeholder (no SCIP — Tier 1 only).
+Rust cohesion (y) değerleri 2026-06-27 düzeltilmiş loader ile yeniden çalıştırıldı (eski placeholder değerler: serde 0.59, ripgrep 0.75, tracing 0.69, axum 0.61, tokio 0.71).
 Rust/Go edge extraction (tree-sitter `use`/`import`) tamamlandı 2026-06-25 — eski `edges=0†` kısıtlaması kalktı.
 
 ## Ana Bulgular
@@ -73,17 +74,17 @@ Rust/Go artık gerçek κ değerleri ile stable Python/TS bandında, foam'dan ne
 | Rust | 0.54 |
 | Go | 0.56 |
 
-### 3. LCOM4 Cohesion — Rust/Go yüksek (well-structured)
+### 3. LCOM4 Cohesion — diller yakın bantta, Go hafif önde
 
 | Kategori | Ortalama y | Range |
 |---|---|---|
-| **Rust** (SCIP) | **0.67** † | 0.59–0.75 |
 | **Go** (SCIP) | **0.64** | 0.57–0.71 |
 | Stable Python (SCIP) | 0.60 | 0.49–0.67 |
+| **Rust** (SCIP) | **0.578** | 0.56–0.60 |
 | Stable TS/JS (SCIP) | 0.52 | 0.51–0.54 |
 | Foam (placeholder) | 0.50* | — |
 
-**Bulgü:** Rust projeleri en yüksek cohesion (0.67 ortalama) — güçlü tip sistemi + trait-based design. † Rust cohesion değerleri loader bug öncesi üretilmiştir; rerun gerekir (bkz. Sınırlamalar #4).
+**Bulgü:** Diller arasında cohesion dar bir bantta (0.52–0.64). Go hafif önde (0.64), Rust ve Python orta bandta (~0.58–0.60), TS/JS daha düşük (0.52). Rust değerleri 2026-06-27 düzeltilmiş loader ile yeniden çalıştırıldı — önceki placeholder değerler (y≈0.67, LCOM4=1'den şişirilmiş) geçersizdi (bkz. Sınırlamalar #4).
 
 ### 4. 5 Dil Karşılaştırması
 
@@ -92,7 +93,7 @@ Rust/Go artık gerçek κ değerleri ile stable Python/TS bandında, foam'dan ne
 | Python | 12 | 0.58 | 1.23 | 0.55 | 8/12 |
 | TypeScript | 3 | 0.52 | 1.46 | 0.74 | 3/3 |
 | JavaScript | 3 | 0.52 | 0.57 | 0.74 | 2/3 |
-| **Rust** | 5 | **0.67** † | 0.57 | 0.54 | 5/5 |
+| **Rust** | 5 | **0.578** | 0.57 | 0.54 | 5/5 |
 | **Go** | 4 | **0.64** | 0.72 | 0.56 | 4/4 |
 
 ### 5. SCIP Toolchain Doğrulama
@@ -114,4 +115,4 @@ Rust/Go artık gerçek κ değerleri ile stable Python/TS bandında, foam'dan ne
 
 3. **SCIP coverage değişken:** Bazı Rust repolarda (axum 32%, serde 42%) kısmi coverage. MetricValue.confidence bu belirsizliği yansıtır.
 
-4. **Rust cohesion loader bug (çözüldü 2026-06-25):** Önceki teşhis "scip-rust field-access üretmiyor, toolchain limitation" yanlıştı — scip-rust veriyi üretiyor. Gerçek kök neden: OSP SCIP loader'ı rust-analyzer'in `impl#[Type]...method().` sembol desenini tanımıyordu (sadece Python/TS `Type#member` desenini biliyordu). Bu yüzden Rust struct'larının method'ları yakalanamıyor → hiçbir class hem method hem field gösteremiyordu → LCOM4 her zaman 1 (placeholder-level) çıkıyordu. Fix: `symbol_belongs_to_class` yardımcı fonksiyonu iki deseni de ele alıyor (Python/TS/trait `Type#member` + Rust impl-block `impl#[Type]...`). Doğrulama: serde n=319 class, fix öncesi 0 class hem method+field → fix sonrası 117 class, gerçek LCOM4 hesaplanıyor (serde y: placeholder → 0.57). **Bu bir toolchain limitation değil, OSP loader bug'ıydı.** Yukarıdaki Rust cohesion değerleri (y=0.67) fix öncesi üretilmiştir; Rust repo'ları için 28-repo rerun gerekir.
+4. **Rust cohesion loader bug (çözüldü + rerun 2026-06-27):** Önceki teşhis "scip-rust field-access üretmiyor, toolchain limitation" yanlıştı — scip-rust veriyi üretiyor. Gerçek kök neden: OSP SCIP loader'ı rust-analyzer'in `impl#[Type]...method().` sembol desenini tanımıyordu (sadece Python/TS `Type#member` desenini biliyordu). Bu yüzden Rust struct'larının method'ları yakalanamıyor → hiçbir class hem method hem field gösteremiyordu → LCOM4 her zaman 1 (placeholder-level) çıkıyordu. Fix: `symbol_belongs_to_class` yardımcı fonksiyonu iki deseni de ele alıyor (Python/TS/trait `Type#member` + Rust impl-block `impl#[Type]...`). Doğrulama: serde n=319 class, fix öncesi 0 class hem method+field → fix sonrası 117 class, gerçek LCOM4 hesaplanıyor. **Rerun (2026-06-27):** Tüm 5 Rust repo düzeltilmiş loader ile yeniden çalıştırıldı. Rust cohesion ortalaması 0.67 (placeholder-şişirilmiş) → **0.578 (gerçek LCOM4)** düştü. Bu, Rust'ın "en yüksek cohesion" bulgusunu geçersiz kılar — Rust artık Python bandında (0.58), Go'nun (0.64) altında. Önceki yanıltıcı değerler: serde 0.59→0.57, ripgrep 0.75→0.60, tracing 0.69→0.60, axum 0.61→0.56, tokio 0.71→0.56.
