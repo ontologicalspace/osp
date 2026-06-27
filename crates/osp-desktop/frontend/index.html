@@ -118,6 +118,9 @@
   <input type="text" id="repoPath" placeholder="/path/to/repository" value="">
   <input type="text" id="scipPath" placeholder="SCIP index (optional)" value="">
   <button id="analyzeBtn" onclick="doAnalyze()">Analyze</button>
+  <button id="snapshotSaveBtn" onclick="saveSnapshot()" disabled>Save Snapshot</button>
+  <button id="snapshotLoadBtn" onclick="document.getElementById('snapshotFile').click()">Load Snapshot</button>
+  <input type="file" id="snapshotFile" accept=".json" style="display:none" onchange="loadSnapshot(event)">
   <span id="statusText" class="status idle">Ready</span>
 </div>
 
@@ -160,6 +163,8 @@
     <div id="repoMetrics"><div class="metric"><span class="label">Analyze a repo</span></div></div>
     <h3 style="margin-top:20px;">SCIP Coverage</h3>
     <div id="scipInfo"><div class="metric"><span class="label">No SCIP data</span></div></div>
+    <h3 style="margin-top:20px;">Node Inspector</h3>
+    <div id="nodeInspector"><div class="metric"><span class="label">Click a node to inspect</span></div></div>
   </div>
 </div>
 
@@ -281,6 +286,8 @@ async function doAnalyze() {
     analysisData = data;
     setStatus('success', `Done — ${data.module_count} modules`);
     document.getElementById('vizControls').style.display = 'flex';
+    document.getElementById('snapshotSaveBtn').disabled = false;
+    selectedNodeId = null;
     renderSidebar(data);
     render();
   } catch (e) {
@@ -667,9 +674,132 @@ function render() {
   g.selectAll('.dot').data(nodes).enter().append('circle')
     .attr('cx',d=>x(getVal(d,xKey))).attr('cy',d=>y(getVal(d,yKey)))
     .attr('r',d=>size(d.mass)).attr('fill',d=>{const v=getVal(d,colorKey);return color(v!=null?v:0.5);})
-    .attr('stroke','#30363d').attr('opacity',0.85).style('cursor','pointer')
+    .attr('stroke',d=>d.id===selectedNodeId?'#58a6ff':"#30363d")
+    .attr('stroke-width',d=>d.id===selectedNodeId?3:1)
+    .attr('opacity',0.85).style('cursor','pointer')
     .on('mouseover',(e,d)=>{tt.style('opacity',1).html(`<b>Node ${d.id}</b><br>kind: ${d.kind}<br>mass: ${d.mass}<br>coupling: ${d.coupling!=null?d.coupling.toFixed(3):'—'}<br>cohesion: ${d.cohesion!=null?d.cohesion.toFixed(3):'—'}<br>instability: ${d.instability!=null?d.instability.toFixed(3):'—'}`).style('left',(e.clientX+14)+'px').style('top',(e.clientY-10)+'px');})
-    .on('mouseout',()=>tt.style('opacity',0));
+    .on('mouseout',()=>tt.style('opacity',0))
+    .on('click',(e,d)=>{selectedNodeId=d.id; render(); showNodeInspector(d);});
+}
+
+// ═══ Node Inspector ═══
+let selectedNodeId = null;
+
+function showNodeInspector(d) {
+  const el = document.getElementById('nodeInspector');
+  if (!d) { el.innerHTML = '<div class="metric"><span class="label">Click a node to inspect</span></div>'; return; }
+
+  const fmt = v => v != null ? v.toFixed(3) : '—';
+  const edges = analysisData ? analysisData.space.edges : [];
+  const incoming = edges.filter(e => e.to === d.id);
+  const outgoing = edges.filter(e => e.from === d.id);
+
+  // Vision sapma analizi — slider'lardan mevcut vision vektörünü oku
+  let visionHtml = '<div class="metric"><span class="label">No vision loaded</span></div>';
+  const visX = parseFloat(document.getElementById('vis_x')?.value);
+  const visY = parseFloat(document.getElementById('vis_y')?.value);
+  const visZ = parseFloat(document.getElementById('vis_z')?.value);
+  const thetaBound = parseFloat(document.getElementById('vis_theta_bound')?.value);
+  if (!isNaN(visX) && !isNaN(visY) && !isNaN(visZ) && !isNaN(thetaBound)) {
+    const dx = (d.coupling ?? 0.5) - visX;
+    const dy = (d.cohesion ?? 0.5) - visY;
+    const dz = (d.instability ?? 0.5) - visZ;
+    const theta = Math.sqrt(dx*dx + dy*dy + dz*dz) / Math.sqrt(3);
+    const passes = theta <= thetaBound;
+    // En çok sapma olan ekseni bul
+    const axes = [
+      {name: 'coupling (x)', delta: Math.abs(dx)},
+      {name: 'cohesion (y)', delta: Math.abs(dy)},
+      {name: 'instability (z)', delta: Math.abs(dz)},
+    ].sort((a,b) => b.delta - a.delta);
+    visionHtml = `
+      <div class="metric"><span class="label">Vision deviation θ</span><span class="value" style="color:${passes?'#3fb950':'#f85149'};">${theta.toFixed(3)} ${passes?'✓ pass':'✗ fail'}</span></div>
+      <div class="metric"><span class="label">Worst axis</span><span class="value">${axes[0].name} (Δ=${axes[0].delta.toFixed(3)})</span></div>
+      <div class="metric" style="font-size:11px;color:#8b949e;"><span class="label">Δx=${dx.toFixed(2)} Δy=${dy.toFixed(2)} Δz=${dz.toFixed(2)} · θ_bound=${thetaBound.toFixed(2)}</span></div>`;
+  }
+
+  const edgeRow = (e, isIncoming) => {
+    const other = isIncoming ? e.from : e.to;
+    const arrow = isIncoming ? '←' : '→';
+    return `<div class="metric" style="font-size:11px;"><span class="label">${arrow} Node ${other}</span><span class="value">${e.kind}</span></div>`;
+  };
+
+  el.innerHTML = `
+    <div class="metric"><span class="label">Node ID</span><span class="value">#${d.id}</span></div>
+    <div class="metric"><span class="label">Kind</span><span class="value">${d.kind}</span></div>
+    <div class="metric"><span class="label">Mass (LOC)</span><span class="value">${d.mass}</span></div>
+    <div class="metric"><span class="label">Coupling (x)</span><span class="value">${fmt(d.coupling)}</span></div>
+    <div class="metric"><span class="label">Cohesion (y)</span><span class="value">${fmt(d.cohesion)}</span></div>
+    <div class="metric"><span class="label">Instability (z)</span><span class="value">${fmt(d.instability)}</span></div>
+    ${d.path ? `<div class="metric" style="font-size:11px;word-break:break-all;"><span class="label">Path</span><span class="value">${d.path}</span></div>` : ''}
+    <div style="margin-top:10px;font-size:12px;color:#8b949e;">Vision</div>
+    ${visionHtml}
+    <div style="margin-top:10px;font-size:12px;color:#8b949e;">Edges — outgoing (${outgoing.length})</div>
+    ${outgoing.length ? outgoing.map(e => edgeRow(e, false)).join('') : '<div class="metric"><span class="label">none</span></div>'}
+    <div style="margin-top:10px;font-size:12px;color:#8b949e;">Edges — incoming (${incoming.length})</div>
+    ${incoming.length ? incoming.map(e => edgeRow(e, true)).join('') : '<div class="metric"><span class="label">none</span></div>'}
+  `;
+}
+
+// ═══ Snapshot (frontend-only: JSON download/upload) ═══
+
+function saveSnapshot() {
+  if (!analysisData) { setStatus('error', 'Nothing to snapshot'); return; }
+  const snapshot = {
+    snapshot_version: 1,
+    saved_at: new Date().toISOString(),
+    repo_path: repoPathCache,
+    analysis: analysisData,
+  };
+  const blob = new Blob([JSON.stringify(snapshot, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const repoName = (repoPathCache || 'repo').replace(/[\\/]/g, '_').split('_').pop() || 'repo';
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `osp-snapshot-${repoName}-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  setStatus('success', `Snapshot saved — ${a.download}`);
+}
+
+function loadSnapshot(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    try {
+      const snapshot = JSON.parse(e.target.result);
+      if (!snapshot.snapshot_version || !snapshot.analysis) {
+        setStatus('error', 'Invalid snapshot: missing snapshot_version or analysis');
+        return;
+      }
+      if (snapshot.snapshot_version !== 1) {
+        setStatus('error', `Unsupported snapshot version: ${snapshot.snapshot_version}`);
+        return;
+      }
+      if (!snapshot.analysis.space || !snapshot.analysis.space.nodes) {
+        setStatus('error', 'Invalid snapshot: missing space.nodes');
+        return;
+      }
+      analysisData = snapshot.analysis;
+      repoPathCache = snapshot.repo_path || '(loaded snapshot)';
+      selectedNodeId = null;
+      setStatus('success', `Snapshot loaded — ${analysisData.module_count} modules (saved ${snapshot.saved_at ? new Date(snapshot.saved_at).toLocaleString() : '?'})`);
+      document.getElementById('vizControls').style.display = 'flex';
+      document.getElementById('snapshotSaveBtn').disabled = false;
+      renderSidebar(analysisData);
+      render();
+    } catch (err) {
+      setStatus('error', `Failed to load snapshot: ${err.message}`);
+    }
+  };
+  reader.onerror = () => setStatus('error', 'Failed to read file');
+  reader.readAsText(file);
+  // Reset input so the same file can be selected again
+  event.target.value = '';
 }
 </script>
 </body>

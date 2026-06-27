@@ -116,6 +116,8 @@ pub struct AnalysisResult {
     pub space: Space,
     /// Per-module metrik paketleri.
     pub module_metrics: HashMap<NodeId, ModuleMetrics>,
+    /// Node ID → source file relative path eşlemesi (Inspector için).
+    pub node_paths: HashMap<NodeId, String>,
     /// Repo-level metrikler (A, D).
     pub repo_metrics: RepoMetrics,
     /// SCIP index kalitesi (coverage, stale).

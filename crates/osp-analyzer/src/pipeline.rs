@@ -191,9 +191,23 @@ pub fn analyze_repo_with_config(
         "analiz tamamlandı"
     );
 
+    // Node ID → relative source path eşlemesi (Inspector için).
+    // node_map path→id; tersine çevir. Path'leri repo-relative yap.
+    let node_paths: std::collections::HashMap<NodeId, String> = node_map
+        .iter()
+        .map(|(p, id)| {
+            let rel = p
+                .strip_prefix(&repo)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| p.to_string_lossy().replace('\\', "/"));
+            (*id, rel)
+        })
+        .collect();
+
     Ok(AnalysisResult {
         space,
         module_metrics,
+        node_paths,
         repo_metrics: RepoMetrics {
             abstractness: abstractness_mv,
             main_sequence_distance: d_mv,
@@ -434,6 +448,36 @@ mod tests {
         let node_ids: Vec<NodeId> = (0..3).collect();
         for id in &node_ids {
             assert!(result.space.nodes.contains_key(id), "node {id} exists");
+        }
+    }
+
+    #[test]
+    fn analyze_repo_populates_node_paths_for_inspector() {
+        // node_paths: NodeId → relative source path (Inspector feature)
+        let dir = make_fixture();
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+
+        // Her node için bir path olmalı (3 Python dosyası → 3 entry)
+        assert_eq!(result.node_paths.len(), 3, "node_paths covers all nodes");
+
+        // Path'ler repo-relative ve .py ile bitmeli (main.py, models.py, utils.py)
+        for (_id, path) in &result.node_paths {
+            assert!(
+                path.ends_with(".py"),
+                "node path should be a source file, got: {path}"
+            );
+            assert!(
+                !path.contains('\\'),
+                "node path should use forward slashes, got: {path}"
+            );
+        }
+
+        // Tüm node ID'leri hem node_paths'te hem space'te olmalı
+        for id in result.space.nodes.keys() {
+            assert!(
+                result.node_paths.contains_key(id),
+                "node {id} missing from node_paths"
+            );
         }
     }
 

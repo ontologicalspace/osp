@@ -29,6 +29,8 @@ pub struct NodeJson {
     pub coupling: Option<f64>,
     pub cohesion: Option<f64>,
     pub instability: Option<f64>,
+    /// Node ID'ye karşılık gelen source file relative path (Inspector için).
+    pub path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -93,6 +95,7 @@ pub fn cmd_analyze_repo(
                 coupling: metrics.map(|m| m.coupling.value),
                 cohesion: n.cohesion.or_else(|| metrics.map(|m| m.cohesion.value)),
                 instability: metrics.map(|m| m.instability.value),
+                path: result.node_paths.get(&n.id).cloned(),
             }
         })
         .collect();
@@ -550,4 +553,66 @@ fn git_output(path: &std::path::Path, args: &[&str]) -> Result<String, String> {
                 Err(format!("git error: {}", String::from_utf8_lossy(&o.stderr)))
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// cmd_analyze_repo, NodeJson.path'i AnalysisResult.node_paths'ten doldurur.
+    /// Inspector feature'ının backend contract'ı: her node'un source path'i olmalı.
+    #[test]
+    fn analyze_repo_populates_node_json_path_for_inspector() {
+        // Minimal Python fixture: 2 dosya, birbirini import etmesin (edges 0 OK)
+        let dir = std::env::temp_dir().join(format!(
+            "osp-desktop-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("alpha.py"), "x = 1\n").unwrap();
+        std::fs::write(dir.join("beta.py"), "y = 2\n").unwrap();
+
+        let result = cmd_analyze_repo(dir.to_str().unwrap(), None).expect("analyze ok");
+
+        // 2 node olmalı
+        assert_eq!(result.space.nodes.len(), 2, "2 .py files → 2 nodes");
+
+        // Her node'un path'i olmalı (Inspector contract)
+        for node in &result.space.nodes {
+            assert!(
+                node.path.is_some(),
+                "node {} should have a source path",
+                node.id
+            );
+            let path = node.path.as_ref().unwrap();
+            assert!(
+                path.ends_with(".py"),
+                "node path should end with .py, got: {path}"
+            );
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// NodeJson serde round-trip: frontend JSON ↔ Rust struct (snapshot ile uyumlu).
+    #[test]
+    fn node_json_serializes_with_path_field() {
+        let node = NodeJson {
+            id: 42,
+            kind: "Module".to_string(),
+            mass: 100.0,
+            coupling: Some(0.3),
+            cohesion: Some(0.7),
+            instability: Some(0.5),
+            path: Some("src/main.py".to_string()),
+        };
+        let json = serde_json::to_string(&node).expect("serialize");
+        assert!(json.contains("\"path\":\"src/main.py\""), "path field in JSON");
+        // Round-trip
+        let back: NodeJson = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.path, Some("src/main.py".to_string()));
+        assert_eq!(back.id, 42);
+    }
 }
