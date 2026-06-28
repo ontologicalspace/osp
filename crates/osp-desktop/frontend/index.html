@@ -154,6 +154,14 @@
           <option value="instability">Instability</option>
           <option value="coupling">Coupling</option>
         </select></label>
+        <label>Scale: <select id="scaleMode" onchange="render()">
+          <option value="linear" selected>Linear</option>
+          <option value="log">Log (mass)</option>
+        </select></label>
+        <label>Color mode: <select id="colorMode" onchange="render()">
+          <option value="metric" selected>Metric (high=green)</option>
+          <option value="risk">Risk (high=red)</option>
+        </select></label>
       </div>
       <svg id="chart" width="850" height="500"></svg>
     </div>
@@ -660,16 +668,26 @@ function render() {
   const getVal = (n,k) => k==='mass' ? n.mass : (n[k]!=null ? n[k] : 0.5);
   const xExt = d3.extent(nodes, d => getVal(d,xKey)), yExt = d3.extent(nodes, d => getVal(d,yKey));
   const xP = (xExt[1]-xExt[0])*0.1||0.05, yP = (yExt[1]-yExt[0])*0.1||0.05;
-  const x = d3.scaleLinear().domain([xExt[0]-xP,xExt[1]+xP]).range([0,w]);
+  // Mass için log scale (outlier'lar grafiği ezmesin); diğer metrikler lineer (0-1 arası).
+  const useLog = document.getElementById('scaleMode').value === 'log' && xKey === 'mass';
+  const x = useLog
+    ? d3.scaleLog().domain([Math.max(1, xExt[0]), xExt[1]]).range([0,w]).clamp(true)
+    : d3.scaleLinear().domain([xExt[0]-xP,xExt[1]+xP]).range([0,w]);
   const y = d3.scaleLinear().domain([yExt[0]-yP,yExt[1]+yP]).range([h,0]);
-  const color = d3.scaleSequential(d3.interpolateRdYlGn).domain([0.4,0.7]);
+  // Color: domain [0,1] (tüm aralık renk alsın). Risk mode = ters (yüksek=kırmızı).
+  const colorMode = document.getElementById('colorMode').value;
+  const baseColor = d3.scaleSequential(d3.interpolateRdYlGn).domain([0,1]);
+  const color = v => {
+    const clamped = Math.max(0, Math.min(1, v ?? 0.5));
+    return colorMode === 'risk' ? baseColor(1 - clamped) : baseColor(clamped);
+  };
   const size = d3.scaleSqrt().domain([0,d3.max(nodes,d=>d.mass)]).range([4,18]);
   const tt = d3.select('#tooltip');
 
   g.append('g').attr('transform',`translate(0,${h})`).call(d3.axisBottom(x).ticks(6));
   g.append('g').call(d3.axisLeft(y).ticks(6));
-  g.append('text').attr('x',w/2).attr('y',h+40).attr('text-anchor','middle').attr('fill','#8b949e').attr('font-size','13px').text(xKey);
-  g.append('text').attr('transform','rotate(-90)').attr('x',-h/2).attr('y',-45).attr('text-anchor','middle').attr('fill','#8b949e').attr('font-size','13px').text(yKey);
+  g.append('text').attr('x',w/2).attr('y',h+40).attr('text-anchor','middle').attr('fill','#8b949e').attr('font-size','13px').text(`${xKey} (view axis)`);
+  g.append('text').attr('transform','rotate(-90)').attr('x',-h/2).attr('y',-45).attr('text-anchor','middle').attr('fill','#8b949e').attr('font-size','13px').text(`${yKey} (view axis)`);
 
   g.selectAll('.dot').data(nodes).enter().append('circle')
     .attr('cx',d=>x(getVal(d,xKey))).attr('cy',d=>y(getVal(d,yKey)))
@@ -694,6 +712,22 @@ function showNodeInspector(d) {
   const incoming = edges.filter(e => e.to === d.id);
   const outgoing = edges.filter(e => e.from === d.id);
 
+  // Classification: dosya rolü (test/production/migration/...).
+  // Eski snapshot'lar classification taşımaz → "Unknown".
+  const cls = d.classification || 'Unknown';
+  // Advisory: bu node türlerinde yüksek instability / incoming=0 doğaldır →
+  // vision fail'i kırmızı risk yerine sarı uyarı olarak göster.
+  const advisoryTypes = ['Test', 'Fixture', 'Migration', 'Generated', 'Script'];
+  const isAdvisory = advisoryTypes.includes(cls);
+
+  // Classification badge renkleri
+  const badgeColors = {
+    Production: '#3fb950', Test: '#d29922', Fixture: '#d29922',
+    Migration: '#8b949e', Config: '#8b949e', Script: '#8b949e',
+    Generated: '#8b949e', Documentation: '#8b949e', Unknown: '#8b949e',
+  };
+  const badgeColor = badgeColors[cls] || '#8b949e';
+
   // Vision sapma analizi — slider'lardan mevcut vision vektörünü oku
   let visionHtml = '<div class="metric"><span class="label">No vision loaded</span></div>';
   const visX = parseFloat(document.getElementById('vis_x')?.value);
@@ -712,8 +746,21 @@ function showNodeInspector(d) {
       {name: 'cohesion (y)', delta: Math.abs(dy)},
       {name: 'instability (z)', delta: Math.abs(dz)},
     ].sort((a,b) => b.delta - a.delta);
+
+    // Advisory mode: test/migration/fixture için fail → sarı uyarı (false-positive gider)
+    // Production/Unknown için mevcut kırmızı fail korunur.
+    let statusColor, statusText;
+    if (passes) {
+      statusColor = '#3fb950'; statusText = '✓ pass';
+    } else if (isAdvisory) {
+      statusColor = '#d29922';
+      statusText = `⚠ advisory — high ${axes[0].name.split(' ')[0]} normal for ${cls}`;
+    } else {
+      statusColor = '#f85149'; statusText = '✗ fail';
+    }
+
     visionHtml = `
-      <div class="metric"><span class="label">Vision deviation θ</span><span class="value" style="color:${passes?'#3fb950':'#f85149'};">${theta.toFixed(3)} ${passes?'✓ pass':'✗ fail'}</span></div>
+      <div class="metric"><span class="label">Vision deviation θ</span><span class="value" style="color:${statusColor};">${theta.toFixed(3)} ${statusText}</span></div>
       <div class="metric"><span class="label">Worst axis</span><span class="value">${axes[0].name} (Δ=${axes[0].delta.toFixed(3)})</span></div>
       <div class="metric" style="font-size:11px;color:#8b949e;"><span class="label">Δx=${dx.toFixed(2)} Δy=${dy.toFixed(2)} Δz=${dz.toFixed(2)} · θ_bound=${thetaBound.toFixed(2)}</span></div>`;
   }
@@ -726,12 +773,14 @@ function showNodeInspector(d) {
 
   el.innerHTML = `
     <div class="metric"><span class="label">Node ID</span><span class="value">#${d.id}</span></div>
-    <div class="metric"><span class="label">Kind</span><span class="value">${d.kind}</span></div>
+    <div class="metric"><span class="label">Classification</span><span class="value" style="color:${badgeColor};font-weight:600;">${cls}</span></div>
+    <div class="metric" style="font-size:11px;color:#8b949e;"><span class="label">Kind</span><span class="value">${d.kind}</span></div>
     <div class="metric"><span class="label">Mass (LOC)</span><span class="value">${d.mass}</span></div>
-    <div class="metric"><span class="label">Coupling (x)</span><span class="value">${fmt(d.coupling)}</span></div>
-    <div class="metric"><span class="label">Cohesion (y)</span><span class="value">${fmt(d.cohesion)}</span></div>
-    <div class="metric"><span class="label">Instability (z)</span><span class="value">${fmt(d.instability)}</span></div>
     ${d.path ? `<div class="metric" style="font-size:11px;word-break:break-all;"><span class="label">Path</span><span class="value">${d.path}</span></div>` : ''}
+    <div style="margin-top:10px;font-size:12px;color:#8b949e;">OSP Coordinates</div>
+    <div class="metric"><span class="label">x — Coupling</span><span class="value">${fmt(d.coupling)}</span></div>
+    <div class="metric"><span class="label">y — Cohesion</span><span class="value">${fmt(d.cohesion)}</span></div>
+    <div class="metric"><span class="label">z — Instability</span><span class="value">${fmt(d.instability)}</span></div>
     <div style="margin-top:10px;font-size:12px;color:#8b949e;">Vision</div>
     ${visionHtml}
     <div style="margin-top:10px;font-size:12px;color:#8b949e;">Edges — outgoing (${outgoing.length})</div>

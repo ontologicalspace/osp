@@ -77,10 +77,19 @@ pub fn analyze_repo_with_config(
     let mut diagnostics = Vec::new();
 
     for (i, fd) in file_data.iter().enumerate() {
+        // Classification: path'ten dosya rolü çıkar (test/production/migration/...).
+        // Context-aware mimari yorum için — örn. test dosyasında yüksek instability
+        // normaldir ve "risk" olarak işaretlenmemelidir.
+        let rel_path = fd
+            .path
+            .strip_prefix(&repo)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| fd.path.to_string_lossy().replace('\\', "/"));
         space.insert_node(CoreNode {
             id: i as NodeId,
             kind: NodeKind::Module,
             mass: fd.loc as f64,
+            classification: osp_core::space::classify_path(&rel_path),
             ..Default::default()
         });
         node_map.insert(fd.path.clone(), i as NodeId);
@@ -479,6 +488,39 @@ mod tests {
                 "node {id} missing from node_paths"
             );
         }
+    }
+
+    #[test]
+    fn analyze_repo_classifies_nodes_by_path() {
+        // Pipeline, classify_path ile her node'a dosya-rolü atar.
+        // make_fixture() main.py/models.py/utils.py üretir → hepsi Production.
+        let dir = make_fixture();
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+
+        for n in result.space.nodes.values() {
+            assert_eq!(
+                n.classification,
+                osp_core::space::NodeClassification::Production,
+                "node {} (path {:?}) should be Production",
+                n.id,
+                result.node_paths.get(&n.id)
+            );
+        }
+
+        // Test dosyası ekleyip tekrar classify edelim → Test classification
+        std::fs::write(dir.path().join("test_models.py"), "import models\n").unwrap();
+        let result2 = analyze_repo(dir.path()).expect("analyze succeeded");
+        let test_node = result2
+            .space
+            .nodes
+            .values()
+            .find(|n| result2.node_paths.get(&n.id).map(|p| p.contains("test_")).unwrap_or(false))
+            .expect("test node should exist");
+        assert_eq!(
+            test_node.classification,
+            osp_core::space::NodeClassification::Test,
+            "test_models.py should be classified as Test"
+        );
     }
 
     #[test]

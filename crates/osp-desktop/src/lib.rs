@@ -31,6 +31,10 @@ pub struct NodeJson {
     pub instability: Option<f64>,
     /// Node ID'ye karşılık gelen source file relative path (Inspector için).
     pub path: Option<String>,
+    /// Dosya-rolü sınıflandırması (test/production/migration/...) — context-aware
+    /// vision uyarıları için. Eski snapshot'lar "Unknown" default ile deserialize olur.
+    #[serde(default)]
+    pub classification: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +100,7 @@ pub fn cmd_analyze_repo(
                 cohesion: n.cohesion.or_else(|| metrics.map(|m| m.cohesion.value)),
                 instability: metrics.map(|m| m.instability.value),
                 path: result.node_paths.get(&n.id).cloned(),
+                classification: format!("{:?}", n.classification),
             }
         })
         .collect();
@@ -598,7 +603,7 @@ mod tests {
 
     /// NodeJson serde round-trip: frontend JSON ↔ Rust struct (snapshot ile uyumlu).
     #[test]
-    fn node_json_serializes_with_path_field() {
+    fn node_json_serializes_with_path_and_classification() {
         let node = NodeJson {
             id: 42,
             kind: "Module".to_string(),
@@ -607,12 +612,25 @@ mod tests {
             cohesion: Some(0.7),
             instability: Some(0.5),
             path: Some("src/main.py".to_string()),
+            classification: "Production".to_string(),
         };
         let json = serde_json::to_string(&node).expect("serialize");
         assert!(json.contains("\"path\":\"src/main.py\""), "path field in JSON");
+        assert!(json.contains("\"classification\":\"Production\""), "classification field in JSON");
         // Round-trip
         let back: NodeJson = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.path, Some("src/main.py".to_string()));
+        assert_eq!(back.classification, "Production");
         assert_eq!(back.id, 42);
+    }
+
+    /// Eski snapshot (classification yok) deserialize → empty default (frontend
+    /// JS tarafı "Unknown" olarak gösterir — boş string → Unknown eşlemesi).
+    #[test]
+    fn node_json_backward_compat_missing_classification() {
+        let old_json = r#"{"id":1,"kind":"Module","mass":10.0,"coupling":null,"cohesion":null,"instability":null,"path":"a.py"}"#;
+        let n: NodeJson = serde_json::from_str(old_json).expect("deserialize old node");
+        assert_eq!(n.classification, "", "missing classification defaults to empty string");
+        assert_eq!(n.id, 1);
     }
 }

@@ -129,7 +129,7 @@ Dosya: `crates/osp-analyzer/src/adapters/rust.rs` ve `go.rs`
 
 | Dosya | İçerik |
 |---|---|
-| `docs/paper-draft-v2.5-edited.md` | Paper v2.7 (submit target) |
+| `docs/paper-draft-v2.6.md` | Paper v2.6 (arXiv submit target) |
 | `docs/roadmap.md` | Faz durum + öncelikler |
 | `docs/usage-dogfooding.md` | Dogfooding verisi |
 | `docs/usage-llm-benchmark.md` | Real GPT-4o-mini verisi |

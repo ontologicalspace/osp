@@ -37,6 +37,149 @@ pub enum NodeKind {
     Witness,
 }
 
+/// Dosya-rolü sınıflandırması (`NodeKind`'ten ayrı bir eksen).
+///
+/// `NodeKind` formal ontolojidir (Module/Concept/Feature/.../Witness) ve bir node'un
+/// uzaydaki *semantik rolünü* tanımlar. `NodeClassification` ise bir source-module'un
+/// *dosya rolünü* tanımlar — bu dosya production mı, test mi, migration mı?
+///
+/// Bu ayrım mimari yorum için kritiktir: bir test dosyasının `instability = 1.0`
+/// (incoming=0) olması doğaldır ve "risk" değildir; bir domain-core dosyasında aynı
+/// değer ciddi bir alarm üretir. UI bu bilgiyle context-aware vision uyarıları gösterir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum NodeClassification {
+    /// Domain/business logic (varsayılan). Yüksek instability burada ciddi alarm.
+    #[default]
+    Production,
+    /// `tests/`, `test_*.py`, `*_test.go`, `*.test.ts` — incoming=0 doğal.
+    Test,
+    /// `conftest.py`, `/fixtures/`, `/factories/`, `/__mocks__/` — test altyapısı.
+    Fixture,
+    /// `/migrations/`, `alembic/`, `flyway` — schema değişikliği, genelde snapshot dışı.
+    Migration,
+    /// `settings.py`, `config.rs`, `.env`, `go.mod` — runtime/derleme konfigürasyonu.
+    Config,
+    /// `/scripts/`, `manage.py`, `build.rs`, `Makefile` — otomasyon/tooling.
+    Script,
+    /// `.generated.`, `.pb.go`, `/gen/`, `/build/`, `.min.js` — üretilmiş kod.
+    Generated,
+    /// `/docs/`, `*.md` (node olması nadir).
+    Documentation,
+    /// Yukarıdakine uymayan — eski snapshot'lar veya sınıflandırılamayan dosyalar.
+    Unknown,
+}
+
+/// Path-rule-based classifier — dosya yolundan `NodeClassification` çıkarır.
+///
+/// Üretim varsayılan (Production); sonra en spesifik desen kazanır. Python/Rust/Go/
+/// TypeScript/JavaScript path convention'larını kapsar. Path separator olarak `/`
+/// bekler (pipeline zaten normalize ediyor).
+pub fn classify_path(path: &str) -> NodeClassification {
+    // Path'i lower-case + forward-slash normalize et (cross-platform dayanıklılık).
+    let p = path.replace('\\', "/");
+    let lower = p.to_lowercase();
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+
+    // Generated (en spesifik — önce kontrol et, çünkü test_*.generated da olabilir)
+    if base.contains(".generated.")
+        || base.ends_with(".pb.go")
+        || base.ends_with(".pb.rs")
+        || base.ends_with(".min.js")
+        || lower.contains("/gen/")
+        || lower.contains("/build/")
+        || lower.contains("/dist/")
+        || lower.contains("/target/")
+        || lower.contains("/vendor/")
+        || lower.starts_with("dist/")
+        || lower.starts_with("gen/")
+        || lower.starts_with("build/")
+    {
+        return NodeClassification::Generated;
+    }
+
+    // Fixture (test altyapısı — test'lerden önce, daha spesifik)
+    if base == "conftest.py"
+        || lower.contains("/fixtures/")
+        || lower.contains("/factories/")
+        || lower.contains("/__mocks__/")
+        || base.starts_with("fixture_")
+        || base.starts_with("test_helper")
+    {
+        return NodeClassification::Fixture;
+    }
+
+    // Test (en yaygın convention'lar)
+    if lower.contains("/tests/")
+        || lower.contains("/test/")
+        || lower.contains("/__tests__/")
+        || lower.contains("/spec/")
+        || lower.starts_with("tests/")
+        || lower.starts_with("test/")
+        || lower.starts_with("__tests__/")
+        || lower.starts_with("spec/")
+        || base.starts_with("test_")
+        || base.starts_with("test-")
+        || base.ends_with("_test.go")
+        || base.ends_with("_test.rs")
+        || base.ends_with(".test.ts")
+        || base.ends_with(".test.tsx")
+        || base.ends_with(".test.js")
+        || base.ends_with(".spec.ts")
+        || base.ends_with(".spec.js")
+        || base.ends_with("_test.py")
+    {
+        return NodeClassification::Test;
+    }
+
+    // Migration
+    if lower.contains("/migrations/")
+        || lower.contains("/alembic/")
+        || lower.contains("/flyway/")
+        || lower.contains("/migrate/")
+        || lower.contains("migrations/")
+        || lower.starts_with("migrations/")
+        || lower.starts_with("alembic/")
+        || lower.starts_with("db/migrate/")
+    {
+        return NodeClassification::Migration;
+    }
+
+    // Config
+    if base == "settings.py"
+        || base == "config.rs"
+        || base == "config.go"
+        || base == "config.ts"
+        || base == "go.mod"
+        || base == "go.sum"
+        || base == "cargo.toml"
+        || base == "package.json"
+        || base == "tsconfig.json"
+        || base == ".env"
+        || base.ends_with(".toml")
+        && (base == "config.toml" || base.contains("config"))
+    {
+        return NodeClassification::Config;
+    }
+
+    // Script
+    if lower.contains("/scripts/")
+        || base == "manage.py"
+        || base == "build.rs"
+        || base == "makefile"
+        || base.ends_with(".sh")
+        || base.ends_with(".ps1")
+    {
+        return NodeClassification::Script;
+    }
+
+    // Documentation
+    if lower.contains("/docs/") || base.ends_with(".md") || base.ends_with(".rst") {
+        return NodeClassification::Documentation;
+    }
+
+    NodeClassification::Production
+}
+
 /// Tipleşmiş kenar türleri (OSP-formalism.md §1.3).
 ///
 /// Klasik yazılım grafindan (yalnız `DependsOn`) farklı olarak OSP'de epistemolojik
@@ -79,6 +222,11 @@ pub struct Node {
     /// sadece cohesion external (SCIP) veri gerektirir.
     #[serde(default)]
     pub cohesion: Option<f64>,
+    /// Dosya-rolü sınıflandırması (test/production/migration/...). Context-aware
+    /// mimari yorum için: örn. test dosyasında yüksek instability normaldir.
+    /// Eski snapshot'lar `Unknown` default ile deserialize olur.
+    #[serde(default)]
+    pub classification: NodeClassification,
 }
 
 /// Tipleşmiş yönlü kenar (OSP-formalism.md §1.3).
@@ -298,5 +446,110 @@ mod tests {
         // Faz 1.4: position artık Position struct (raw + derived), ikisi de default
         assert_eq!(n.position.raw, crate::coords::RawPosition::default());
         assert_eq!(n.position.derived, crate::coords::DerivedPosition::default());
+    }
+
+    // ─── classify_path tests ───
+
+    #[test]
+    fn classify_path_test_files() {
+        // Python conventions
+        assert_eq!(classify_path("tests/test_foo.py"), NodeClassification::Test);
+        assert_eq!(classify_path("app/test_models.py"), NodeClassification::Test);
+        assert_eq!(classify_path("src/foo/test_bar.py"), NodeClassification::Test);
+        // Go
+        assert_eq!(classify_path("handler/handler_test.go"), NodeClassification::Test);
+        // Rust
+        assert_eq!(classify_path("src/lib_test.rs"), NodeClassification::Test);
+        // TypeScript/JavaScript
+        assert_eq!(classify_path("src/foo.test.ts"), NodeClassification::Test);
+        assert_eq!(classify_path("src/bar.spec.js"), NodeClassification::Test);
+        // __tests__ directory
+        assert_eq!(classify_path("__tests__/unit.ts"), NodeClassification::Test);
+    }
+
+    #[test]
+    fn classify_path_fixtures_and_config() {
+        assert_eq!(classify_path("tests/conftest.py"), NodeClassification::Fixture);
+        assert_eq!(classify_path("tests/fixtures/user.py"), NodeClassification::Fixture);
+        assert_eq!(classify_path("src/__mocks__/db.ts"), NodeClassification::Fixture);
+        // Config
+        assert_eq!(classify_path("myapp/settings.py"), NodeClassification::Config);
+        assert_eq!(classify_path("go.mod"), NodeClassification::Config);
+        assert_eq!(classify_path("Cargo.toml"), NodeClassification::Config);
+    }
+
+    #[test]
+    fn classify_path_migrations_scripts_generated() {
+        assert_eq!(classify_path("app/migrations/0001_initial.py"), NodeClassification::Migration);
+        assert_eq!(classify_path("alembic/versions/abc.py"), NodeClassification::Migration);
+        assert_eq!(classify_path("db/migrate/001_create.rb"), NodeClassification::Migration);
+        // Scripts
+        assert_eq!(classify_path("scripts/deploy.sh"), NodeClassification::Script);
+        assert_eq!(classify_path("manage.py"), NodeClassification::Script);
+        // Generated
+        assert_eq!(classify_path("api/foo.pb.go"), NodeClassification::Generated);
+        assert_eq!(classify_path("dist/bundle.min.js"), NodeClassification::Generated);
+        assert_eq!(classify_path("proto/foo.generated.rs"), NodeClassification::Generated);
+    }
+
+    #[test]
+    fn classify_path_production_default() {
+        // Normal source files → Production (default)
+        assert_eq!(classify_path("src/models/user.py"), NodeClassification::Production);
+        assert_eq!(classify_path("handler/handler.go"), NodeClassification::Production);
+        assert_eq!(classify_path("src/lib.rs"), NodeClassification::Production);
+        assert_eq!(classify_path("app/services/auth.ts"), NodeClassification::Production);
+    }
+
+    #[test]
+    fn classify_path_cross_platform_separators() {
+        // Windows backslash separators should be normalized (pipeline already
+        // normalizes, but classify_path should be defensive).
+        assert_eq!(
+            classify_path("tests\\test_foo.py"),
+            NodeClassification::Test
+        );
+        assert_eq!(
+            classify_path("app\\migrations\\0001.py"),
+            NodeClassification::Migration
+        );
+    }
+
+    #[test]
+    fn node_default_classification_is_production() {
+        // Backward-compat: yeni Node'lar Production default alır.
+        // (Eski snapshot'lar Unknown değil — serde default = Production.)
+        let n = Node::default();
+        assert_eq!(n.classification, NodeClassification::Production);
+    }
+
+    #[test]
+    fn node_classification_serde_backward_compat() {
+        // Eski snapshot (classification alanı YOK) deserialize → default.
+        // "Unknown" enum değeri manuel set için kullanılabilir ama serde default
+        // Production'dır (#[default]).
+        // Gerçek Position serialize edip classification'ı çıkararak simüle et
+        // (elle yazmak Position struct tüm alanlarına bağımlı olur).
+        let mut full = Node::default();
+        full.id = 1;
+        let mut json_val: serde_json::Value =
+            serde_json::to_value(&full).expect("serialize");
+        // classification alanını çıkar → eski snapshot formatı
+        json_val
+            .as_object_mut()
+            .expect("node is object")
+            .remove("classification");
+        let old_json = serde_json::to_string(&json_val).expect("re-serialize");
+        assert!(
+            !old_json.contains("classification"),
+            "test setup: classification removed"
+        );
+
+        let n: Node = serde_json::from_str(&old_json).expect("deserialize old node");
+        assert_eq!(
+            n.classification,
+            NodeClassification::Production,
+            "missing classification field should default to Production"
+        );
     }
 }
