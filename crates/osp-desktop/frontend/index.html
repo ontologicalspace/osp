@@ -160,8 +160,8 @@
           <option value="log">Log (mass)</option>
         </select></label>
         <label>Color mode: <select id="colorMode" onchange="render()">
-          <option value="metric" selected>Metric (high=green)</option>
-          <option value="risk">Risk (high=red)</option>
+          <option value="risk" selected>Risk (high=red)</option>
+          <option value="metric">Metric (high=green)</option>
         </select></label>
       </div>
       <svg id="chart" width="850" height="500"></svg>
@@ -456,19 +456,32 @@ function updateVisionPreview() {
     // yumuşak" tespitini adresler. pass = θ_bound slider'dan, reject bound preset'ten.
     const thetaBound = get('theta_bound');
     const rejectBound = currentRejectBound;
-    const vx = get('x'), vy = get('y'), vz = get('z');
+    const gx = get('x'), gy = get('y'), gz = get('z');
     let pass = 0, warning = 0, reject = 0;
     // Axis breakdown — hangi eksende en çok sapma var (reject'ler için)
     const axisRejects = { coupling: 0, cohesion: 0, instability: 0 };
+    // Role breakdown — hangi role'den kaç warning/reject
+    const roleBreakdown = {};
     analysisData.space.nodes.forEach(n => {
-      const dx = (n.coupling ?? 0.5) - vx;
-      const dy = (n.cohesion ?? 0.5) - vy;
-      const dz = (n.instability ?? 0.5) - vz;
+      // Role-aware: her node kendi rolünün vision'ı ile değerlendirilir (backend
+      // vision_for_claim ile aynı mantık). Core node artık global z=0.50 değil z=0.20.
+      const rv = roleVision(n.role || 'Runtime', gx, gy, gz);
+      const dx = (n.coupling ?? 0.5) - rv.x;
+      const dy = (n.cohesion ?? 0.5) - rv.y;
+      const dz = (n.instability ?? 0.5) - rv.z;
       const dist = Math.sqrt(dx*dx + dy*dy + dz*dz) / Math.sqrt(3);
       if (dist <= thetaBound) pass++;
-      else if (dist <= rejectBound) warning++;
+      else if (dist <= rejectBound) {
+        warning++;
+        const r = n.role || 'Runtime';
+        roleBreakdown[r] = roleBreakdown[r] || { w: 0, r: 0 };
+        roleBreakdown[r].w++;
+      }
       else {
         reject++;
+        const r = n.role || 'Runtime';
+        roleBreakdown[r] = roleBreakdown[r] || { w: 0, r: 0 };
+        roleBreakdown[r].r++;
         // En çok sapma olan ekseni say
         const absDx = Math.abs(dx), absDy = Math.abs(dy), absDz = Math.abs(dz);
         if (absDx >= absDy && absDx >= absDz) axisRejects.coupling++;
@@ -498,6 +511,13 @@ function updateVisionPreview() {
         <span style="color:#f85149;">coupling ${axisRejects.coupling}</span> ·
         <span style="color:#f85149;">cohesion ${axisRejects.cohesion}</span> ·
         <span style="color:#f85149;">instability ${axisRejects.instability}</span>
+      </div>` : ''}
+      ${(warning + reject) > 0 ? `
+      <div style="font-size:11px;color:#8b949e;margin-top:10px;">Warning/reject by role:</div>
+      <div style="font-size:11px;margin-top:4px;">
+        ${Object.entries(roleBreakdown).sort((a,b) => (b[1].w+b[1].r)-(a[1].w+a[1].r)).map(([role, counts]) =>
+          `<span style="color:#d29922;">${role}: ${counts.w}w/${counts.r}r</span>`
+        ).join(' · ')}
       </div>` : ''}
       <div style="font-size:11px;color:#8b949e;margin-top:8px;">
         Vision: x=${fmt('x')} y=${fmt('y')} z=${fmt('z')} w=${fmt('w')} v=${fmt('v')} |
@@ -832,6 +852,31 @@ function render() {
 // ═══ Node Inspector ═══
 let selectedNodeId = null;
 
+// Builtin role vision overrides — backend VisionConfig::builtin_role_override
+// ile birebir mirror. Kullanıcı TOML override'ı yoksa bu defaults uygulanır.
+// Değerlendirmenin "DetectedCore hâlâ global z=0.50 ile fail" tespitini adresler:
+// backend role-aware ama frontend global kullanıyordu — artık aynı override.
+const BUILTIN_ROLE_VISION = {
+  TypeSurface: { x: 0.05, y: 0.80, z: 0.50 }, // coupling relaxed (declaration = no runtime deps)
+  Core:        { x: 0.60, y: 0.75, z: 0.20 }, // instability low (stabil foundation)
+  Adapter:     { x: 0.80, y: 0.50, z: 0.80 }, // instability tolerated (integration boundary)
+  Utility:     { x: 0.20, y: 0.60, z: 0.50 }, // coupling low (leaf helper)
+  Runtime:     { x: 0.40, y: 0.60, z: 0.35 }, // instability biraz düşük (global 0.50 değil)
+  Support:     null, // advisory mode — vision relaxation UI'da, override yok
+};
+
+// Bir node'un rolüne göre vision vector döndür. Global slider değerlerini
+// role override ile birleştirir (backend vision_for_claim ile aynı mantık).
+function roleVision(role, globalX, globalY, globalZ) {
+  const ovr = BUILTIN_ROLE_VISION[role];
+  if (!ovr) return { x: globalX, y: globalY, z: globalZ };
+  return {
+    x: ovr.x != null ? ovr.x : globalX,
+    y: ovr.y != null ? ovr.y : globalY,
+    z: ovr.z != null ? ovr.z : globalZ,
+  };
+}
+
 // Mimari rol badge'i — role-aware vision'da hangi hedef vector'un uygulandığını göster.
 function roleBadge(role) {
   const desc = {
@@ -922,11 +967,17 @@ function showNodeInspector(d) {
   const visZ = parseFloat(document.getElementById('vis_z')?.value);
   const thetaBound = parseFloat(document.getElementById('vis_theta_bound')?.value);
   if (!isNaN(visX) && !isNaN(visY) && !isNaN(visZ) && !isNaN(thetaBound)) {
-    const dx = (d.coupling ?? 0.5) - visX;
-    const dy = (d.cohesion ?? 0.5) - visY;
-    const dz = (d.instability ?? 0.5) - visZ;
+    // Role-aware vision: node'un rolüne göre builtin override uygula (backend
+    // vision_for_claim ile aynı). Core node z=0.20, TypeSurface x=0.05, vb.
+    const rv = roleVision(role, visX, visY, visZ);
+    const dx = (d.coupling ?? 0.5) - rv.x;
+    const dy = (d.cohesion ?? 0.5) - rv.y;
+    const dz = (d.instability ?? 0.5) - rv.z;
     const theta = Math.sqrt(dx*dx + dy*dy + dz*dz) / Math.sqrt(3);
     const passes = theta <= thetaBound;
+    // Cohesion placeholder: SCIP yoksa cohesion=0.5 fallback → θ sonucu düşük güven.
+    // Değerlendirmenin "placeholder iken fail yerine review" önerisi.
+    const cohesionPlaceholder = d.cohesion_source === 'placeholder' || d.cohesion_source === 'heuristic';
     // En çok sapma olan ekseni bul
     const axes = [
       {name: 'coupling (x)', delta: Math.abs(dx)},
@@ -948,6 +999,12 @@ function showNodeInspector(d) {
     } else if (isAdvisory) {
       statusColor = '#d29922';
       statusText = `⚠ advisory — high ${axes[0].name.split(' ')[0]} normal for ${cls}`;
+    } else if (cohesionPlaceholder) {
+      // Confidence-aware: cohesion placeholder (SCIP yok) iken θ sonucu düşük güven.
+      // Değerlendirmenin "placeholder iken fail yerine review" önerisi — fail kesin
+      // görünmemeli çünkü cohesion ölçülmemiş (0.5 fallback).
+      statusColor = '#8b949e';
+      statusText = `◐ review — cohesion unmeasured (no SCIP data), θ inconclusive`;
     } else {
       statusColor = '#f85149'; statusText = '✗ fail';
     }
