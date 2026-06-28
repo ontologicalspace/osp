@@ -235,7 +235,26 @@ pub fn infer_role(
     let lower = p.to_lowercase();
     let base = lower.rsplit('/').next().unwrap_or(&lower);
 
-    // TypeSurface — en spesifik (declaration dosyaları)
+    // Support — test/fixture/migration/generated/config/script ÖNCE inherit edilir.
+    //
+    // Önemli sıralama kararı: bir dosya hem Support classification'a (örn. Test) hem de
+    // TypeSurface path pattern'ine (örn. `tests/types/*.ts`, `.d.ts`) sahip olabilir.
+    // Bu durumda Support kazanır — çünkü gate açısından bir test dosyasının tip tanımı
+    // içermesi onu "production type surface" yapmaz; advisory vision'a (Support) tabi
+    // olmalı, TypeSurface relaxation'ına değil. Önceki sıralama TypeSurface'i öne
+    // aldığı için `tests/types/*` dosyaları yanlışça TypeSurface'a düşüyordu (svelte
+    // diagnostic'inde 8 node — review'deki "TypeSurface 8 reject" şikayetinin kaynağı).
+    // Epistemolojik kural: dosya *rolü* (test/migration) mimari *şeklinden* (type surface)
+    // önce gelir; bir test dosyası production kurallarıyla değerlendirilmemelidir.
+    match classification {
+        C::Test | C::Fixture | C::Migration | C::Generated | C::Config | C::Script => {
+            return R::Support;
+        }
+        _ => {}
+    }
+
+    // TypeSurface — en spesifik (declaration dosyaları). Yalnız Production dosyalar için
+    // (Support yukarıda elendi). `.d.ts`, `types/`, `declarations/`, `interfaces/`.
     if base.ends_with(".d.ts")
         || lower.contains("/types/")
         || lower.contains("/declarations/")
@@ -243,14 +262,6 @@ pub fn infer_role(
         || lower.contains("/typings/")
     {
         return R::TypeSurface;
-    }
-
-    // Support — test/fixture/migration/generated/config/script direkt inherit
-    match classification {
-        C::Test | C::Fixture | C::Migration | C::Generated | C::Config | C::Script => {
-            return R::Support;
-        }
-        _ => {}
     }
 
     // Metric shape'e dayalı rol çıkarımı (varsa)
@@ -657,6 +668,94 @@ mod tests {
             n.classification,
             NodeClassification::Production,
             "missing classification field should default to Production"
+        );
+    }
+
+    // ── infer_role regression test'leri ──────────────────────────────────────
+    // Bu testler role/classification sıralama kararlarını kilitler. Özellikle
+    // `support_beats_typesurface_for_test_files` bir bug'ın regression guard'ıdır:
+    // eski sıralama `tests/types/*.ts` dosyalarını TypeSurface'a düşürüyordu (svelte
+    // diagnostic'inde 8 node — "TypeSurface 8 reject" şikayetinin kaynağı).
+
+    #[test]
+    fn infer_role_support_beats_typesurface_for_test_files() {
+        // Bir dosya hem Test classification'a hem TypeSurface path pattern'ine sahip
+        // olabilir (örn. `packages/svelte/tests/types/actions.ts`). Bu durumda Support
+        // kazanmalı — production type-surface relaxation'ı değil, advisory vision.
+        use super::{infer_role, NodeClassification as C, NodeRole as R};
+        let role = infer_role("packages/svelte/tests/types/actions.ts", C::Test, None);
+        assert_eq!(
+            role,
+            R::Support,
+            "test files under tests/types/ must be Support, not TypeSurface"
+        );
+
+        // Aynı desen `.d.ts` için de: bir `.d.ts` dosyası Test klasöründeyse Support.
+        let role = infer_role("tests/mocks/types.d.ts", C::Test, None);
+        assert_eq!(role, R::Support, ".d.ts under tests/ must be Support");
+    }
+
+    #[test]
+    fn infer_role_typesurface_for_production_declaration_files() {
+        // Production `.d.ts` / `types/` dosyaları TypeSurface olmalı (relaxation aktif).
+        use super::{infer_role, NodeClassification as C, NodeRole as R};
+        assert_eq!(
+            infer_role("packages/svelte/elements.d.ts", C::Production, None),
+            R::TypeSurface
+        );
+        assert_eq!(
+            infer_role("src/types/index.ts", C::Production, None),
+            R::TypeSurface
+        );
+        assert_eq!(
+            infer_role("src/declarations/foo.ts", C::Production, None),
+            R::TypeSurface
+        );
+    }
+
+    #[test]
+    fn infer_role_runtime_default_for_production() {
+        // Production + metrics yok + path pattern yok → Runtime (default).
+        use super::{infer_role, NodeClassification as C, NodeRole as R};
+        assert_eq!(
+            infer_role("src/index.js", C::Production, None),
+            R::Runtime
+        );
+    }
+
+    #[test]
+    fn infer_role_metric_aware_refinement() {
+        // Metric shape rolleri: Core (high incoming + stable), Adapter (high outgoing +
+        // low incoming), Utility (small + low coupling).
+        use super::{infer_role, NodeClassification as C, NodeRole as R, RoleMetrics};
+        let core = RoleMetrics {
+            incoming: 8.0,
+            instability: 0.2,
+            ..Default::default()
+        };
+        assert_eq!(
+            infer_role("src/core/domain.js", C::Production, Some(core)),
+            R::Core
+        );
+
+        let adapter = RoleMetrics {
+            outgoing: 5.0,
+            incoming: 0.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            infer_role("src/adapters/api.js", C::Production, Some(adapter)),
+            R::Adapter
+        );
+
+        let utility = RoleMetrics {
+            mass: 40.0,
+            outgoing: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            infer_role("src/utils/helper.js", C::Production, Some(utility)),
+            R::Utility
         );
     }
 }

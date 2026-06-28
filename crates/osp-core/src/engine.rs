@@ -441,30 +441,40 @@ impl SpaceEngine {
 
     /// Claim'in temsil ettiği node'un rolüne göre vision vector seç.
     /// Override (kullanıcı TOML) yoksa builtin sensible-default kullanılır.
+    ///
+    /// **Provenance (#2):** Dönen `VisionVector`'un `source` alanı, vision'ın
+    /// nereden geldiğini belirtir — UI "Vision: not loaded" çelişkisini çözer:
+    ///   - kullanıcı TOML `[role_overrides.<Role>]` → `RoleProfile`
+    ///   - `builtin_role_override` (hardcoded) → `BuiltinRole`
+    ///   - engine global vision (`self.vision`) → `self.vision.source()` inherit
     fn vision_for_claim(&self, claim: &Claim) -> VisionVector {
-        use crate::space::{infer_role, NodeRole};
+        use crate::space::infer_role;
         use crate::vision_config::VisionConfig;
+        use crate::vision::VisionSource;
         // İlk delta_node'un classification'ından rol çıkar (path/metric olmadan
         // classification-only — engine path bilmez, sadece node classification).
         if let Some(node) = claim.delta_nodes.first() {
             let role = infer_role("", node.classification, None);
-            if let NodeRole::Runtime = role {
-                // Runtime: builtin override uygula (z=0.35) — değerlendirmenin
-                // "Runtime için z=0.50 yanlış" tespiti. Kullanıcı override varsa o kazanır.
-            }
-            // Önce kullanıcı TOML override'ı, sonra builtin default
+            // Önce kullanıcı TOML override'ı (RoleProfile), sonra builtin (BuiltinRole).
             let key = format!("{:?}", role);
-            let ovr = self.config.role_overrides.get(&key)
-                .cloned()
-                .or_else(|| VisionConfig::builtin_role_override(role));
-            if let Some(ovr) = ovr {
-                let mut raw = *self.vision.raw();
-                if let Some(x) = ovr.x { raw.x = x; }
-                if let Some(y) = ovr.y { raw.y = y; }
-                if let Some(z) = ovr.z { raw.z = z; }
-                return VisionVector::new(raw);
+            let user_override = self.config.role_overrides.get(&key).cloned();
+            let builtin_override = VisionConfig::builtin_role_override(role);
+            // Kullanıcı override'ı varsa o kazanır; yoksa builtin.
+            if let Some(ovr) = user_override.clone().or(builtin_override.clone()) {
+                let mut raw_v = *self.vision.raw();
+                if let Some(x) = ovr.x { raw_v.x = x; }
+                if let Some(y) = ovr.y { raw_v.y = y; }
+                if let Some(z) = ovr.z { raw_v.z = z; }
+                // Source: kullanıcı override mı, builtin mi?
+                let source = if user_override.is_some() {
+                    VisionSource::RoleProfile
+                } else {
+                    VisionSource::BuiltinRole
+                };
+                return VisionVector::with_source(raw_v, source);
             }
         }
+        // Override yok → engine global vision'ı (source dahil) inherit et.
         self.vision
     }
 

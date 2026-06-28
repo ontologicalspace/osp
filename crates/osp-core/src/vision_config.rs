@@ -186,35 +186,47 @@ impl VisionConfig {
         Ok(())
     }
 
-    /// → `VisionVector` (raw position wrap).
+    /// → `VisionVector` (raw position wrap, source = `UserLoaded`).
+    ///
+    /// TOML `[raw]` ile elle deklare edildiği için en yüksek provenance'a sahiptir.
     pub fn to_vision_vector(&self) -> VisionVector {
-        VisionVector::new(RawPosition {
-            x: self.raw.x,
-            y: self.raw.y,
-            z: self.raw.z,
-            w: self.raw.w,
-            v: self.raw.v,
-        })
+        use crate::vision::VisionSource;
+        VisionVector::with_source(
+            RawPosition {
+                x: self.raw.x,
+                y: self.raw.y,
+                z: self.raw.z,
+                w: self.raw.w,
+                v: self.raw.v,
+            },
+            VisionSource::UserLoaded,
+        )
     }
 
     /// → role-specific `VisionVector`. Override varsa x/y/z onu kullanır,
     /// yoksa (veya alan None ise) global `[raw]` default. w/v her zaman global.
     ///
+    /// **Provenance (#2):** Override varsa source = `RoleProfile` (kullanıcı TOML
+    /// `[role_overrides]`); yoksa global `[raw]` → `UserLoaded`.
+    ///
     /// Bu, değerlendirmenin "her rol için ayrı vision vector" önerisini formal
     /// model seviyesinde uygular. Örn: TypeSurface için coupling=0.05 (declaration
     /// dosyasında runtime deps beklenmez), Core için instability=0.20 (stable).
     pub fn role_vision(&self, role: NodeRole) -> VisionVector {
+        use crate::vision::VisionSource;
         let key = format!("{:?}", role);
-        let global = self.to_vision_vector();
         match self.role_overrides.get(&key) {
-            Some(ovr) => VisionVector::new(RawPosition {
-                x: ovr.x.unwrap_or(self.raw.x),
-                y: ovr.y.unwrap_or(self.raw.y),
-                z: ovr.z.unwrap_or(self.raw.z),
-                w: self.raw.w,
-                v: self.raw.v,
-            }),
-            None => global,
+            Some(ovr) => VisionVector::with_source(
+                RawPosition {
+                    x: ovr.x.unwrap_or(self.raw.x),
+                    y: ovr.y.unwrap_or(self.raw.y),
+                    z: ovr.z.unwrap_or(self.raw.z),
+                    w: self.raw.w,
+                    v: self.raw.v,
+                },
+                VisionSource::RoleProfile,
+            ),
+            None => self.to_vision_vector(),
         }
     }
 
