@@ -160,7 +160,8 @@
           <option value="log">Log (mass)</option>
         </select></label>
         <label>Color mode: <select id="colorMode" onchange="render()">
-          <option value="risk" selected>Risk (high=red)</option>
+          <option value="role" selected>Role (architectural topology)</option>
+          <option value="risk">Risk (vision deviation θ)</option>
           <option value="metric">Metric (high=green)</option>
         </select></label>
       </div>
@@ -172,6 +173,8 @@
     <div id="repoMetrics"><div class="metric"><span class="label">Analyze a repo</span></div></div>
     <h3 style="margin-top:20px;">SCIP Coverage</h3>
     <div id="scipInfo"><div class="metric"><span class="label">No SCIP data</span></div></div>
+    <h3 style="margin-top:20px;">Confidence</h3>
+    <div id="confidencePanel"><div class="metric"><span class="label">Analyze a repo</span></div></div>
     <h3 style="margin-top:20px;">Node Inspector</h3>
     <div id="nodeInspector"><div class="metric"><span class="label">Click a node to inspect</span></div></div>
   </div>
@@ -799,6 +802,20 @@ function renderSidebar(data) {
     <div class="metric"><span class="label">Coverage</span><span class="value">${(c.coverage_ratio * 100).toFixed(1)}%</span></div>
     <div class="metric"><span class="label">Classes</span><span class="value">${c.classes_total}</span></div>
     ${!scipActive ? '<div class="metric" style="font-size:11px;color:#8b949e;"><span class="label">No --scip index provided; re-analyze with a SCIP index for LCOM4 cohesion + class semantics.</span></div>' : ''}`;
+  // Confidence panel — toplanmış epistemik durum (Structural/SCIP/Cohesion/Vision).
+  // Değerlendirmenin "kullanıcı sistemin ne kadar güvenilir olduğunu tek yerde görmeli" önerisi.
+  const visX2 = parseFloat(document.getElementById('vis_x')?.value);
+  const visionLoaded2 = !isNaN(visX2);
+  const scipConf = c.coverage_ratio >= 0.7 ? '<span style="color:#3fb950;">full</span>'
+    : c.coverage_ratio >= 0.3 ? '<span style="color:#d29922;">partial</span>'
+    : c.coverage_ratio > 0 ? '<span style="color:#f85149;">low ('+(c.coverage_ratio*100).toFixed(0)+'%)</span>'
+    : '<span style="color:#f85149;">missing</span>';
+  document.getElementById('confidencePanel').innerHTML = `
+    <div class="metric"><span class="label">Structural graph</span><span class="value"><span style="color:#3fb950;">● high</span> <span style="color:#8b949e;font-size:10px;">(tree-sitter)</span></span></div>
+    <div class="metric"><span class="label">SCIP semantics</span><span class="value">${scipConf}</span></div>
+    <div class="metric"><span class="label">Cohesion</span><span class="value">${scipActive ? '<span style="color:#3fb950;">measured</span> <span style="color:#8b949e;font-size:10px;">(partial)</span>' : '<span style="color:#f85149;">placeholder</span>'}</span></div>
+    <div class="metric"><span class="label">Vision</span><span class="value">${visionLoaded2 ? '<span style="color:#3fb950;">loaded</span>' : '<span style="color:#8b949e;">not loaded</span>'}</span></div>
+    <div class="metric" style="font-size:11px;color:#8b949e;margin-top:4px;"><span class="label">Mode: ${visionLoaded2 ? 'Vision evaluation' : 'Topology only'}</span></div>`;
 }
 
 function render() {
@@ -822,12 +839,46 @@ function render() {
     ? d3.scaleLog().domain([Math.max(1, xExt[0]), xExt[1]]).range([0,w]).clamp(true)
     : d3.scaleLinear().domain([xExt[0]-xP,xExt[1]+xP]).range([0,w]);
   const y = d3.scaleLinear().domain([yExt[0]-yP,yExt[1]+yP]).range([h,0]);
-  // Color: domain [0,1] (tüm aralık renk alsın). Risk mode = ters (yüksek=kırmızı).
+  // Color modes: role (architectural topology) / risk (vision deviation θ) / metric.
+  // Risk mode vision-bağımlı: gerçek θ (node'un rolünün vision'ından). Vision yoksa
+  // Risk anlamsızdır → Metric'e fallback (değerlendirmenin "Risk neye göre?" tespiti).
   const colorMode = document.getElementById('colorMode').value;
   const baseColor = d3.scaleSequential(d3.interpolateRdYlGn).domain([0,1]);
-  const color = v => {
+  const rolePalette = {
+    TypeSurface: '#a371f7', // mor — declaration/type surface
+    Core:        '#58a6ff', // mavi — domain core (stabil merkez)
+    Runtime:     '#8b949e', // gri — implementation (default)
+    Adapter:     '#f0883e', // turuncu — integration boundary
+    Utility:     '#3fb950', // yeşil — leaf helper
+    Support:     '#d29922', // amber — test/fixture/migration
+    Unknown:     '#6e7681', // koyu gri
+  };
+  // Vision yüklü mü? (slider'lardan oku — vis_x varsa vision loaded)
+  const visX = parseFloat(document.getElementById('vis_x')?.value);
+  const visionLoaded = !isNaN(visX);
+  const gx = visX, gy = parseFloat(document.getElementById('vis_y')?.value), gz = parseFloat(document.getElementById('vis_z')?.value);
+  const thetaBound = parseFloat(document.getElementById('vis_theta_bound')?.value) || 0.30;
+  // Effective color mode: risk ancak vision varsa geçerli, yoksa metric'e düş
+  const effectiveMode = (colorMode === 'risk' && !visionLoaded) ? 'metric' : colorMode;
+  const color = (d) => {
+    if (effectiveMode === 'role') {
+      return rolePalette[d.role || 'Runtime'] || rolePalette.Runtime;
+    }
+    if (effectiveMode === 'risk') {
+      // Gerçek risk: node'un rolünün vision'ından θ deviation → renk.
+      // θ=0 yeşil (hedefte), θ>=rejectBound kırmızı (uzak). role-aware.
+      const rv = roleVision(d.role || 'Runtime', gx, gy, gz);
+      const dx = (d.coupling ?? 0.5) - rv.x;
+      const dy = (d.cohesion ?? 0.5) - rv.y;
+      const dz = (d.instability ?? 0.5) - rv.z;
+      const theta = Math.sqrt(dx*dx + dy*dy + dz*dz) / Math.sqrt(3);
+      const norm = Math.min(1, theta / (thetaBound * 2)); // 0=yeşil, 2×bound=kırmızı
+      return baseColor(1 - norm); // yüksek θ = kırmızı (1-norm)
+    }
+    // metric: yüksek değer yeşil
+    const v = getVal(d, colorKey);
     const clamped = Math.max(0, Math.min(1, v ?? 0.5));
-    return colorMode === 'risk' ? baseColor(1 - clamped) : baseColor(clamped);
+    return baseColor(clamped);
   };
   const size = d3.scaleSqrt().domain([0,d3.max(nodes,d=>d.mass)]).range([4,18]);
   const tt = d3.select('#tooltip');
@@ -839,12 +890,12 @@ function render() {
 
   g.selectAll('.dot').data(nodes).enter().append('circle')
     .attr('cx',d=>x(getVal(d,xKey))).attr('cy',d=>y(getVal(d,yKey)))
-    .attr('r',d=>size(d.mass)).attr('fill',d=>{const v=getVal(d,colorKey);return color(v!=null?v:0.5);})
+    .attr('r',d=>size(d.mass)).attr('fill',d=>color(d))
     .attr('stroke',d=>d.id===selectedNodeId?'#58a6ff':"#30363d")
     .attr('stroke-width',d=>d.id===selectedNodeId?3:1)
     .attr('fill-opacity',d=>(d.cohesion_source==='placeholder'||d.cohesion_source==='heuristic')?0.35:0.85)
     .style('cursor','pointer')
-    .on('mouseover',(e,d)=>{tt.style('opacity',1).html(`<b>Node ${d.id}</b><br>kind: ${d.kind}<br>mass: ${d.mass}<br>coupling: ${d.coupling!=null?d.coupling.toFixed(3):'—'}<br>cohesion: ${d.cohesion!=null?d.cohesion.toFixed(3):'—'}<br>instability: ${d.instability!=null?d.instability.toFixed(3):'—'}`).style('left',(e.clientX+14)+'px').style('top',(e.clientY-10)+'px');})
+    .on('mouseover',(e,d)=>{tt.style('opacity',1).html(`<b>Node ${d.id}</b> <span style="color:${rolePalette[d.role||'Runtime']||'#8b949e'}">[${d.role||'Runtime'}]</span><br>${d.path?`<span style="color:#8b949e;font-size:11px;">${d.path}</span><br>`:''}kind: ${d.kind}<br>mass: ${d.mass}<br>coupling: ${d.coupling!=null?d.coupling.toFixed(3):'—'}<br>cohesion: ${d.cohesion!=null?d.cohesion.toFixed(3):'—'}${d.cohesion_source==='placeholder'?' <span style="color:#8b949e;font-size:10px;">⚠ placeholder</span>':''}<br>instability: ${d.instability!=null?d.instability.toFixed(3):'—'}`).style('left',(e.clientX+14)+'px').style('top',(e.clientY-10)+'px');})
     .on('mouseout',()=>tt.style('opacity',0))
     .on('click',(e,d)=>{selectedNodeId=d.id; render(); showNodeInspector(d);});
 }
