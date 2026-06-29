@@ -1,142 +1,137 @@
 # OSP — Session Handoff Document
 
-> **Tarih:** 2026-06-29
-> **Session:** Review-driven desktop UX/semantics pass + type-only import distinction
-> **Sonraki session:** Node-level witness (roadmap #9) veya arXiv submission
-> **Branch:** `feat/desktop-vision-semantics-pass` → PR #1 (github.com/ervolkan/osp/pull/1)
+> **Tarih:** 2026-06-29 (ikinci oturum)
+> **Session:** CI fix + Node-level witness #9 (composite risk §3.2)
+> **Sonraki session:** arXiv submission (#7) veya 3D visualization (#8)
+> **Branch:** `feat/desktop-vision-semantics-pass` → **PR #1 MERGED → main**
 
 ---
 
 ## Bu Session'da Yapılanlar (Özet)
 
-İki review turu (harici) sonucu OSP desktop'ında **mimari karar destek sistemi**
-oluşturuldu ve analyzer'da **type-only import ayrımı** (kök çözüm) eklendi.
-4 commit, 407→414 test.
+İki ana iş: **(1) PR #1 CI fix** (önceki handoff "her şey tamam" demişti ama CI
+fail ediyordu) + **(2) Node-level witness #9** (git history → composite risk_score,
+paper §3.2 stub dolduruldu). PR #1 merged edildi. 414 → **436 test**.
 
-### Review turu 1 — Engine semantics + UX foundations
+### CI fix (kritik — önceki oturumun gözden kaçırdığı)
 
-**`521c1b6 feat(core): VisionSource provenance + VisionVerdict semantics + infer_role fix`**
-- `VisionSource` enum (None/GlobalDefault/BuiltinRole/RoleProfile/UserLoaded) —
-  MetricValue provenance modelinin vision karşılığı. "Vision: not loaded" + "θ pass"
-  çelişkisini çözer.
-- `VisionVerdict` enum (pass/warning/advisory/reject/inconclusive) +
-  `evaluate_node_vision()` — node analiz seviyesi karar semantiği. Commit pipeline
-  Q5 gate'ten ayrı (Q5 hard reject; VisionVerdict repo-wide analiz).
-- **Bug fix:** `infer_role` sıralaması düzeltildi — Support check'i TypeSurface'tan
-  önce. `tests/types/*.ts` artık Support'a düşüyor (advisory), TypeSurface'a değil.
-  Review'in "TypeSurface 8 reject" şikayetinin kaynağı buydu.
-- 2 diagnostic example: `role_diagnostic.rs` (classifier kalitesi),
-  `vision_breakdown.rs` (verdict dağılımı).
+Önceki handoff "5 commit, her şey tamam" diyordu ama `gh pr status` "All checks
+failing" gösterdi. İki ayrı kök neden bulundu:
 
-**`1723368 feat(desktop): decision-support UX pass`**
-- Analysis scope filtresi (All/Architectural/Production/Support) — Support-heavy
-  repo'larda production sağlığını boğmaması için.
-- Deterministik recommendations (breakdown → template mesaj, LLM değil).
-- Vision preset'leri (DDD/Microservice/Library/Framework/...) provenance-aware.
-- Per-axis bars (score DEĞİL — provenance-aware, MetricValue uyumlu).
-- Collapsible sidebar + conditional inspector + reject halo + conditional scatter zone.
+**1. `engine.rs` unused mut (5 yer)** — `RUSTFLAGS="-D warnings"` altında hard
+error. Lokal Windows'ta `cargo test` (warnings flag'siz) geçiyordu → yanılgı.
+5 test'te `let mut engine` → `let engine` (engine `&self` metodları kullanıyor).
++ `cargo fmt --all` (329 konum repo-wide drift temizlendi).
 
-### Review turu 2 — Calibration + kök çözüm
+**2. `osp-desktop` (Tauri) CI'da derlenmiyor** — ilk teşhisim (engine.rs) aslında
+yanlıştı. İlk CI log'undaki satırlar `cargo fmt --check` diff'idir (CI `|| true`
+ile geçiştiriliyor), rustc error değil. Gerçek fail her zaman Tauri idi:
+`glib-sys` build script `pkg-config` ile `glib-2.0 >= 2.70` arıyor, Ubuntu runner'da
+yok. Windows'ta Tauri WebView2 (Edge) kullanır → lokalde derlenir.
 
-**`9b18903 fix(core): TypeSurface coupling calibration + vision_breakdown metric-source fix`**
-- `vision_breakdown.rs` metrik kaynağı düzeltildi (`node.position.raw` →
-  `module_metrics`) — sahte "0 pass" bulgusu **çürütüldü**, gerçek resim: 91% pass.
-- TypeSurface coupling target 0.05 → 0.20 (geçici workaround, type-only sınırlaması için).
+**Çözüm:** `ci.yml`'a `--exclude osp-desktop` (build/test/examples). Tauri binary
+headless CI'da zaten çalışmaz; lokal/release-workflow konusu. CI 4 library
+crate'i test eder: osp-core/analyzer/spike/llm-runtime.
 
-**`730b6c7 feat(analyzer): type-only import distinction` (KÖK ÇÖZÜM)**
-- TS `import type {Foo}` ve `import {type Foo}` artık runtime dependency değil →
-  coupling/instability'den hariç (value-only degree).
-- `Edge::is_type_only: bool` + `#[serde(default)]` (backward-compat, Node.classification pattern).
-- `Space::out_degree_value/in_degree_value` (type-only hariç); CouplingAxis/InstabilityAxis geçti.
-- Tree-sitter textual byte-range detection (grammar `type` qualifier'ı anonim token,
-  byte-range ile recover). 3 form: statement-level, per-specifier, mixed→value-wins.
-- TypeSurface target 0.20 → 0.05 geri alındı (workaround artık gerekmiyor).
-- **Sonuç:** TypeSurface gerçek runtime coupling 0.20 → **0.04** (mimari norma uyum).
+```
+Commit: 613fc6a (engine.rs fix + fmt), a986ede (ci.yml exclude)
+PR #1 CI: fail → pass (1m4s)
+```
 
-### Doğrulama (svelte, 3448 nodes)
+### Node-level witness #9 (composite risk §3.2 dolduruldu)
 
-| Metrik | Öncesi | Sonrası |
-|---|---|---|
-| TypeSurface gerçek runtime coupling | 0.20 (şişirilmiş) | **0.04** (0.05 target'a uyum) |
-| TypeSurface reject | 8 | **3** (gerçek high-coupling) |
-| Total pass | 3142 (91%) | **3152 (91.4%)** |
-| Test sayısı | 407 | **414** (+7) |
+"Risky AMA historically stable mı?" sorusu artık cevaplanır. Review'in
+"battle-tested vs speculative" konusu. 3 katman:
+
+**Katman 1 — NodeWitness tipi + git extraction**
+- `osp-core/space.rs`: `NodeWitness` struct (commits_touching, distinct_authors,
+  last_modified_days_ago, churn, ownership_concentration) + `neutral()` ctor.
+  Node/Edge ile aynı yer (dependency yönü core←analyzer).
+- `osp-analyzer/witness.rs` (yeni): `extract_witness()` — tek
+  `git log --numstat --format=... --no-merges` pas'ı tüm repo history'yi tarar,
+  per-file aggregate. svelte (34710 file) saniyeler mertebesinde. Graceful
+  no-git fallback (SCIP-yok paralel). Binary skip, rename arrow handled.
+
+**Katman 2 — composite risk_score (§3.2 stub dolduruldu)**
+- `osp-core/vision.rs`: `compute_risk_score(theta, witness, vision_confidence)`
+  + `RiskBreakdown` (vision/volatility/recency/solo/speculative) + `risk_weights`
+  modülü (VISION 0.40 / VOL 0.20 / REC 0.15 / SOLO 0.15 / SPEC 0.10).
+- 3 mod: witness=None → neutral 0.5; vision-conf=0 → vision katkısı 0
+  ("Vision: not loaded" + "high risk" paradoks çözümü).
+- `compute_derived` değişmedi (commit-path, witness erişimi yok) — risk ayrı
+  analiz katmanında compute edilir.
+
+**Katman 3 — wire-through + UI**
+- `pipeline.rs`: `extract_witness()` → `AnalysisResult.node_witnesses`.
+- desktop `NodeJson`: witness_* alanları (`#[serde(default)]`).
+- frontend: Node Inspector "Witness (git history)" + "Composite risk (θ × witness)"
+  breakdown bar'ları (scalar DEĞİL — gamification tuzağı önlemi).
+
+**Diagnostic:** `examples/witness_breakdown.rs`.
+
+### Bug bulundu (svelte corpus ile)
+
+`days_between` çift bölme yapıyordu: `days_from_civil` GÜN döndürür, kod
+`(l-e)/86400` yapmış → 12/86400 = 0. **Tüm dosyalar "0 gün önce" çıkıyordu.**
+Fix: bölme yok (gün - gün = gün). Regression test eklendi. Ayrıca `%aI`
+(author date) → `%cI` (commit date): author date rebase'te korunur, son
+değişikliği maskeler.
+
+**Doğrulama (svelte, 34710 files):**
+- runtime.js: commits=316, authors=18, **days_ago=12** (önceden 0 — bug).
+- witness extraction saniyeler mertebesinde.
+
+```
+Commit: 275063c (node-level witness #9, tüm katmanlar)
+```
 
 ---
 
 ## Mevcut Durum (Test/Build)
 
 ```
-414 test, 0 fail, 0 warning
+436 test, 0 fail, 0 warning (CI-equivalent: -D warnings, exclude osp-desktop)
 5 crate: osp-core + osp-analyzer + osp-spike + osp-desktop + osp-llm-runtime
-Branch: feat/desktop-vision-semantics-pass (PR #1 açık)
+PR #1 MERGED → main üzerinde
+CI: Build & Test pass (osp-desktop excluded — Tauri headless CI'da derlenmez)
 ```
 
 ---
 
 ## Sıradaki Implementation Öncelikleri
 
-### #1: Node-level witness (YÜKSEK ÖNCELİK — roadmap #9)
+### #1: arXiv submission (YÜKSEK ÖNCELİK — roadmap #7)
 
-**Sorun:** Witness Dashboard repo-level (merge ratio, author sayısı). Node-level
-evidence yok — "bu node risky AMA historically stable mı?" sorusu cevapsız.
-
-**Çözüm:**
-- `crates/osp-analyzer/src/` — git blame/log per-file extraction
-- NodeJson'e witness alanları ekle: `commits_touching`, `distinct_authors`,
-  `last_modified`, `churn`, `ownership_concentration`, `recent_volatility`
-- Composite risk: vision deviation θ + node witness → `risk_score` (§3.2 stub'ı doldur)
-- Frontend: Node Inspector'a "Witness" bölümü
-
-**Neden şimdi:** Metrikler artık doğru (type-only ayrımı yapıldı), bu yüzden
-composite risk anlamlı olur. Review'in "battle-tested vs speculative" konusu.
-
-**Efor:** M (4-6 saat)
-
----
-
-### #2: arXiv submission (YÜKSEK ÖNCELİK — roadmap #7)
-
-**Sorun:** Paper v2.6 içerik olarak hazır ama format/derleme bekliyor.
+**Durum:** Paper v2.6 içerik olarak hazır. Node-level witness ile §3.2 risk_score
+stub'ı doldu — paper'a eklenmeli.
 
 **Çözüm:**
 - paper-draft-v2.6.md → LaTeX derleme (arXiv şablonu)
 - Bibliyografya (.bib) derleme
 - Figure'ler (Figure 1-3) vektör format
-- type-only import ayrımı + VisionSource/VisionVerdict paper'a ekle (§3.2, §6.5)
+- §3.2: NodeWitness + compute_risk_score + RiskBreakdown ekle
+- §6.5: Node Inspector witness bölümü + risk breakdown UI
+- §7.8: svelte witness doğrulama sonuçları (runtime.js days_ago fix)
 
 **Efor:** M (format derleme + yeni sonuçların entegrasyonu)
 
 ---
 
-### #3: Python `if TYPE_CHECKING:` idiom (ORTA ÖNCELİK)
+### #2: 3D OSP Space visualization (YÜKSEK ÖNCELİK — roadmap #8)
 
-**Sorun:** Type-only import ayrımı sadece TS'de. Python'da `if TYPE_CHECKING:`
-bloğu içindeki import'lar da type-only sayılmalı ama ayrı mekanizma gerektirir
-(if_statement walk + TYPE_CHECKING identifier detection).
-
-**Çözüm:**
-- `crates/osp-analyzer/src/adapters/python.rs` — TYPE_CHECKING block detection
-- `if TYPE_CHECKING:` içindeki import_statement'ları `is_type_only=true` işaretle
-
-**Efor:** S-M (2-4 saat)
-
----
-
-### #4: 3D OSP Space visualization (ORTA ÖNCELİK — roadmap #8)
-
-**Sorun:** 2D scatter iki eksen gösteriyor, 5 eksenli uzayın keşfi kısıtlı.
+**Neden şimdi:** Mode semantics (role/risk/metric) + type-only ayrımı + node-level
+witness temiz. 3D artık anlamlı — 5 eksenli uzayın keşfi için.
 
 **Çözüm:**
 - Three.js / plotly 3D scatter
-- 3 eksen: coupling/cohesion/instability; mass=size, entropy/witness-depth=color
-- Mode semantics artık temiz (role/risk/metric + type-only ayrımı), 3D anlamlı olur
+- 3 eksen: coupling/cohesion/instability; mass=size, churn/witness-depth=color
+- risk_score → node boyut/halo (scalar değil, breakdown tooltip)
 
 **Efor:** M-L
 
 ---
 
-### #5: Task-success benchmark (DÜŞÜK ÖNCELİK — roadmap #6)
+### #3: Task-success benchmark (ORTA ÖNCELİK — roadmap #6)
 
 **Sorun:** RQ5 token savings'i gösteriyor ama task success (kod kalitesi) boşluğu var.
 
@@ -146,15 +141,83 @@ bloğu içindeki import'lar da type-only sayılmalı ama ayrı mekanizma gerekti
 
 ---
 
+### #4: Witness author normalization (DÜŞÜK ÖNCELİK — roadmap #10)
+
+**Sorun:** Node witness author sayısı bot/alias (örn "dependabot", aynı kişinin
+ farklı email'leri) yüzünden şişebilir.
+
+**Çözüm:** `.mailmap` + bot detection (commit author pattern).
+
+**Efor:** S-M
+
+---
+
 ## Yeni Session'da İlk Soru
 
 ```
-"Node-level witness (#1) ile başlayalım mı?"
+"arXiv (#7) ile başlayalım mı? Paper §3.2 risk_score artık gerçek değerle dolu."
 ```
 
-Dosya: `crates/osp-analyzer/src/` (git blame extraction yeni)
-Başlangıç noktası: `Witness Dashboard` paneli zaten repo-level; node-level'a genişlet.
-Paper bağlantısı: §3.2 `risk_score` stub'ı doldur.
+Dosya: `docs/paper-draft-v2.6.md` → LaTeX derleme
+Başlangıç noktası: §3.2 stub'ı (`risk_score = 0.0` yazıyordu) artık compute_risk_score
+ile doldu. NodeWitness + RiskBreakdown paper'a eklenmeli.
+
+---
+
+## Bu Session'da Öğrenilen Teknik Dersler
+
+### 1. CI log'unda fmt diff ≠ rustc error
+
+**Bulgu:** PR #1 "All checks failing" idi. İlk CI log'unda `Verdict::Warning` gibi
+satırlar gördüm → "engine.rs mut hatası" sandım. Ama bunlar `cargo fmt --check`
+diff'idir (CI `|| true` ile geçiştiriyor). Gerçek fail her zaman Tauri `glib-sys`.
+
+**Ders:** CI log'undaki `+`/`-` satırları önce fmt diff mi rustc error mu doğrula.
+Gerçek fail adımını (`gh run view --job`) ve `failed to run custom build command`
+satırını ara.
+
+### 2. Windows lokal test vs Linux CI: `-D warnings` farkı
+
+**Bulgu:** Lokalde `cargo test` (warnings flag'siz) 414 test geçti. CI `-D warnings`
+ile fail. 5 gereksiz `let mut engine` warning'ı lokalde sessiz, CI'da hard error.
+
+**Ders:** Lokal doğrulama CI ile aynı flag'lerle: `RUSTFLAGS="-D warnings" cargo test`.
+Handoff'ta "X test geçti" demeden önce CI-equivalent koşullarda doğrula.
+
+### 3. Tauri binary headless CI'da derlenmez
+
+**Bulgu:** `osp-desktop` (Tauri v2) `cargo build --workspace` Linux CI'da
+`webkit2gtk`/`glib-sys`/`gtk-sys` çekiyor → `pkg-config` sistem paketleri istiyor.
+Windows'ta WebView2 (Edge) kullanır → lokalde derlenir.
+
+**Ders:** Native GUI binary'lerini headless PR CI'ından exclude et. CI library
+crate'leri test etsin. Binary lokal/release-workflow konusu.
+
+### 4. days_from_civil birimi → çift bölme bug'ı
+
+**Bulgu:** `days_from_civil` GÜN döndürür. `days_between` bunu `(l-e)/86400`'e
+bölmüş → gün / saniye = 0. Svelte corpus'ta 34710 dosyanın HEPSİ "0 gün önce".
+Diagnostic tool olmasaydı sessiz metric bozulması.
+
+**Ders:** Tarih/zaman hesabında birimleri net belirt. Çift dönüştürme tuzağı:
+fonksiyon adı `_days` ise birimi gün, başka bölme yapma. Büyük corpus'ta diagnostic
+run etmeden metric doğru varsayma.
+
+### 5. Author date vs commit date (rebase maskesi)
+
+**Bulgu:** `git log %aI` (author date) rebase'te korunur. Svelte'te eski dosyalar
+author date'i yıllar geride. `%cI` (commit date) rebase'te güncellenir → gerçek
+"en son dokunma".
+
+**Ders:** "last modified" için `%cI` kullan. Author date "orijinal yazım" içindir.
+
+### 6. Composite risk: scalar değil breakdown
+
+**Bulgu:** Risk tek sayı (0.62) gamification'a davet. Yerine RiskBreakdown bar
+grafiği — "neden riskli" anlatır. Önceki oturumun #5 dersinin node-level uzantısı.
+
+**Ders:** Karar destek metriklerinde scalar'lardan kaçın. risk_score Inspector'da
+total + breakdown birlikte gösterilir.
 
 ---
 
@@ -162,100 +225,29 @@ Paper bağlantısı: §3.2 `risk_score` stub'ı doldur.
 
 | Dosya | İçerik |
 |---|---|
-| `docs/paper-draft-v2.6.md` | Paper v2.6 (arXiv target; type-only ayrımı + VisionSource eklenecek) |
-| `docs/roadmap.md` | Faz durum + öncelikler (bu session'la güncellendi) |
-| `crates/osp-core/src/vision.rs` | VisionSource + VisionVerdict (yeni) |
-| `crates/osp-core/src/space.rs` | Edge::is_type_only + out_degree_value/in_degree_value (yeni) |
-| `crates/osp-core/src/axes.rs` | CouplingAxis/InstabilityAxis value-only degree (yeni) |
-| `crates/osp-analyzer/src/adapters/shared.rs` | walk_imports_typed + TS type-only detection (yeni) |
-| `crates/osp-analyzer/examples/role_diagnostic.rs` | Classifier diagnostic tool (yeni) |
-| `crates/osp-analyzer/examples/vision_breakdown.rs` | Verdict breakdown + calibration diagnostic (yeni) |
-| `crates/osp-desktop/frontend/index.html` | Decision-support UX (scope/recommendations/presets/bars) |
-
----
-
-## Bu Session'da Öğrenilen Teknik Dersler
-
-### 1. Diagnostic tool'da yanlış field okuma → sahte bulgu
-
-**Bulgu:** `vision_breakdown.rs` coupling/instability'yi `node.position.raw.{x,z}`'den
-okuyordu — ama pipeline bu field'ları **hiç populate etmiyor** (sadece `node.cohesion`;
-coupling/instability `module_metrics` map'inde). Sonuç: her node (0.00, 0.50, 0.00)
-okundu → sahte "0 pass / 84 reject" bulgusu.
-
-**Ders:** Diagnostic tool yazarken backend'in gerçekten hangi field'ı populate
-ettiğini doğrula. `node.position.raw` ile `module_metrics` farklı yerler —
-desktop lib.rs zaten doğru yerden (`module_metrics`) okuyordu. Diagnostic'i backend
- mirror'ı yap, ayrı okuma yapma.
-
-**Etki:** "0 pass" teşhisi yanlıştı, gerçek resim 91% pass. TypeSurface calibration
-(0.05→0.20) aslında gereksizdi — type-only ayrımı (gerçek kök çözüm) yapıldıktan
-sonra 0.05'e geri döndü.
-
-### 2. Tree-sitter grammar anonim token'ları → textual byte-range recovery
-
-**Bulgu:** TS grammar `import type`'daki `type`/`typeof` keyword'ünü **anonim token**
-olarak consume ediyor (named node değil, field değil). Structural AST'den
-ayırt edilemez. Ama kaynak byte'lardan textual olarak recover edilebilir:
-`import` keyword'ünün bitişi ile `import_clause` başlangıcı arasındaki gap.
-
-**Ders:** Tree-sitter grammar bazen qualifier'ları discard eder. AST node-types.json
-kontrol et; eğer field yoksa textual byte-range check fallback'i kullan. Per-specifier
-(`import {type Foo}`) için her specifier'ın `name` field'ından önceki gap'ı kontrol et.
-
-### 3. Edge struct'a field ekleme → Default derive pattern
-
-**Bulgu:** `Edge`'e `is_type_only: bool` ekleyince ~30 `Edge { from, to, kind }`
-literal'i kırıldı (testler dahil). `Default` derive + `..Default::default()` pattern'i
-tüm literal'ları tek seferde onardı.
-
-**Ders:** Struct'a opsiyonel field eklerken: (1) `#[serde(default)]` backward-compat
-için, (2) `Default` derive + `..Default::default()` mevcut literal'ları korur.
-`Node.classification`/`Node.role` zaten bu pattern'i kullanıyordu — aynı deseni
-uyguladık. Yeni field eklemek tek dosyada değil, workspace-wide ~30 yerde değişiklik.
-
-### 4. Value-wins dedup: type+value import aynı dosyaya
-
-**Bulgu:** Bir dosyaya hem `import type {Foo}` hem `import {Bar}` yapılırsa, iki
-ayrı edge yerine tek edge olmalı. Hangisi kazanır? **Value** — çünkü runtime
-dependency mevcut, coupling gerçek.
-
-**Ders:** Dedup HashSet→HashMap yaparken "hangisi kazanır" kuralını net tanımla.
-`existing.is_type_only && !new.is_type_only → overwrite false` kuralı mimari
-açıdan doğru: runtime import varsa type-only statüsü geçersiz.
-
-### 5. Calibration gamification tuzağı
-
-**Bulgu:** Review "Vision Score 84/100" önerdi. Bu MetricValue provenance'ını
-(§3.2) tek scalar'da eritir + gamification'a davet eder ("85'e çıkarayım" için
-threshold gevşetme). İtiraz ettim, yerine per-axis bar + provenance etiketi yaptım.
-
-**Ders:** Metrik araçlarında scalar score'lardan kaçın. OSP'nin değeri "84/100"
-değil "8 node coupling'de reject, hepsi TypeSurface, threshold 0.30 belki gevşek"
-diyebilmekte. Score gizler, breakdown + provenance gösterir.
-
-### 6. Deterministik recommendation > LLM açıklama
-
-**Bulgu:** Review "8 reject → AI açıklama" önerdi. LLM hallucination riski + OSP'nin
-"deterministic gate" kimliğine zıt. Yerine deterministik pattern recognition yaptım:
-role-axis mismatch, axis dominance, scope suggestion, placeholder dilution.
-
-**Ders:** "Karar destek sistemi" LLM olmak zorunda değil. Pattern'leri insan-okur
-template'lere çevirmek deterministic, §9.5 "hallucination as epistemic data" ile
-uyumlu, ucuza. LLM yalnızca LLM-arena (Faz 5) katmanında, analiz katmanında değil.
+| `docs/paper-draft-v2.6.md` | Paper v2.6 (arXiv target; §3.2 risk_score artık dolu) |
+| `docs/roadmap.md` | Faz durum + öncelikler (bu session'la güncellendi, 0.7.0) |
+| `crates/osp-core/src/space.rs` | NodeWitness struct (yeni) |
+| `crates/osp-core/src/vision.rs` | compute_risk_score + RiskBreakdown + risk_weights (yeni) |
+| `crates/osp-analyzer/src/witness.rs` | extract_witness — git log parse (yeni) |
+| `crates/osp-analyzer/examples/witness_breakdown.rs` | Witness distribution diagnostic (yeni) |
+| `crates/osp-analyzer/src/pipeline.rs` | node_witnesses wire-through |
+| `crates/osp-analyzer/src/contract.rs` | AnalysisResult.node_witnesses + NodeWitness re-export |
+| `crates/osp-desktop/src/lib.rs` | NodeJson witness_* alanları |
+| `crates/osp-desktop/frontend/index.html` | Node Inspector witness + risk breakdown bölümleri |
+| `.github/workflows/ci.yml` | osp-desktop exclude (Tauri headless) |
 
 ---
 
 ## Git Commit History (bu session)
 
 ```
-730b6c7 feat(analyzer): type-only import distinction (TS import type excluded from coupling)
-9b18903 fix(core): TypeSurface coupling calibration + vision_breakdown metric-source fix
-1723368 feat(desktop): decision-support UX pass — recommendations, presets, scope, provenance bars
-521c1b6 feat(core): VisionSource provenance + VisionVerdict semantics + infer_role fix
+275063c feat(core,analyzer,desktop): node-level witness (#9) — git history → composite risk
+a986ede ci: exclude osp-desktop (Tauri) from headless CI build
+613fc6a ci: fix unused mut in engine.rs tests + cargo fmt across workspace
 ```
 
-Tümü `feat/desktop-vision-semantics-pass` branch'inde, PR #1 olarak açıldı:
+Tümü `feat/desktop-vision-semantics-pass` branch'indeydi, **PR #1 olarak merged** edildi.
 https://github.com/ervolkan/osp/pull/1
 
 ---
@@ -264,14 +256,22 @@ https://github.com/ervolkan/osp/pull/1
 
 ```
 1. docs/session-handoff.md oku (bu dosya)
-2. docs/roadmap.md "Implementation Öncelikleri" bölümüne bak — güncellendi
-3. PR #1 merge edilmiş olabilir; kontrol et: gh pr status
-4. Kod durum: 414 test, 5 crate
+2. docs/roadmap.md "Sonraki Session İçin Hızlı Başlangıç" bölümü
+3. PR #1 MERGED → main üzerinde çalış:
+     git checkout main && git pull
+     (yeni feature branch'te çalış)
+4. Kod durum: 436 test, 5 crate
+   CI: osp-desktop exclude (Tauri headless CI'da derlenmez)
 5. Corpus repo'lar: P:\repos\osp-spike\ (svelte dahil)
-6. Diagnostic tool'lar: cargo run --example role_diagnostic / vision_breakdown
-7. İlk soru: "Node-level witness (#1) ile başlayalım mı?"
+6. Lokal doğrulama her zaman CI-equivalent:
+     RUSTFLAGS="-D warnings" cargo test --workspace --exclude osp-desktop
+7. Diagnostic tool'lar:
+     cargo run --example role_diagnostic -- <repo>      (classifier)
+     cargo run --example vision_breakdown -- <repo>     (verdict)
+     cargo run --example witness_breakdown -- <repo>    (git history)
+8. İlk soru: "arXiv (#7) ile başlayalım mı? §3.2 risk_score artık gerçek değerle dolu."
 ```
 
 ---
 
-*Sürüm: 0.6.3 · 2026-06-29 · review-driven UX/semantics pass + type-only import · 414 test · 5 crate · PR #1*
+*Sürüm: 0.7.0 · 2026-06-29 · node-level witness #9 + CI fix · 436 test · 5 crate · PR #1 MERGED*
