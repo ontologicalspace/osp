@@ -1875,6 +1875,98 @@ function renderScipSemantics(d) {
     <div class="metric" style="font-size:11px;"><span class="label">Cohesion signal${fragNote}</span></div>`;
 }
 
+// Node-level witness (git history evidence, §3.2) — "battle-tested vs speculative".
+// d.witness_commits undefined ise git yok → "no witness data" (SCIP-yok gibi graceful).
+// Risk breakdown: vision θ × witness bileşenleri → bar grafiği (scalar DEĞİL, gamification
+// tuzağı önlemi — roadmap dersi #5). Ağırlıklar backend compute_risk_score ile birebir
+// aynı (osp-core vision.rs risk_weights): vision 0.40 / volatility 0.20 / recency 0.15 /
+// solo 0.15 / speculative 0.10.
+const RISK_WEIGHTS = { vision: 0.40, volatility: 0.20, recency: 0.15, solo: 0.15, speculative: 0.10 };
+const RISK_C_MAX = 50;       // volatility normalizasyon eşiği (commits)
+const RISK_RECENCY_TAU = 90; // recency e-folding (gün)
+
+// Risk breakdown compute — θ × witness. θ vision yoksa (topology-only) 0 → vision
+// katkısı 0 ("Vision: not loaded" + "high risk" çelişkisi önlenir).
+function computeRiskBreakdown(theta, d) {
+  const vision = (theta || 0) * (theta != null ? 1 : 0); // confidence frontend'de ~1
+  const commits = d.witness_commits ?? 0;
+  const days = d.witness_last_modified_days ?? 0;
+  const ownership = d.witness_ownership ?? 0;
+  const volatility = Math.min(1, commits / RISK_C_MAX);
+  const recency = Math.exp(-days / RISK_RECENCY_TAU);
+  const solo = ownership;
+  const speculative = commits <= 2 ? 0.8 : 0.2;
+  const breakdown = { vision, volatility, recency, solo, speculative };
+  const total = Object.keys(breakdown).reduce(
+    (s, k) => s + RISK_WEIGHTS[k] * breakdown[k], 0
+  );
+  return { breakdown, total: Math.max(0, Math.min(1, total)) };
+}
+
+function renderWitness(d) {
+  // Git yok veya bu dosya tracked değil → "no witness data".
+  if (d.witness_commits == null) {
+    return '<div class="metric"><span class="label">No witness data for this file</span><span class="value" style="color:#8b949e;">—</span></div>';
+  }
+  const commits = d.witness_commits;
+  const authors = d.witness_authors ?? 0;
+  const churn = d.witness_churn ?? 0;
+  const ownership = d.witness_ownership ?? 0;
+  const days = d.witness_last_modified_days ?? 0;
+  // İnsan-okur last_modified
+  let lastMod;
+  if (days === 0) lastMod = 'today';
+  else if (days === 1) lastMod = '1 day ago';
+  else if (days < 30) lastMod = `${days} days ago`;
+  else if (days < 365) lastMod = `${Math.round(days/30)} months ago`;
+  else lastMod = `${Math.round(days/365)} years ago`;
+
+  // Qualitative stability etiketi: "battle-tested" (çok commit + eski + shared)
+  // vs "speculative" (az commit + yeni). Scalar risk değil, insan-okur kategori.
+  const isBattleTested = commits >= 20 && days >= 90 && ownership < 0.6;
+  const isSpeculative = commits <= 2;
+  let stabilityLabel, stabilityColor;
+  if (isBattleTested) { stabilityLabel = 'battle-tested'; stabilityColor = '#3fb950'; }
+  else if (isSpeculative) { stabilityLabel = 'speculative (new)'; stabilityColor = '#d29922'; }
+  else { stabilityLabel = 'established'; stabilityColor = '#58a6ff'; }
+
+  const ownershipPct = (ownership * 100).toFixed(0);
+  return `
+    <div class="metric"><span class="label">Commits touching</span><span class="value">${commits}</span></div>
+    <div class="metric"><span class="label">Distinct authors</span><span class="value">${authors}</span></div>
+    <div class="metric"><span class="label">Churn (hist)</span><span class="value">${churn}</span></div>
+    <div class="metric"><span class="label">Ownership</span><span class="value">${ownershipPct}% top author</span></div>
+    <div class="metric"><span class="label">Last modified</span><span class="value">${lastMod}</span></div>
+    <div class="metric"><span class="label">Stability</span><span class="value" style="color:${stabilityColor};font-weight:600;">${stabilityLabel}</span></div>`;
+}
+
+// Risk breakdown bar — vision θ × witness. θ (vision deviation) vision bloğundan gelir;
+// topology-only modda θ=0 → sadece witness katkısı. Scalar total gösterilir AMA breakdown
+// bar'larıyla birlikte (oyunlaştırma tuzağı: tek rakam değil, "neden riskli" anlatır).
+function renderRiskBreakdown(theta, d) {
+  if (d.witness_commits == null) return ''; // witness yok → risk yok
+  const { breakdown, total } = computeRiskBreakdown(theta, d);
+  const bar = (v, color) => {
+    const w = Math.max(0, Math.min(1, v)) * 100;
+    return `<div style="display:inline-block;width:60px;height:6px;background:#21262d;border-radius:3px;vertical-align:middle;overflow:hidden;"><div style="width:${w}%;height:100%;background:${color};"></div></div>`;
+  };
+  const row = (label, v, color) => `
+    <div style="display:flex;justify-content:space-between;align-items:center;font-size:10px;margin:2px 0;">
+      <span style="color:#8b949e;width:70px;">${label}</span>
+      ${bar(v, color)}
+      <span style="color:#c9d1d9;font-family:monospace;width:32px;text-align:right;">${v.toFixed(2)}</span>
+    </div>`;
+  return `
+    <div class="metric"><span class="label">Composite risk</span><span class="value" style="color:#d29922;">${total.toFixed(2)}</span></div>
+    <div style="margin-top:4px;padding:6px;background:#161b22;border-radius:4px;">
+      ${row('vision', breakdown.vision, '#f85149')}
+      ${row('volatility', breakdown.volatility, '#d29922')}
+      ${row('recency', breakdown.recency, '#a371f7')}
+      ${row('solo', breakdown.solo, '#f85149')}
+      ${row('speculat.', breakdown.speculative, '#d29922')}
+    </div>`;
+}
+
 function showNodeInspector(d) {
   const el = document.getElementById('nodeInspector');
   const toggle = document.getElementById('inspectorToggle');
@@ -1916,6 +2008,7 @@ function showNodeInspector(d) {
   //     ("role-default (builtin)" etiketi gösterilir)
   //   - vs.state === 'userGlobal' → kullanıcı slider vision, θ anlamlı ("user loaded")
   let visionHtml;
+  let thetaForRisk = null; // topology-only → null → risk breakdown vision katkısı 0
   const vs = getVisionState();
   const thetaBound = parseFloat(document.getElementById('vis_theta_bound')?.value) || 0.30;
   if (!vs.evaluable) {
@@ -1932,6 +2025,7 @@ function showNodeInspector(d) {
     const dy = (d.cohesion ?? 0.5) - rv.y;
     const dz = (d.instability ?? 0.5) - rv.z;
     const theta = Math.sqrt(dx*dx + dy*dy + dz*dz) / Math.sqrt(3);
+    thetaForRisk = theta; // risk breakdown için outer scope'a çıkar
     // Cohesion placeholder: SCIP yoksa cohesion=0.5 fallback → θ sonucu düşük güven.
     // Değerlendirmenin "placeholder iken fail yerine review" önerisi.
     const cohesionPlaceholder = d.cohesion_source === 'placeholder' || d.cohesion_source === 'heuristic';
@@ -1997,6 +2091,10 @@ function showNodeInspector(d) {
     ${renderScipSemantics(d)}
     <div style="margin-top:10px;font-size:12px;color:#8b949e;">Vision</div>
     ${visionHtml}
+    <div style="margin-top:10px;font-size:12px;color:#8b949e;">Witness (git history) — battle-tested vs speculative</div>
+    ${renderWitness(d)}
+    <div style="margin-top:10px;font-size:12px;color:#8b949e;">Composite risk (θ × witness)</div>
+    ${renderRiskBreakdown(thetaForRisk, d)}
     <div style="margin-top:10px;font-size:12px;color:#8b949e;">Edges — outgoing (${outgoing.length})</div>
     ${outgoing.length ? outgoing.map(e => edgeRow(e, false)).join('') : '<div class="metric"><span class="label">none</span></div>'}
     <div style="margin-top:10px;font-size:12px;color:#8b949e;">Edges — incoming (${incoming.length})</div>

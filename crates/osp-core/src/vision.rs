@@ -257,8 +257,129 @@ pub fn compute_derived(
     DerivedPosition {
         u,
         theta,
-        risk_score: 0.0, // Faz 2
+        // risk_score burada DEĞİL — compute_risk_score ayrı bir analiz-seviyesi
+        // fonksiyondur. compute_derived commit path'inde (inv #5) kullanılır;
+        // orada NodeWitness'e (git history) erişim yok. risk_score pipeline'ın
+        // analiz katmanında compute_risk_score ile doldurulur.
+        risk_score: 0.0,
         main_sequence_distance: d,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// compute_risk_score — composite risk (§3.2): vision θ × node witness
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Composite risk için sabit kalibrasyon ağırlıkları (§3.2).
+///
+/// Toplamları 1.0:
+/// - `W_VISION` (0.40) — mimari sapma θ (en güçlü sinyal)
+/// - `W_VOLATILITY` (0.20) — commits_touching / C_MAX (çok dokunulan = hareketli)
+/// - `W_RECENCY` (0.15) — yakın zamanda değişen (e-folding 90 gün)
+/// - `W_SOLO` (0.15) — solo authorship (bus-factor)
+/// - `W_SPECULATIVE` (0.10) — az dokunulan (yeni/olgunlaşmamış)
+///
+/// Bu sabitler Faz 1.11 kalibrasyonuna kadar donmuş; sonra `EngineConfig`'e
+/// taşınabilir. Ağırlıkların **insan-okur** kalması kasıtlı — Inspector'da
+/// risk scalar olarak DEĞİL, `RiskBreakdown` bileşenleriyle gösterilir
+/// (gamification tuzağı, roadmap dersi #5).
+pub mod risk_weights {
+    pub const VISION: f64 = 0.40;
+    pub const VOLATILITY: f64 = 0.20;
+    pub const RECENCY: f64 = 0.15;
+    pub const SOLO: f64 = 0.15;
+    pub const SPECULATIVE: f64 = 0.10;
+    /// Volatility normalizasyon eşiği — commits_touching >= C_MAX → 1.0.
+    pub const C_MAX: f64 = 50.0;
+    /// Recency e-folding sabiti (gün). 90 gün ≈ ~3 ay sprint-döngü.
+    pub const RECENCY_TAU: f64 = 90.0;
+}
+
+/// Risk'in bileşen bazında dökümü — Inspector/scatter için insan-okur.
+///
+/// `compute_risk_score` hem toplamı hem dökümü döndürür. UI toplamı scalar
+/// olarak göstermez (gamification); bunun yerine bu breakdown'u bar grafiği
+/// olarak gösterir. Her bileşen ∈ [0,1].
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RiskBreakdown {
+    /// Mimari sapma θ ∈ [0,1] — vision'a uzaklık.
+    pub vision: f64,
+    /// `min(1, commits_touching / C_MAX)` — hareketlilik.
+    pub volatility: f64,
+    /// `exp(-days_ago / TAU)` — yakın değişiklik = yüksek.
+    pub recency: f64,
+    /// `ownership_concentration` — solo authorship riski.
+    pub solo: f64,
+    /// `commits_touching <= 2 ? 0.8 : 0.2` — yeni/az-dokunulmuş.
+    pub speculative: f64,
+}
+
+impl RiskBreakdown {
+    /// Ağırlıklı toplam → composite risk_score ∈ [0,1].
+    pub fn total(self) -> f64 {
+        use risk_weights as w;
+        (w::VISION * self.vision
+            + w::VOLATILITY * self.volatility
+            + w::RECENCY * self.recency
+            + w::SOLO * self.solo
+            + w::SPECULATIVE * self.speculative)
+            .clamp(0.0, 1.0)
+    }
+}
+
+/// Composite risk hesabı (§3.2): vision θ × node witness × vision-confidence.
+///
+/// **Üç mod:**
+/// - `witness=None` → "ölçülmemiş" epistemolojik durum. risk neutral 0.5
+///   (placeholder cohesion'a paralel — "bilmiyoruz" sessiz varsayım değil).
+///   `RiskBreakdown` tüm alanlar neutral (0.5).
+/// - `witness=Some` + `vision_confidence=0.0` (VisionSource::None) → vision
+///   ölçülmemiş. vision bileşeni 0, witness bileşenleri ölçülü. "topology-only"
+///   risk: sadece historical stability.
+/// - `witness=Some` + `vision_confidence>0` → tam composite.
+///
+/// `vision_confidence` `VisionSource::confidence()`'dan gelir (§3.2 girdi).
+/// vision ölçülmemişse vision bileşeni risk'i şişirmemeli — confidence 0 →
+/// vision katkısı 0.
+pub fn compute_risk_score(
+    theta: f64,
+    witness: Option<&crate::space::NodeWitness>,
+    vision_confidence: f64,
+) -> (f64, RiskBreakdown) {
+    let theta = theta.clamp(0.0, 1.0);
+    let vision_confidence = vision_confidence.clamp(0.0, 1.0);
+
+    // Vision bileşeni: θ × confidence. confidence 0 (ölçülmemiş vision) → 0.
+    // Bu "Vision: not loaded" + "high risk" çelişkisini önler.
+    let vision_component = theta * vision_confidence;
+
+    match witness {
+        None => {
+            // Ölçülmemiş (git yok). Neutral — "bilmiyoruz".
+            let neutral = RiskBreakdown {
+                vision: vision_component,
+                volatility: 0.5,
+                recency: 0.5,
+                solo: 0.5,
+                speculative: 0.5,
+            };
+            (neutral.total(), neutral)
+        }
+        Some(w) => {
+            use risk_weights as rw;
+            let volatility = (w.commits_touching as f64 / rw::C_MAX).min(1.0);
+            let recency = (-(w.last_modified_days_ago as f64) / rw::RECENCY_TAU).exp();
+            let solo = w.ownership_concentration.clamp(0.0, 1.0);
+            let speculative = if w.commits_touching <= 2 { 0.8 } else { 0.2 };
+            let breakdown = RiskBreakdown {
+                vision: vision_component,
+                volatility,
+                recency,
+                solo,
+                speculative,
+            };
+            (breakdown.total(), breakdown)
+        }
     }
 }
 
@@ -746,5 +867,128 @@ mod tests {
         let v = VisionVector::default();
         assert_eq!(v.source(), VisionSource::None);
         assert!(!v.is_evaluable());
+    }
+
+    // --- compute_risk_score (§3.2 composite risk) ---
+
+    use crate::space::NodeWitness;
+
+    fn witness(commits: usize, authors: usize, days_ago: u32, ownership: f64) -> NodeWitness {
+        NodeWitness {
+            commits_touching: commits,
+            distinct_authors: authors,
+            last_modified_days_ago: days_ago,
+            churn: commits as u64 * 10,
+            ownership_concentration: ownership,
+        }
+    }
+
+    #[test]
+    fn risk_score_none_witness_is_neutral() {
+        // Ölçülmemiş (git yok) → neutral. "bilmiyoruz" sessiz varsayım değil.
+        let (score, bd) = compute_risk_score(0.8, None, 1.0);
+        // Neutral breakdown: vision=θ (confidence 1.0), diğerleri 0.5.
+        assert!((bd.vision - 0.8).abs() < 1e-9);
+        assert!((bd.volatility - 0.5).abs() < 1e-9);
+        assert!((bd.recency - 0.5).abs() < 1e-9);
+        assert!((bd.solo - 0.5).abs() < 1e-9);
+        assert!((bd.speculative - 0.5).abs() < 1e-9);
+        // total = 0.40*0.8 + 0.20*0.5 + 0.15*0.5 + 0.15*0.5 + 0.10*0.5
+        //       = 0.32 + 0.10 + 0.075 + 0.075 + 0.05 = 0.62
+        assert!(
+            (score - 0.62).abs() < 1e-9,
+            "neutral total = 0.62, got {score}"
+        );
+    }
+
+    #[test]
+    fn risk_score_zero_vision_confidence_zeros_vision_component() {
+        // VisionSource::None → confidence 0 → vision katkısı 0.
+        // "Vision: not loaded" + "high risk" çelişkisi çözülür.
+        let w = witness(20, 3, 5, 0.4);
+        let (score, bd) = compute_risk_score(0.9, Some(&w), 0.0);
+        assert!(bd.vision.abs() < 1e-9, "confidence 0 → vision 0");
+        assert!(score < 0.5, "vision yok → risk düşük-orta, got {score}");
+    }
+
+    #[test]
+    fn risk_score_high_theta_high_witness_risk() {
+        // Yüksek mimari sapma + volatil + yeni + solo → yüksek risk.
+        // commits=60 > 2 → speculative = 0.2 (olgun ama hareketli, yeni DEĞİL).
+        let w = witness(60, 1, 1, 1.0); // C_MAX aşımı, solo, dün
+        let (score, bd) = compute_risk_score(0.9, Some(&w), 1.0);
+        assert!(bd.vision > 0.8, "vision = θ×conf = 0.9");
+        assert!(
+            (bd.volatility - 1.0).abs() < 1e-9,
+            "60 commits > C_MAX → 1.0"
+        );
+        assert!(bd.recency > 0.9, "1 day ago → ~0.99");
+        assert!((bd.solo - 1.0).abs() < 1e-9, "solo ownership");
+        assert!(
+            (bd.speculative - 0.2).abs() < 1e-9,
+            "commits>2 → 0.2 (olgun)"
+        );
+        // Yüksek vision + volatility + recency + solo → yüksek risk, speculative düşük olsa da.
+        assert!(score > 0.7, "composite high risk, got {score}");
+    }
+
+    #[test]
+    fn risk_score_battle_tested_low_risk() {
+        // Çok dokunulmuş, çok yazar, eski, shared → low risk (battle-tested).
+        let w = witness(100, 8, 365, 0.2); // çok commit, 8 yazar, 1 yıl önce, shared
+        let (score, bd) = compute_risk_score(0.1, Some(&w), 1.0); // düşük sapma
+        assert!((bd.volatility - 1.0).abs() < 1e-9, "100 commits → volatil");
+        assert!(bd.recency < 0.05, "365 days → ~0.018, eski = stabil");
+        assert!((bd.solo - 0.2).abs() < 1e-9, "shared ownership");
+        assert!((bd.speculative - 0.2).abs() < 1e-9, "olgun");
+        // volatil AMA eski + shared + düşük vision → net düşük-orta
+        assert!(score < 0.45, "battle-tested → düşük risk, got {score}");
+    }
+
+    #[test]
+    fn risk_score_monotonic_in_theta() {
+        // Daha yüksek θ → daha yüksek risk (diğerleri sabit, confidence > 0).
+        let w = witness(10, 2, 30, 0.5);
+        let (s_low, _) = compute_risk_score(0.1, Some(&w), 1.0);
+        let (s_high, _) = compute_risk_score(0.9, Some(&w), 1.0);
+        assert!(
+            s_high > s_low,
+            "monotonic: θ=0.9 ({s_high}) > θ=0.1 ({s_low})"
+        );
+    }
+
+    #[test]
+    fn risk_score_speculative_flag_for_new_files() {
+        // commits <= 2 → speculative 0.8 (yeni/az-dokunulmuş).
+        let new_file = witness(1, 1, 0, 1.0);
+        let (_, bd_new) = compute_risk_score(0.0, Some(&new_file), 1.0);
+        assert!((bd_new.speculative - 0.8).abs() < 1e-9);
+
+        let established = witness(50, 1, 0, 1.0);
+        let (_, bd_est) = compute_risk_score(0.0, Some(&established), 1.0);
+        assert!((bd_est.speculative - 0.2).abs() < 1e-9);
+    }
+
+    #[test]
+    fn risk_score_clamps_to_unit_interval() {
+        // Volatil ekstrem witness (C_MAX aşımı) → volatility 1.0, total clamp [0,1].
+        let w_extreme = witness(10_000, 1, 0, 1.0);
+        let (score, _) = compute_risk_score(1.0, Some(&w_extreme), 1.0);
+        assert!(score >= 0.0 && score <= 1.0, "clamped [0,1], got {score}");
+
+        // Out-of-range θ/confidence girdileri clamp edilir → total yine [0,1].
+        let (score2, _) = compute_risk_score(5.0, None, 2.0);
+        assert!(score2 >= 0.0 && score2 <= 1.0, "input clamp works");
+    }
+
+    #[test]
+    fn risk_weights_sum_to_one() {
+        // Ağırlıklar 1.0 toplam — composite anlamlı (her bileşen eşit ağırlık değil).
+        let total = risk_weights::VISION
+            + risk_weights::VOLATILITY
+            + risk_weights::RECENCY
+            + risk_weights::SOLO
+            + risk_weights::SPECULATIVE;
+        assert!((total - 1.0).abs() < 1e-9, "weights sum = 1.0, got {total}");
     }
 }

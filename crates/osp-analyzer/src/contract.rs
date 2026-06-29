@@ -14,6 +14,10 @@ use osp_core::space::{NodeId, Space};
 // Re-export: MetricValue/MetricSource/MetricValueError canonical kaynak osp_core::coords.
 // Downstream kod `crate::contract::MetricValue` path'inde çalışmaya devam eder (backward compat).
 pub use osp_core::coords::{MetricSource, MetricValue, MetricValueError};
+// Re-export: NodeWitness canonical kaynak osp_core::space (Node/Edge ile aynı yer).
+// `osp-analyzer::witness::extract_witness` bu tipi populate eder — üretici değil,
+// sahibi osp-core. Dependency yönü core←analyzer.
+pub use osp_core::space::NodeWitness;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SemanticCoverage — SCIP index quality
@@ -138,6 +142,10 @@ pub struct AnalysisResult {
     /// Node ID → SCIP semantic özeti (class/method/field sayıları).
     /// SCIP yoksa boş → inspector "no SCIP data" gösterir.
     pub node_semantics: HashMap<NodeId, NodeSemanticSummary>,
+    /// Node ID → git history witness (commits_touching, distinct_authors, churn,
+    /// ownership_concentration, last_modified). `extract_witness` tek `git log`
+    /// pas'ı ile doldurur. `.git` yoksa boş → inspector "no witness data".
+    pub node_witnesses: HashMap<NodeId, NodeWitness>,
     /// Repo-level metrikler (A, D).
     pub repo_metrics: RepoMetrics,
     /// SCIP index kalitesi (coverage, stale).

@@ -384,6 +384,60 @@ pub struct Edge {
 /// `gravity` değerini düşürür → negatif-uzay sinyali.
 pub type GravityVector = Vec<f64>;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// NodeWitness — per-node git history evidence (§3.2 composite risk girdisi)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Bir node'un (source file) git history'sinden çıkarılan "battle-tested vs
+/// speculative" kanıtı. Repo-level `WitnessSet`'in (claim/PR onayı) aksine
+/// node-level'dır — her dosyanın tarihsel stabilitesini ölçer.
+///
+/// `osp-analyzer::witness::extract_witness` tek bir `git log --numstat` pas'ı
+/// ile tüm repo history'yi tarayıp per-dosya aggregate eder; bu struct o
+/// aggregate'in sonucudur. `osp_core::vision::compute_derived` bu alanları
+/// composite `risk_score` (§3.2) için girdi olarak kullanır.
+///
+/// **Nullabilite:** `repo_has_git=false` (SCIP yok gibi) durumunda `Space`'de
+/// NodeWitness bulunmaz → `compute_derived` `None` alır → risk neutral (0.5).
+/// Bu "ölçülmemiş" durumu epistemolojik olarak `MetricSource::Placeholder`'a
+/// paraleldir: "bilmiyoruz" sessiz varsayım değil.
+///
+/// **Sahiplik:** `osp-core`'da tanımlı (Node/Edge ile aynı yer) çünkü composite
+/// risk hesabı `vision.rs`'te (core). `osp-analyzer` bu tipleri populate eden
+/// üreticidir — dependency yönü core←analyzer, analyzer→core değil.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct NodeWitness {
+    /// Dosyayı değiştiren distinct commit sayısı (volatility sinyali).
+    pub commits_touching: usize,
+    /// Dosyaya dokunan distinct yazar sayısı (knowledge distribution).
+    pub distinct_authors: usize,
+    /// HEAD commit'ine göre son değişiklikten geçen gün sayısı
+    /// (recent_volatility — yakın zamanda değişen = daha riskli).
+    pub last_modified_days_ago: u32,
+    /// Toplam eklenen+silinen satır (churn — tüm history).
+    pub churn: u64,
+    /// En aktif yazarın commit payı ∈ [0,1]. `1.0` = solo authorship
+    /// (bus-factor riski), düşük = shared ownership. `commits_touching == 0`
+    /// → `0.0` (geçerli değil).
+    pub ownership_concentration: f64,
+}
+
+impl NodeWitness {
+    /// Risk-neutral witness — ölçülmemiş/git-yok durumu için "bilmiyoruz"
+    /// epistemolojik durumu. `compute_derived` bunu `None` ile aynı değer
+    /// üretecek şekilde tasarlandı, ama caller `Some(neutral)` tercih ederse
+    /// explicit.
+    pub fn neutral() -> Self {
+        Self {
+            commits_touching: 0,
+            distinct_authors: 0,
+            last_modified_days_ago: 0,
+            churn: 0,
+            ownership_concentration: 0.0,
+        }
+    }
+}
+
 /// Zaman katmanı (OSP-formalism.md §3.1).
 ///
 /// OSP'de zaman kronolojik sayaç değil **epistemolojik durum**'dur.
