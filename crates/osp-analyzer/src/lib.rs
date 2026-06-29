@@ -13,6 +13,7 @@ pub mod contract;
 pub mod language;
 pub mod pipeline;
 pub mod scip;
+pub mod witness;
 
 pub use contract::AnalysisResult;
 pub use pipeline::analyze_repo;

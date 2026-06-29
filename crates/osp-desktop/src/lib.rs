@@ -58,6 +58,23 @@ pub struct NodeJson {
     /// SCIP semantic: en yüksek LCOM4 component sayısı (en düşük cohesion'lı class).
     #[serde(default)]
     pub scip_max_lcom4: u32,
+    // --- Node-level witness (git history evidence, §3.2) ---
+    // Tümü `#[serde(default)]` — git yoksa veya eski snapshot'ta yoksa None/0.
+    /// Dosyayı değiştiren distinct commit sayısı (volatility). None = git yok.
+    #[serde(default)]
+    pub witness_commits: Option<usize>,
+    /// Dosyaya dokunan distinct yazar sayısı.
+    #[serde(default)]
+    pub witness_authors: Option<usize>,
+    /// HEAD'e göre son değişiklikten geçen gün (recent_volatility).
+    #[serde(default)]
+    pub witness_last_modified_days: Option<u32>,
+    /// Toplam added+deleted lines (churn).
+    #[serde(default)]
+    pub witness_churn: Option<u64>,
+    /// En aktif yazarın payı ∈ [0,1] (1=solo, düşük=shared).
+    #[serde(default)]
+    pub witness_ownership: Option<f64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -133,6 +150,7 @@ pub fn cmd_analyze_repo(
         .map(|n| {
             let metrics = result.module_metrics.get(&n.id);
             let sem = result.node_semantics.get(&n.id);
+            let wit = result.node_witnesses.get(&n.id);
             // Cohesion: node.cohesion (SCIP direkt) veya module_metrics'ten.
             // Source/confidence module_metrics'ten gelir (node.cohesion sadece değer taşır).
             let (cohesion_val, cohesion_src, cohesion_conf) = if let Some(m) = metrics {
@@ -160,6 +178,11 @@ pub fn cmd_analyze_repo(
                 scip_method_count: sem.map(|s| s.method_count).unwrap_or(0),
                 scip_field_count: sem.map(|s| s.field_count).unwrap_or(0),
                 scip_max_lcom4: sem.map(|s| s.max_lcom4).unwrap_or(0),
+                witness_commits: wit.map(|w| w.commits_touching),
+                witness_authors: wit.map(|w| w.distinct_authors),
+                witness_last_modified_days: wit.map(|w| w.last_modified_days_ago),
+                witness_churn: wit.map(|w| w.churn),
+                witness_ownership: wit.map(|w| w.ownership_concentration),
             }
         })
         .collect();
@@ -793,6 +816,11 @@ mod tests {
             scip_method_count: 12,
             scip_field_count: 8,
             scip_max_lcom4: 2,
+            witness_commits: Some(15),
+            witness_authors: Some(4),
+            witness_last_modified_days: Some(12),
+            witness_churn: Some(340),
+            witness_ownership: Some(0.4),
         };
         let json = serde_json::to_string(&node).expect("serialize");
         assert!(
