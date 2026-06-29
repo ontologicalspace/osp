@@ -242,7 +242,11 @@ impl VisionConfig {
     /// target 0.50 olmamalı" tespitini adresler.
     ///
     /// Default'lar mimari normlardan türetilmiştir:
-    /// - TypeSurface (.d.ts): coupling düşük (declaration = runtime deps yok)
+    /// - TypeSurface (.d.ts): coupling düşük-orta. Kalibrasyon (svelte diagnostic):
+    ///   0.05 → 0.20. Sebep: analyzer henüz `import type` (type-only) ayrımı yapmıyor,
+    ///   bu yüzden .d.ts dosyalarının type-only import'ları da coupling'e giriyor.
+    ///   Gerçek runtime coupling düşük olsa da ölçülen 0.20 civarı. 0.20 target'ı
+    ///   bu sınırlamayı kabul eder (type-only ayrımı yapıldığında tekrar düşürülebilir).
     /// - Core: instability düşük (stabil foundation), cohesion yüksek
     /// - Adapter: instability yüksek olabilir (integration boundary)
     /// - Utility: coupling düşük (leaf helper)
@@ -254,7 +258,7 @@ impl VisionConfig {
             x: Some(x), y: Some(y), z: Some(z),
         };
         match role {
-            R::TypeSurface => Some(ovr(0.05, 0.80, 0.50)), // coupling relaxed
+            R::TypeSurface => Some(ovr(0.20, 0.80, 0.50)), // coupling 0.05→0.20 (type-import kalibrasyon)
             R::Core => Some(ovr(0.60, 0.75, 0.20)),        // instability low (stabil)
             R::Adapter => Some(ovr(0.80, 0.50, 0.80)),     // instability tolerated
             R::Utility => Some(ovr(0.20, 0.60, 0.50)),     // coupling low

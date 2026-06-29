@@ -24,7 +24,7 @@ use osp_core::space::NodeRole;
 /// Backend builtin_role_override mirror (vision_config.rs ile birebir aynı).
 fn builtin_role_vision(role: NodeRole) -> Option<(f64, f64, f64)> {
     match role {
-        NodeRole::TypeSurface => Some((0.05, 0.80, 0.50)),
+        NodeRole::TypeSurface => Some((0.20, 0.80, 0.50)), // 0.05→0.20 type-import kalibrasyon
         NodeRole::Core => Some((0.60, 0.75, 0.20)),
         NodeRole::Adapter => Some((0.80, 0.50, 0.80)),
         NodeRole::Utility => Some((0.20, 0.60, 0.50)),
@@ -97,17 +97,34 @@ fn main() -> anyhow::Result<()> {
         ("instability", vec![]),
     ]);
     let mut typesurface_rejects: Vec<(u64, String, f64, f64, f64, f64)> = vec![];
+    // Calibration teşhisi: Adapter reject örnekleri + ilk 5 node'un RAW değerleri
+    let mut adapter_rejects: Vec<(u64, String, f64, f64, f64, f64)> = vec![];
+    let mut raw_samples: Vec<(u64, String, f64, Option<f64>, f64)> = vec![];
+    // Calibration teşhisi (#1): per-role gerçek eksen dağılımı (mean) + θ distribution.
+    // "0 pass" kök nedenini ayırmak için: vision override'lar mı yanlış, yoksa θ_bound mu
+    // çok sert? Per-role mean ile builtin override karşılaştır → gap göster.
+    let mut role_axis_values: HashMap<NodeRole, Vec<(f64, f64, f64)>> = HashMap::new();
+    // θ distribution — percentil/treshold'a kaç node düşüyor?
+    let mut all_thetas: Vec<f64> = vec![];
 
     for (id, node) in &result.space.nodes {
         let role = node.role;
         let (rvx, rvy, rvz) = builtin_role_vision(role).unwrap_or((gx, gy, gz));
-        let coupling = node.position.raw.x;
+        // DÜZELTME: coupling/instability node.position.raw'da DEĞİL, module_metrics'te.
+        // Backend (desktop lib.rs) ve frontend doğru yerden okuyor; bu example önce
+        // yanlış yerden (position.raw.x, hep 0.00) okuyordu → sahte "0 pass" bulgusu.
+        let metrics = result.module_metrics.get(id);
+        let coupling = metrics.map(|m| m.coupling.value).unwrap_or(0.0);
+        let instability = metrics.map(|m| m.instability.value).unwrap_or(0.0);
         let cohesion = node.cohesion.unwrap_or(0.5);
-        let instability = node.position.raw.z;
         let dx = coupling - rvx;
         let dy = cohesion - rvy;
         let dz = instability - rvz;
         let theta = (dx * dx + dy * dy + dz * dz).sqrt() / 3.0_f64.sqrt();
+
+        // Per-role gerçek değerleri topla (calibration için)
+        role_axis_values.entry(role).or_default().push((coupling, cohesion, instability));
+        all_thetas.push(theta);
 
         // cohesion placeholder → inconclusive (frontend ile aynı)
         let inconclusive = node.cohesion.is_none();
@@ -133,6 +150,15 @@ fn main() -> anyhow::Result<()> {
                 let path = result.node_paths.get(id).cloned().unwrap_or_default();
                 typesurface_rejects.push((*id, path, theta, dx, dy, dz));
             }
+            if role == NodeRole::Adapter {
+                let path = result.node_paths.get(id).cloned().unwrap_or_default();
+                adapter_rejects.push((*id, path, theta, dx, dy, dz));
+            }
+        }
+        // İlk 5 node'un RAW değerleri — metrikler gerçekten üretiliyor mu?
+        if raw_samples.len() < 5 {
+            let path = result.node_paths.get(id).cloned().unwrap_or_default();
+            raw_samples.push((*id, path, coupling, node.cohesion, instability));
         }
     }
 
@@ -202,6 +228,68 @@ fn main() -> anyhow::Result<()> {
         if typesurface_rejects.len() > 15 {
             println!("    ... ({} more)", typesurface_rejects.len() - 15);
         }
+    }
+
+    // ── RAW metric dump: metrikler gerçekten üretiliyor mu? ────────────────
+    // Calibration'dan ÖNCE bu kontrol şart — eğer coupling/instability hep 0.00 ise
+    // vision calibration değil, analyzer pipeline hatası söz konusu.
+    println!("\n── RAW metric samples (first 5 nodes) ──");
+    println!("  (eğer coupling/instability hep 0.00 ise analyzer metrik üretmiyor demektir)");
+    for (id, path, coupling, cohesion, instability) in &raw_samples {
+        let coh_str = match cohesion {
+            Some(c) => format!("{:.3}", c),
+            None => "None (placeholder→0.5)".to_string(),
+        };
+        println!("  Node {:<4} coupling={:.2} cohesion={} instability={:.2}  {}", id, coupling, coh_str, instability, path);
+    }
+
+    // ── Calibration teşhisi (#1): "0 pass" kök nedeni ──────────────────────
+    // Per-role GERÇEK eksen dağılımı (mean) vs builtin override target.
+    // Gap gösterir: override ile gerçek değer ne kadar uyuşuyor?
+    println!("\n── #1 Calibration: per-role real distribution vs builtin target ──");
+    println!("  (gap = real mean − builtin target; |gap| > 0.15 → override yanlış kalibre)");
+    for role in roles {
+        let values = match role_axis_values.get(&role) {
+            Some(v) if !v.is_empty() => v,
+            _ => continue,
+        };
+        let n = values.len();
+        let mean_x: f64 = values.iter().map(|(x, _, _)| *x).sum::<f64>() / n as f64;
+        let mean_y: f64 = values.iter().map(|(_, y, _)| *y).sum::<f64>() / n as f64;
+        let mean_z: f64 = values.iter().map(|(_, _, z)| *z).sum::<f64>() / n as f64;
+        let (tx, ty, tz) = builtin_role_vision(role).unwrap_or((gx, gy, gz));
+        let gap_x = mean_x - tx;
+        let gap_y = mean_y - ty;
+        let gap_z = mean_z - tz;
+        let mark = |g: f64| if g.abs() > 0.15 { "⚠" } else { " " };
+        println!(
+            "  {:<12} n={:>4}  real x={:.2} y={:.2} z={:.2}  target x={:.2} y={:.2} z={:.2}  gap {m1}Δx={:+.2} {m2}Δy={:+.2} {m3}Δz={:+.2}",
+            format!("{:?}", role), n, mean_x, mean_y, mean_z, tx, ty, tz,
+            gap_x, gap_y, gap_z,
+            m1 = mark(gap_x), m2 = mark(gap_y), m3 = mark(gap_z),
+        );
+    }
+
+    // θ distribution — kaç node hangi eşiğe düşer?
+    println!("\n── #1 Calibration: θ distribution (how many nodes pass at each bound) ──");
+    let mut sorted = all_thetas.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    for bound in [0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.50, 0.60] {
+        let pass_count = sorted.iter().filter(|&&t| t <= bound).count();
+        let pct = pct(pass_count, total);
+        let bar = "█".repeat((pct / 2.0) as usize);
+        let marker = if (bound - theta_bound).abs() < 1e-9 { "  ← current θ_bound" } else { "" };
+        println!("  θ ≤ {:.2}: {:>5} / {} ({:>5}%) {}{}", bound, pass_count, total, pct, bar, marker);
+    }
+    // Percentil tabanlı öneri: eğer θ_bound=0.30 → %0 pass ise, %50'yi yakalayan
+    // θ yaklaşık nedir? (median θ). Bu, kalibre edilmiş eşiğin referansı.
+    if !sorted.is_empty() {
+        let median = sorted[sorted.len() / 2];
+        let p25 = sorted[sorted.len() / 4];
+        let p75 = sorted[3 * sorted.len() / 4];
+        println!("\n  θ percentiles: p25={:.3}  median(p50)={:.3}  p75={:.3}", p25, median, p75);
+        println!("  → mevcut θ_bound=0.30 iken {} pass.", sorted.iter().filter(|&&t| t <= 0.30).count());
+        println!("    median θ={:.3}, yani node'ların yarısı bu değerden düşük. Bu skala referans.", median);
     }
 
     Ok(())
