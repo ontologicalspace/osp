@@ -138,16 +138,22 @@ pub struct Task {
 
 /// Multi-axis predicate set (review 2 — F5 axis oscillation'ı doğal çözer).
 /// Tek predicate yerine Vec + birleştirme modu.
+/// review v4 #4 — Weighted duplication temizlendi: tek predicate listesi + weight Option.
 pub struct PredicateSet {
     pub mode: PredicateMode,               // All (AND) | Any (OR) | Weighted (loss'a katkı)
-    pub predicates: Vec<MetricPredicate>,
+    pub predicates: Vec<WeightedPredicate>, // tek liste (weight All/Any'de None)
     pub preferred_vector: Option<RawPosition>, // navigasyon merkezi (debug, distance)
+}
+
+pub struct WeightedPredicate {
+    pub predicate: MetricPredicate,
+    pub weight: Option<f64>,               // None = All/Any modda; Some(w) = Weighted modda
 }
 
 pub enum PredicateMode {
     All,      // tüm predicate'lar satisfied olmalı (AND) — default
     Any,      // en az biri (OR)
-    Weighted(Vec<(MetricPredicate, f64)>), // loss function'a katkı (F5 axis oscillation)
+    Weighted, // loss function: weight'lerle (F5 axis oscillation)
 }
 
 pub enum TaskStatus { Pending, Assigned, InProgress, Completed, Blocked }
