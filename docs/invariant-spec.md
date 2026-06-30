@@ -15,8 +15,19 @@
 
 ## Bölüm A — Mevcut 15 Invariant (Paper 1, statik uzay)
 
-Bu invariant'lar zaten implemente edildi, type-level enforced, test edildi.
+Bu invariant'lar zaten implemente edildi, type-level enforced, test edildi
+(review v3 #5: **status her birinde belirtilmedi** — çoğu `implemented/tested`, ama bazıları
+stub, örn. INV #5 Lazy diffusion `stub`, INV #6 admin override `implemented`).
 Aşama A kodlaması bunları **bozmamalı** — her yeni tip bu listeye uyum kontrolünden geçer.
+
+**Status gösterimi (review v3 #5):** Bölüm A'da her invariant için ayrı Status satırı
+eklenmedi (15 invariant, çoğu implemented/tested zaten paper §6.3 ile doğrulandı). Aşağıda
+sadece **stub/planned** olanlar işaretlenir:
+- INV #5 Lazy diffusion → **stub** (Faz 6+)
+- INV #11 LLM stateless → **implemented/tested** (osp-llm-runtime, 9 test)
+- Diğerleri INV #1-4, #6-10, #12-15 → **implemented/tested** (osp-core, 136+ test)
+
+Bölüm B'deki INV-T1..T8 için **her birinde ayrı `Status:` satırı** var (Aşama A'da implement).
 
 ### INV #1 — Author-witness rejection
 **Tanım:** Bir Claim'in yazarı, kendi claim'inin şahidi (approver) olamaz.
@@ -117,60 +128,118 @@ Dairesellik yok. Agent pozisyon declare edemez — engine compute eder.
 Bu invariant'lar Aşama A'da implement edilecek. INV #1..#15 ile **çelişmez**,
 onların üzerine inşa edilir. Her biri yapısal (type-level) garanti ister.
 
-### INV-T1 — Predicate epistemolojisi ( Hibrit modelin kalbi)
-**Tanım:** Task, agent'a **predicate** olarak verilir. Koordinat hedefi
-(`Milestone.target_region.preferred_vector`, `InternalTaskPlan.milestone_target_vector`)
-agent'a serialize edilmez. Sadece `AgentTaskView` (koordinatsız) agent'a gider.
-**Yapısal garanti:** `AgentTaskView` serde struct'ında koordinat alanı YOK.
-`InternalTaskPlan` ve `AgentTaskView` ayrık tipler; dönüşüm tek yönlü (engine→agent).
-**Test:** `agent_task_view_has_no_coordinate_fields` — serde çıktısında "vector"/"target_raw"
-string geçmemeli.
+### INV-T1 — Predicate epistemolojisi (Hibrit modelin kalbi)
+**Status:** planned (Aşama A)
+**Tanım:** Task, agent'a **predicate** olarak verilir. **Hedef koordinatı** (target coordinate)
+agent'a serialize edilmez: `TargetRegion.preferred_vector`, `InternalTaskPlan.milestone_target_vector`,
+`Milestone.target_region`. **Mevcut engine-measured koordinat** (`current_measurement`) ise
+görülebilir — agent mevcut durumu bilmeli (nerede olduğunu), ama hedefi değil.
+**Yapısal garanti:** `AgentTaskView` serde struct'ında **target coordinate alanı YOK**
+(`current_measurement: RawPosition` var — bu mevcut durum, serbest). `InternalTaskPlan` ve
+`AgentTaskView` ayrık tipler; dönüşüm tek yönlü (engine→agent).
+**Test:** `agent_task_view_has_no_target_coordinate` — serde çıktısında target sızıntı
+kontrolü (spesifik alan adları, genel "coordinate"/"vector" değil):
+```rust
+assert!(!json.contains("target_vector"));
+assert!(!json.contains("preferred_vector"));
+assert!(!json.contains("milestone_target_vector"));
+assert!(!json.contains("target_raw"));
+assert!(!json.contains("target_region"));
+// current_measurement SERBEST — mevcut engine-measured durum, hedef değil
+```
 **İhlal örneği:** Agent "hedef coupling 0.55" koordinatını görür → "AI söylediği için
-doğru" — INV #4 (engine ölçer) erozyona uğrar.
-**Koruma mekanizması:** `serialize_agent_view()` fonksiyonu — sadece AgentTaskView'ı
-serialize eder, InternalTaskPlan'ı reddeder (compile-time: farklı tip).
+doğru" — INV #4 (engine ölçer) erozyona uğrar. **Dikkat:** `current_measurement` sızması
+ihlal DEĞİL — agent mevcut konumunu bilmeli.
 
 ### INV-T2 — Operator tanımlar hedef (Genesis)
+**Status:** planned (Aşama A)
 **Tanım:** `Trajectory` ve `Milestone.target_region` trusted operator tarafından
 tanımlanır (INV #13, #15 ile uyumlu). Agent hedef belirlemez; sadece oraya giden
 structural change (DeltaProposal) üretir.
-**Yapısal garanti:** `Trajectory::new()` constructor operator PermissionMask gerektirir.
-**Test:** `trajectory_requires_operator_permission` — agent PermissionMask ile
-Trajectory::new() çağırırsa compile/runtime reject.
+**Yapısal garanti:** `OperatorCapability` tipi — private constructor (`_private: ()`),
+sadece trusted boundary'de (engine bootstrap / God Mode API) üretilebilir. PermissionMask
+runtime value (agent üretebilir) YERİNE capability tipi compile-time korur:
+```rust
+pub struct OperatorCapability { _private: () }  // agent tarafında üretilemez
+impl Trajectory {
+    pub fn new(cap: &OperatorCapability, region: TargetRegion) -> Self { ... }
+}
+```
+**Test:** `trajectory_requires_operator_capability` — agent kodu `OperatorCapability`
+üretemez (private field) → compile error; `Trajectory::new()` capability olmadan çağrılamaz.
 **İhlal örneği:** Agent PRD okuyup kendi Trajectory'sini yaratır → halüsinasyon kaskadı
 (review 3 — Seçenek B reddedildi).
-**Koruma mekanizması:** Seçenek A (insan mimar / God Mode) — kodlamada bu.
+**Koruma mekanizması:** Seçenek A (insan mimar / God Mode) — capability sadece trusted API'den.
 
 ### INV-T3 — Engine ölçer (korunmuş, INV #4'ün dinamik uzantısı)
+**Status:** planned (Aşama A)
 **Tanım:** Task predicate'i **engine-measured** değer üzerinde değerlendirilir
 (`claim.computed_raw`). Agent ölçmez; engine, DeltaProposal'ı apply_delta ile
 uygulayıp re-analyze eder, P_raw'ı ölçer.
-**Yapısal garanti:** `MetricPredicate::evaluate(raw: &RawPosition)` — input engine'dan,
-agent değiştiremez. Predicate `Claim.computed_raw`'ı okur, agent'ın PositionHint'ini değil.
+**Yapısal garanti:** `MetricPredicate::evaluate(pos: &ProvenancedRawPosition)` — input
+engine'dan (ProvenancedRawPosition, INV-T4), agent değiştiremez. Predicate
+`Claim.computed_raw`'ı okur, agent'ın PositionHint'ini değil.
 **Test:** `predicate_uses_computed_raw_not_hint` — PositionHint ile predicate geçse bile
 computed_raw ile fail etmeli.
 **İhlal örneği:** Agent "coupling 0.4 oldu" der, predicate bunu kabul eder → INV #4 ihlali.
 **Koruma mekanizması:** `check_claim_predicate(claim, task)` — claim.computed_raw zorunlu.
 
-### INV-T4 — Predicate provenance
+### INV-T4 — Predicate provenance (RawPosition provenance taşımalı)
+**Status:** planned (Aşama A)
 **Tanım:** MetricPredicate `required_source` ile "measured/scip" zorunlu kılabilir.
 Placeholder/heuristic kaynaklı ölçümlerle task kapatılamaz (epistemolojik bütünlük).
-**Yapısal garanti:** `MetricValue.source` enum; predicate evaluate source'u kontrol eder.
-**Test:** `placeholder_metric_cannot_close_task` — source=Placeholder ile predicate satisfied
-olsa bile task Done olmaz.
+**Kritik (review v3):** Çıplak `RawPosition` (f64) provenance taşıyamaz. INV-T4'ün
+type-level enforce edilmesi için **her axis'in source'unu taşıyan** ölçüm tipi gerekir.
+**Yapısal garanti:** `ProvenancedRawPosition` — her axis için `AxisMetric { value, source }`:
+```rust
+pub struct AxisMetric { pub value: f64, pub source: MetricSource }  // TreeSitter/Scip/Placeholder/Heuristic
+pub struct ProvenancedRawPosition {
+    pub coupling: AxisMetric, pub cohesion: AxisMetric, pub instability: AxisMetric,
+    pub entropy: AxisMetric, pub witness_depth: AxisMetric,
+}
+// predicate evaluate: required_source ile karşılaştır
+fn evaluate(&self, pos: &ProvenancedRawPosition) -> PredicateResult {
+    let m = pos.axis(self.metric);  // AxisMetric (value + source)
+    if self.required_source.map_or(false, |req| m.source != req) {
+        return PredicateResult::SourceInsufficient;  // placeholder ile task kapatılamaz
+    }
+    self.op.compare(m.value, self.threshold) ? ...
+}
+```
+**Test:** `placeholder_metric_cannot_close_task` — coupling.source=Placeholder ile predicate
+satisfied olsa bile `SourceInsufficient` → task Done olmaz.
 **İhlal örneği:** "Coupling ölçülmedi (placeholder 0.5) ama 0.55'in altında" → task kapanır →
-ölçülmemiş başarı iddiası.
+ölçülmemiş başarı iddiası. ProvenancedRawPosition ile source type-level, runtime check değil.
 
 ### INV-T5 — Task ≠ Claim
+**Status:** planned (Aşama A)
 **Tanım:** Task bir **şart seti** (PredicateSet), Claim bir **iş** (structural delta).
 Bir task birden fazla claim/attempt gerektirebilir (TaskAttempt); bir claim bir task'a
-hizmet eder (Claim.task_id). Task multi-axis predicate taşır (PredicateSet — review v2 #4).
+hizmet eder (Claim.task_id). Task multi-axis predicate taşır (PredicateSet — review v2 #4,
+tanım aşağıda).
 **Yapısal garanti:** `Claim.task_id: TaskId` (required); `Task.target_predicate_set: PredicateSet`;
 `TaskAttempt.outcome: AttemptOutcome` (zengin struct — review v2 #5).
 **Test:** `one_task_many_attempts` — 3 attempt senaryosu, hepsi aynı task_id, farklı outcome.
 **İhlal örneği:** Task = Claim → bir reddedilen claim task'ı öldürür → katı sistem.
 
+**PredicateSet tanımı (review 2 — spec'de eksikti):**
+```rust
+/// Multi-axis predicate set (roadmap §4.3). Tek MetricPredicate yerine Vec + mode.
+/// F5 axis oscillation'ı doğal çözer (multi-axis loss).
+pub struct PredicateSet {
+    pub mode: PredicateMode,               // All (AND) | Any (OR) | Weighted (loss katkı)
+    pub predicates: Vec<MetricPredicate>,
+    pub preferred_vector: Option<RawPosition>, // navigasyon merkezi (debug, distance)
+}
+pub enum PredicateMode {
+    All,                                    // tüm predicate'lar satisfied olmalı (default)
+    Any,                                    // en az biri
+    Weighted(Vec<(MetricPredicate, f64)>),  // loss function'a katkı (F5)
+}
+```
+
 ### INV-T6 — Failure ≠ regression (review 1 + review v2 güçlendirme)
+**Status:** planned (Aşama B/B2)
 **Tanım:** Predicate failure negative progress *gerektirmez*. Bir DeltaProposal
 predicate'i sağlamasa bile milestone'a yaklaşmış olabilir (loss azaldı). OSP üç şeyi
 ayırt eder: (1) **completion** (predicate satisfied), (2) **mutation decision**
@@ -182,17 +251,19 @@ bounded progress checkpoint olabilir.
 - `MutationDecision` enum — Reject/AcceptAsProgress/AcceptAsCompleted/RequireOperatorApproval.
 - `TaskPolicy.predicate_failure_policy` — StrictReject/AcceptImprovement/OperatorApproval.
 - Loss function quantitative: `loss_after < loss_before − min_delta AND max_axis_regression respected`.
+- **CommitLane** (INV-T8 ile bağlantılı): AcceptAsProgress → sadece TrajectoryCheckpoint lane.
 **Test:** `improved_accepted_as_progress_under_policy` — 0.82→0.71 (target 0.55), policy
 AcceptImprovement → AcceptAsProgress (checkpoint, task açık). Same with StrictReject →
 Reject (record improved).
 **İhlal örneği:** "coupling ↓ ama instability +0.35" → max_axis_regression aşıldı →
 Reject (axis oscillation tespit, F5). Veya progress checkpoint main branch'a merge
-edilir → INV-T6 ihlali (progress ≠ merge).
+edilir → INV-T8 ihlali (progress ≠ merge).
 **Prensip cümlesi:** "Predicate failure never completes a task, but under a task-specific
 mutation policy it may be accepted as a bounded progress checkpoint if engine-measured
 trajectory loss decreases and no hard invariant is violated."
 
 ### INV-T7 — Maneuver limit (review 3)
+**Status:** planned (Aşama B2)
 **Tanım:** Bir Task için ardışık N (default 5, operator-configurable) reddedilen attempt
 sonra sistem **Trajectory Deviation Alert** üretir ve operatöre (God Mode) kontrol devreder.
 Sonsuz context-loop ve token patlaması önlenir.
@@ -201,6 +272,34 @@ Sonsuz context-loop ve token patlaması önlenir.
 **Test:** `maneuver_limit_triggers_alert` — 5 reject sonra alert, 6. attempt blocked.
 **İhlal örneği:** Agent 50 kez dener, token $50 harcar, hiç ilerlemez → kaynak israfı.
 **Koruma mekanizması:** N aşıldığında task `Blocked` → operator replan veya N'i artır.
+
+### INV-T8 — Progress checkpoint isolation (review v3 — INV-T6'dan ayrı)
+**Status:** planned (Aşama B)
+**Tanım:** `AcceptAsProgress` olan mutation task'ı **tamamlamaz** ve **mainline'a doğrudan
+promote edilemez**. Sadece `TrajectoryCheckpoint` (veya `Sandbox`) commit lane içinde kalır.
+Mainline'a sadece `AcceptAsCompleted` (predicate satisfied) promote olabilir. Bu OSP'nin
+güven modelinin kalbidir — progress checkpoint yanlışlıkla ana branch'e karışırsa epistemolojik
+bütünlük zedelenir.
+**Yapısal garanti:** `CommitLane` enum + lane-enforcement type:
+```rust
+pub enum CommitLane { Mainline, TrajectoryCheckpoint, Sandbox }
+// MutationDecision → lane mapping (type-level):
+impl MutationDecision {
+    fn allowed_lane(&self) -> CommitLane {
+        match self {
+            MutationDecision::AcceptAsCompleted => CommitLane::Mainline,  // promote edilebilir
+            MutationDecision::AcceptAsProgress => CommitLane::TrajectoryCheckpoint, // asla Mainline
+            MutationDecision::RequireOperatorApproval => CommitLane::Sandbox,
+            MutationDecision::Reject => CommitLane::Sandbox, // hiç uygulanmaz
+        }
+    }
+}
+// apply_delta lane parametresi zorunlu — Mainline'a AcceptAsProgress → compile/runtime reject
+```
+**Test:** `progress_checkpoint_cannot_promote_to_mainline` — AcceptAsProgress mutation
+`CommitLane::Mainline`'a apply_delta çağrısı → Err. Sadece AcceptAsCompleted Mainline'a.
+**İhlal örneği:** predicate fail, loss improved, AcceptAsProgress, yanlışlıkla main branch
+merge → OSP güven modeli çöker (progress ≠ merge, ama merge oldu).
 
 ---
 
@@ -220,8 +319,11 @@ Yeni invariant'ların mevcutlarla **çelişmediğinin** formal doğrulanması.
 | INV-T5 | yeni | — | ✅ | Task≠Claim ontolojik ayrım. |
 | INV-T6 | genişletir | INV #9 | ✅ | INV #9 evaluate pure; INV-T6 AttemptOutcome/MutationDecision pure çıktı (loss-driven). |
 | INV-T7 | yeni | INV #7 | ✅ | INV #7 admin override; INV-T7 maneuver limit → admin devralma. |
+| INV-T8 | genişletir | INV-T6 | ✅ | INV-T6 loss-driven progress; INV-T8 progress checkpoint lane izolasyonu (progress≠merge). |
 
-**Çatışma yok.** Her yeni invariant mevcutları genişletir veya bağımsız ekler.
+**Çatışma yok.** Her yeni invariant mevcutları genişletir veya bağımsız ekler. INV-T8
+INV-T6'nın "progress≠merge" yönünü ayrı invariant yapar — ikisi birlikte progress checkpoint
+güvenliğini tamamlar.
 
 ---
 
