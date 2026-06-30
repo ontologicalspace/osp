@@ -13,10 +13,18 @@ docs/paper2-notes/
   README.md                    ← bu dosya (indeks + disiplin)
   stage-A-ontology.md          — Aşama A: ontolojik kararlar, invariant ispatları
   stage-B-predicate-gate.md    — Aşama B: Q5.b deterministik reddin etkisi
-  stage-C-planner.md           — Aşama C: task dematerialization matematiği
-  stage-D-agent-loop.md        — Aşama D: token maliyeti (RQ6), task success (RQ7)
+  stage-B2-attempt-ledger.md   — Aşama B2: TaskAttempt evidence, RQ6/RQ7/RQ8 ham veri
+  stage-C-planner.md           — Aşama C: task dematerialization, axis oscillation (F5)
+  stage-D-agent-loop.md        — Aşama D: token maliyeti, task success, maneuver limit
+  stage-X-failures.md          — başarısız denemeler (review 1 — Paper 2 için değerli)
   evidence/                    — ham ölçümler (JSON), corpus sonuçları
 ```
+
+## İlişkili Formal Spec
+
+`docs/invariant-spec.md` — Aşama A kodlamadan ÖNCE INV-T1..T7 + mevcut INV #1..#15'in
+formal tanımı. Her invariant: yapısal garanti (type-level) + test + ihlal örneği.
+Review 1'in önerisi: kod yazarken epistemolojik sınırların bulanıklaşmasını önlemek.
 
 ## Not Yazma Disiplini
 
