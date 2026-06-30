@@ -285,6 +285,16 @@ impl Intent {
     pub fn time_layer(&self) -> crate::space::TimeLayer {
         self.time_layer
     }
+
+    /// Aşama C — Task'tan Intent türet. `target_raw` = `InternalTaskPlan.milestone_target_vector`
+    /// (preferred_vector). **INV-T1:** internal-only — agent'a serialize edilmez.
+    /// Predicate validation için değil, internal navigation/distance hesabı için.
+    ///
+    /// Agent hedef koordinatı görmez; sadece `AgentTaskView` (predicate + current_measurement)
+    /// alır. Bu Intent sadece engine/claim/witness içindir.
+    pub fn from_task(agent: AgentId, plan: &crate::trajectory::InternalTaskPlan) -> Self {
+        Self::new(agent, plan.milestone_target_vector)
+    }
 }
 
 /// Agent'ın ürettiği iş (PR). `t_m`'de Belief → `t_c`'de Knowledge (witness sonrası).

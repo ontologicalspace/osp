@@ -959,6 +959,319 @@ fn is_improved_loss(
         && measured.cohesion.value > 0.15
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Aşama C — Planner / Milestone Decomposition (deterministic, INV-T2)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use crate::space::NodeRole;
+
+/// Planner/operator seviyesi decomposition kısıtları. Agent bunları **değiştiremez**
+/// (INV-T2 — operator only). Decomposition policy milestone scope + loss dağılımına
+/// göre kaç task üretileceğini belirler.
+///
+/// **Prensip:** Task, bir agent'ın 1-3 attempt içinde anlamlı progress üretebileceği
+/// kadar küçük, ama mimari bağlamı kaybettirmeyecek kadar büyük olmalı.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DecompositionPolicy {
+    /// Milestone başına maksimum task sayısı (task patlaması önü).
+    pub max_tasks_per_milestone: usize,
+    /// Task başına maksimum node sayısı (geniş task önü).
+    pub max_nodes_per_task: usize,
+    /// Top-offender için loss katkısı oranı (örn 0.10 = top %10).
+    pub top_offender_ratio: f64,
+    /// Bir node'un task'a girmesi için min loss katkısı.
+    pub min_loss_contribution: f64,
+    /// Role bazlı decomposition aktif mi.
+    pub split_by_role: bool,
+    /// Axis bazlı decomposition aktif mi.
+    pub split_by_axis: bool,
+}
+
+impl Default for DecompositionPolicy {
+    fn default() -> Self {
+        Self {
+            max_tasks_per_milestone: 8,
+            max_nodes_per_task: 15,
+            top_offender_ratio: 0.10,
+            min_loss_contribution: 0.05,
+            split_by_role: true,
+            split_by_axis: false,
+        }
+    }
+}
+
+/// Decomposition stratejisi (deterministic). Planner seçer; agent görmez/yapamaz.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum DecompositionStrategy {
+    /// Scope tek node / küçük module → tek task.
+    OneTask,
+    /// Top K high-loss node → her biri ayrı task + aggregate cleanup (kalan node'lar).
+    SplitByNodeTopK(usize),
+    /// Role bazlı (Core task, Runtime task, Support task) — her role için ayrı task.
+    SplitByRole,
+    /// Axis bazlı (coupling task, cohesion task, instability task).
+    SplitByAxis,
+}
+
+/// Planner'ın ihtiyaç duyduğu measured space snapshot. **Agent'a verilmez.**
+/// Aşama C'de minimal (node id + measured position + role + loss). Aşama D'de engine'den beslenir.
+#[derive(Debug, Clone, Default)]
+pub struct DecompositionSpace {
+    pub nodes: Vec<DecompositionNode>,
+    /// preferred_vector (milestone merkezi) — loss_contribution hesabı için.
+    pub preferred_vector: RawPosition,
+}
+
+impl DecompositionSpace {
+    /// Top K high-loss node (loss_contribution'a göre descending, deterministic sort).
+    pub fn top_offenders(&self, k: usize, min_loss: f64) -> Vec<&DecompositionNode> {
+        let mut sorted: Vec<&DecompositionNode> = self
+            .nodes
+            .iter()
+            .filter(|n| n.loss_contribution >= min_loss)
+            .collect();
+        // Deterministic: loss descending, tie-break id ascending.
+        sorted.sort_by(|a, b| {
+            b.loss_contribution
+                .partial_cmp(&a.loss_contribution)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        sorted.into_iter().take(k).collect()
+    }
+
+    /// Belirli bir role'deki node'lar.
+    pub fn by_role(&self, role: NodeRole) -> Vec<&DecompositionNode> {
+        self.nodes.iter().filter(|n| n.role == role).collect()
+    }
+}
+
+/// Decomposition için tek node snapshot.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecompositionNode {
+    pub id: NodeId,
+    pub role: NodeRole,
+    pub measured: ProvenancedRawPosition,
+    /// preferred_vector'e uzaklık (trajectory_loss). Top-offender için.
+    pub loss_contribution: f64,
+}
+
+/// INV-T2 — MilestoneDecomposer. Deterministic kurallarla Milestone → Task[].
+/// `OperatorCapability` zorunlu (operator/planner only; agent decomposition yapamaz).
+pub fn decompose_milestone(
+    milestone: &Milestone,
+    space: &DecompositionSpace,
+    policy: &DecompositionPolicy,
+    strategy: &DecompositionStrategy,
+    _cap: &OperatorCapability, // INV-T2 — operator only
+) -> Vec<Task> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TASK_ID: AtomicU64 = AtomicU64::new(1);
+    let next_id = || TaskId::from(TASK_ID.fetch_add(1, Ordering::SeqCst));
+
+    let make_task = |label: String, predicate_set: PredicateSet, scope_nodes: Vec<NodeId>| {
+        // Scope'u ilk node'a bağla (multi-node scope Aşama D'de Subgraph predicate).
+        let scope = scope_nodes
+            .first()
+            .copied()
+            .map(PredicateScope::Node)
+            .unwrap_or(PredicateScope::Subgraph(scope_nodes));
+        // Predicate'ların scope'unu override et (milestone predicate'leri + task scope).
+        let mut ps = predicate_set;
+        ps.predicates = ps
+            .predicates
+            .into_iter()
+            .map(|wp| {
+                let mut p = wp.predicate;
+                p.scope = scope.clone();
+                WeightedPredicate {
+                    predicate: p,
+                    weight: wp.weight,
+                }
+            })
+            .collect();
+        Task {
+            id: next_id(),
+            milestone_id: milestone.id,
+            label,
+            target_predicate_set: ps,
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![
+                OpKind::RemoveImport,
+                OpKind::AddAbstraction,
+                OpKind::ExtractModule,
+            ],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        }
+    };
+
+    // Milestone predicate'lerini PredicateSet'e çevir (All mode, weight None).
+    let base_predicate_set = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: milestone
+            .target_region
+            .predicates
+            .iter()
+            .map(|p| WeightedPredicate {
+                predicate: p.clone(),
+                weight: None,
+            })
+            .collect(),
+        preferred_vector: milestone.target_region.preferred_vector,
+    };
+
+    match strategy {
+        DecompositionStrategy::OneTask => {
+            let all_nodes: Vec<NodeId> = space.nodes.iter().map(|n| n.id).collect();
+            vec![make_task(
+                milestone.label.clone(),
+                base_predicate_set,
+                all_nodes,
+            )]
+        }
+        DecompositionStrategy::SplitByNodeTopK(k) => {
+            let k = (*k)
+                .min(policy.max_tasks_per_milestone.saturating_sub(1))
+                .max(1);
+            let offenders = space.top_offenders(k, policy.min_loss_contribution);
+            let offender_ids: Vec<NodeId> = offenders.iter().map(|n| n.id).collect();
+            let mut tasks: Vec<Task> = offenders
+                .into_iter()
+                .map(|n| {
+                    let mut ps = base_predicate_set.clone();
+                    ps.predicates = ps
+                        .predicates
+                        .into_iter()
+                        .map(|wp| {
+                            let mut p = wp.predicate;
+                            p.scope = PredicateScope::Node(n.id);
+                            WeightedPredicate {
+                                predicate: p,
+                                weight: wp.weight,
+                            }
+                        })
+                        .collect();
+                    Task {
+                        id: next_id(),
+                        milestone_id: milestone.id,
+                        label: format!(
+                            "Reduce loss for node {} ({:.2})",
+                            n.id, n.loss_contribution
+                        ),
+                        target_predicate_set: ps,
+                        policy: TaskPolicy::default(),
+                        allowed_operations: vec![OpKind::RemoveImport, OpKind::AddAbstraction],
+                        constraints: vec![],
+                        status: TaskStatus::Pending,
+                    }
+                })
+                .collect();
+            // Aggregate cleanup task — kalan node'lar.
+            let remaining: Vec<NodeId> = space
+                .nodes
+                .iter()
+                .map(|n| n.id)
+                .filter(|id| !offender_ids.contains(id))
+                .collect();
+            if !remaining.is_empty() {
+                tasks.push(make_task(
+                    format!("Aggregate cleanup ({} remaining nodes)", remaining.len()),
+                    base_predicate_set,
+                    remaining,
+                ));
+            }
+            tasks.truncate(policy.max_tasks_per_milestone);
+            tasks
+        }
+        DecompositionStrategy::SplitByRole => {
+            use NodeRole::*;
+            let mut tasks = Vec::new();
+            for role in [Core, Runtime, Support, Adapter, Utility, TypeSurface] {
+                let nodes: Vec<&DecompositionNode> = space.by_role(role);
+                if nodes.is_empty() {
+                    continue;
+                }
+                let ids: Vec<NodeId> = nodes.iter().map(|n| n.id).collect();
+                let mut ps = base_predicate_set.clone();
+                ps.predicates = ps
+                    .predicates
+                    .into_iter()
+                    .map(|wp| {
+                        let mut p = wp.predicate;
+                        p.scope = PredicateScope::Subgraph(ids.clone());
+                        WeightedPredicate {
+                            predicate: p,
+                            weight: wp.weight,
+                        }
+                    })
+                    .collect();
+                tasks.push(Task {
+                    id: next_id(),
+                    milestone_id: milestone.id,
+                    label: format!("{role:?} role cleanup ({} nodes)", ids.len()),
+                    target_predicate_set: ps,
+                    policy: TaskPolicy::default(),
+                    allowed_operations: vec![OpKind::RemoveImport, OpKind::AddAbstraction],
+                    constraints: vec![],
+                    status: TaskStatus::Pending,
+                });
+                if tasks.len() >= policy.max_tasks_per_milestone {
+                    break;
+                }
+            }
+            tasks
+        }
+        DecompositionStrategy::SplitByAxis => {
+            // Axis bazlı: her predicate → ayrı task. coupling task, cohesion task, vb.
+            let mut tasks = Vec::new();
+            for wp in &base_predicate_set.predicates {
+                let all_nodes: Vec<NodeId> = space.nodes.iter().map(|n| n.id).collect();
+                let axis_label = format!("{:?}", wp.predicate.metric);
+                let mut ps = PredicateSet {
+                    mode: PredicateMode::All,
+                    predicates: vec![{
+                        let mut p = wp.predicate.clone();
+                        p.scope = PredicateScope::Subgraph(all_nodes.clone());
+                        WeightedPredicate {
+                            predicate: p,
+                            weight: wp.weight,
+                        }
+                    }],
+                    preferred_vector: base_predicate_set.preferred_vector,
+                };
+                let _ = &mut ps; // satisfy
+                tasks.push(Task {
+                    id: next_id(),
+                    milestone_id: milestone.id,
+                    label: format!("{axis_label} axis improvement"),
+                    target_predicate_set: ps,
+                    policy: TaskPolicy::default(),
+                    allowed_operations: vec![OpKind::RemoveImport, OpKind::AddAbstraction],
+                    constraints: vec![],
+                    status: TaskStatus::Pending,
+                });
+                if tasks.len() >= policy.max_tasks_per_milestone {
+                    break;
+                }
+            }
+            tasks
+        }
+    }
+}
+
+impl Milestone {
+    /// Milestone achieved = `TargetRegion.predicates` satisfied (engine-measured).
+    /// **Task'lar Done OLMASA bile** milestone achieved olabilir — task'lar araç,
+    /// asıl otorite engine measurement (sizin kuralınız, review v2).
+    pub fn is_achieved(&self, measured: &ProvenancedRawPosition) -> bool {
+        self.target_region
+            .predicates
+            .iter()
+            .all(|p| matches!(p.evaluate(measured), PredicateResult::Satisfied))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1493,6 +1806,304 @@ mod tests {
         assert_eq!(
             out.outcome.mutation_decision,
             MutationDecision::RequireOperatorApproval
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Aşama C — Planner / Milestone Decomposition done-criteria
+    // ─────────────────────────────────────────────────────────────────────────
+
+    use crate::space::NodeRole;
+
+    fn dec_node(id: NodeId, role: NodeRole, coupling: f64, loss: f64) -> DecompositionNode {
+        DecompositionNode {
+            id,
+            role,
+            measured: measured_pos(coupling, 0.6, 0.4),
+            loss_contribution: loss,
+        }
+    }
+
+    fn dec_space(nodes: Vec<DecompositionNode>, target_coupling: f64) -> DecompositionSpace {
+        DecompositionSpace {
+            nodes,
+            preferred_vector: RawPosition {
+                x: target_coupling,
+                y: 0.7,
+                z: 0.3,
+                w: 0.5,
+                v: 0.3,
+            },
+        }
+    }
+
+    fn coupling_milestone(id: MilestoneId, threshold: f64) -> Milestone {
+        Milestone {
+            id,
+            label: format!("Coupling ≤ {threshold}"),
+            target_region: TargetRegion {
+                predicates: vec![coupling_pred_le(threshold, Some(MetricSource::Scip))],
+                preferred_vector: Some(RawPosition {
+                    x: threshold,
+                    y: 0.7,
+                    z: 0.3,
+                    w: 0.5,
+                    v: 0.3,
+                }),
+            },
+            tasks: vec![],
+            status: MilestoneStatus::Pending,
+        }
+    }
+
+    // 1. one_task_decomposition_for_single_node_scope
+    #[test]
+    fn one_task_decomposition_for_single_node_scope() {
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        let space = dec_space(vec![dec_node(10, NodeRole::Core, 0.82, 0.3)], 0.55);
+        let policy = DecompositionPolicy::default();
+        let tasks = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::OneTask,
+            &cap,
+        );
+        assert_eq!(tasks.len(), 1, "OneTask → tek task");
+        assert_eq!(tasks[0].milestone_id, 1);
+    }
+
+    // 2. split_by_node_topk_produces_offender_tasks
+    #[test]
+    fn split_by_node_topk_produces_offender_tasks() {
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        // 5 node, farklı loss katkıları.
+        let space = dec_space(
+            vec![
+                dec_node(1, NodeRole::Core, 0.90, 0.50),
+                dec_node(2, NodeRole::Core, 0.85, 0.40),
+                dec_node(3, NodeRole::Runtime, 0.60, 0.10),
+                dec_node(4, NodeRole::Runtime, 0.55, 0.05),
+                dec_node(5, NodeRole::Support, 0.50, 0.02),
+            ],
+            0.55,
+        );
+        let policy = DecompositionPolicy::default();
+        let tasks = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::SplitByNodeTopK(2),
+            &cap,
+        );
+        // 2 offender task + 1 aggregate cleanup (3 remaining nodes) = 3 task.
+        assert!(tasks.len() >= 2, "top-k offender task + cleanup");
+        // İlk task en yüksek loss node (id 1, loss 0.50).
+        assert!(
+            tasks[0].label.contains("node 1"),
+            "highest loss first: {}",
+            tasks[0].label
+        );
+    }
+
+    // 3. split_by_role_groups_by_architectural_role
+    #[test]
+    fn split_by_role_groups_by_architectural_role() {
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        let space = dec_space(
+            vec![
+                dec_node(1, NodeRole::Core, 0.80, 0.3),
+                dec_node(2, NodeRole::Core, 0.75, 0.25),
+                dec_node(3, NodeRole::Runtime, 0.70, 0.2),
+                dec_node(4, NodeRole::Support, 0.65, 0.15),
+            ],
+            0.55,
+        );
+        let policy = DecompositionPolicy::default();
+        let tasks = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::SplitByRole,
+            &cap,
+        );
+        // 3 role var (Core, Runtime, Support) → 3 task.
+        assert_eq!(tasks.len(), 3, "3 distinct roles → 3 tasks");
+        assert!(tasks.iter().any(|t| t.label.contains("Core")));
+        assert!(tasks.iter().any(|t| t.label.contains("Runtime")));
+        assert!(tasks.iter().any(|t| t.label.contains("Support")));
+    }
+
+    // 4. max_tasks_per_milestone_enforced
+    #[test]
+    fn max_tasks_per_milestone_enforced() {
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        // 10 node, hepsi farklı role'de (SplitByRole → 6 role task).
+        let mut nodes = Vec::new();
+        for i in 1..=10 {
+            let role = match i % 3 {
+                0 => NodeRole::Core,
+                1 => NodeRole::Runtime,
+                _ => NodeRole::Support,
+            };
+            nodes.push(dec_node(i, role, 0.80, 0.1 * i as f64));
+        }
+        let space = dec_space(nodes, 0.55);
+        let mut policy = DecompositionPolicy::default();
+        policy.max_tasks_per_milestone = 2; // strict cap
+        let tasks = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::SplitByRole,
+            &cap,
+        );
+        assert!(
+            tasks.len() <= 2,
+            "max_tasks_per_milestone enforced: got {}",
+            tasks.len()
+        );
+    }
+
+    // 5. decomposer_requires_operator_capability (INV-T2 — signature)
+    #[test]
+    fn decomposer_requires_operator_capability() {
+        // decompose_milestone imzası &OperatorCapability zorunlu — agent üretemez.
+        // Bu test sadece capability ile çağrılabildiğini doğrular (compile-time invariant).
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        let space = dec_space(vec![dec_node(1, NodeRole::Core, 0.80, 0.3)], 0.55);
+        let tasks = decompose_milestone(
+            &milestone,
+            &space,
+            &DecompositionPolicy::default(),
+            &DecompositionStrategy::OneTask,
+            &cap,
+        );
+        assert!(!tasks.is_empty());
+    }
+
+    // 6. intent_from_task_uses_preferred_vector (INV-T1)
+    #[test]
+    fn intent_from_task_uses_preferred_vector() {
+        let plan = InternalTaskPlan {
+            task_id: 1,
+            milestone_target_vector: RawPosition {
+                x: 0.55,
+                y: 0.70,
+                z: 0.30,
+                w: 0.5,
+                v: 0.3,
+            },
+            task_predicate: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate: coupling_pred_le(0.55, None),
+                    weight: None,
+                }],
+                preferred_vector: Some(RawPosition {
+                    x: 0.55,
+                    y: 0.70,
+                    z: 0.30,
+                    w: 0.5,
+                    v: 0.3,
+                }),
+            },
+            tolerance: 0.02,
+        };
+        let intent = Intent::from_task(42, &plan);
+        // target_raw = milestone_target_vector (preferred_vector), INV-T1.
+        assert_eq!(intent.target_raw, plan.milestone_target_vector);
+    }
+
+    // 7. milestone_achieved_when_region_satisfied_not_all_tasks_done
+    #[test]
+    fn milestone_achieved_when_region_satisfied_not_all_tasks_done() {
+        // Sizin kuralınız: milestone achieved = TargetRegion satisfied (engine-measured),
+        // task'lar Done olmasa bile.
+        let milestone = coupling_milestone(1, 0.55);
+        // coupling 0.40 ≤ 0.55 (measured/scip) → region satisfied.
+        let measured = measured_pos(0.40, 0.7, 0.3);
+        assert!(
+            milestone.is_achieved(&measured),
+            "region satisfied → achieved"
+        );
+        // coupling 0.70 > 0.55 → region not satisfied.
+        let measured_fail = measured_pos(0.70, 0.7, 0.3);
+        assert!(
+            !milestone.is_achieved(&measured_fail),
+            "region not satisfied → not achieved"
+        );
+    }
+
+    // 8. decomposition_deterministic_same_input_same_output
+    #[test]
+    fn decomposition_deterministic_same_input_same_output() {
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        let space = dec_space(
+            vec![
+                dec_node(1, NodeRole::Core, 0.90, 0.50),
+                dec_node(2, NodeRole::Core, 0.85, 0.40),
+                dec_node(3, NodeRole::Runtime, 0.60, 0.10),
+            ],
+            0.55,
+        );
+        let policy = DecompositionPolicy::default();
+        let tasks1 = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::SplitByNodeTopK(2),
+            &cap,
+        );
+        let tasks2 = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::SplitByNodeTopK(2),
+            &cap,
+        );
+        // Aynı input → aynı task labels (id'ler atomic artar, label deterministic).
+        let labels1: Vec<String> = tasks1.iter().map(|t| t.label.clone()).collect();
+        let labels2: Vec<String> = tasks2.iter().map(|t| t.label.clone()).collect();
+        assert_eq!(
+            labels1, labels2,
+            "deterministic: same labels for same input"
+        );
+    }
+
+    // 9. aggregate_cleanup_task_for_remaining_nodes
+    #[test]
+    fn aggregate_cleanup_task_for_remaining_nodes() {
+        let cap = OperatorCapability::issue();
+        let milestone = coupling_milestone(1, 0.55);
+        let space = dec_space(
+            vec![
+                dec_node(1, NodeRole::Core, 0.90, 0.50),
+                dec_node(2, NodeRole::Core, 0.85, 0.40),
+                dec_node(3, NodeRole::Runtime, 0.60, 0.10),
+                dec_node(4, NodeRole::Support, 0.55, 0.03),
+            ],
+            0.55,
+        );
+        let policy = DecompositionPolicy::default();
+        let tasks = decompose_milestone(
+            &milestone,
+            &space,
+            &policy,
+            &DecompositionStrategy::SplitByNodeTopK(2),
+            &cap,
+        );
+        // Aggregate cleanup task var (remaining nodes 3,4).
+        assert!(
+            tasks.iter().any(|t| t.label.contains("Aggregate cleanup")),
+            "cleanup task for remaining nodes: {:?}",
+            tasks.iter().map(|t| &t.label).collect::<Vec<_>>()
         );
     }
 }
