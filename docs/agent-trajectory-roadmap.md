@@ -564,24 +564,47 @@ osp evidence export --trajectory <id> --out evidence.json
 aynı sonucu üretmeli. CI/CD'ye koyması kolay, agent çağırabilir, Paper 2 evidence üretir.
 **Efor:** M
 
-### Aşama G — osp-mcp (AI access surface, MCP second) ⬜ CLI sonrası
+### Aşama G1 — osp-mcp (AI access surface, MCP second) ✅ TAMAMLANDI (2026-06-29)
 **Hedef:** MCP server — AI agent'ların OSP çekirdeğini güvenli kullanması. INV-T1..T8 bypass edilemez.
-**Crate:** `crates/osp-mcp/` (yeni). osp-cli komutlarının MCP tool wrapper'ları.
-**Tools (ilk set, küçük):**
+**Crate:** `crates/osp-mcp/` (rmcp 0.8, tokio async, stdio transport).
+**Tools (G1 ilk set — 4 tool):**
 ```
-osp_analyze_repo           — repo → space snapshot
-osp_get_agent_task_view    — INV-T1 test: AgentTaskView (predicate, NO preferred_vector)
-osp_get_node               — node + measured position
-osp_check_predicate        — DeltaProposal → AttemptOutcome
-osp_submit_delta           — navigator attempt
-osp_get_attempt_history    — evidence ledger
-osp_get_relevant_context   — space_slice (k-hop)
+osp_analyze_workspace     — repo → space snapshot (node/edge count, coverage)
+osp_get_agent_task_view   ⭐ INV-T1 test: AgentTaskView (predicate, NO preferred_vector)
+osp_check_predicate       — mevcut position ile predicate değerlendirme
+osp_submit_delta          — DeltaProposal → engine measure → PredicateGate → outcome
 ```
 **Kritik tasarım prensibi:** `MCP is not an authority layer; MCP is an access layer over osp-core.`
 MCP tool çağrısı → osp-core API → invariant checks → deterministic result. MCP kendi başına
-karar veremez. Özellikle `osp_get_agent_task_view` INV-T1'in gerçek dünyadaki testi olur
-(hedef koordinat ASLA döndürülmez).
-**Efor:** M-L
+karar veremez. `osp_get_agent_task_view` INV-T1'in gerçek dünyadaki testi — **canlı server
+üzerinde doğrulandı**: preferred_vector / target_region / milestone_target_vector ASLA döndürülmez.
+
+**INV koruması (G1):**
+- INV-T1: AgentTaskView serde-level (preferred_vector alanı yok) + `assert_no_coordinate_leak`
+  runtime check (her agent-facing tool çıktısında forbidden token taraması).
+- INV-T2: Agent mode (default) — operator tools disabled. OperatorCapability startup'ta
+  inject edilir (`--mode operator`), request'ten ASLA.
+- INV-T3/T4: engine ölçer (compute_raw_from_delta), source provenance (MetricSource::Scip).
+- INV-T5: TaskNotFound error code (claim task-bound değilse).
+- INV-T6/T7/T8: commit_task_claim (Q5.b PredicateGate + policy).
+
+**Standart output envelope:** `osp.mcp.v1` — her tool { ok, schema_version, request_id,
+tool, result/invariants_checked/warnings } veya { ok:false, error_code, message,
+invariants_checked, recoverable }. Deterministic error codes: TARGET_COORDINATE_LEAK_BLOCKED,
+OPERATOR_CAPABILITY_REQUIRED, PLACEHOLDER_METRIC_INSUFFICIENT, MANEUVER_LIMIT_EXCEEDED,
+TASK_NOT_FOUND, WORKSPACE_NOT_REGISTERED, INVALID_DELTA_PROPOSAL.
+
+**Workspace güvenliği:** `--workspace <path>` startup'ta alınır, canonicalize + exists
+kontrolü. Agent raw path veremez (path traversal önü).
+
+**Test:** 8 unit test + 7 INV-T1 integration test (canlı server serialization'da
+forbidden token yok). Tüm workspace testleri pass.
+
+**G2 (gelecek):** Operator-only tools (trajectory_init, task_add, milestone_decompose),
+WorkspaceRegistry (multi-workspace), dry_run_delta, get_attempt_history, navigator loop
+(multi-attempt LLM), gerçek LLM entegrasyon (submit_delta → navigator.run_task).
+
+**Efor:** M (G1 tamam), G2 M-L.
 
 ### Aşama H — osp-sdk (integration, third) ⬜ MCP sonrası
 **Hedef:** TypeScript/Python/Rust bindings. CLI/MCP deneyleri bittikten sonra hangi
