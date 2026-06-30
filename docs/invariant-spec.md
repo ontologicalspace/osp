@@ -162,25 +162,35 @@ olsa bile task Done olmaz.
 ölçülmemiş başarı iddiası.
 
 ### INV-T5 — Task ≠ Claim
-**Tanım:** Task bir **şart** (predicate), Claim bir **iş** (structural delta).
+**Tanım:** Task bir **şart seti** (PredicateSet), Claim bir **iş** (structural delta).
 Bir task birden fazla claim/attempt gerektirebilir (TaskAttempt); bir claim bir task'a
-hizmet eder (Claim.task_id).
-**Yapısal garanti:** `Claim.task_id: TaskId` (opsiyonel değil, required); `Task.attempts`
-Vec<TaskAttempt>.
-**Test:** `one_task_many_attempts` — 3 attempt senaryosu, hepsi aynı task_id.
+hizmet eder (Claim.task_id). Task multi-axis predicate taşır (PredicateSet — review v2 #4).
+**Yapısal garanti:** `Claim.task_id: TaskId` (required); `Task.target_predicate_set: PredicateSet`;
+`TaskAttempt.outcome: AttemptOutcome` (zengin struct — review v2 #5).
+**Test:** `one_task_many_attempts` — 3 attempt senaryosu, hepsi aynı task_id, farklı outcome.
 **İhlal örneği:** Task = Claim → bir reddedilen claim task'ı öldürür → katı sistem.
 
-### INV-T6 — Failure ≠ regression (review 1)
+### INV-T6 — Failure ≠ regression (review 1 + review v2 güçlendirme)
 **Tanım:** Predicate failure negative progress *gerektirmez*. Bir DeltaProposal
-predicate'i sağlamasa bile milestone'a yaklaşmış olabilir
-(`PredicateGateResult::UnsatisfiedButImproved`). OSP completion (predicate satisfied)
-ile directional improvement'ı ayırır.
-**Yapısal garanti:** `PredicateGateResult` enum — 3 variant (Satisfied/Improved/Regressed);
-`distance` alanları ile quantitative.
-**Test:** `improved_not_treated_as_failure` — 0.82→0.71 (target 0.55) → Improved,
-attempt kaydedilir, task açık kalır ama progress sinyali.
-**İhlal örneği:** Her reject "başarısız" sayılır → uzun refactor task'larında agent
-ödüllendirilmez, sürekli reject → token patlaması (F6).
+predicate'i sağlamasa bile milestone'a yaklaşmış olabilir (loss azaldı). OSP üç şeyi
+ayırt eder: (1) **completion** (predicate satisfied), (2) **mutation decision**
+(policy'ye göre AcceptAsProgress/Reject/OperatorApproval), (3) **progress signal**
+(loss ↓). Predicate failure asla task'ı tamamlamaz ama task bazlı policy izin veriyorsa
+bounded progress checkpoint olabilir.
+**Yapısal garanti:**
+- `AttemptOutcome` struct — gate_decision/predicate_completion/mutation_decision/witness ayrı.
+- `MutationDecision` enum — Reject/AcceptAsProgress/AcceptAsCompleted/RequireOperatorApproval.
+- `TaskPolicy.predicate_failure_policy` — StrictReject/AcceptImprovement/OperatorApproval.
+- Loss function quantitative: `loss_after < loss_before − min_delta AND max_axis_regression respected`.
+**Test:** `improved_accepted_as_progress_under_policy` — 0.82→0.71 (target 0.55), policy
+AcceptImprovement → AcceptAsProgress (checkpoint, task açık). Same with StrictReject →
+Reject (record improved).
+**İhlal örneği:** "coupling ↓ ama instability +0.35" → max_axis_regression aşıldı →
+Reject (axis oscillation tespit, F5). Veya progress checkpoint main branch'a merge
+edilir → INV-T6 ihlali (progress ≠ merge).
+**Prensip cümlesi:** "Predicate failure never completes a task, but under a task-specific
+mutation policy it may be accepted as a bounded progress checkpoint if engine-measured
+trajectory loss decreases and no hard invariant is violated."
 
 ### INV-T7 — Maneuver limit (review 3)
 **Tanım:** Bir Task için ardışık N (default 5, operator-configurable) reddedilen attempt
@@ -208,7 +218,7 @@ Yeni invariant'ların mevcutlarla **çelişmediğinin** formal doğrulanması.
 | INV-T3 | bağımsız | INV #12 | ✅ | INV #12 Q4 syntax; INV-T3 Q5.b predicate — farklı gate'ler. |
 | INV-T4 | genişletir | INV #3 | ✅ | INV #3 tri-state; INV-T4 placeholder metric task kapatmaz. |
 | INV-T5 | yeni | — | ✅ | Task≠Claim ontolojik ayrım. |
-| INV-T6 | genişletir | INV #9 | ✅ | INV #9 evaluate pure; INV-T6 PredicateGateResult pure çıktı. |
+| INV-T6 | genişletir | INV #9 | ✅ | INV #9 evaluate pure; INV-T6 AttemptOutcome/MutationDecision pure çıktı (loss-driven). |
 | INV-T7 | yeni | INV #7 | ✅ | INV #7 admin override; INV-T7 maneuver limit → admin devralma. |
 
 **Çatışma yok.** Her yeni invariant mevcutları genişletir veya bağımsız ekler.
