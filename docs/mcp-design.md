@@ -1,8 +1,9 @@
 # OSP MCP Server — Design Document
 
-> **Durum:** v0.1 tasarım (implementasyon öncesi şema)
-> **Tarih:** 2026-06-30
-> **İlişki:** `docs/agent-trajectory-roadmap.md` §8 Aşama G (osp-mcp), `docs/invariant-spec.md`
+> **Durum:** v0.1 tasarım + G1 implementasyonu TAMAMLANDI (4 tool canlı, INV-T1 doğrulandı)
+> **Tarih:** 2026-06-29 (G1 impl), 2026-06-30 (tasarım)
+> **İlişki:** `docs/agent-trajectory-roadmap.md` §8 Aşama G1 (osp-mcp), `docs/invariant-spec.md`
+> **Kanal:** `crates/osp-mcp/` (rmcp 0.8, stdio) — README.md MCP client config içerir
 > **Kaynak:** Beyin fırtınası (arkadaş yorumu — CLI first, MCP second) + review revizyonu
 
 ---

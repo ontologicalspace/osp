@@ -13,10 +13,13 @@ docs/paper2-notes/
   README.md                    ← bu dosya (indeks + disiplin)
   stage-A-ontology.md          — Aşama A: ontolojik kararlar, invariant ispatları
   stage-B-predicate-gate.md    — Aşama B: Q5.b deterministik reddin etkisi
-  stage-B2-attempt-ledger.md   — Aşama B2: TaskAttempt evidence, RQ6/RQ7/RQ8 ham veri
   stage-C-planner.md           — Aşama C: task dematerialization, axis oscillation (F5)
-  stage-D-agent-loop.md        — Aşama D: token maliyeti, task success, maneuver limit
-  stage-X-failures.md          — başarısız denemeler (review 1 — Paper 2 için değerli)
+  stage-D-agent-loop.md        — Aşama D: mock navigator loop
+  stage-D2-real-measure.md     — Aşama D2: gerçek engine measure + commit_task_claim
+  stage-D3-real-llm.md         — Aşama D3: gerçek LLM adapter (GPT-4o-mini)
+  stage-D4-calibration.md      — Aşama D4: calibration feedback (LLM retry optimization)
+  stage-F-osp-cli.md           — Aşama F1: CLI truth surface
+  stage-G1-osp-mcp.md          — Aşama G1: MCP server (INV-T1 canlı doğrulama)
   evidence/                    — ham ölçümler (JSON), corpus sonuçları
 ```
 
@@ -42,14 +45,17 @@ Her implementasyon aşaması bitiminde o aşamanın notu yazılır. Not şunlar�
 |---|---|
 | §1 Trajectory ontolojisi | stage-A-ontology.md |
 | §2 Task dematerialization | stage-C-planner.md |
-| §3 Adaptive control loop | stage-D-agent-loop.md |
-| §4 Deterministic predicate gating | stage-B-predicate-gate.md |
-| §5 Token cost (RQ6) | stage-D-agent-loop.md + evidence/ |
+| §3 Adaptive control loop | stage-D-agent-loop.md, stage-D3-real-llm.md |
+| §4 Deterministic predicate gating | stage-B-predicate-gate.md, stage-D2-real-measure.md |
+| §5 Token cost (RQ6) | stage-D-agent-loop.md + stage-D4-calibration.md + evidence/ |
 | §6 Task success (RQ7) | stage-D-agent-loop.md + evidence/ |
+| §7 Epistemic projection (RQ5) | stage-G1-osp-mcp.md (INV-T1 canlı doğrulama) |
 
-## Mevcut Durum (2026-06-30)
+## Mevcut Durum (2026-06-29)
 
-- **Aşama A-D:** Henüz başlanmadı (roadmap review sonrası)
+- **Aşama A-G1:** TAMAMLANDI (ontoloji → predicate gate → planner → navigator → gerçek
+  measure → gerçek LLM → calibration feedback → CLI → MCP)
+- **Aşama G2:** Operator-only tools, WorkspaceRegistry, navigator loop (gelecek)
 - **3D viewer:** DURDURULDU (Aşama E için gerekli, ama agent işleri öncelik)
 - **Paper 1:** Tamamlandı (statik uzay, kanıtlanmış)
 

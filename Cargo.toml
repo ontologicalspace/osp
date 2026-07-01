@@ -7,11 +7,10 @@ members = [
     "crates/osp-llm-runtime",
     "crates/osp-desktop",
     "crates/osp-cli",
+    "crates/osp-mcp",
 ]
 
 # Gelecek Fazlar:
-#   "crates/osp-analyzer"   (Faz 3: code→space mapper, tree-sitter adapters)
-#   "crates/osp-cli"        (Faz 5: God-Mode CLI + LLM codec)
 #   "crates/osp-viz"        (Faz 6: WASM görselleştirme)
 
 [workspace.package]

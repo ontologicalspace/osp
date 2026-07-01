@@ -1,0 +1,31 @@
+[package]
+name = "osp-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ontological Space Protocol — MCP server (agent access surface, INV-T1..T8 enforced)"
+
+[[bin]]
+name = "osp-mcp"
+path = "src/main.rs"
+
+[dependencies]
+osp-core = { path = "../osp-core" }
+osp-analyzer = { path = "../osp-analyzer" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tokio.workspace = true
+thiserror = "1"
+clap = { version = "4", features = ["derive"] }
+# Resmi Rust MCP SDK (modelcontextprotocol/rust-sdk v2). stdio transport, tokio async.
+# Features: server (ServerHandler + tool_router), transport-io (stdio), macros (#[tool]).
+rmcp = { version = "0.8", features = ["server", "transport-io", "macros"] }
+# schemars 0.8 — rmcp 0.8 ile uyumlu (JsonSchema derive, tool input/output schema).
+schemars = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
