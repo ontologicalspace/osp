@@ -322,6 +322,39 @@ pub struct AgentNavigator<'a, L: LlmClient + ?Sized, R: TaskResolver> {
     pub current_measured: ProvenancedRawPosition,
     /// Q4 syntax contract (agent shell).
     pub output_contract: OutputContract,
+    /// **G2c-3b (arkadaş review 9):** Witness gate policy — navigator'ın witness
+    /// gereksinimi. Default `Production` (Paper 1 witness güven modeli, min_approvers=2).
+    /// `HarnessAutoApprove` sadece controlled experiment için (tek-agent auto-approve).
+    /// Navigator bu field'a göre WitnessSet quorum'unu set eder — production
+    /// güven iddiasını zayıflatmadan G2c runner/test'lere izin verir.
+    pub witness_policy: NavigatorWitnessPolicy,
+}
+
+/// **G2c-3b (arkadaş review 9):** Navigator witness gate policy.
+///
+/// Navigator `commit_task_claim`'e WitnessSet geçirir. Bu policy quorum parametrelerini
+/// belirler. **Production güven iddiası** (Paper 1 witness modeli) SADECE `Production`
+/// variant'ta korunur — `HarnessAutoApprove` controlled experiment dışında kullanılmaz.
+///
+/// **Neden gerekli:** G2c-1 0/24 Completed'in sebebi navigator'ın witness gate'i idi
+/// (default min_approvers=2 + boş set → her zaman reject). Bu enum, fix'i scoped tutar:
+/// production navigator default Production, G2c runner/test HarnessAutoApprove override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigatorWitnessPolicy {
+    /// Production: Paper 1 witness güven modeli (min_approvers=2, quorum_threshold=1.5).
+    /// WitnessSet default quorum ile kurulur. Gerçek deployment'ta kullanılır.
+    Production,
+    /// Harness/test: tek-agent auto-approve (min_approvers=0, quorum=0.0).
+    /// SADECE controlled experiment için — production navigator asla bu modda çalışmaz.
+    HarnessAutoApprove,
+}
+
+impl Default for NavigatorWitnessPolicy {
+    fn default() -> Self {
+        // Production güvenli — witness gate aktif. Harness kullanıcıları açıkça override eder.
+        NavigatorWitnessPolicy::Production
+    }
 }
 
 impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
@@ -507,9 +540,14 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
 
             // 6. D2 — commit_task_claim: Q4→bind→Q5→Q5.b(PredicateGate)→Q6→mutate→Q1-Q3.
-            // G2c-3: navigator tek-agent auto-approve — witness gate min_approvers=0
-            // (D2'de gerçek witness yok; operator approval ayrı semantic). with_quorum builder.
-            let omega = crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0);
+            // G2c-3b (arkadaş review 9): witness policy'ye göre WitnessSet quorum.
+            // Production: Paper 1 witness güven modeli (min_approvers=2). Harness: auto-approve.
+            let omega = match self.witness_policy {
+                NavigatorWitnessPolicy::Production => crate::witness::WitnessSet::new(Vec::new()),
+                NavigatorWitnessPolicy::HarnessAutoApprove => {
+                    crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0)
+                }
+            };
             let task_result = match self
                 .engine
                 .commit_task_claim(crate::engine::TaskCommitInput {
@@ -784,6 +822,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(999, 7);
         assert_eq!(result, NavigatorResult::TaskNotFound);
@@ -822,6 +861,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         // D1: mock engine satisfied döndüğü için Completed; D2'de gerçek measure ile
@@ -863,6 +903,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         // En az 1 evidence (reject'ler de kaydeder). Maneuver limit dolana kadar.
@@ -906,6 +947,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         // Loop çalıştı, evidence kaydedildi (progress veya complete veya maneuver).
@@ -955,6 +997,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         if let NavigatorResult::ExceededManeuverLimit { .. } = result {
@@ -1213,6 +1256,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         // Empty proposals → ExceededManeuverLimit (2 attempt evidence push edildi).
@@ -1261,6 +1305,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         // Evidence boş DEĞİL ve gate_decision Unknown DEĞİL (gerçek gate set edildi).
@@ -1299,6 +1344,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         let e = &evidence[0];
@@ -1433,6 +1479,7 @@ mod tests {
             },
             current_measured: measured_pos(0.5),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         // Policy violation → RejectedByRule evidence.
@@ -1632,6 +1679,8 @@ mod tests {
             },
             current_measured: measured_pos(0.80),
             output_contract: OutputContract::strict(),
+            // G2c-3: harness auto-approve (controlled experiment — production değil).
+            witness_policy: NavigatorWitnessPolicy::HarnessAutoApprove,
         }
     }
 

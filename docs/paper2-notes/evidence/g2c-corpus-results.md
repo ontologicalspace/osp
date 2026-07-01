@@ -65,15 +65,22 @@ Without feedback: 12 cells, 0 completed, 0 evidence entries
 synthetic/StrictReject:     ExceededManeuverLimit attempts=3, completed=false
 synthetic/AcceptImprovement: Completed attempts=3, completed=true
 ```
-**G2c-3 sonucu (arkadaş review 8):** Policy accumulation mekanizması kanıtlandı.
+**G2c-3 sonucu (arkadaş review 8/9):** Policy accumulation mekanizması kanıtlandı.
 - **AcceptImprovement** + incremental removal (3 attempt): state ilerler (coupling 0.80→0.75→0.667→0.50), 3. attempt'te predicate satisfied → **Completed**
 - **StrictReject** + aynı incremental removal: state donmuş (coupling hep 0.80 ölçülür), predicate hep NotCompleted → **ExceededManeuverLimit**
+
+**RQ9 mechanism signal (arkadaş review 9 sıkılaştırma):**
+> Progress checkpoint accumulation enables completion under bounded attempts; strict rejection prevents accumulation and reaches the maneuver limit.
+
+Her iki path de 3 attempt kullandı — fark maliyet değil, **bounded attempts içinde completion üretebilme**. Token/cost farkı G2c-4'te (gerçek LLM) ölçülür.
 
 **Paper 2 cümlesi:** "OSP'de progress checkpoint politikası, uzun refactor benzeri görevlerde state'i adım adım hedefe yaklaştırırken, strict reject politikası aynı task'ı ilerletemez."
 
 **Etiket (review 8 #1):** synthetic controlled fixture — gerçek repo corpus değil. Policy accumulation *mekanizması* kanıtlandı; external corpus genellemesi G2c-5'te.
 
-**Local crate corpus (G2c-3 witness fix sonrası):** navigator `min_approvers=0` fix'i ile local crate corpus artık Completed üretiyor (G2c-1'in 0/24 gizli sebebi witness gate idi). Bu ek bir bulgu — navigator witness policy ayrı bir konu (operator approval vs auto-approve).
+**Witness mode (review 9):** G2c harness `witness_mode: "harness_auto_approve"` (min_approvers=0, controlled experiment). Production navigator `Production` (min_approvers=2, Paper 1 güven modeli) — harness auto-approve production'a sızmadı (`NavigatorWitnessPolicy` enum ile scoped).
+
+**Local crate corpus (G2c-3 witness fix sonrası):** navigator `min_approvers=0` fix'i ile local crate corpus artık Completed üretüyor (G2c-1'in 0/24 gizli sebebi witness gate idi). Bu ek bir bulgu — navigator witness policy ayrı bir konu (operator approval vs auto-approve).
 
 ## 3. Real LLM Preliminary Results
 

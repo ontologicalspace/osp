@@ -36,12 +36,32 @@ G2c-3 sırasında **G2c-1'in 0/24 Completed'inin gizli sebebi** ortaya çıktı:
 - `WitnessSet` default `min_approvers=2`, `quorum_threshold=1.5`
 - Boş set → her zaman `Witness(MinApproversNotMet { distinct: 0, required: 2 })` reject
 
-**Fix:** navigator artık `WitnessSet::new(Vec::new()).with_quorum(0, 0.0)` kullanıyor (tek-agent
-auto-approve semantic). Bu fix local crate corpus'ta da Completed üretmeye başladı.
+## Witness policy isolation (arkadaş review 9 — merge blocker düzeltme)
 
-Bu gerçek bir bulgu — navigator + witness gate etkileşimi Paper 2 için önemli:
-"D2 navigator tek-agent, auto-approve modunda çalışmalı; gerçek witness policy operator
-approval semantic'ine ayrı."
+`with_quorum(0, 0.0)` ilk başta navigator loop'a **hardcoded** yazılmıştı — bu production güven
+idasını zayıflatıyordu. Review 9 bunu merge blocker olarak işaretledi. Düzeltme:
+
+```rust
+pub enum NavigatorWitnessPolicy {
+    Production,         // Paper 1 witness modeli (min_approvers=2) — default
+    HarnessAutoApprove, // min_approvers=0 — SADECE controlled experiment
+}
+
+// navigator loop:
+let omega = match self.witness_policy {
+    Production => WitnessSet::new(Vec::new()),
+    HarnessAutoApprove => WitnessSet::new(Vec::new()).with_quorum(0, 0.0),
+};
+```
+
+**Scoped fix:**
+- navigator default = `Production` (Paper 1 güven iddiası korunur)
+- G2c runner + navigator G2c-3 test'leri = `HarnessAutoApprove` (caller override)
+- osp-cli trajectory attempt = `Production`
+- osp-mcp server = `Production`
+- Evidence JSON `witness_mode` alanı: "harness_auto_approve" / "production"
+
+Bu fix navigator'ın production güven iddiasını korurken G2c controlled experiment'lere izin verir.
 
 ## Review 8 entegrasyonu (5 düzeltme)
 1. ✅ "synthetic controlled harness" etiketi (corpus_kind)

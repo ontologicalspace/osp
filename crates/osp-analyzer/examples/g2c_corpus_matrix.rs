@@ -92,6 +92,10 @@ struct G2cEvidenceRow {
     feedback: String, // "with" | "without"
     llm: String,
     maneuver_limit: u32,
+    /// **G2c-3b (arkadaş review 9 #1):** Navigator witness gate mode.
+    /// "harness_auto_approve" = controlled experiment (min_approvers=0).
+    /// "production" = Paper 1 witness güven modeli (min_approvers=2).
+    witness_mode: String,
     // ── Target node (review #4) ──
     target_node_id: NodeId,
     target_node_path: String,
@@ -526,6 +530,8 @@ fn run_one_experiment(
             target_vector,
             current_measured: current_measured.clone(),
             output_contract: OutputContract::strict(),
+            // G2c harness: controlled experiment → auto-approve (production değil).
+            witness_policy: osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove,
         };
         nav.run_task(task_id, 1)
     };
@@ -625,6 +631,8 @@ fn run_one_experiment(
         feedback: format!("{feedback_mode:?}"),
         llm: format!("{llm_backend:?}"),
         maneuver_limit,
+        // G2c runner = harness → witness_mode auto-approve (production değil).
+        witness_mode: "harness_auto_approve".into(),
         target_node_id: target_node,
         target_node_path: target_role.clone(),
         target_node_role: target_role,
@@ -798,6 +806,8 @@ fn run_synthetic_rq9(policy: PredicateFailurePolicy, run_meta: &RunMeta) -> Resu
             target_vector,
             current_measured: current_measured.clone(),
             output_contract: OutputContract::strict(),
+            // G2c harness: controlled experiment → auto-approve (production değil).
+            witness_policy: osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove,
         };
         nav.run_task(task_id, 1)
     };
@@ -858,6 +868,8 @@ fn run_synthetic_rq9(policy: PredicateFailurePolicy, run_meta: &RunMeta) -> Resu
         feedback: "fixed_with".into(), // review 8 #5 — RQ9 için feedback sabit
         llm: "Mock".into(),
         maneuver_limit: 3,
+        // G2c synthetic fixture = harness → witness_mode auto-approve.
+        witness_mode: "harness_auto_approve".into(),
         target_node_id: target_node,
         target_node_path: "<synthetic-node-0>".into(),
         target_node_role: "Module".into(),

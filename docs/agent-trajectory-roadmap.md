@@ -964,6 +964,7 @@ H ve E beklenmez — SDK ve 3D, paper'ı gereksiz geciktirir.
 | 2026-06-29 | G2c-1b TAMAMLANDI (reject-evidence) | Navigator tüm attempt'ler evidence'a girer + gate_decision. Empty-proposal site YENİ. GateDecision +Unknown/RejectedByTaskBinding. Helper mapping. Evidence 0→120. Review 6 entegre. |
 | 2026-06-29 | G2c-2 TAMAMLANDI (remove_edges) | DeltaProposal +removed_edges (subtractive delta). OpKind::RemoveImport onurlandırılır. Space::remove_edge count. affected_nodes (new_nodes'a target KOYMA). allowed_ops validation. Review 7 entegre. |
 | 2026-06-29 | G2c-3 TAMAMLANDI (RQ9 kanıt) | Incremental coupling-dropping + policy accumulation. AcceptImprovement→Completed, StrictReject→LimitExceeded (synthetic fixture). Gizli keşif: navigator witness gate fix (min_approvers=0). Review 8 entegre. |
+| 2026-06-29 | G2c-3b witness policy isolation (review 9) | `with_quorum(0,0.0)` navigator loop'tan çıkarıldı → `NavigatorWitnessPolicy` enum (Production default, HarnessAutoApprove scoped). Production güven iddiası korundu. Evidence `witness_mode` alanı. RQ9 ifadesi sıkılaştır (bounded attempts). |
 
 ### Review kaynakları (v0.2 iyileştirmeleri)
 - **Review 1 (teknik):** AgentTaskView/InternalTaskPlan ayrımı, TaskAttempt/Ledger, PredicateGateResult, TargetRegion, INV-T6, failures.md, B2 aşaması, "task=vektör" düzeltme.
