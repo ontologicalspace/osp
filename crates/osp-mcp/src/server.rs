@@ -571,6 +571,8 @@ impl OspMcpServer {
                 target_vector,
                 current_measured: current_measured.clone(),
                 output_contract: osp_core::agent::OutputContract::strict(),
+                // MCP server = production context → Production witness (min_approvers=2).
+                witness_policy: osp_core::navigator::NavigatorWitnessPolicy::Production,
             };
             let result = nav.run_task(task_id, 1);
             // Evidence'ı store'a kaydet (RQ6 verisi).

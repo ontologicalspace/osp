@@ -322,6 +322,39 @@ pub struct AgentNavigator<'a, L: LlmClient + ?Sized, R: TaskResolver> {
     pub current_measured: ProvenancedRawPosition,
     /// Q4 syntax contract (agent shell).
     pub output_contract: OutputContract,
+    /// **G2c-3b (arkadaş review 9):** Witness gate policy — navigator'ın witness
+    /// gereksinimi. Default `Production` (Paper 1 witness güven modeli, min_approvers=2).
+    /// `HarnessAutoApprove` sadece controlled experiment için (tek-agent auto-approve).
+    /// Navigator bu field'a göre WitnessSet quorum'unu set eder — production
+    /// güven iddiasını zayıflatmadan G2c runner/test'lere izin verir.
+    pub witness_policy: NavigatorWitnessPolicy,
+}
+
+/// **G2c-3b (arkadaş review 9):** Navigator witness gate policy.
+///
+/// Navigator `commit_task_claim`'e WitnessSet geçirir. Bu policy quorum parametrelerini
+/// belirler. **Production güven iddiası** (Paper 1 witness modeli) SADECE `Production`
+/// variant'ta korunur — `HarnessAutoApprove` controlled experiment dışında kullanılmaz.
+///
+/// **Neden gerekli:** G2c-1 0/24 Completed'in sebebi navigator'ın witness gate'i idi
+/// (default min_approvers=2 + boş set → her zaman reject). Bu enum, fix'i scoped tutar:
+/// production navigator default Production, G2c runner/test HarnessAutoApprove override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NavigatorWitnessPolicy {
+    /// Production: Paper 1 witness güven modeli (min_approvers=2, quorum_threshold=1.5).
+    /// WitnessSet default quorum ile kurulur. Gerçek deployment'ta kullanılır.
+    Production,
+    /// Harness/test: tek-agent auto-approve (min_approvers=0, quorum=0.0).
+    /// SADECE controlled experiment için — production navigator asla bu modda çalışmaz.
+    HarnessAutoApprove,
+}
+
+impl Default for NavigatorWitnessPolicy {
+    fn default() -> Self {
+        // Production güvenli — witness gate aktif. Harness kullanıcıları açıkça override eder.
+        NavigatorWitnessPolicy::Production
+    }
 }
 
 impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
@@ -507,9 +540,14 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
 
             // 6. D2 — commit_task_claim: Q4→bind→Q5→Q5.b(PredicateGate)→Q6→mutate→Q1-Q3.
-            // D1'deki ayrı PredicateGate YERINE atomic commit_task_claim. Empty witness
-            // set (D2'de gerçek witness yok — navigator tek-agent, auto-approve veya D3'te).
-            let omega = crate::witness::WitnessSet::new(Vec::new());
+            // G2c-3b (arkadaş review 9): witness policy'ye göre WitnessSet quorum.
+            // Production: Paper 1 witness güven modeli (min_approvers=2). Harness: auto-approve.
+            let omega = match self.witness_policy {
+                NavigatorWitnessPolicy::Production => crate::witness::WitnessSet::new(Vec::new()),
+                NavigatorWitnessPolicy::HarnessAutoApprove => {
+                    crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0)
+                }
+            };
             let task_result = match self
                 .engine
                 .commit_task_claim(crate::engine::TaskCommitInput {
@@ -784,6 +822,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(999, 7);
         assert_eq!(result, NavigatorResult::TaskNotFound);
@@ -822,6 +861,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         // D1: mock engine satisfied döndüğü için Completed; D2'de gerçek measure ile
@@ -863,6 +903,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         // En az 1 evidence (reject'ler de kaydeder). Maneuver limit dolana kadar.
@@ -906,6 +947,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         // Loop çalıştı, evidence kaydedildi (progress veya complete veya maneuver).
@@ -955,6 +997,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         if let NavigatorResult::ExceededManeuverLimit { .. } = result {
@@ -1213,6 +1256,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let result = nav.run_task(1, 7);
         // Empty proposals → ExceededManeuverLimit (2 attempt evidence push edildi).
@@ -1261,6 +1305,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         // Evidence boş DEĞİL ve gate_decision Unknown DEĞİL (gerçek gate set edildi).
@@ -1299,6 +1344,7 @@ mod tests {
             },
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         let e = &evidence[0];
@@ -1433,6 +1479,7 @@ mod tests {
             },
             current_measured: measured_pos(0.5),
             output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
         };
         let _ = nav.run_task(1, 7);
         // Policy violation → RejectedByRule evidence.
@@ -1508,5 +1555,210 @@ mod tests {
             1,
             "Claim must carry removed_edges"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // G2c-3 (arkadaş review 8) — Incremental coupling-dropping + policy accumulation
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// **G2c-3:** 5 node'lu balanced fixture. Target (node 0) → 4 node import (coupling 0.80).
+    /// **Değerlendirilebilir vision** (`VisionVector::new`, GlobalDefault source) —
+    /// G2c-2 `make_real_engine`'in None vision tuzağı YOK (θ=1.0 > 0.3 reject'i).
+    fn make_balanced_engine() -> SpaceEngine {
+        use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+        use crate::coords::CoordinateSystem;
+        let mut space = Space::default();
+        // Target node 0 + 4 dependency node (1,2,3,4).
+        for id in 0..=4u64 {
+            space.nodes.insert(
+                id,
+                Node {
+                    id,
+                    kind: NodeKind::Module,
+                    mass: 100.0,
+                    cohesion: Some(0.6),
+                    ..Default::default()
+                },
+            );
+        }
+        // node 0 → node 1,2,3,4 (4 outgoing Imports → coupling 4/5 = 0.80).
+        for dep in 1..=4u64 {
+            space.edges.push(Edge {
+                from: 0,
+                to: dep,
+                kind: crate::space::EdgeKind::Imports,
+                is_type_only: false,
+            });
+        }
+        // node 1→0 incoming import → instability balanced (Ca>0).
+        space.edges.push(Edge {
+            from: 1,
+            to: 0,
+            kind: crate::space::EdgeKind::Imports,
+            is_type_only: false,
+        });
+        let cs = CoordinateSystem::default_raw_five(
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(6.0),
+            WitnessDepthAxis::from_witness(0.3, 5),
+        );
+        // Değerlendirilebilir vision (GlobalDefault) — θ küçük, Q5 vision geçer.
+        // Vision instability = measured (~0.80) ile aynı — loss coupling'den düşer, vision geçer.
+        let vision = VisionVector::new(RawPosition {
+            x: 0.55,
+            y: 0.6,
+            z: 0.80,
+            w: 0.5,
+            v: 0.3,
+        });
+        // G2c-3 test: navigator boş witness set geçirir → min_approvers 0 (auto-approve).
+        // Gerçek deployment'ta witness policy ayrı (operator approval).
+        let mut config = EngineConfig::default_calibrated();
+        config.min_approvers = 0;
+        SpaceEngine::new(space, cs, vision, config)
+    }
+
+    /// 3 incremental coupling-reducing proposal: 1'er import kaldırma.
+    /// 0.80→0.75 (remove 0→1), 0.75→0.67 (remove 0→2), 0.67→0.50 (remove 0→3).
+    fn incremental_coupling_proposals() -> Vec<DeltaProposal> {
+        use crate::agent::EdgeRef;
+        (1..=3u64)
+            .map(|dep| DeltaProposal {
+                new_nodes: vec![],
+                new_edges: vec![],
+                removed_edges: vec![EdgeRef {
+                    from: 0,
+                    to: dep,
+                    kind: crate::space::EdgeKind::Imports,
+                }],
+                affected_nodes: vec![0],
+                modified_entities: vec![],
+                position_hints: vec![],
+                reasoning: format!("G2c-3 incremental: remove import 0→{dep}"),
+            })
+            .collect()
+    }
+
+    /// G2c-3 task — coupling ≤ 0.55. preferred_vector instability'yı measured'ınkine
+    /// yakın tutar (loss sadece coupling farkından düşer, instability farkı maskelenmez).
+    fn g2c3_coupling_task(task_id: TaskId, policy: &TaskPolicy) -> Task {
+        let mut task = coupling_task(task_id, 0.55, policy.clone());
+        task.target_predicate_set.predicates[0].predicate.scope = PredicateScope::Node(0);
+        // target_vector instability = measured instability (~0.75-0.80) — loss coupling'den düşer.
+        task.target_predicate_set.preferred_vector = Some(RawPosition {
+            x: 0.55,
+            y: 0.6,
+            z: 0.80, // measured instability (4 import → Ce=4, Ca=1 → 0.80)
+            w: 0.5,
+            v: 0.3,
+        });
+        task
+    }
+
+    /// G2c-3 navigator builder — target_vector instability measured'a yakın.
+    fn g2c3_nav<'a>(
+        llm: &'a MockLlmClient,
+        resolver: &'a InMemoryTaskRegistry,
+        engine: &'a mut SpaceEngine,
+        evidence: &'a mut Vec<TrajectoryEvidence>,
+    ) -> AgentNavigator<'a, MockLlmClient, InMemoryTaskRegistry> {
+        AgentNavigator {
+            llm,
+            resolver,
+            engine,
+            evidence,
+            trajectory_id: 1,
+            milestone_id: 1,
+            // target_vector instability = measured (~0.80) — loss coupling'den düşer.
+            target_vector: RawPosition {
+                x: 0.55,
+                y: 0.6,
+                z: 0.80,
+                w: 0.5,
+                v: 0.3,
+            },
+            current_measured: measured_pos(0.80),
+            output_contract: OutputContract::strict(),
+            // G2c-3: harness auto-approve (controlled experiment — production değil).
+            witness_policy: NavigatorWitnessPolicy::HarnessAutoApprove,
+        }
+    }
+
+    /// G2c-3 #1: AcceptImprovement + incremental removal → Completed (state accumulation).
+    /// RQ9 ana kanıtı: progress checkpoint policy state'i adım adım hedefe yaklaştırır.
+    #[test]
+    fn g2c3_incremental_coupling_reduction_completes() {
+        let mut policy = TaskPolicy::default();
+        policy.maneuver_limit = 3; // review 8 #3 — NoMoreProposals tuzağı yok (3 proposal = 3 attempt)
+        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        policy.allow_progress_checkpoint = true;
+        let task = g2c3_coupling_task(1, &policy);
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let mock = MockLlmClient::new(incremental_coupling_proposals());
+        let mut engine = make_balanced_engine();
+        let mut evidence = vec![];
+        let mut nav = g2c3_nav(&mock, &resolver, &mut engine, &mut evidence);
+        let result = nav.run_task(1, 7);
+        // G2c-3 ana kanıt: AcceptImprovement → Completed (3 attempts).
+        assert!(
+            matches!(result, NavigatorResult::Completed { attempts, .. } if attempts == 3),
+            "G2c-3: AcceptImprovement + incremental removal should Complete in 3 attempts: got {result:?}"
+        );
+    }
+
+    /// G2c-3 #2: StrictReject + incremental removal → ExceededManeuverLimit (state frozen).
+    /// RQ9 kontrol hücresi: strict reject state'i dondurur, aynı task ilerlemez.
+    #[test]
+    fn g2c3_strict_reject_freezes_state_at_maneuver_limit() {
+        let mut policy = TaskPolicy::default();
+        policy.maneuver_limit = 3;
+        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let task = g2c3_coupling_task(1, &policy);
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let mock = MockLlmClient::new(incremental_coupling_proposals());
+        let mut engine = make_balanced_engine();
+        let mut evidence = vec![];
+        let mut nav = g2c3_nav(&mock, &resolver, &mut engine, &mut evidence);
+        let result = nav.run_task(1, 7);
+        // G2c-3 kontrol: StrictReject → ExceededManeuverLimit (state donmuş).
+        assert!(
+            matches!(result, NavigatorResult::ExceededManeuverLimit { .. }),
+            "G2c-3: StrictReject should freeze state → ExceededManeuverLimit: got {result:?}"
+        );
+        // State donmuş: her attempt Reject, evidence 3 entry.
+        assert_eq!(evidence.len(), 3);
+        assert!(evidence
+            .iter()
+            .all(|e| { e.mutation_decision == MutationDecision::Reject }));
+    }
+
+    /// G2c-3 #3 (review 8 #4): Completed evidence gate_decision = PassedAll.
+    /// PR #21'in Unknown borcu kapanır — success path artık Unknown değil.
+    #[test]
+    fn g2c3_completed_evidence_has_passed_all_gate_decision() {
+        let mut policy = TaskPolicy::default();
+        policy.maneuver_limit = 3;
+        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        policy.allow_progress_checkpoint = true;
+        let task = g2c3_coupling_task(1, &policy);
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let mock = MockLlmClient::new(incremental_coupling_proposals());
+        let mut engine = make_balanced_engine();
+        let mut evidence = vec![];
+        let mut nav = g2c3_nav(&mock, &resolver, &mut engine, &mut evidence);
+        let result = nav.run_task(1, 7);
+        assert!(matches!(result, NavigatorResult::Completed { .. }));
+        // Son evidence (Completed attempt) — gate_decision PassedAll (review 8 #4).
+        let last = evidence.last().expect("Completed produces evidence");
+        assert_eq!(
+            last.gate_decision,
+            GateDecision::PassedAll,
+            "Completed evidence must have gate_decision=PassedAll, not Unknown"
+        );
+        assert_eq!(last.predicate_completion, PredicateCompletion::Completed);
+        assert_eq!(last.mutation_decision, MutationDecision::AcceptAsCompleted);
     }
 }

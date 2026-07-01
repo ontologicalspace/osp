@@ -280,6 +280,8 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         },
         current_measured,
         output_contract: osp_core::agent::OutputContract::strict(),
+        // CLI = production → Production witness (min_approvers=2, Paper 1 güven modeli).
+        witness_policy: osp_core::navigator::NavigatorWitnessPolicy::Production,
     };
     let result = nav.run_task(args.task_id, 1);
     // 6. Sonuç yazdır.
