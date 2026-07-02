@@ -7,6 +7,7 @@ use crate::anchoring::classifier::{Classifier, Glossary};
 use crate::anchoring::typed_ref::TypedNodeRef;
 use crate::anchoring::types::{
     ConceptGraph, ConceptNodeId, ConceptNodeKind, ConceptPacket, ExtractedAnchorCandidate,
+    NonEmptyExplanation,
 };
 use crate::anchoring::ConceptEdgeKind;
 
@@ -43,12 +44,12 @@ impl<'a> Extractor<'a> {
             for term in terms {
                 if text_lower.contains(&term.to_lowercase()) {
                     let target = ConceptNodeId(format!("Concept:{}", entry.canonical));
-                    candidates.push(ExtractedAnchorCandidate {
-                        packet_id: packet.id.clone(),
-                        target_node_id: target,
-                        edge_kind: ConceptEdgeKind::Mentions,
-                        explanation: None, // düşük stake, opsiyonel
-                    });
+                    candidates.push(ExtractedAnchorCandidate::new(
+                        packet.id.clone(),
+                        target,
+                        ConceptEdgeKind::Mentions,
+                        None, // düşük stake, opsiyonel
+                    ));
                     break; // her canonical için bir Mentions
                 }
             }
@@ -75,20 +76,20 @@ impl<'a> Extractor<'a> {
                     _ => ConceptEdgeKind::Mentions,
                 };
                 let explanation = if edge_kind.is_high_stake() {
-                    Some(format!(
+                    Some(NonEmptyExplanation::from_validated(format!(
                         "Extracted typed ref {}:{}",
                         r.kind.as_prefix(),
                         r.name
-                    ))
+                    )))
                 } else {
                     None
                 };
-                candidates.push(ExtractedAnchorCandidate {
-                    packet_id: packet.id.clone(),
-                    target_node_id: r.to_node_id(),
+                candidates.push(ExtractedAnchorCandidate::new(
+                    packet.id.clone(),
+                    r.to_node_id(),
                     edge_kind,
                     explanation,
-                });
+                ));
             }
         }
 
@@ -97,24 +98,30 @@ impl<'a> Extractor<'a> {
             // Mevcut RuleCandidate yoksa yeni türet
             let rule_name = self.derive_rule_name(&packet.text);
             let target = ConceptNodeId(format!("RuleCandidate:{rule_name}"));
-            candidates.push(ExtractedAnchorCandidate {
-                packet_id: packet.id.clone(),
-                target_node_id: target,
-                edge_kind: ConceptEdgeKind::DerivesRule,
-                explanation: Some(format!("Rule derived from: {}", packet.text)),
-            });
+            candidates.push(ExtractedAnchorCandidate::new(
+                packet.id.clone(),
+                target,
+                ConceptEdgeKind::DerivesRule,
+                Some(NonEmptyExplanation::from_validated(format!(
+                    "Rule derived from: {}",
+                    packet.text
+                ))),
+            ));
         }
 
         // 4. Risk sinyali → DerivesRisk (high stake, packet type'dan bağımsız)
         if self.classifier.has_risk_signal(&packet.text) {
             let risk_name = self.derive_risk_name(&packet.text);
             let target = ConceptNodeId(format!("RiskCandidate:{risk_name}"));
-            candidates.push(ExtractedAnchorCandidate {
-                packet_id: packet.id.clone(),
-                target_node_id: target,
-                edge_kind: ConceptEdgeKind::DerivesRisk,
-                explanation: Some(format!("Risk derived from: {}", packet.text)),
-            });
+            candidates.push(ExtractedAnchorCandidate::new(
+                packet.id.clone(),
+                target,
+                ConceptEdgeKind::DerivesRisk,
+                Some(NonEmptyExplanation::from_validated(format!(
+                    "Risk derived from: {}",
+                    packet.text
+                ))),
+            ));
         }
 
         // 5. AntiGoalOf — packet type AntiGoal ise mevcut Concept'e
@@ -123,12 +130,15 @@ impl<'a> Extractor<'a> {
             crate::anchoring::ConceptPacketType::AntiGoal
         ) {
             if let Some(target_concept) = self.first_concept_target(&candidates) {
-                candidates.push(ExtractedAnchorCandidate {
-                    packet_id: packet.id.clone(),
-                    target_node_id: target_concept.clone(),
-                    edge_kind: ConceptEdgeKind::AntiGoalOf,
-                    explanation: Some(format!("AntiGoal of {}", target_concept.0)),
-                });
+                candidates.push(ExtractedAnchorCandidate::new(
+                    packet.id.clone(),
+                    target_concept.clone(),
+                    ConceptEdgeKind::AntiGoalOf,
+                    Some(NonEmptyExplanation::from_validated(format!(
+                        "AntiGoal of {}",
+                        target_concept.0
+                    ))),
+                ));
             }
         }
 

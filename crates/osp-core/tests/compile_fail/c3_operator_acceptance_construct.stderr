@@ -1,0 +1,5 @@
+error[E0451]: field `_private` of struct `OperatorAcceptance` is private
+ --> tests/compile_fail/c3_operator_acceptance_construct.rs:7:37
+  |
+7 |     let _cap = OperatorAcceptance { _private: () };
+  |                                     ^^^^^^^^ private field

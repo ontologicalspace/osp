@@ -8,7 +8,7 @@
 
 use crate::anchoring::classifier::{Classifier, Glossary};
 use crate::anchoring::extractor::Extractor;
-use crate::anchoring::gate::{AnchorGate, GateError};
+use crate::anchoring::gate::{AnchorGate, AnchorGateContext, GateError};
 use crate::anchoring::scorer::AnchorScorer;
 use crate::anchoring::store::StoreError;
 use crate::anchoring::types::{AnchorPlan, ConceptGraph, ConceptPacket, PacketSource};
@@ -118,14 +118,21 @@ impl AnchorPipeline {
         }
     }
 
-    /// Metni AnchorPlan'a dönüştür (tam pipeline).
+    /// Metni AnchorPlan'a dönüştür (tam pipeline). Default: ExplicitUser source,
+    /// no-authority context (INV-C4: Faz 2'de Supersedes reject, Faz 8 operator doldurur).
     pub fn run(
         &self,
         text: &str,
         language: &str,
         graph: &ConceptGraph,
     ) -> Result<AnchorPlan, AnchorError> {
-        self.run_with_source(text, language, graph, PacketSource::ExplicitUser)
+        self.run_with_source(
+            text,
+            language,
+            graph,
+            PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
+        )
     }
 
     /// Belirli source ile pipeline.
@@ -135,6 +142,7 @@ impl AnchorPipeline {
         language: &str,
         graph: &ConceptGraph,
         source: PacketSource,
+        ctx: &AnchorGateContext,
     ) -> Result<AnchorPlan, AnchorError> {
         if text.trim().is_empty() {
             return Err(ClassifyError::EmptyInput.into());
@@ -155,8 +163,8 @@ impl AnchorPipeline {
             .map(|e| self.scorer.score(e, graph, source))
             .collect();
 
-        // 5. Gate
-        let plan = self.gate.decide(&packet.id, scored, graph)?;
+        // 5. Gate (ctx INV-C4 authority taşır)
+        let plan = self.gate.decide(&packet.id, scored, graph, ctx)?;
 
         Ok(plan)
     }

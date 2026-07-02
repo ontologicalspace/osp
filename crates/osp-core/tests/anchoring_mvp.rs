@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use osp_core::anchoring::classifier::{Classifier, Glossary};
+use osp_core::anchoring::gate::AnchorGateContext;
 use osp_core::anchoring::pipeline::AnchorPipeline;
 use osp_core::anchoring::store::InMemoryAnchorStore;
 use osp_core::anchoring::types::{ConceptNode, ConceptNodeKind, GraphSeed, PacketSource};
@@ -241,6 +242,7 @@ fn anchor_mvp_runs_all_fixtures() {
             "tr",
             store.graph(),
             PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
         );
         // Sonuç olsun: ya plan ya da bilinçli GateError (INV ihlali)
         match result {
@@ -288,12 +290,13 @@ fn anchor_mvp_fix_001_derives_risk() {
             "tr",
             store.graph(),
             PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
         )
         .expect("plan");
     let has_derives_risk = plan
-        .candidates
+        .candidates()
         .iter()
-        .any(|c| c.edge_kind == ConceptEdgeKind::DerivesRisk);
+        .any(|c| c.edge_kind() == ConceptEdgeKind::DerivesRisk);
     assert!(
         has_derives_risk,
         "fix_001 DerivesRisk üretmeli (güven/hissetmeli sinyali)"
@@ -333,27 +336,28 @@ fn anchor_mvp_fix_007_contradiction() {
             "tr",
             store.graph(),
             PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
         )
         .expect("fix_007 plan üretmeli");
 
     let has_contradicts = plan
-        .candidates
+        .candidates()
         .iter()
-        .any(|c| c.edge_kind == ConceptEdgeKind::Contradicts);
+        .any(|c| c.edge_kind() == ConceptEdgeKind::Contradicts);
 
     if has_contradicts {
         // §6.4.1: Contradicts → MarkContradiction + negative_assertions
         assert_eq!(
-            plan.decision,
+            plan.decision(),
             osp_core::anchoring::AnchorDecisionKind::MarkContradiction,
             "Contradicts → MarkContradiction"
         );
         assert!(
-            !plan.negative_assertions.is_empty(),
+            !plan.negative_assertions().is_empty(),
             "§6.4.1 negative assertions"
         );
         assert!(
-            plan.negative_assertions
+            plan.negative_assertions()
                 .iter()
                 .any(|s| s.contains("SUPERSEDES")),
             "negative assertion SUPERSEDES yasağını içermeli"
@@ -388,6 +392,7 @@ fn anchor_mvp_candidate_isolation_inv_c3() {
             "tr",
             store.graph(),
             PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
         )
         .expect("plan");
     store.apply_plan(&plan);
@@ -422,12 +427,13 @@ fn anchor_mvp_does_not_emit_implemented_by() {
             "tr",
             store.graph(),
             PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
         ) {
             Ok(plan) => {
                 let has_impl = plan
-                    .candidates
+                    .candidates()
                     .iter()
-                    .any(|c| c.edge_kind == ConceptEdgeKind::ImplementedBy);
+                    .any(|c| c.edge_kind() == ConceptEdgeKind::ImplementedBy);
                 assert!(
                     !has_impl,
                     "fixture {}: ImplementedBy üretilmemeli (Faz 1 code evidence yok)",
@@ -459,11 +465,12 @@ fn anchor_mvp_fix_008_dedup_canon_gate() {
         "tr",
         store.graph(),
         PacketSource::ExplicitUser,
+        &AnchorGateContext::no_authority(),
     ) {
         // INV-C8: "ödeme"/"payment" mevcut Concept:Payment'a redirect olmalı
         // (yeni node oluşmamalı). Not: Faz 1 coarse classifier redirect üretmeyebilir;
         // eğer üretirse existing_node Concept:Payment olmalı.
-        for redirect in &plan.redirects {
+        for redirect in plan.redirects() {
             assert!(
                 redirect.existing_node.0.starts_with("Concept:"),
                 "canon gate redirect Concept node'a olmalı"
@@ -487,11 +494,12 @@ fn anchor_mvp_fix_010_unanchored_empty() {
             "tr",
             store.graph(),
             PacketSource::ExplicitUser,
+            &AnchorGateContext::no_authority(),
         )
         .expect("plan");
     // Vague cümle → glossary match yok → boş candidates
     assert!(
-        plan.candidates.is_empty(),
+        plan.candidates().is_empty(),
         "fix_010: glossary/rule/risk match yok → boş candidates (MarkUnanchored)"
     );
 }

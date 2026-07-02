@@ -17,3 +17,4 @@ tracing = { workspace = true } # Faz 2.5 persistence logging
 [dev-dependencies]
 tempfile = "3"           # Faz 2.5 persistence test'leri için temp directory
 serde_json = { workspace = true }  # Intent invariant test (serde roundtrip)
+trybuild = "1"           # Faz 2 compile-fail testler (INV type-level garantiler)
