@@ -24,7 +24,7 @@ Faz 2: "invariant ihlali imkansız" (compile-fail testler)
 | **C4** (supersede authority) | runtime reject | ✅ type-level API | `SupersedeAuthority` capability + `AnchorGateContext`; Faz 8 hazır |
 | **C5** (inferred is not accepted) | runtime | runtime (kasıtlı — typestate serde kırar) | — |
 | **C6** (code-derived intent) | runtime | runtime (kasıtlı — epistemik ayrım) | — |
-| **C7** (high-stake explainable) | runtime `Option<String>` | ✅ + emptiness type-level | `NonEmptyExplanation` newtype; boş string compile error, presence runtime |
+| **C7** (high-stake explainable) | runtime `Option<String>` | ✅ + emptiness type-level | `NonEmptyExplanation` newtype; boş string public constructor tarafından `Err` ile reddedilir, oluşturulmuş değer type-level non-empty; presence runtime |
 | **C8** (concept canonicalized) | runtime gate | ✅ type-level | `AnchorPlan` private fields; "AnchorPlan almak = canon gate'ten geçmiş" |
 
 ## Yeni primitifler (crate'te ilk kullanım)

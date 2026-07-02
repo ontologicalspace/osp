@@ -71,16 +71,25 @@ impl std::error::Error for GateError {}
 
 /// Accepted kararları geçersiz kılma yetkisi (§6.4 hiyerarşi).
 ///
-/// # INV-C4 type-level
-/// Her varyant `_private: ()` + `pub(crate) fn issue_*()` — external crate (osp-cli/mcp)
-/// ve integration test'leri (`tests/`) üretemez. Sadece osp-core içi (Faz 8 operator
-/// console bu gate'leri gerçek API ile açar).
+/// # INV-C4 type-level (yapısal garanti)
+/// **Private field** (`_private: ()`) sayesinde external crate struct literal ile
+/// üretemez. `AnchorGateContext { supersede_authority: Some(SupersedeAuthority::Operator) }`
+/// dışarıdan yazılamaz — `SupersedeAuthority::Operator` bir enum varyantı DEĞİL, private
+/// field'lı struct'tır. Sadece `pub(crate) fn issue_*()` constructor'ları (TCB içi)
+/// üretebilir. Faz 8 operator console bu constructor'ları gerçek API ile çağırır.
 ///
-/// Faz 2'de hala hiçbir kaynak bu yetkiye sahip değil (operator API Faz 8) — `decide`
-/// `AnchorGateContext { supersede_authority: None }` ile çağrılır, `Supersedes` candidate
-/// reddedilir. Ama **API hazır**: Faz 8 context'i doldurduğunda kabul edilir.
+/// `SupersedeAuthorityLevel` public enum sadece **bilgi amaçlı** (level okuma);
+/// yeni authority üretmek için kullanılamaz.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SupersedeAuthority {
+pub struct SupersedeAuthority {
+    level: SupersedeAuthorityLevel,
+    _private: (),
+}
+
+/// Authority seviyesi (§6.2 hiyerarşi) — public, ama yeni `SupersedeAuthority`
+/// üretmek için kullanılamaz (sadece `SupersedeAuthority::level()` ile okunur).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersedeAuthorityLevel {
     /// §6.2 seviye 1 — her şeyi supersede edebilir.
     Operator,
     /// §6.2 seviye 2 — architect decision ve altını.
@@ -90,19 +99,33 @@ pub enum SupersedeAuthority {
 }
 
 impl SupersedeAuthority {
+    /// Authority seviyesini oku (bilgi amaçlı — yeni authority üretmez).
+    pub fn level(&self) -> SupersedeAuthorityLevel {
+        self.level
+    }
+
     #[cfg(test)]
     pub(crate) fn issue_operator_for_tests() -> Self {
-        Self::Operator
+        Self {
+            level: SupersedeAuthorityLevel::Operator,
+            _private: (),
+        }
     }
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn issue_explicit_user_for_tests() -> Self {
-        Self::ExplicitUser
+        Self {
+            level: SupersedeAuthorityLevel::ExplicitUser,
+            _private: (),
+        }
     }
     #[cfg(test)]
     #[allow(dead_code)]
     pub(crate) fn issue_witnessed_architect_for_tests() -> Self {
-        Self::WitnessedArchitectDecision
+        Self {
+            level: SupersedeAuthorityLevel::WitnessedArchitectDecision,
+            _private: (),
+        }
     }
 }
 

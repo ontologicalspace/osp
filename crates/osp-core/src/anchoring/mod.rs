@@ -51,12 +51,13 @@ pub use types::{
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Sealed trait primitifi — external impl engeller (closed set of implementors).
-/// Kullanım: `pub trait Foo: Sealed {}` + sadece module-internal impl'ler.
+/// Kullanım: `pub trait Foo: sealed::Sealed {}` (re-export ETME — dış crate trait'i
+/// isimlendiremesin). Faz 2'de aktif kullanılmıyor (placeholder); Faz 3+ trait'lerde
+/// kullanıma hazır.
+#[allow(dead_code)] // Faz 2 placeholder — Faz 3+ trait'lerde kullanılacak
 mod sealed {
     pub trait Sealed {}
 }
-
-pub use sealed::Sealed;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INV-C1: sealed embedding mod (Faz 2 — Faz 7 placeholder)

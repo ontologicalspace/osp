@@ -780,16 +780,29 @@ pub enum CanonicalRedirectReason {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Family'ye göre eksen seti taşıyan position vektörü (INV-C2).
-/// Faz 1'de detaylı eksenler YOK — `family` ayrımı yeterli (Faz 2 calibration).
+/// PositionSnapshot — INV-C2: `family` ayrı field DEĞİL, vector'dan türetilir.
+///
+/// # INV-C2 (Faz 2 — type-level, snapshot seviyesi)
+/// `family` field kaldırıldı; [`PositionVector::family()`] vector'dan türetilir.
+/// Bu, `family: PositionFamily::PhysicalCode` + `vector: PositionVector::Evidence(...)`
+/// mismatch'ini imkansız kılar. Field'lar `pub(crate)` — TCB içi (store) erişir,
+/// external crate literal construct edemez (serde hariç — deserialize için `#[serde(default)]`
+/// veya custom deserialize gerekirse Faz 3'te eklenir).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PositionSnapshot {
     pub id: PositionSnapshotId,
     pub node_id: ConceptNodeId,
-    pub family: PositionFamily,
     pub vector: PositionVector,
     pub confidence: f64,
     /// Faz 1: u64 epoch (chrono yok).
     pub measured_at: u64,
+}
+
+impl PositionSnapshot {
+    /// INV-C2: family vector'dan türetilir — mismatch imkansız.
+    pub fn family(&self) -> PositionFamily {
+        self.vector.family()
+    }
 }
 
 /// Position eksenleri — Faz 2: family-parametric (INV-C2 type-level separation).
@@ -812,6 +825,18 @@ pub enum PositionVector {
     ConceptualIntent(ConceptualIntentVector),
     /// §4.1 Evidence (Paper 1+3): confidence/coverage/recency/stability/source_reliability.
     Evidence(EvidenceVector),
+}
+
+impl PositionVector {
+    /// INV-C2: family vector'dan türetilir — `PositionSnapshot` ayrı `family` field
+    /// taşımaz, mismatch imkansız. Bu metod family/vector tutarlılığını garanti eder.
+    pub fn family(&self) -> PositionFamily {
+        match self {
+            Self::PhysicalCode(_) => PositionFamily::PhysicalCode,
+            Self::ConceptualIntent(_) => PositionFamily::ConceptualIntent,
+            Self::Evidence(_) => PositionFamily::Evidence,
+        }
+    }
 }
 
 /// PhysicalCode position vector (Paper 1, 5 eksen).
@@ -1179,5 +1204,34 @@ mod tests {
         assert!(md.contains("# AnchorPlan Audit — pkt:md"));
         assert!(md.contains("**Decision:** `MarkUnanchored`"));
         assert!(md.contains("_(none — unanchored)_"));
+    }
+
+    #[test]
+    fn anchor_plan_audit_json_is_valid_json() {
+        // Manuel JSON üretimi malformed olabilir — serde_json ile parse-validity doğrula.
+        let plan = AnchorPlan::from_gate(
+            ConceptPacketId("pkt:valid".into()),
+            vec![AnchorCandidate::from_scored(
+                ExtractedAnchorCandidate::new(
+                    ConceptPacketId("pkt:valid".into()),
+                    ConceptNodeId("Concept:Payment".into()),
+                    crate::anchoring::ConceptEdgeKind::Mentions,
+                    None,
+                ),
+                AnchorScoreBreakdown::zeroed(),
+            )],
+            crate::anchoring::AnchorDecisionKind::TentativeLink,
+            crate::anchoring::ThresholdBand::Tentative,
+            true,
+            vec!["SUPERSEDES yasak".into()],
+            vec![],
+        );
+        let json = plan.to_audit_json();
+        // Geçerli JSON olması lazım (serde_json parse edebilmeli)
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("audit JSON geçerli JSON olmalı");
+        assert_eq!(parsed["packet_id"], "pkt:valid");
+        assert_eq!(parsed["decision"], "TentativeLink");
+        assert!(parsed["candidates"].is_array());
     }
 }
