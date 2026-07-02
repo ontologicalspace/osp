@@ -65,6 +65,93 @@ impl std::fmt::Display for GateError {
 
 impl std::error::Error for GateError {}
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SupersedeAuthority — INV-C4 capability token (§6.4, OperatorAcceptance pattern mirror)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Accepted kararları geçersiz kılma yetkisi (§6.4 hiyerarşi).
+///
+/// # INV-C4 type-level (yapısal garanti)
+/// **Private field** (`_private: ()`) sayesinde external crate struct literal ile
+/// üretemez. `AnchorGateContext { supersede_authority: Some(SupersedeAuthority::Operator) }`
+/// dışarıdan yazılamaz — `SupersedeAuthority::Operator` bir enum varyantı DEĞİL, private
+/// field'lı struct'tır. Sadece `pub(crate) fn issue_*()` constructor'ları (TCB içi)
+/// üretebilir. Faz 8 operator console bu constructor'ları gerçek API ile çağırır.
+///
+/// `SupersedeAuthorityLevel` public enum sadece **bilgi amaçlı** (level okuma);
+/// yeni authority üretmek için kullanılamaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupersedeAuthority {
+    level: SupersedeAuthorityLevel,
+    _private: (),
+}
+
+/// Authority seviyesi (§6.2 hiyerarşi) — public, ama yeni `SupersedeAuthority`
+/// üretmek için kullanılamaz (sadece `SupersedeAuthority::level()` ile okunur).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SupersedeAuthorityLevel {
+    /// §6.2 seviye 1 — her şeyi supersede edebilir.
+    Operator,
+    /// §6.2 seviye 2 — architect decision ve altını.
+    ExplicitUser,
+    /// §6.2 seviye 3 — documentation ve altını.
+    WitnessedArchitectDecision,
+}
+
+impl SupersedeAuthority {
+    /// Authority seviyesini oku (bilgi amaçlı — yeni authority üretmez).
+    pub fn level(&self) -> SupersedeAuthorityLevel {
+        self.level
+    }
+
+    #[cfg(test)]
+    pub(crate) fn issue_operator_for_tests() -> Self {
+        Self {
+            level: SupersedeAuthorityLevel::Operator,
+            _private: (),
+        }
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn issue_explicit_user_for_tests() -> Self {
+        Self {
+            level: SupersedeAuthorityLevel::ExplicitUser,
+            _private: (),
+        }
+    }
+    #[cfg(test)]
+    #[allow(dead_code)]
+    pub(crate) fn issue_witnessed_architect_for_tests() -> Self {
+        Self {
+            level: SupersedeAuthorityLevel::WitnessedArchitectDecision,
+            _private: (),
+        }
+    }
+}
+
+/// Gate context — INV-C4 authority + ileride diğer capability'ler.
+///
+/// `decide` çağrılırken verilir. `Supersedes` candidate varsa `supersede_authority`
+/// kontrol edilir; yoksa `GateError::SupersedeAuthorityRequired`. Faz 8 operator console
+/// bu context'i doldurur.
+#[derive(Debug, Clone, Default)]
+pub struct AnchorGateContext {
+    pub supersede_authority: Option<SupersedeAuthority>,
+}
+
+impl AnchorGateContext {
+    /// Faz 2 default: hiçbir authority yok (operator API Faz 8).
+    pub fn no_authority() -> Self {
+        Self {
+            supersede_authority: None,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AnchorGate
+// ═══════════════════════════════════════════════════════════════════════════════
+
 /// Anchor gate. Pipeline'ın son aşaması — candidate'leri plana dönüştürür.
 pub struct AnchorGate {
     glossary: Glossary,
@@ -78,11 +165,13 @@ impl AnchorGate {
     /// Skorlanmış adayları AnchorPlan'a dönüştür.
     ///
     /// Sıra: invariant kontrolleri → threshold karar → canon gate → negative assertions.
+    /// `ctx` INV-C4 authority taşır (Faz 2'de `None`; Faz 8 operator console doldurur).
     pub fn decide(
         &self,
         packet_id: &ConceptPacketId,
         candidates: Vec<AnchorCandidate>,
         graph: &ConceptGraph,
+        ctx: &AnchorGateContext,
     ) -> Result<AnchorPlan, GateError> {
         // 1. INV-C7: high-stake explanation kontrolü
         for c in &candidates {
@@ -95,7 +184,7 @@ impl AnchorGate {
 
         // 2. §8.6 + ImplementedBy + Supersedes kontrolleri
         for c in &candidates {
-            self.validate_edge_kind(c, graph)?;
+            self.validate_edge_kind(c, graph, ctx)?;
         }
 
         // 3. Threshold karar (en yüksek skorlu aday üzerinden)
@@ -153,15 +242,15 @@ impl AnchorGate {
                     | AnchorDecisionKind::MarkContradiction
             );
 
-        Ok(AnchorPlan {
-            packet_id: packet_id.clone(),
-            candidates: adjusted_candidates,
-            decision: final_decision,
-            threshold_band: final_band,
+        Ok(AnchorPlan::from_gate(
+            packet_id.clone(),
+            adjusted_candidates,
+            final_decision,
+            final_band,
             requires_operator_review,
             negative_assertions,
             redirects,
-        })
+        ))
     }
 
     /// §8.2 threshold → (decision, band).
@@ -185,13 +274,15 @@ impl AnchorGate {
         &self,
         c: &AnchorCandidate,
         _graph: &ConceptGraph,
+        ctx: &AnchorGateContext,
     ) -> Result<(), GateError> {
         // Faz 1: ImplementedBy yasak (code evidence Faz 4)
         if c.edge_kind == ConceptEdgeKind::ImplementedBy {
             return Err(GateError::ImplementedByRequiresCodeEvidence);
         }
-        // INV-C4: Supersedes authority (Faz 1'de hiçbir kaynak yetkili değil — operator API Faz 8)
-        if c.edge_kind == ConceptEdgeKind::Supersedes {
+        // INV-C4: Supersedes authority gerekli. ctx.supersede_authority yoksa reject.
+        // Faz 2'de context default None → reject. Faz 8 operator console authority verir.
+        if c.edge_kind == ConceptEdgeKind::Supersedes && ctx.supersede_authority.is_none() {
             return Err(GateError::SupersedeAuthorityRequired);
         }
         // §8.6: ConceptPacket → doğrudan CodeEntity (Candidate değil) yasak
@@ -241,7 +332,7 @@ impl AnchorGate {
         }
 
         // 3. Edit distance ≤2 — mevcut concept canonical'larına karşı
-        for node in graph.nodes.values() {
+        for node in graph.nodes_iter() {
             if matches!(
                 node.node_kind,
                 crate::anchoring::types::ConceptNodeKind::Concept
@@ -301,7 +392,8 @@ mod tests {
         // (ağırlık toplamı 1.0). penalty'ler 0. Böylece threshold testleri `score` ile
         // direkt ilişki kurabilir (0.90 → StrongLink, 0.70 → TentativeLink, vb.).
         let b = AnchorScoreBreakdown {
-            semantic_similarity: score,
+            semantic_similarity: crate::anchoring::types::ScalarSimilarity::new(score)
+                .expect("test score [0,1]"),
             ontology_type_compatibility: score,
             graph_context_score: score,
             domain_term_match: score,
@@ -316,7 +408,8 @@ mod tests {
             target_node_id: ConceptNodeId(target.into()),
             edge_kind: kind,
             score: b,
-            explanation: expl.map(String::from),
+            explanation: expl
+                .map(|e| crate::anchoring::types::NonEmptyExplanation::from_validated(e.into())),
         }
     }
 
@@ -329,7 +422,12 @@ mod tests {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.90, None);
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::StrongLink);
         assert_eq!(plan.threshold_band, ThresholdBand::Strong);
@@ -340,7 +438,12 @@ mod tests {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.70, None);
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::TentativeLink);
         assert_eq!(plan.threshold_band, ThresholdBand::Tentative);
@@ -351,7 +454,12 @@ mod tests {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.20, None);
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::MarkUnanchored);
         assert_eq!(plan.threshold_band, ThresholdBand::Unanchored);
@@ -363,7 +471,12 @@ mod tests {
         // DerivesRisk high-stake, explanation yok → error
         let c = candidate("RiskCandidate:X", ConceptEdgeKind::DerivesRisk, 0.70, None);
         let err = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap_err();
         assert!(matches!(err, GateError::MissingExplanation { .. }));
     }
@@ -378,7 +491,12 @@ mod tests {
             Some("risk derived"),
         );
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert!(plan.requires_operator_review, "high-stake → review");
     }
@@ -393,7 +511,12 @@ mod tests {
             Some("impl"),
         );
         let err = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap_err();
         assert_eq!(err, GateError::ImplementedByRequiresCodeEvidence);
     }
@@ -408,9 +531,36 @@ mod tests {
             Some("super"),
         );
         let err = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap_err();
         assert_eq!(err, GateError::SupersedeAuthorityRequired);
+    }
+
+    #[test]
+    fn gate_accepts_supersedes_with_authority() {
+        // INV-C4: authority varsa Supersedes kabul edilir (Faz 8 operator console)
+        let g = AnchorGate::new(glossary());
+        let c = candidate(
+            "Decision:X",
+            ConceptEdgeKind::Supersedes,
+            0.90,
+            Some("super"),
+        );
+        let ctx = AnchorGateContext {
+            supersede_authority: Some(SupersedeAuthority::issue_operator_for_tests()),
+        };
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph(), &ctx)
+            .expect("authority ile Supersedes kabul");
+        assert!(plan
+            .candidates()
+            .iter()
+            .any(|c| c.edge_kind() == ConceptEdgeKind::Supersedes));
     }
 
     #[test]
@@ -424,7 +574,12 @@ mod tests {
             Some("expected"),
         );
         let err = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap_err();
         assert!(matches!(err, GateError::IllegalDirectCodeBinding { .. }));
     }
@@ -444,7 +599,12 @@ mod tests {
         });
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.50, None);
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &graph)
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &graph,
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::CreateNode);
         assert_eq!(plan.redirects.len(), 1);
@@ -469,7 +629,12 @@ mod tests {
         // "ödeme" alias → Concept:Payment redirect
         let c = candidate("Concept:ödeme", ConceptEdgeKind::Mentions, 0.50, None);
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &graph)
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &graph,
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert!(!plan.redirects.is_empty());
     }
@@ -484,7 +649,12 @@ mod tests {
             Some("contradicts"),
         );
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::MarkContradiction);
         assert!(
@@ -502,7 +672,12 @@ mod tests {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.50, None);
         let plan = g
-            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .decide(
+                &ConceptPacketId("p".into()),
+                vec![c],
+                &empty_graph(),
+                &AnchorGateContext::no_authority(),
+            )
             .unwrap();
         assert!(
             !plan.requires_operator_review,

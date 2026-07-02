@@ -1,0 +1,13 @@
+warning: unused imports: `ConceptNodeId` and `ConceptNode`
+ --> tests/compile_fail/c3_graph_private.rs:3:48
+  |
+3 | use osp_core::anchoring::types::{ConceptGraph, ConceptNode, ConceptNodeId};
+  |                                                ^^^^^^^^^^^  ^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0616]: field `nodes` of struct `ConceptGraph` is private
+ --> tests/compile_fail/c3_graph_private.rs:8:24
+  |
+8 |     let _count = graph.nodes.len();
+  |                        ^^^^^ private field

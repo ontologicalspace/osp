@@ -159,8 +159,7 @@ impl InMemoryAnchorStore {
     ) -> Result<(), StoreError> {
         let node = self
             .graph
-            .nodes
-            .get_mut(node_id)
+            .node_mut(node_id)
             .ok_or_else(|| StoreError::NodeNotFound(node_id.clone()))?;
 
         if matches!(node.decision_status, DecisionStatus::Accepted) {
@@ -173,16 +172,14 @@ impl InMemoryAnchorStore {
     /// INV-C3: mainline knowledge sorgusu — sadece Accepted.
     pub fn mainline_query(&self) -> impl Iterator<Item = &ConceptNode> {
         self.graph
-            .nodes
-            .values()
+            .nodes_iter()
             .filter(|n| matches!(n.decision_status, DecisionStatus::Accepted))
     }
 
     /// Candidate lane sorgusu — işlem bekleyen.
     pub fn candidate_query(&self) -> impl Iterator<Item = &ConceptNode> {
         self.graph
-            .nodes
-            .values()
+            .nodes_iter()
             .filter(|n| matches!(n.decision_status, DecisionStatus::Candidate))
     }
 
@@ -246,7 +243,9 @@ mod tests {
             target_node_id: ConceptNodeId(target.into()),
             edge_kind: kind,
             score: AnchorScoreBreakdown::zeroed(),
-            explanation: Some("test".into()),
+            explanation: Some(
+                crate::anchoring::types::NonEmptyExplanation::from_validated("test".into()),
+            ),
         }
     }
 
@@ -261,7 +260,7 @@ mod tests {
         assert_eq!(res.new_nodes, 2);
         assert_eq!(res.new_edges, 2);
         // INV-C5: tüm yeni node'lar Candidate
-        for n in store.graph.nodes.values() {
+        for n in store.graph().nodes_iter() {
             assert_eq!(n.decision_status, DecisionStatus::Candidate);
         }
     }

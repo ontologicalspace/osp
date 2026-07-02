@@ -1,0 +1,9 @@
+error[E0451]: fields `level` and `_private` of struct `SupersedeAuthority` are private
+  --> tests/compile_fail/c4_supersede_authority_construct.rs:9:9
+   |
+ 8 |     let _auth = SupersedeAuthority {
+   |                 ------------------ in this type
+ 9 |         level: SupersedeAuthorityLevel::Operator,
+   |         ^^^^^ private field
+10 |         _private: (),
+   |         ^^^^^^^^ private field

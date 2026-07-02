@@ -12,7 +12,7 @@ Paper 2'nin `paper2-notes/` pattern'ini izler (README + stage dosyaları + evide
 |---|---|---|
 | **Faz 0** | ✅ Tamamlandı | Spec + fixture — 10 golden cümle + `anchoring.fixture.v1` şema + 11 loader testi |
 | **Faz 1** | ✅ Tamamlandı | In-memory deterministic MVP — 5 bileşen pipeline (Classifier, Extractor, Scorer, Gate, Store) |
-| Faz 2 | Planlandı | INV-C1..C8 type-level enforcement hardening |
+| **Faz 2** | ✅ Tamamlandı | INV-C1..C8 type-level enforcement hardening (compile-time garantiler) |
 | Faz 3 | Planlandı | Kuzu persistence (`osp-kuzu` crate) |
 | Faz 4 | Planlandı | Code evidence integration (symbol index, ImplementedBy) |
 | Faz 5 | Planlandı | Task/Predicate integration → Paper 2 navigator bridge |
@@ -33,6 +33,7 @@ Mekanizma önce deterministic olarak kanıtlanır, stochastic katmanlar sonra ek
 ## Stage notları
 
 - [`faz1-deterministic-mvp.md`](faz1-deterministic-mvp.md) — Faz 1 implementation evidence
+- [`faz2-invariant-hardening.md`](faz2-invariant-hardening.md) — Faz 2 type-level enforcement evidence
 
 ## Evidence
 

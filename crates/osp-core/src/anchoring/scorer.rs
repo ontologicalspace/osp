@@ -43,7 +43,7 @@ impl AnchorScorer {
         let mut b = AnchorScoreBreakdown::zeroed();
 
         // semantic_similarity: Faz 1 placeholder (INV-C1 — embedding Faz 7)
-        b.semantic_similarity = 0.0;
+        b.semantic_similarity = crate::anchoring::types::ScalarSimilarity::zero();
 
         // ontology_type_compatibility: edge kind ↔ target node kind uyumu
         b.ontology_type_compatibility =
@@ -113,8 +113,7 @@ impl AnchorScorer {
         match graph.node(target_id) {
             Some(_node) => {
                 let neighbor_count = graph
-                    .edges
-                    .iter()
+                    .edges()
                     .filter(|e| &e.to == target_id || &e.from == target_id)
                     .count();
                 (0.5 + (neighbor_count as f64 * 0.1)).min(1.0)
@@ -176,12 +175,12 @@ mod tests {
     use crate::anchoring::{ConceptEdgeKind, DecisionStatus, PositionFamily};
 
     fn extracted(target: &str, kind: ConceptEdgeKind) -> ExtractedAnchorCandidate {
-        ExtractedAnchorCandidate {
-            packet_id: ConceptPacketId("pkt:1".into()),
-            target_node_id: ConceptNodeId(target.into()),
-            edge_kind: kind,
-            explanation: None,
-        }
+        ExtractedAnchorCandidate::new(
+            ConceptPacketId("pkt:1".into()),
+            ConceptNodeId(target.into()),
+            kind,
+            None,
+        )
     }
 
     #[test]
@@ -193,7 +192,7 @@ mod tests {
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
         );
-        assert_eq!(ac.score.semantic_similarity, 0.0);
+        assert_eq!(ac.score.semantic_similarity.get(), 0.0);
     }
 
     #[test]
