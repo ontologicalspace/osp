@@ -1,10 +1,11 @@
 # Architectural Trajectory Navigation: From Target Coordinates to Measurement Predicates
 
-**OSP Paper 2 Draft v1.1** · Target: arXiv then ACM TOSEM
+**OSP Paper 2 Draft v1.2** · Target: arXiv then ACM TOSEM
 **Authors:** Volkan ER
 **Date:** 2026-07-02
 **Companion paper:** *Ontological Space Protocol: Modeling Software as a Conceptual Space with Epistemological Witnessing* (Paper 1, v2.6 — static space). This paper extends OSP to the dynamic, agent-driven regime.
-**Revision:** v1 → v1.1 (review pass): separated three evidence strata (G2c-3 controlled-mock / G2c-4 real-LLM smoke / G2c-5 external corpus) throughout — the RQ9 mechanism is mock-isolated, not a real-LLM result; fixed section cross-references; split Appendix into A (external), B (real-LLM smoke), C (controlled RQ9 fixture); added Evidence Strata table, run-metadata table, and per-repository graph statistics; softened "generalizes" to "preliminary external-corpus evidence"; flagged RQ8 token difference as outlier-driven; renumbered references standalone [1]–[12]; softened "Software Physics program" to "framing supported."
+**Revision:** v1.1 → v1.2 (review pass 2): three consistency fixes — RQ7 table row relabeled ("Synthetic RQ9 baseline" → "G2c-4 real-LLM synthetic smoke, not a policy test"); Conclusion now states "external 24/24; real-LLM total 26/26" instead of conflating the two; Related Work citations corrected (ArchUnit [11], Reflexion Models [12]); temperature 0.3 annotated with the single-run stochasticity caveat inline.
+**Prior v1 → v1.1:** separated three evidence strata (G2c-3 controlled-mock / G2c-4 real-LLM smoke / G2c-5 external corpus) throughout — the RQ9 mechanism is mock-isolated, not a real-LLM result; fixed section cross-references; split Appendix into A (external), B (real-LLM smoke), C (controlled RQ9 fixture); added Evidence Strata table, run-metadata table, and per-repository graph statistics; softened "generalizes" to "preliminary external-corpus evidence"; flagged RQ8 token difference as outlier-driven; renumbered references standalone [1]–[12]; softened "Software Physics program" to "framing supported."
 
 ---
 
@@ -331,7 +332,7 @@ The G2c-3 fixture uses scripted proposals to isolate the *policy variable* (the 
 | Parameter | Value |
 |---|---|
 | Model | `gpt-4o-mini` (OpenAI) |
-| Temperature | 0.3 |
+| Temperature | 0.3 (non-zero; a single run per cell — stochasticity is a stated threat, §6.9) |
 | Witness mode | `harness_auto_approve` (min_approvers = 0; controlled experiment) |
 | Maneuver limit | 5 (external), 3 (G2c-3 controlled fixture) |
 | Prompt schema | `delta_proposal_output_format_snippet` (removed_edges + affected_nodes) + `AgentStructuralContext` |
@@ -373,8 +374,8 @@ We verify INV-T1 live on a running MCP server (`osp-mcp`, stdio transport). The 
 | Corpus | Cells | Completed | First-attempt |
 |---|---:|---:|---:|
 | External (chalk/click/cobra) | 24 | 24 | 23 |
-| Synthetic RQ9 baseline | 2 | 2 | 2 |
-| **Total** | **26** | **26** | **25** |
+| G2c-4 real-LLM synthetic smoke (not a policy test) | 2 | 2 | 2 |
+| **Total (real-LLM evidence)** | **26** | **26** | **25** |
 
 **Result.** Across 24 external cells, the agent produced a predicate-satisfying structural proposal in **24/24 (100%)** cases, with **23/24 on the first attempt**. The single two-attempt cell (click/Coupling/Accept/Without) succeeded on the second attempt after a syntactic rejection. This extends the G2c-4 synthetic smoke (2/2) to a small external corpus across three languages: given the structural context (focus node + current outgoing imports) and the `removed_edges` output contract, GPT-4o-mini reliably identifies and removes the correct import edge to satisfy the coupling/instability predicate on the first attempt. We frame this as preliminary external-corpus evidence rather than a generalization claim, given the corpus size (3 repos, 24 cells) and single-run design.
 
@@ -442,7 +443,7 @@ GraphRAG [4] generates entity-relation graphs for LLM retrieval, improving conte
 
 ### 7.4 Architectural Conformance Checking
 
-ArchUnit [12] and Software Reflexion Models [13] check conformance of implementation to intended architecture. ArchUnit enforces rules in tests (a rule violation fails a test); Reflexion Models reconcile a source model with an intended model, surfacing divergences. OSP's Q6 (Rule) gate is a conformance check, but trajectory navigation adds what these post-hoc checkers lack: a *pre-mutation* gate evaluated on a hypothetical measurement, so a rule-violating delta is rejected before it lands rather than flagged after the fact. The predicate gate (Q5.b) further generalizes conformance from binary rule satisfaction to measurable quality targets (coupling ≤ threshold), with typed outcomes (progress vs. completion vs. regression) that support incremental refactoring.
+ArchUnit [11] and Software Reflexion Models [12] check conformance of implementation to intended architecture. ArchUnit enforces rules in tests (a rule violation fails a test); Reflexion Models reconcile a source model with an intended model, surfacing divergences. OSP's Q6 (Rule) gate is a conformance check, but trajectory navigation adds what these post-hoc checkers lack: a *pre-mutation* gate evaluated on a hypothetical measurement, so a rule-violating delta is rejected before it lands rather than flagged after the fact. The predicate gate (Q5.b) further generalizes conformance from binary rule satisfaction to measurable quality targets (coupling ≤ threshold), with typed outcomes (progress vs. completion vs. regression) that support incremental refactoring.
 
 ### 7.5 Byzantine Fault Tolerance and the Witness Model
 
@@ -506,7 +507,7 @@ The `NavigatorWitnessPolicy` enum is a small type with a large lesson. The G2c-1
 
 We presented Architectural Trajectory Navigation, the dynamic extension of the Ontological Space Protocol, in which an AI agent's task is a measurement predicate rather than a target coordinate. The agent never observes the coordinate it is supposed to reach (INV-T1, verified live); a deterministic predicate gate (Q5.b) measures the agent's structural delta against the predicate before any mutation; an adaptive control loop bounds attempts and feeds rejections back as calibration. Eight type-level invariants (INV-T1–T8) govern the ontology, extending Paper 1's static guarantees into the goal-directed regime.
 
-On an external corpus of three repositories across three languages (chalk/JavaScript, click/Python, cobra/Go), a real LLM (GPT-4o-mini) produced predicate-satisfying structural proposals in 26/26 cells at a mean cost of 1104 tokens per cell, with 0 axis regressions. We report this as preliminary evidence that the structural-proposal pipeline works on small external repositories under a controlled structural harness, while being explicit about two boundaries: success is structural (graph-level `removed_edges`, not source patches), and first-attempt dominance suppresses the feedback and policy mechanisms whose value is demonstrated synthetically. The neutral external results for RQ8 and RQ9 are reported with their mechanism explained rather than suppressed — the honesty is the contribution.
+On the external corpus (chalk/JavaScript, click/Python, cobra/Go), GPT-4o-mini produced predicate-satisfying structural proposals in **24/24 cells** at a mean cost of 1104 tokens per cell, with 0 axis regressions. Including two real-LLM synthetic-smoke cells, the real-LLM evidence totals **26/26 Completed**. We report this as preliminary evidence that the structural-proposal pipeline works on small external repositories under a controlled structural harness, while being explicit about two boundaries: success is structural (graph-level `removed_edges`, not source patches), and first-attempt dominance suppresses the feedback and policy mechanisms whose value is demonstrated synthetically. The neutral external results for RQ8 and RQ9 are reported with their mechanism explained rather than suppressed — the honesty is the contribution.
 
 Together with Paper 1's static space, trajectory navigation provides the dynamic counterpart required by the *Software Physics* framing: software modeled as a conceptual space with provenance-aware metrics (Paper 1), navigated by agents whose tasks are measurable conditions evaluated by a deterministic engine (Paper 2). Together, these results motivate a broader Software Physics program rather than completing it — the framing is supported by one implementation path and a small external corpus, not a general proof. The central separation — between the agent that proposes and the engine that measures — is the epistemic core of the work.
 
