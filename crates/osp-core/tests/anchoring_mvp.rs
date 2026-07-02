@@ -14,9 +14,7 @@ use osp_core::anchoring::classifier::{Classifier, Glossary};
 use osp_core::anchoring::pipeline::AnchorPipeline;
 use osp_core::anchoring::store::InMemoryAnchorStore;
 use osp_core::anchoring::types::{ConceptNode, ConceptNodeKind, GraphSeed, PacketSource};
-use osp_core::anchoring::{
-    ConceptEdgeKind, ConceptPacketType, DecisionStatus, PositionFamily,
-};
+use osp_core::anchoring::{ConceptEdgeKind, ConceptPacketType, DecisionStatus, PositionFamily};
 use serde::{Deserialize, Serialize};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -106,25 +104,61 @@ struct FixtureEdge {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const FIXTURE_FILES: &[(&str, &str)] = &[
-    ("fix_001_payment_trust_vision", include_str!("fixtures/anchoring/fix_001_payment_trust_vision.json")),
-    ("fix_002_requirement_rule", include_str!("fixtures/anchoring/fix_002_requirement_rule.json")),
-    ("fix_003_arch_decision", include_str!("fixtures/anchoring/fix_003_arch_decision.json")),
-    ("fix_004_antigoal", include_str!("fixtures/anchoring/fix_004_antigoal.json")),
-    ("fix_005_assumption_only", include_str!("fixtures/anchoring/fix_005_assumption_only.json")),
-    ("fix_006_direct_code_ref", include_str!("fixtures/anchoring/fix_006_direct_code_ref.json")),
-    ("fix_007_contradiction", include_str!("fixtures/anchoring/fix_007_contradiction.json")),
-    ("fix_008_dedup_alias", include_str!("fixtures/anchoring/fix_008_dedup_alias.json")),
-    ("fix_009_weak_anchor_canon", include_str!("fixtures/anchoring/fix_009_weak_anchor_canon.json")),
-    ("fix_010_unanchored", include_str!("fixtures/anchoring/fix_010_unanchored.json")),
+    (
+        "fix_001_payment_trust_vision",
+        include_str!("fixtures/anchoring/fix_001_payment_trust_vision.json"),
+    ),
+    (
+        "fix_002_requirement_rule",
+        include_str!("fixtures/anchoring/fix_002_requirement_rule.json"),
+    ),
+    (
+        "fix_003_arch_decision",
+        include_str!("fixtures/anchoring/fix_003_arch_decision.json"),
+    ),
+    (
+        "fix_004_antigoal",
+        include_str!("fixtures/anchoring/fix_004_antigoal.json"),
+    ),
+    (
+        "fix_005_assumption_only",
+        include_str!("fixtures/anchoring/fix_005_assumption_only.json"),
+    ),
+    (
+        "fix_006_direct_code_ref",
+        include_str!("fixtures/anchoring/fix_006_direct_code_ref.json"),
+    ),
+    (
+        "fix_007_contradiction",
+        include_str!("fixtures/anchoring/fix_007_contradiction.json"),
+    ),
+    (
+        "fix_008_dedup_alias",
+        include_str!("fixtures/anchoring/fix_008_dedup_alias.json"),
+    ),
+    (
+        "fix_009_weak_anchor_canon",
+        include_str!("fixtures/anchoring/fix_009_weak_anchor_canon.json"),
+    ),
+    (
+        "fix_010_unanchored",
+        include_str!("fixtures/anchoring/fix_010_unanchored.json"),
+    ),
 ];
 
 fn load_fixture(name: &str) -> AnchoringFixture {
-    let (_, raw) = FIXTURE_FILES.iter().find(|(n, _)| *n == name).expect("fixture");
+    let (_, raw) = FIXTURE_FILES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .expect("fixture");
     serde_json::from_str(raw).expect("fixture parse")
 }
 
 fn load_all() -> Vec<AnchoringFixture> {
-    FIXTURE_FILES.iter().map(|(_, raw)| serde_json::from_str(raw).expect("parse")).collect()
+    FIXTURE_FILES
+        .iter()
+        .map(|(_, raw)| serde_json::from_str(raw).expect("parse"))
+        .collect()
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -202,7 +236,12 @@ fn anchor_mvp_runs_all_fixtures() {
     for f in load_all() {
         let seed = graph_seed_from_given(&f.given);
         let mut store = InMemoryAnchorStore::with_seed(seed);
-        let result = pipeline.run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser);
+        let result = pipeline.run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+        );
         // Sonuç olsun: ya plan ya da bilinçli GateError (INV ihlali)
         match result {
             Ok(plan) => {
@@ -244,9 +283,17 @@ fn anchor_mvp_fix_001_derives_risk() {
     let pipeline = AnchorPipeline::default_pipeline();
     let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
     let plan = pipeline
-        .run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser)
+        .run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+        )
         .expect("plan");
-    let has_derives_risk = plan.candidates.iter().any(|c| c.edge_kind == ConceptEdgeKind::DerivesRisk);
+    let has_derives_risk = plan
+        .candidates
+        .iter()
+        .any(|c| c.edge_kind == ConceptEdgeKind::DerivesRisk);
     assert!(
         has_derives_risk,
         "fix_001 DerivesRisk üretmeli (güven/hissetmeli sinyali)"
@@ -262,7 +309,11 @@ fn anchor_mvp_fix_004_antigoal() {
     let f = load_fixture("fix_004_antigoal");
     let classifier = Classifier::new();
     let pt = classifier.classify(&f.input.text, "tr");
-    assert_eq!(pt, ConceptPacketType::AntiGoal, "fix_004 → AntiGoal (precedence #1)");
+    assert_eq!(
+        pt,
+        ConceptPacketType::AntiGoal,
+        "fix_004 → AntiGoal (precedence #1)"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -277,7 +328,12 @@ fn anchor_mvp_fix_007_contradiction() {
 
     // fix_007 text'inde "çelişiyor" var → extractor Contradicts üretmeli (Decision referansı ile)
     let plan = pipeline
-        .run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser)
+        .run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+        )
         .expect("fix_007 plan üretmeli");
 
     let has_contradicts = plan
@@ -292,9 +348,14 @@ fn anchor_mvp_fix_007_contradiction() {
             osp_core::anchoring::AnchorDecisionKind::MarkContradiction,
             "Contradicts → MarkContradiction"
         );
-        assert!(!plan.negative_assertions.is_empty(), "§6.4.1 negative assertions");
         assert!(
-            plan.negative_assertions.iter().any(|s| s.contains("SUPERSEDES")),
+            !plan.negative_assertions.is_empty(),
+            "§6.4.1 negative assertions"
+        );
+        assert!(
+            plan.negative_assertions
+                .iter()
+                .any(|s| s.contains("SUPERSEDES")),
             "negative assertion SUPERSEDES yasağını içermeli"
         );
     }
@@ -314,11 +375,20 @@ fn anchor_mvp_candidate_isolation_inv_c3() {
     let f = load_fixture("fix_001_payment_trust_vision");
     let pipeline = AnchorPipeline::default_pipeline();
     let seed = graph_seed_from_given(&f.given);
-    let pre_mainline = seed.concepts.iter().filter(|c| matches!(c.decision_status, DecisionStatus::Accepted)).count();
+    let pre_mainline = seed
+        .concepts
+        .iter()
+        .filter(|c| matches!(c.decision_status, DecisionStatus::Accepted))
+        .count();
 
     let mut store = InMemoryAnchorStore::with_seed(seed);
     let plan = pipeline
-        .run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser)
+        .run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+        )
         .expect("plan");
     store.apply_plan(&plan);
 
@@ -347,9 +417,17 @@ fn anchor_mvp_does_not_emit_implemented_by() {
     let pipeline = AnchorPipeline::default_pipeline();
     for f in load_all() {
         let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
-        match pipeline.run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser) {
+        match pipeline.run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+        ) {
             Ok(plan) => {
-                let has_impl = plan.candidates.iter().any(|c| c.edge_kind == ConceptEdgeKind::ImplementedBy);
+                let has_impl = plan
+                    .candidates
+                    .iter()
+                    .any(|c| c.edge_kind == ConceptEdgeKind::ImplementedBy);
                 assert!(
                     !has_impl,
                     "fixture {}: ImplementedBy üretilmemeli (Faz 1 code evidence yok)",
@@ -376,7 +454,12 @@ fn anchor_mvp_fix_008_dedup_canon_gate() {
     let pipeline = AnchorPipeline::default_pipeline();
     let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
 
-    if let Ok(plan) = pipeline.run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser) {
+    if let Ok(plan) = pipeline.run_with_source(
+        &f.input.text,
+        "tr",
+        store.graph(),
+        PacketSource::ExplicitUser,
+    ) {
         // INV-C8: "ödeme"/"payment" mevcut Concept:Payment'a redirect olmalı
         // (yeni node oluşmamalı). Not: Faz 1 coarse classifier redirect üretmeyebilir;
         // eğer üretirse existing_node Concept:Payment olmalı.
@@ -399,7 +482,12 @@ fn anchor_mvp_fix_010_unanchored_empty() {
     let pipeline = AnchorPipeline::default_pipeline();
     let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
     let plan = pipeline
-        .run_with_source(&f.input.text, "tr", store.graph(), PacketSource::ExplicitUser)
+        .run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+        )
         .expect("plan");
     // Vague cümle → glossary match yok → boş candidates
     assert!(

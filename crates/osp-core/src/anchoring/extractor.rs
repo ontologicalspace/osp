@@ -4,11 +4,11 @@
 //! Glossary match, typed-prefix parse, rule/risk sinyali tespiti. §8.6 zincir kuralı.
 
 use crate::anchoring::classifier::{Classifier, Glossary};
+use crate::anchoring::typed_ref::TypedNodeRef;
 use crate::anchoring::types::{
-    ConceptGraph, ConceptNodeKind, ConceptNodeId, ConceptPacket, ExtractedAnchorCandidate,
+    ConceptGraph, ConceptNodeId, ConceptNodeKind, ConceptPacket, ExtractedAnchorCandidate,
 };
 use crate::anchoring::ConceptEdgeKind;
-use crate::anchoring::typed_ref::TypedNodeRef;
 
 /// Lexical/domain extractor. Glossary + classifier'a bağlı.
 pub struct Extractor<'a> {
@@ -18,7 +18,10 @@ pub struct Extractor<'a> {
 
 impl<'a> Extractor<'a> {
     pub fn new(glossary: &'a Glossary, classifier: &'a Classifier) -> Self {
-        Self { glossary, classifier }
+        Self {
+            glossary,
+            classifier,
+        }
     }
 
     /// Packet'ten aday edge/node'ları çıkar (score'suz — scorer ekler).
@@ -26,7 +29,11 @@ impl<'a> Extractor<'a> {
     /// Not: `graph` parametresi Faz 1'de kullanılmaz (extractor glossary-driven);
     /// Faz 2'de graph context (mevcut node/komşu) zenginleştirmesi için hazır.
     #[allow(unused_variables)]
-    pub fn extract(&self, packet: &ConceptPacket, graph: &ConceptGraph) -> Vec<ExtractedAnchorCandidate> {
+    pub fn extract(
+        &self,
+        packet: &ConceptPacket,
+        graph: &ConceptGraph,
+    ) -> Vec<ExtractedAnchorCandidate> {
         let mut candidates = Vec::new();
         let text_lower = packet.text.to_lowercase();
 
@@ -68,7 +75,11 @@ impl<'a> Extractor<'a> {
                     _ => ConceptEdgeKind::Mentions,
                 };
                 let explanation = if edge_kind.is_high_stake() {
-                    Some(format!("Extracted typed ref {}:{}", r.kind.as_prefix(), r.name))
+                    Some(format!(
+                        "Extracted typed ref {}:{}",
+                        r.kind.as_prefix(),
+                        r.name
+                    ))
                 } else {
                     None
                 };
@@ -107,7 +118,10 @@ impl<'a> Extractor<'a> {
         }
 
         // 5. AntiGoalOf — packet type AntiGoal ise mevcut Concept'e
-        if matches!(packet.packet_type, crate::anchoring::ConceptPacketType::AntiGoal) {
+        if matches!(
+            packet.packet_type,
+            crate::anchoring::ConceptPacketType::AntiGoal
+        ) {
             if let Some(target_concept) = self.first_concept_target(&candidates) {
                 candidates.push(ExtractedAnchorCandidate {
                     packet_id: packet.id.clone(),
@@ -125,7 +139,9 @@ impl<'a> Extractor<'a> {
     }
 
     fn is_contradiction_context(&self, text_lower: &str) -> bool {
-        text_lower.contains("çeliş") || text_lower.contains("ihlal") || text_lower.contains("contradict")
+        text_lower.contains("çeliş")
+            || text_lower.contains("ihlal")
+            || text_lower.contains("contradict")
     }
 
     fn derive_rule_name(&self, text: &str) -> String {
@@ -209,8 +225,14 @@ mod tests {
         let cands = ex.extract(&pkt, &graph);
 
         // Payment + Trust Mentions
-        assert!(cands.iter().any(|c| c.target_node_id.0 == "Concept:Payment" && c.edge_kind == ConceptEdgeKind::Mentions));
-        assert!(cands.iter().any(|c| c.target_node_id.0 == "Concept:Trust" && c.edge_kind == ConceptEdgeKind::Mentions));
+        assert!(cands
+            .iter()
+            .any(|c| c.target_node_id.0 == "Concept:Payment"
+                && c.edge_kind == ConceptEdgeKind::Mentions));
+        assert!(cands
+            .iter()
+            .any(|c| c.target_node_id.0 == "Concept:Trust"
+                && c.edge_kind == ConceptEdgeKind::Mentions));
     }
 
     #[test]
@@ -224,7 +246,9 @@ mod tests {
         );
         let cands = ex.extract(&pkt, &ConceptGraph::new());
 
-        let risk = cands.iter().find(|c| c.edge_kind == ConceptEdgeKind::DerivesRisk);
+        let risk = cands
+            .iter()
+            .find(|c| c.edge_kind == ConceptEdgeKind::DerivesRisk);
         assert!(risk.is_some(), "DerivesRisk üretilmeli");
         let risk = risk.unwrap();
         assert!(risk.target_node_id.0.starts_with("RiskCandidate:"));
@@ -242,7 +266,9 @@ mod tests {
         );
         let cands = ex.extract(&pkt, &ConceptGraph::new());
 
-        let rule = cands.iter().find(|c| c.edge_kind == ConceptEdgeKind::DerivesRule);
+        let rule = cands
+            .iter()
+            .find(|c| c.edge_kind == ConceptEdgeKind::DerivesRule);
         assert!(rule.is_some(), "DerivesRule üretilmeli");
         assert!(rule.unwrap().target_node_id.0.starts_with("RuleCandidate:"));
     }
@@ -257,7 +283,9 @@ mod tests {
         let cands = ex.extract(&pkt, &ConceptGraph::new());
         let payment_mentions = cands
             .iter()
-            .filter(|c| c.target_node_id.0 == "Concept:Payment" && c.edge_kind == ConceptEdgeKind::Mentions)
+            .filter(|c| {
+                c.target_node_id.0 == "Concept:Payment" && c.edge_kind == ConceptEdgeKind::Mentions
+            })
             .count();
         assert_eq!(payment_mentions, 1, "dedup tek Mentions bırakmalı");
     }

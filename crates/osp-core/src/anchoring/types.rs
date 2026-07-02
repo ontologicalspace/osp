@@ -116,7 +116,13 @@ pub struct ConceptPacket {
 
 impl ConceptPacket {
     /// Yeni packet — default Candidate (INV-C5), ConceptualIntent family.
-    pub fn new(id: impl Into<String>, packet_type: ConceptPacketType, text: impl Into<String>, language: impl Into<String>, source: PacketSource) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        packet_type: ConceptPacketType,
+        text: impl Into<String>,
+        language: impl Into<String>,
+        source: PacketSource,
+    ) -> Self {
         Self {
             id: ConceptPacketId(id.into()),
             packet_type,
@@ -322,7 +328,11 @@ impl AnchorPlan {
         } else {
             lines.push(format!("  candidates ({}):", self.candidates.len()));
             for c in &self.candidates {
-                let expl = if c.explanation.is_some() { " [explained]" } else { "" };
+                let expl = if c.explanation.is_some() {
+                    " [explained]"
+                } else {
+                    ""
+                };
                 lines.push(format!(
                     "    - {:?} → {} (score={:.3}){}",
                     c.edge_kind,
@@ -342,7 +352,10 @@ impl AnchorPlan {
             }
         }
         if !self.negative_assertions.is_empty() {
-            lines.push(format!("  negative_assertions ({}):", self.negative_assertions.len()));
+            lines.push(format!(
+                "  negative_assertions ({}):",
+                self.negative_assertions.len()
+            ));
             for n in &self.negative_assertions {
                 lines.push(format!("    - {}", n));
             }
@@ -478,6 +491,9 @@ impl GraphSeed {
 
     /// Tüm seed node'larını tek iteratörde.
     pub fn all_nodes(&self) -> impl Iterator<Item = &ConceptNode> {
-        self.concepts.iter().chain(self.decisions.iter()).chain(self.code_entities.iter())
+        self.concepts
+            .iter()
+            .chain(self.decisions.iter())
+            .chain(self.code_entities.iter())
     }
 }

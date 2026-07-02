@@ -26,7 +26,10 @@ pub enum GateError {
     /// INV-C7: high-stake edge explanation yok.
     MissingExplanation { edge_kind: ConceptEdgeKind },
     /// §8.6: yüksek abstraction → doğrudan CodeEntity.
-    IllegalDirectCodeBinding { from: ConceptNodeId, to: ConceptNodeId },
+    IllegalDirectCodeBinding {
+        from: ConceptNodeId,
+        to: ConceptNodeId,
+    },
     /// Faz 1: ImplementedBy code evidence (Faz 4) olmadan üretilemez.
     ImplementedByRequiresCodeEvidence,
     /// INV-C4: Supersedes authority yok.
@@ -37,10 +40,18 @@ impl std::fmt::Display for GateError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingExplanation { edge_kind } => {
-                write!(f, "INV-C7: high-stake edge {:?} explanation zorunlu", edge_kind)
+                write!(
+                    f,
+                    "INV-C7: high-stake edge {:?} explanation zorunlu",
+                    edge_kind
+                )
             }
             Self::IllegalDirectCodeBinding { from, to } => {
-                write!(f, "§8.6: yasak doğrudan kod bağlantısı {} → {}", from.0, to.0)
+                write!(
+                    f,
+                    "§8.6: yasak doğrudan kod bağlantısı {} → {}",
+                    from.0, to.0
+                )
             }
             Self::ImplementedByRequiresCodeEvidence => {
                 write!(f, "ImplementedBy code evidence (Faz 4) gerektirir")
@@ -76,7 +87,9 @@ impl AnchorGate {
         // 1. INV-C7: high-stake explanation kontrolü
         for c in &candidates {
             if c.edge_kind.is_high_stake() && c.explanation.is_none() {
-                return Err(GateError::MissingExplanation { edge_kind: c.edge_kind });
+                return Err(GateError::MissingExplanation {
+                    edge_kind: c.edge_kind,
+                });
             }
         }
 
@@ -86,7 +99,10 @@ impl AnchorGate {
         }
 
         // 3. Threshold karar (en yüksek skorlu aday üzerinden)
-        let max_score = candidates.iter().map(|c| c.score.total_clamped()).fold(0.0_f64, f64::max);
+        let max_score = candidates
+            .iter()
+            .map(|c| c.score.total_clamped())
+            .fold(0.0_f64, f64::max);
         let (decision, band) = self.threshold_decision(max_score);
 
         // 4. INV-C8 canon gate (CreateNode ise redirect kontrolü)
@@ -106,11 +122,12 @@ impl AnchorGate {
         let has_contradicts = adjusted_candidates
             .iter()
             .any(|c| c.edge_kind == ConceptEdgeKind::Contradicts);
-        let final_decision = if has_contradicts && !matches!(decision, AnchorDecisionKind::MarkUnanchored) {
-            AnchorDecisionKind::MarkContradiction
-        } else {
-            decision
-        };
+        let final_decision =
+            if has_contradicts && !matches!(decision, AnchorDecisionKind::MarkUnanchored) {
+                AnchorDecisionKind::MarkContradiction
+            } else {
+                decision
+            };
         let final_band = if has_contradicts && !matches!(band, ThresholdBand::Unanchored) {
             // Contradiction band'ı düşürme yok; ama decision değişti
             band
@@ -126,7 +143,9 @@ impl AnchorGate {
         };
 
         // 7. requires_operator_review (INV-C7 ↔ D6)
-        let requires_operator_review = adjusted_candidates.iter().any(|c| c.edge_kind.is_high_stake())
+        let requires_operator_review = adjusted_candidates
+            .iter()
+            .any(|c| c.edge_kind.is_high_stake())
             || matches!(
                 final_decision,
                 AnchorDecisionKind::RequireOperatorReview
@@ -154,12 +173,19 @@ impl AnchorGate {
         } else if score >= 0.40 {
             (AnchorDecisionKind::CreateNode, ThresholdBand::Weak)
         } else {
-            (AnchorDecisionKind::MarkUnanchored, ThresholdBand::Unanchored)
+            (
+                AnchorDecisionKind::MarkUnanchored,
+                ThresholdBand::Unanchored,
+            )
         }
     }
 
     /// §8.6 + ImplementedBy + Supersedes validation.
-    fn validate_edge_kind(&self, c: &AnchorCandidate, _graph: &ConceptGraph) -> Result<(), GateError> {
+    fn validate_edge_kind(
+        &self,
+        c: &AnchorCandidate,
+        _graph: &ConceptGraph,
+    ) -> Result<(), GateError> {
         // Faz 1: ImplementedBy yasak (code evidence Faz 4)
         if c.edge_kind == ConceptEdgeKind::ImplementedBy {
             return Err(GateError::ImplementedByRequiresCodeEvidence);
@@ -182,7 +208,11 @@ impl AnchorGate {
 
     /// INV-C8 canon gate: CreateNode öncesi mevcut node redirect kontrolü (3 katman).
     /// Match varsa Some(redirect) — hata değil, başarılı redirect.
-    fn canon_gate_check(&self, c: &AnchorCandidate, graph: &ConceptGraph) -> Option<CanonicalRedirect> {
+    fn canon_gate_check(
+        &self,
+        c: &AnchorCandidate,
+        graph: &ConceptGraph,
+    ) -> Option<CanonicalRedirect> {
         // Sadece yeni Concept node adayları için (target Concept: prefix)
         let target = &c.target_node_id.0;
         let (_, name) = target.split_once(':')?;
@@ -212,7 +242,10 @@ impl AnchorGate {
 
         // 3. Edit distance ≤2 — mevcut concept canonical'larına karşı
         for node in graph.nodes.values() {
-            if matches!(node.node_kind, crate::anchoring::types::ConceptNodeKind::Concept) {
+            if matches!(
+                node.node_kind,
+                crate::anchoring::types::ConceptNodeKind::Concept
+            ) {
                 if let Some(distance) = within_edit_distance_2(name, &node.canonical) {
                     return Some(CanonicalRedirect {
                         attempted: name.to_string(),
@@ -230,15 +263,14 @@ impl AnchorGate {
     fn contradiction_negative_assertions(&self, candidates: &[AnchorCandidate]) -> Vec<String> {
         let mut out = Vec::new();
         let has_code_entity = candidates.iter().any(|c| {
-            c.target_node_id.0.starts_with("CodeEntity:") || c.target_node_id.0.starts_with("CodeEntityCandidate:")
+            c.target_node_id.0.starts_with("CodeEntity:")
+                || c.target_node_id.0.starts_with("CodeEntityCandidate:")
         });
         if has_code_entity {
             out.push(
                 "CodeEntity --SUPERSEDES--> Decision yasak (INV-C4, §6.4.1: kod güçlüdür ama karar değildir)".into(),
             );
-            out.push(
-                "CodeEntity sadece --DRIFTS_FROM--> / --CONTRADICTS?--> üretebilir".into(),
-            );
+            out.push("CodeEntity sadece --DRIFTS_FROM--> / --CONTRADICTS?--> üretebilir".into());
         }
         out.push(
             "Agent kaynağı --SUPERSEDES--> AcceptedDecision yapamaz; sadece CONTRADICTS? önerir (INV-C4 capability gate)".into(),
@@ -250,14 +282,21 @@ impl AnchorGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anchoring::types::{AnchorScoreBreakdown, ConceptNode, ConceptNodeKind, ConceptPacketId, ConceptNodeId, PacketSource};
+    use crate::anchoring::types::{
+        AnchorScoreBreakdown, ConceptNode, ConceptNodeId, ConceptNodeKind, ConceptPacketId,
+    };
     use crate::anchoring::{ConceptEdgeKind, DecisionStatus, PositionFamily};
 
     fn glossary() -> Glossary {
         Glossary::seed_default()
     }
 
-    fn candidate(target: &str, kind: ConceptEdgeKind, score: f64, expl: Option<&str>) -> AnchorCandidate {
+    fn candidate(
+        target: &str,
+        kind: ConceptEdgeKind,
+        score: f64,
+        expl: Option<&str>,
+    ) -> AnchorCandidate {
         // Test helper: tüm pozitif bileşenleri `score`'a eşitle → raw_total ≈ score
         // (ağırlık toplamı 1.0). penalty'ler 0. Böylece threshold testleri `score` ile
         // direkt ilişki kurabilir (0.90 → StrongLink, 0.70 → TentativeLink, vb.).
@@ -289,7 +328,9 @@ mod tests {
     fn threshold_strong() {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.90, None);
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap();
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::StrongLink);
         assert_eq!(plan.threshold_band, ThresholdBand::Strong);
     }
@@ -298,7 +339,9 @@ mod tests {
     fn threshold_tentative() {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.70, None);
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap();
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::TentativeLink);
         assert_eq!(plan.threshold_band, ThresholdBand::Tentative);
     }
@@ -307,7 +350,9 @@ mod tests {
     fn threshold_unanchored() {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.20, None);
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap();
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::MarkUnanchored);
         assert_eq!(plan.threshold_band, ThresholdBand::Unanchored);
     }
@@ -317,31 +362,54 @@ mod tests {
         let g = AnchorGate::new(glossary());
         // DerivesRisk high-stake, explanation yok → error
         let c = candidate("RiskCandidate:X", ConceptEdgeKind::DerivesRisk, 0.70, None);
-        let err = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap_err();
+        let err = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap_err();
         assert!(matches!(err, GateError::MissingExplanation { .. }));
     }
 
     #[test]
     fn inv_c7_high_stake_with_explanation_ok() {
         let g = AnchorGate::new(glossary());
-        let c = candidate("RiskCandidate:X", ConceptEdgeKind::DerivesRisk, 0.70, Some("risk derived"));
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap();
+        let c = candidate(
+            "RiskCandidate:X",
+            ConceptEdgeKind::DerivesRisk,
+            0.70,
+            Some("risk derived"),
+        );
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap();
         assert!(plan.requires_operator_review, "high-stake → review");
     }
 
     #[test]
     fn gate_rejects_implemented_by_without_code_evidence() {
         let g = AnchorGate::new(glossary());
-        let c = candidate("CodeEntity:X", ConceptEdgeKind::ImplementedBy, 0.90, Some("impl"));
-        let err = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap_err();
+        let c = candidate(
+            "CodeEntity:X",
+            ConceptEdgeKind::ImplementedBy,
+            0.90,
+            Some("impl"),
+        );
+        let err = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap_err();
         assert_eq!(err, GateError::ImplementedByRequiresCodeEvidence);
     }
 
     #[test]
     fn gate_rejects_supersedes_without_authority() {
         let g = AnchorGate::new(glossary());
-        let c = candidate("Decision:X", ConceptEdgeKind::Supersedes, 0.90, Some("super"));
-        let err = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap_err();
+        let c = candidate(
+            "Decision:X",
+            ConceptEdgeKind::Supersedes,
+            0.90,
+            Some("super"),
+        );
+        let err = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap_err();
         assert_eq!(err, GateError::SupersedeAuthorityRequired);
     }
 
@@ -349,8 +417,15 @@ mod tests {
     fn section_8_6_illegal_direct_code_binding() {
         let g = AnchorGate::new(glossary());
         // ExpectedImplementation → gerçek CodeEntity (Candidate değil) → §8.6 yasak
-        let c = candidate("CodeEntity:PaymentService", ConceptEdgeKind::ExpectedImplementation, 0.90, Some("expected"));
-        let err = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap_err();
+        let c = candidate(
+            "CodeEntity:PaymentService",
+            ConceptEdgeKind::ExpectedImplementation,
+            0.90,
+            Some("expected"),
+        );
+        let err = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap_err();
         assert!(matches!(err, GateError::IllegalDirectCodeBinding { .. }));
     }
 
@@ -368,10 +443,15 @@ mod tests {
             position_family: PositionFamily::ConceptualIntent,
         });
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.50, None);
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &graph).unwrap();
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &graph)
+            .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::CreateNode);
         assert_eq!(plan.redirects.len(), 1);
-        assert_eq!(plan.redirects[0].reason, CanonicalRedirectReason::ExactCanonicalMatch);
+        assert_eq!(
+            plan.redirects[0].reason,
+            CanonicalRedirectReason::ExactCanonicalMatch
+        );
     }
 
     #[test]
@@ -388,25 +468,45 @@ mod tests {
         });
         // "ödeme" alias → Concept:Payment redirect
         let c = candidate("Concept:ödeme", ConceptEdgeKind::Mentions, 0.50, None);
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &graph).unwrap();
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &graph)
+            .unwrap();
         assert!(!plan.redirects.is_empty());
     }
 
     #[test]
     fn section_6_4_1_contradiction_negative_assertions() {
         let g = AnchorGate::new(glossary());
-        let c = candidate("Decision:X", ConceptEdgeKind::Contradicts, 0.50, Some("contradicts"));
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap();
+        let c = candidate(
+            "Decision:X",
+            ConceptEdgeKind::Contradicts,
+            0.50,
+            Some("contradicts"),
+        );
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap();
         assert_eq!(plan.decision, AnchorDecisionKind::MarkContradiction);
-        assert!(!plan.negative_assertions.is_empty(), "§6.4.1 negative assertions doldu");
-        assert!(plan.negative_assertions.iter().any(|s| s.contains("SUPERSEDES")));
+        assert!(
+            !plan.negative_assertions.is_empty(),
+            "§6.4.1 negative assertions doldu"
+        );
+        assert!(plan
+            .negative_assertions
+            .iter()
+            .any(|s| s.contains("SUPERSEDES")));
     }
 
     #[test]
     fn requires_review_false_when_only_low_stake() {
         let g = AnchorGate::new(glossary());
         let c = candidate("Concept:Payment", ConceptEdgeKind::Mentions, 0.50, None);
-        let plan = g.decide(&ConceptPacketId("p".into()), vec![c], &empty_graph()).unwrap();
-        assert!(!plan.requires_operator_review, "düşük-stake Mentions → review gerekmez");
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph())
+            .unwrap();
+        assert!(
+            !plan.requires_operator_review,
+            "düşük-stake Mentions → review gerekmez"
+        );
     }
 }

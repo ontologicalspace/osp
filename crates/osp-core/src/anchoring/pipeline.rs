@@ -178,49 +178,71 @@ mod tests {
     fn pipeline_runs_fix_001() {
         let p = AnchorPipeline::default_pipeline();
         let graph = ConceptGraph::new();
-        let plan = p.run(
-            "Kullanıcı ödeme yaparken kendini güvende hissetmeli.",
-            "tr",
-            &graph,
-        )
-        .expect("pipeline");
+        let plan = p
+            .run(
+                "Kullanıcı ödeme yaparken kendini güvende hissetmeli.",
+                "tr",
+                &graph,
+            )
+            .expect("pipeline");
         // DerivesRisk veya Mentions olmalı
-        assert!(!plan.candidates.is_empty() || matches!(plan.decision, crate::anchoring::AnchorDecisionKind::MarkUnanchored));
+        assert!(
+            !plan.candidates.is_empty()
+                || matches!(
+                    plan.decision,
+                    crate::anchoring::AnchorDecisionKind::MarkUnanchored
+                )
+        );
     }
 
     #[test]
     fn pipeline_rejects_empty() {
         let p = AnchorPipeline::default_pipeline();
         let err = p.run("", "tr", &ConceptGraph::new()).unwrap_err();
-        assert!(matches!(err, AnchorError::Classify(ClassifyError::EmptyInput)));
+        assert!(matches!(
+            err,
+            AnchorError::Classify(ClassifyError::EmptyInput)
+        ));
     }
 
     #[test]
     fn pipeline_unanchored_vague() {
         let p = AnchorPipeline::default_pipeline();
-        let plan = p.run(
-            "Belki hafta sonu bazı şeyleri gözden geçirmek lazım.",
-            "tr",
-            &ConceptGraph::new(),
-        )
-        .expect("pipeline");
-        assert!(plan.candidates.is_empty(), "glossary match yok → boş candidate");
+        let plan = p
+            .run(
+                "Belki hafta sonu bazı şeyleri gözden geçirmek lazım.",
+                "tr",
+                &ConceptGraph::new(),
+            )
+            .expect("pipeline");
+        assert!(
+            plan.candidates.is_empty(),
+            "glossary match yok → boş candidate"
+        );
     }
 
     #[test]
     fn pipeline_no_implemented_by_emitted() {
         // INV: Faz 1'de hiçbir durumda ImplementedBy üretilmemeli
         let p = AnchorPipeline::default_pipeline();
-        let plan = p.run("Kimlik doğrulama akışı AuthService'de implement edilmeli.", "tr", &ConceptGraph::new());
+        let plan = p.run(
+            "Kimlik doğrulama akışı AuthService'de implement edilmeli.",
+            "tr",
+            &ConceptGraph::new(),
+        );
         // Plan başarılıysa ImplementedBy yok; hata (IllegalDirectCodeBinding) da olabilir
         match plan {
             Ok(plan) => {
                 assert!(
-                    !plan.candidates.iter().any(|c| c.edge_kind == crate::anchoring::ConceptEdgeKind::ImplementedBy),
+                    !plan
+                        .candidates
+                        .iter()
+                        .any(|c| c.edge_kind == crate::anchoring::ConceptEdgeKind::ImplementedBy),
                     "ImplementedBy üretilmemeli"
                 );
             }
-            Err(AnchorError::Gate(GateError::IllegalDirectCodeBinding { .. })) | _ => { /* kabul */ }
+            Err(AnchorError::Gate(GateError::IllegalDirectCodeBinding { .. })) | _ => { /* kabul */
+            }
         }
     }
 }

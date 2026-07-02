@@ -78,7 +78,9 @@ impl Default for InMemoryAnchorStore {
 
 impl InMemoryAnchorStore {
     pub fn new() -> Self {
-        Self { graph: ConceptGraph::new() }
+        Self {
+            graph: ConceptGraph::new(),
+        }
     }
 
     /// Graph seed ile başlat (fixture given'dan dönüştürülmüş).
@@ -90,7 +92,12 @@ impl InMemoryAnchorStore {
 
     /// Seed yükle. Pre-state concept/decision/code_entities.
     pub fn seed(&mut self, seed: GraphSeed) {
-        for node in seed.concepts.into_iter().chain(seed.decisions).chain(seed.code_entities) {
+        for node in seed
+            .concepts
+            .into_iter()
+            .chain(seed.decisions)
+            .chain(seed.code_entities)
+        {
             self.graph.insert_node(node);
         }
     }
@@ -138,7 +145,10 @@ impl InMemoryAnchorStore {
             new_edges += 1;
         }
 
-        ApplyResult { new_nodes, new_edges }
+        ApplyResult {
+            new_nodes,
+            new_edges,
+        }
     }
 
     /// INV-C3: Candidate → Accepted geçişi. `OperatorAcceptance` gerekir.
@@ -259,21 +269,34 @@ mod tests {
     #[test]
     fn mainline_query_empty_when_all_candidate() {
         let mut store = InMemoryAnchorStore::new();
-        store.apply_plan(&make_plan(vec![candidate("Concept:X", ConceptEdgeKind::Mentions)]));
-        assert_eq!(store.mainline_query().count(), 0, "INV-C3: Candidate mainline değil");
+        store.apply_plan(&make_plan(vec![candidate(
+            "Concept:X",
+            ConceptEdgeKind::Mentions,
+        )]));
+        assert_eq!(
+            store.mainline_query().count(),
+            0,
+            "INV-C3: Candidate mainline değil"
+        );
     }
 
     #[test]
     fn candidate_query_returns_pending() {
         let mut store = InMemoryAnchorStore::new();
-        store.apply_plan(&make_plan(vec![candidate("Concept:X", ConceptEdgeKind::Mentions)]));
+        store.apply_plan(&make_plan(vec![candidate(
+            "Concept:X",
+            ConceptEdgeKind::Mentions,
+        )]));
         assert_eq!(store.candidate_query().count(), 1);
     }
 
     #[test]
     fn store_promotion_requires_operator_acceptance() {
         let mut store = InMemoryAnchorStore::new();
-        store.apply_plan(&make_plan(vec![candidate("Concept:Payment", ConceptEdgeKind::Mentions)]));
+        store.apply_plan(&make_plan(vec![candidate(
+            "Concept:Payment",
+            ConceptEdgeKind::Mentions,
+        )]));
 
         // INV-C3: promotion OperatorAcceptance ile
         let cap = OperatorAcceptance::issue_for_tests();
@@ -314,7 +337,10 @@ mod tests {
     #[test]
     fn find_concepts_by_canonical() {
         let mut store = InMemoryAnchorStore::new();
-        store.apply_plan(&make_plan(vec![candidate("Concept:Payment", ConceptEdgeKind::Mentions)]));
+        store.apply_plan(&make_plan(vec![candidate(
+            "Concept:Payment",
+            ConceptEdgeKind::Mentions,
+        )]));
         let found = store.find_concepts_by_canonical("Payment");
         assert_eq!(found.len(), 1);
     }

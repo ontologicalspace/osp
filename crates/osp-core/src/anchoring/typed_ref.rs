@@ -21,7 +21,10 @@ impl TypedNodeRef {
         if name.is_empty() {
             return None;
         }
-        Some(Self { kind, name: name.to_string() })
+        Some(Self {
+            kind,
+            name: name.to_string(),
+        })
     }
 
     /// `"Concept:Payment"` formatına geri.

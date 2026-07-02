@@ -5,8 +5,7 @@
 //! 7 pozitif + 2 penalty bileşen. `raw_total()` + `total_clamped()`.
 
 use crate::anchoring::types::{
-    AnchorCandidate, AnchorScoreBreakdown, ConceptGraph, ExtractedAnchorCandidate,
-    PacketSource,
+    AnchorCandidate, AnchorScoreBreakdown, ConceptGraph, ExtractedAnchorCandidate, PacketSource,
 };
 use crate::anchoring::ConceptEdgeKind;
 
@@ -47,7 +46,8 @@ impl AnchorScorer {
         b.semantic_similarity = 0.0;
 
         // ontology_type_compatibility: edge kind ↔ target node kind uyumu
-        b.ontology_type_compatibility = self.ontology_compat(c.edge_kind, c.target_node_id.0.as_str(), graph);
+        b.ontology_type_compatibility =
+            self.ontology_compat(c.edge_kind, c.target_node_id.0.as_str(), graph);
 
         // graph_context_score: target node'un graph'ta varlığı + komşu sayısı
         b.graph_context_score = self.graph_context(&c.target_node_id, graph);
@@ -75,7 +75,12 @@ impl AnchorScorer {
         b
     }
 
-    fn ontology_compat(&self, kind: ConceptEdgeKind, target_id: &str, _graph: &ConceptGraph) -> f64 {
+    fn ontology_compat(
+        &self,
+        kind: ConceptEdgeKind,
+        target_id: &str,
+        _graph: &ConceptGraph,
+    ) -> f64 {
         // Edge kind ↔ target node kind uyumu (prefix'ten)
         let target_kind = target_id.split(':').next().unwrap_or("");
         match (kind, target_kind) {
@@ -85,7 +90,12 @@ impl AnchorScorer {
             (ConceptEdgeKind::DerivesRisk, "RiskCandidate") => 1.0,
             (ConceptEdgeKind::ExpectedImplementation, "CodeEntityCandidate") => 1.0,
             (ConceptEdgeKind::ImplementedBy, "CodeEntity") => 1.0,
-            (ConceptEdgeKind::Contradicts | ConceptEdgeKind::DependsOnDecision | ConceptEdgeKind::Supersedes, "Decision") => 1.0,
+            (
+                ConceptEdgeKind::Contradicts
+                | ConceptEdgeKind::DependsOnDecision
+                | ConceptEdgeKind::Supersedes,
+                "Decision",
+            ) => 1.0,
             (ConceptEdgeKind::AntiGoalOf, "Concept") => 1.0,
             // Kısmi uyum
             (_, "Concept") => 0.7,
@@ -94,7 +104,11 @@ impl AnchorScorer {
         }
     }
 
-    fn graph_context(&self, target_id: &crate::anchoring::types::ConceptNodeId, graph: &ConceptGraph) -> f64 {
+    fn graph_context(
+        &self,
+        target_id: &crate::anchoring::types::ConceptNodeId,
+        graph: &ConceptGraph,
+    ) -> f64 {
         // Target graph'ta varsa + komşuları varsa yüksek
         match graph.node(target_id) {
             Some(_node) => {
@@ -156,7 +170,9 @@ impl AnchorScorer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::anchoring::types::{ConceptNode, ConceptNodeKind, ConceptPacketId, ConceptNodeId, ExtractedAnchorCandidate};
+    use crate::anchoring::types::{
+        ConceptNode, ConceptNodeId, ConceptNodeKind, ConceptPacketId, ExtractedAnchorCandidate,
+    };
     use crate::anchoring::{ConceptEdgeKind, DecisionStatus, PositionFamily};
 
     fn extracted(target: &str, kind: ConceptEdgeKind) -> ExtractedAnchorCandidate {
@@ -172,49 +188,80 @@ mod tests {
     fn semantic_similarity_is_zero_faz1() {
         // INV-C1: Faz 1 placeholder
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("Concept:Payment", ConceptEdgeKind::Mentions), &ConceptGraph::new(), PacketSource::ExplicitUser);
+        let ac = s.score(
+            extracted("Concept:Payment", ConceptEdgeKind::Mentions),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+        );
         assert_eq!(ac.score.semantic_similarity, 0.0);
     }
 
     #[test]
     fn ontology_compat_mentiones_concept_full() {
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("Concept:Payment", ConceptEdgeKind::Mentions), &ConceptGraph::new(), PacketSource::ExplicitUser);
+        let ac = s.score(
+            extracted("Concept:Payment", ConceptEdgeKind::Mentions),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+        );
         assert_eq!(ac.score.ontology_type_compatibility, 1.0);
     }
 
     #[test]
     fn ontology_compat_derives_risk_full() {
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("RiskCandidate:X", ConceptEdgeKind::DerivesRisk), &ConceptGraph::new(), PacketSource::ExplicitUser);
+        let ac = s.score(
+            extracted("RiskCandidate:X", ConceptEdgeKind::DerivesRisk),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+        );
         assert_eq!(ac.score.ontology_type_compatibility, 1.0);
     }
 
     #[test]
     fn temporal_trust_explicit_user_high() {
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("Concept:X", ConceptEdgeKind::Mentions), &ConceptGraph::new(), PacketSource::ExplicitUser);
+        let ac = s.score(
+            extracted("Concept:X", ConceptEdgeKind::Mentions),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+        );
         assert!(ac.score.temporal_trust_score > 0.8);
     }
 
     #[test]
     fn temporal_trust_agent_low() {
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("Concept:X", ConceptEdgeKind::Mentions), &ConceptGraph::new(), PacketSource::Agent);
+        let ac = s.score(
+            extracted("Concept:X", ConceptEdgeKind::Mentions),
+            &ConceptGraph::new(),
+            PacketSource::Agent,
+        );
         assert!(ac.score.temporal_trust_score < 0.5);
     }
 
     #[test]
     fn contradiction_penalty_applied() {
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("Decision:X", ConceptEdgeKind::Contradicts), &ConceptGraph::new(), PacketSource::ExplicitUser);
-        assert!(ac.score.contradiction_penalty > 0.0, "Contradicts → penalty");
+        let ac = s.score(
+            extracted("Decision:X", ConceptEdgeKind::Contradicts),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+        );
+        assert!(
+            ac.score.contradiction_penalty > 0.0,
+            "Contradicts → penalty"
+        );
     }
 
     #[test]
     fn total_clamped_in_range() {
         let s = AnchorScorer::new();
-        let ac = s.score(extracted("Concept:Payment", ConceptEdgeKind::Mentions), &ConceptGraph::new(), PacketSource::ExplicitUser);
+        let ac = s.score(
+            extracted("Concept:Payment", ConceptEdgeKind::Mentions),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+        );
         let total = ac.score.total_clamped();
         assert!((0.0..=1.0).contains(&total), "total_clamped [0,1]");
     }
@@ -242,7 +289,11 @@ mod tests {
             position_family: PositionFamily::ConceptualIntent,
         };
         graph.insert_node(node);
-        let ac = s.score(extracted("Concept:Payment", ConceptEdgeKind::Mentions), &graph, PacketSource::ExplicitUser);
+        let ac = s.score(
+            extracted("Concept:Payment", ConceptEdgeKind::Mentions),
+            &graph,
+            PacketSource::ExplicitUser,
+        );
         assert_eq!(ac.score.decision_status_score, 1.0);
     }
 }

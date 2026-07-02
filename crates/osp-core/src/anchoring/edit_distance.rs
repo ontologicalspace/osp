@@ -26,9 +26,13 @@ pub fn levenshtein(a: &str, b: &str) -> u32 {
     for i in 1..=n {
         curr[0] = i as u32;
         for j in 1..=m {
-            let cost = if a[i - 1].eq_ignore_ascii_case(&b[j - 1]) { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)      // sil
-                .min(curr[j - 1] + 1)    // ekle
+            let cost = if a[i - 1].eq_ignore_ascii_case(&b[j - 1]) {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1) // sil
+                .min(curr[j - 1] + 1) // ekle
                 .min(prev[j - 1] + cost); // değiştir
         }
         std::mem::swap(&mut prev, &mut curr);

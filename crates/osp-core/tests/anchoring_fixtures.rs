@@ -131,16 +131,46 @@ struct GlossaryEntry {
 
 /// 10 golden fixture — sabit liste (fixture ekle/çıkarma bilinçli görünür).
 const FIXTURE_FILES: &[(&str, &str)] = &[
-    ("fix_001_payment_trust_vision", include_str!("fixtures/anchoring/fix_001_payment_trust_vision.json")),
-    ("fix_002_requirement_rule", include_str!("fixtures/anchoring/fix_002_requirement_rule.json")),
-    ("fix_003_arch_decision", include_str!("fixtures/anchoring/fix_003_arch_decision.json")),
-    ("fix_004_antigoal", include_str!("fixtures/anchoring/fix_004_antigoal.json")),
-    ("fix_005_assumption_only", include_str!("fixtures/anchoring/fix_005_assumption_only.json")),
-    ("fix_006_direct_code_ref", include_str!("fixtures/anchoring/fix_006_direct_code_ref.json")),
-    ("fix_007_contradiction", include_str!("fixtures/anchoring/fix_007_contradiction.json")),
-    ("fix_008_dedup_alias", include_str!("fixtures/anchoring/fix_008_dedup_alias.json")),
-    ("fix_009_weak_anchor_canon", include_str!("fixtures/anchoring/fix_009_weak_anchor_canon.json")),
-    ("fix_010_unanchored", include_str!("fixtures/anchoring/fix_010_unanchored.json")),
+    (
+        "fix_001_payment_trust_vision",
+        include_str!("fixtures/anchoring/fix_001_payment_trust_vision.json"),
+    ),
+    (
+        "fix_002_requirement_rule",
+        include_str!("fixtures/anchoring/fix_002_requirement_rule.json"),
+    ),
+    (
+        "fix_003_arch_decision",
+        include_str!("fixtures/anchoring/fix_003_arch_decision.json"),
+    ),
+    (
+        "fix_004_antigoal",
+        include_str!("fixtures/anchoring/fix_004_antigoal.json"),
+    ),
+    (
+        "fix_005_assumption_only",
+        include_str!("fixtures/anchoring/fix_005_assumption_only.json"),
+    ),
+    (
+        "fix_006_direct_code_ref",
+        include_str!("fixtures/anchoring/fix_006_direct_code_ref.json"),
+    ),
+    (
+        "fix_007_contradiction",
+        include_str!("fixtures/anchoring/fix_007_contradiction.json"),
+    ),
+    (
+        "fix_008_dedup_alias",
+        include_str!("fixtures/anchoring/fix_008_dedup_alias.json"),
+    ),
+    (
+        "fix_009_weak_anchor_canon",
+        include_str!("fixtures/anchoring/fix_009_weak_anchor_canon.json"),
+    ),
+    (
+        "fix_010_unanchored",
+        include_str!("fixtures/anchoring/fix_010_unanchored.json"),
+    ),
 ];
 
 const GLOSSARY_JSON: &str = include_str!("fixtures/anchoring/_glossary.json");
@@ -156,8 +186,16 @@ fn load_all_fixtures() -> Vec<AnchoringFixture> {
 fn high_stake_kinds() -> Vec<ConceptEdgeKind> {
     use ConceptEdgeKind::*;
     vec![
-        DerivesRule, DerivesTask, DerivesRisk, Constrains, ExpectedImplementation,
-        ImplementedBy, EvidencedBy, Contradicts, Supersedes, AntiGoalOf,
+        DerivesRule,
+        DerivesTask,
+        DerivesRisk,
+        Constrains,
+        ExpectedImplementation,
+        ImplementedBy,
+        EvidencedBy,
+        Contradicts,
+        Supersedes,
+        AntiGoalOf,
     ]
 }
 
@@ -195,7 +233,11 @@ fn anchor_glossary_parse_successfully() {
             "glossary canonical tekrarlı: {}",
             e.canonical
         );
-        assert!(!e.aliases.is_empty(), "glossary {} alias'ları boş", e.canonical);
+        assert!(
+            !e.aliases.is_empty(),
+            "glossary {} alias'ları boş",
+            e.canonical
+        );
     }
 }
 
@@ -218,16 +260,25 @@ fn anchor_fixture_ids_unique() {
 
 #[test]
 fn anchor_fixture_invariants_reference_valid() {
-    let valid: std::collections::HashSet<&str> = (1..=8).map(|i| match i {
-        1 => "INV-C1", 2 => "INV-C2", 3 => "INV-C3", 4 => "INV-C4",
-        5 => "INV-C5", 6 => "INV-C6", 7 => "INV-C7", _ => "INV-C8",
-    }).collect();
+    let valid: std::collections::HashSet<&str> = (1..=8)
+        .map(|i| match i {
+            1 => "INV-C1",
+            2 => "INV-C2",
+            3 => "INV-C3",
+            4 => "INV-C4",
+            5 => "INV-C5",
+            6 => "INV-C6",
+            7 => "INV-C7",
+            _ => "INV-C8",
+        })
+        .collect();
     for f in load_all_fixtures() {
         for inv in &f.invariants {
             assert!(
                 valid.contains(inv.as_str()),
                 "fixture {} geçersiz invariant referansı: {} (sadece INV-C1..C8)",
-                f.id, inv
+                f.id,
+                inv
             );
         }
     }
@@ -243,16 +294,26 @@ fn anchor_fixture_edges_valid_kinds() {
         for e in &f.expected.edges {
             // kind deserialize edildiğinde zaten ConceptEdgeKind olmuş; ekstra kontrol:
             assert!(
-                matches!(e.kind,
-                    ConceptEdgeKind::Mentions | ConceptEdgeKind::Refines
-                    | ConceptEdgeKind::DerivesRule | ConceptEdgeKind::DerivesTask
-                    | ConceptEdgeKind::DerivesRisk | ConceptEdgeKind::Constrains
-                    | ConceptEdgeKind::ExpectedImplementation | ConceptEdgeKind::ImplementedBy
-                    | ConceptEdgeKind::EvidencedBy | ConceptEdgeKind::Contradicts
-                    | ConceptEdgeKind::Supersedes | ConceptEdgeKind::RelatedTo
-                    | ConceptEdgeKind::AntiGoalOf | ConceptEdgeKind::DependsOnDecision
-                    | ConceptEdgeKind::HasPosition),
-                "fixture {} bilinmeyen edge kind", f.id
+                matches!(
+                    e.kind,
+                    ConceptEdgeKind::Mentions
+                        | ConceptEdgeKind::Refines
+                        | ConceptEdgeKind::DerivesRule
+                        | ConceptEdgeKind::DerivesTask
+                        | ConceptEdgeKind::DerivesRisk
+                        | ConceptEdgeKind::Constrains
+                        | ConceptEdgeKind::ExpectedImplementation
+                        | ConceptEdgeKind::ImplementedBy
+                        | ConceptEdgeKind::EvidencedBy
+                        | ConceptEdgeKind::Contradicts
+                        | ConceptEdgeKind::Supersedes
+                        | ConceptEdgeKind::RelatedTo
+                        | ConceptEdgeKind::AntiGoalOf
+                        | ConceptEdgeKind::DependsOnDecision
+                        | ConceptEdgeKind::HasPosition
+                ),
+                "fixture {} bilinmeyen edge kind",
+                f.id
             );
         }
     }
@@ -266,12 +327,18 @@ fn anchor_fixture_edges_valid_kinds() {
 fn anchor_fixture_packet_types_valid() {
     for f in load_all_fixtures() {
         assert!(
-            matches!(f.expected.packet_type,
-                ConceptPacketType::UserVision | ConceptPacketType::Requirement
-                | ConceptPacketType::RuleCandidate | ConceptPacketType::Risk
-                | ConceptPacketType::Decision | ConceptPacketType::Assumption
-                | ConceptPacketType::AntiGoal),
-            "fixture {} geçersiz packet_type", f.id
+            matches!(
+                f.expected.packet_type,
+                ConceptPacketType::UserVision
+                    | ConceptPacketType::Requirement
+                    | ConceptPacketType::RuleCandidate
+                    | ConceptPacketType::Risk
+                    | ConceptPacketType::Decision
+                    | ConceptPacketType::Assumption
+                    | ConceptPacketType::AntiGoal
+            ),
+            "fixture {} geçersiz packet_type",
+            f.id
         );
     }
 }
@@ -284,10 +351,15 @@ fn anchor_fixture_packet_types_valid() {
 fn anchor_fixture_threshold_bands_valid() {
     for f in load_all_fixtures() {
         assert!(
-            matches!(f.expected.threshold_band,
-                ThresholdBand::Strong | ThresholdBand::Tentative
-                | ThresholdBand::Weak | ThresholdBand::Unanchored),
-            "fixture {} geçersiz threshold_band", f.id
+            matches!(
+                f.expected.threshold_band,
+                ThresholdBand::Strong
+                    | ThresholdBand::Tentative
+                    | ThresholdBand::Weak
+                    | ThresholdBand::Unanchored
+            ),
+            "fixture {} geçersiz threshold_band",
+            f.id
         );
     }
 }
@@ -301,13 +373,16 @@ fn anchor_fixture_decision_status_consistency() {
     for f in load_all_fixtures() {
         if f.expected.requires_operator_review {
             assert!(
-                matches!(f.expected.anchor_decision,
+                matches!(
+                    f.expected.anchor_decision,
                     AnchorDecisionKind::RequireOperatorReview
-                    | AnchorDecisionKind::TentativeLink
-                    | AnchorDecisionKind::MarkContradiction),
+                        | AnchorDecisionKind::TentativeLink
+                        | AnchorDecisionKind::MarkContradiction
+                ),
                 "fixture {}: requires_operator_review=true ama anchor_decision={:?} \
                  (∈ {{RequireOperatorReview, TentativeLink, MarkContradiction}} olmalı, D6)",
-                f.id, f.expected.anchor_decision
+                f.id,
+                f.expected.anchor_decision
             );
         }
     }
@@ -350,25 +425,43 @@ fn anchor_fixture_high_stake_edges_require_explanation() {
 fn anchor_fixture_pre_state_required_when_needed() {
     let fixtures = load_all_fixtures();
     let by_id = |id: &str| -> &AnchoringFixture {
-        fixtures.iter().find(|f| f.id == id).expect("fixture bulunamadı")
+        fixtures
+            .iter()
+            .find(|f| f.id == id)
+            .expect("fixture bulunamadı")
     };
 
     // fix_003 → decisions non-empty (accepted Decision:AdoptEventSourcing)
     let f3 = by_id("fix_003_arch_decision");
-    assert!(!f3.given.decisions.is_empty(), "fix_003 given.decisions gerekli");
+    assert!(
+        !f3.given.decisions.is_empty(),
+        "fix_003 given.decisions gerekli"
+    );
 
     // fix_007 → decisions + code_entities non-empty (accepted Decision + Observed CodeEntity)
     let f7 = by_id("fix_007_contradiction");
-    assert!(!f7.given.decisions.is_empty(), "fix_007 given.decisions gerekli");
-    assert!(!f7.given.code_entities.is_empty(), "fix_007 given.code_entities gerekli");
+    assert!(
+        !f7.given.decisions.is_empty(),
+        "fix_007 given.decisions gerekli"
+    );
+    assert!(
+        !f7.given.code_entities.is_empty(),
+        "fix_007 given.code_entities gerekli"
+    );
 
     // fix_008 → concepts non-empty (pre-existing Concept:Payment)
     let f8 = by_id("fix_008_dedup_alias");
-    assert!(!f8.given.concepts.is_empty(), "fix_008 given.concepts gerekli");
+    assert!(
+        !f8.given.concepts.is_empty(),
+        "fix_008 given.concepts gerekli"
+    );
 
     // fix_009 → concepts non-empty (pre-existing Concept:Notification + alias)
     let f9 = by_id("fix_009_weak_anchor_canon");
-    assert!(!f9.given.concepts.is_empty(), "fix_009 given.concepts gerekli");
+    assert!(
+        !f9.given.concepts.is_empty(),
+        "fix_009 given.concepts gerekli"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

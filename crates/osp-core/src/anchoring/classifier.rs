@@ -42,12 +42,21 @@ impl Glossary {
         let mut g = Self::new();
         g.insert(GlossaryEntry {
             canonical: "Payment".into(),
-            aliases: vec!["ödeme".into(), "payments".into(), "checkout".into(), "ödeme akışı".into()],
+            aliases: vec![
+                "ödeme".into(),
+                "payments".into(),
+                "checkout".into(),
+                "ödeme akışı".into(),
+            ],
             language: "tr/en".into(),
         });
         g.insert(GlossaryEntry {
             canonical: "Trust".into(),
-            aliases: vec!["güven".into(), "SecurityPerception".into(), "güvenlik algısı".into()],
+            aliases: vec![
+                "güven".into(),
+                "SecurityPerception".into(),
+                "güvenlik algısı".into(),
+            ],
             language: "tr/en".into(),
         });
         g.insert(GlossaryEntry {
@@ -79,7 +88,10 @@ impl Glossary {
             if e.canonical.to_lowercase() == lower {
                 return Some(e.canonical.as_str());
             }
-            e.aliases.iter().find(|a| a.to_lowercase() == lower).map(|_| e.canonical.as_str())
+            e.aliases
+                .iter()
+                .find(|a| a.to_lowercase() == lower)
+                .map(|_| e.canonical.as_str())
         })
     }
 
@@ -122,7 +134,15 @@ impl Classifier {
     pub fn new() -> Self {
         Self {
             // Sadece doğrudan risk bildiren kelimeler (precedence #6).
-            risk_markers: &["risk", "tehlike", "danger", "açık", "vulnerability", "failure", "başarısızlık"],
+            risk_markers: &[
+                "risk",
+                "tehlike",
+                "danger",
+                "açık",
+                "vulnerability",
+                "failure",
+                "başarısızlık",
+            ],
         }
     }
 
@@ -178,39 +198,77 @@ fn matches_any(text: &str, markers: &[&str]) -> bool {
 
 // Precedence keyword setleri (Türkçe + EN, lowercase)
 const ANTIGOAL_MARKERS: &[&str] = &[
-    "olmamalı", "kaçınılmalı", "anti-pattern", "yasak", "never", "avoid", "should not",
+    "olmamalı",
+    "kaçınılmalı",
+    "anti-pattern",
+    "yasak",
+    "never",
+    "avoid",
+    "should not",
     "kaçın",
 ];
 
 const DECISION_MARKERS: &[&str] = &[
-    "karar verdik", "kararı", "kabul edilen karar", "adopted", "decided", "seçildi",
-    "referans al", "referans alın",
+    "karar verdik",
+    "kararı",
+    "kabul edilen karar",
+    "adopted",
+    "decided",
+    "seçildi",
+    "referans al",
+    "referans alın",
 ];
 
 const ASSUMPTION_MARKERS: &[&str] = &[
-    "varsay", "assume", "kabul ediyoruz", "varsayılıyor", "ön kabul",
+    "varsay",
+    "assume",
+    "kabul ediyoruz",
+    "varsayılıyor",
+    "ön kabul",
 ];
 
 const USER_VISION_MARKERS: &[&str] = &[
-    "kullanıcı", "müşteri", "deneyim", "hissetmeli", "kolaylık", "memnuniyet", "user",
-    "customer", "experience", "feel",
+    "kullanıcı",
+    "müşteri",
+    "deneyim",
+    "hissetmeli",
+    "kolaylık",
+    "memnuniyet",
+    "user",
+    "customer",
+    "experience",
+    "feel",
 ];
 
 const REQUIREMENT_MARKERS: &[&str] = &[
-    "sistem", "modül", "servis", "katman", "must", "should", "gerekir", "yapılmalı",
-    "implement edilmeli", "bağımlı olmamalı", "layer",
+    "sistem",
+    "modül",
+    "servis",
+    "katman",
+    "must",
+    "should",
+    "gerekir",
+    "yapılmalı",
+    "implement edilmeli",
+    "bağımlı olmamalı",
+    "layer",
 ];
 
 const RULE_MARKERS: &[&str] = &[
-    "bağımlı olmamalı", "olmamalı", "gerekir", "malı", "meli", "must not", "should not",
-    "requirement", "kural",
+    "bağımlı olmamalı",
+    "olmamalı",
+    "gerekir",
+    "malı",
+    "meli",
+    "must not",
+    "should not",
+    "requirement",
+    "kural",
 ];
 
 // Risk *türetme* sinyalleri (güven bağlamı — "güvende hissetmeli" → DerivesRisk).
 // Not: bunlar packet type Risk YAPMAZ, UserVision kalır + DerivesRisk edge.
-const RISK_SIGNAL_MARKERS: &[&str] = &[
-    "güven", "hissetmeli", "risk", "tehlike", "güvenlik",
-];
+const RISK_SIGNAL_MARKERS: &[&str] = &["güven", "hissetmeli", "risk", "tehlike", "güvenlik"];
 
 #[cfg(test)]
 mod tests {
@@ -223,17 +281,26 @@ mod tests {
     #[test]
     fn precedence_antigoal_first() {
         // "olmamalı" → AntiGoal (Requirement marker'lar var olsa bile)
-        assert_eq!(cls().classify("Controller'larda business logic olmamalı.", "tr"), ConceptPacketType::AntiGoal);
+        assert_eq!(
+            cls().classify("Controller'larda business logic olmamalı.", "tr"),
+            ConceptPacketType::AntiGoal
+        );
     }
 
     #[test]
     fn precedence_decision_before_assumption() {
-        assert_eq!(cls().classify("Event Sourcing kararını referans alarak tasarla.", "tr"), ConceptPacketType::Decision);
+        assert_eq!(
+            cls().classify("Event Sourcing kararını referans alarak tasarla.", "tr"),
+            ConceptPacketType::Decision
+        );
     }
 
     #[test]
     fn precedence_assumption_explicit() {
-        assert_eq!(cls().classify("Teknik bilgi seviyesi orta varsayılıyor.", "tr"), ConceptPacketType::Assumption);
+        assert_eq!(
+            cls().classify("Teknik bilgi seviyesi orta varsayılıyor.", "tr"),
+            ConceptPacketType::Assumption
+        );
     }
 
     #[test]
@@ -248,17 +315,26 @@ mod tests {
     #[test]
     fn precedence_requirement() {
         // "sistem" + "gerekir" ama kullanıcı/müşteri yok
-        assert_eq!(cls().classify("Sistem logları 7 gün tutmalı.", "tr"), ConceptPacketType::Requirement);
+        assert_eq!(
+            cls().classify("Sistem logları 7 gün tutmalı.", "tr"),
+            ConceptPacketType::Requirement
+        );
     }
 
     #[test]
     fn precedence_risk_direct() {
-        assert_eq!(cls().classify("Bu bir güvenlik açığı riski.", "tr"), ConceptPacketType::Risk);
+        assert_eq!(
+            cls().classify("Bu bir güvenlik açığı riski.", "tr"),
+            ConceptPacketType::Risk
+        );
     }
 
     #[test]
     fn default_assumption_when_no_marker() {
-        assert_eq!(cls().classify("Belki hafta sonu bazı şeyleri gözden geçirmek lazım.", "tr"), ConceptPacketType::Assumption);
+        assert_eq!(
+            cls().classify("Belki hafta sonu bazı şeyleri gözden geçirmek lazım.", "tr"),
+            ConceptPacketType::Assumption
+        );
     }
 
     #[test]
