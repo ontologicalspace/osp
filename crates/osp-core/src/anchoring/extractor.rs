@@ -422,24 +422,23 @@ mod tests {
     }
 
     #[test]
-    fn extract_no_derives_task_without_both_signal_and_typed_ref() {
-        // Patch 7: task signal YOK + typed TaskCandidate: ref YOK → DerivesTask yok.
-        // Not: "TaskCandidate:X" literal'i "task" substring içerdiğinden has_task_signal
-        // true döner — typed ref olmadan + task sinyali olmadan test ederiz.
+    fn extract_no_derives_task_with_typed_ref_but_no_task_signal() {
+        // D2 review patch: typed TaskCandidate: ref VAR ama task signal YOK → DerivesTask
+        // üretilmez. D2 bug'ı: "task" substring `TaskCandidate:Foo` içinde geçer →
+        // yanlış task signal. Fix: "task" token-based eşleşme. Bu test fix'i doğrular.
         let g = Glossary::seed_default();
         let c = Classifier::new();
         let ex = Extractor::new(&g, &c);
         let pkt = make_packet(
-            "Payment modülü hakkında genel bir değerlendirme yapıyoruz.",
+            "TaskCandidate:AuthServiceRefactor sadece referans olarak geçti.",
             ConceptPacketType::UserVision,
         );
         let cands = ex.extract(&pkt, &ConceptGraph::new());
-        let has_task = cands
-            .iter()
-            .any(|c| c.edge_kind == ConceptEdgeKind::DerivesTask);
         assert!(
-            !has_task,
-            "task signal + typed ref yok → DerivesTask üretilmez"
+            !cands
+                .iter()
+                .any(|c| c.edge_kind == ConceptEdgeKind::DerivesTask),
+            "typed TaskCandidate ref tek başına DerivesTask üretmemeli (D2 fix)"
         );
     }
 }

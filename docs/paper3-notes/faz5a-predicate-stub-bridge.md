@@ -88,7 +88,7 @@ D16 modelleme kararı: `PredicateStub` boş bir "bilmiyorum" DEĞİL — neyi bi
 ### GraphSeed (`types.rs`)
 - 3 yeni bucket: `rule_candidates`, `task_candidates`, `risk_candidates`
 - `all_nodes()` deterministik sıra: concepts → decisions → code_entities → rule_candidates → task_candidates → risk_candidates
-- Backward-compat (Default)
+- Backward-compat: **runtime `GraphSeed` serde derive'a sahip DEĞİL** — `Default` ile uyumlu (yeni field'lar `Vec::default()` = boş başlar). Eski kod `GraphSeed { concepts, decisions, code_entities }` ile çalışmaya devam eder. **`#[serde(default)]` fixture tarafında** (`FixtureGiven` struct'ları, anchoring_fixtures.rs/anchoring_mvp.rs) — eski fixture JSON'ları yeni candidate bucket olmadan parse edilir (D2 non-blocking not netleştirme).
 
 ### Store (`store.rs`)
 - `seed_trusted` 6 bucket chain (yeni candidate bucket'lar dahil)
