@@ -190,6 +190,14 @@ impl Classifier {
         let lower = text.to_lowercase();
         matches_any(&lower, RULE_MARKERS)
     }
+
+    /// Task sinyali var mı (Faz 5a — DerivesTask için). Packet type'dan bağımsız.
+    /// PR33a'da task signal + typed `TaskCandidate:<Name>` ref birlikte gerekir
+    /// (extractor). Doğal dilden task adı türetme PR33a dışı.
+    pub fn has_task_signal(&self, text: &str) -> bool {
+        let lower = text.to_lowercase();
+        matches_any(&lower, TASK_SIGNAL_MARKERS)
+    }
 }
 
 fn matches_any(text: &str, markers: &[&str]) -> bool {
@@ -269,6 +277,17 @@ const RULE_MARKERS: &[&str] = &[
 // Risk *türetme* sinyalleri (güven bağlamı — "güvende hissetmeli" → DerivesRisk).
 // Not: bunlar packet type Risk YAPMAZ, UserVision kalır + DerivesRisk edge.
 const RISK_SIGNAL_MARKERS: &[&str] = &["güven", "hissetmeli", "risk", "tehlike", "güvenlik"];
+
+// Task *türetme* sinyalleri (Faz 5a — DerivesTask için). Packet type'dan bağımsız.
+// Not: PR33a'da task signal + typed TaskCandidate:<Name> ref birlikte ister (extractor).
+// Doğal dilden task adı türetme (NLP) PR33a dışı — typed ref zorunlu.
+const TASK_SIGNAL_MARKERS: &[&str] = &[
+    "görev",
+    "task",
+    "yapılmalı",
+    "implement edilmeli",
+    "geliştirilmeli",
+];
 
 #[cfg(test)]
 mod tests {
@@ -372,5 +391,24 @@ mod tests {
         let aliases = g.aliases_of("Payment");
         assert!(aliases.contains(&"ödeme".to_string()));
         assert!(aliases.contains(&"checkout".to_string()));
+    }
+
+    // ── Faz 5a (T9): has_task_signal ──────────────────────────────────────────
+
+    #[test]
+    fn task_signal_detects_markers() {
+        let c = cls();
+        assert!(c.has_task_signal("Bu bir görev olarak planlanmalı."));
+        assert!(c.has_task_signal("AuthServiceRefactor task olarak işaretlendi."));
+        assert!(c.has_task_signal("Bu özellik yapılmalı."));
+        assert!(c.has_task_signal("Modül implement edilmeli."));
+    }
+
+    #[test]
+    fn task_signal_absent_without_markers() {
+        let c = cls();
+        assert!(!c.has_task_signal("Ödeme modülü yüksek coupling'e sahip."));
+        assert!(!c.has_task_signal("Bu bir görüştür."));
+        assert!(!c.has_task_signal("Belki hafta sonu bakarız."));
     }
 }
