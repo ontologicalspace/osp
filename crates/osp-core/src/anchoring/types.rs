@@ -164,6 +164,166 @@ impl std::fmt::Display for SimilarityOutOfRange {
 impl std::error::Error for SimilarityOutOfRange {}
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ObservedCodeMetricSource + EvidenceStrength + ObservedCodeEvidence — INV-C6 (Faz 4)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// INV-C6 (§7.2/§9, düzeltilmiş): kod metric'leri = **Observed** (Paper 1 ontolojisi);
+// koddan çıkarılan *niyet* = **Inferred** (Candidate). İkisi karıştırılamaz.
+//
+// Faz 4 modelleme kararı (D15 — provenance yorumu): "Observed" yeni bir `DecisionStatus`
+// variantı DEĞİLDİR. İki lane net ayrılır:
+//
+//   DecisionStatus        = graph acceptance lane (Candidate→InReview→Accepted)
+//   ObservedCodeEvidence  = epistemik provenance lane (MetricSource'tan)
+//
+// "Observed code reality is evidence, not acceptance." — bir CodeEntity node'unun
+// observed olması operator-accepted decision anlamına gelmez; Candidate kalır, observed
+// olma durumu `ObservedCodeEvidence` içinde taşınır (Patch 5).
+
+/// Observed kod kanıtının metric kaynağı (INV-C6 — type-level filtre).
+///
+/// Genel [`crate::coords::MetricSource`] (Paper 1'de `Placeholder`/`Heuristic` içerir)
+/// yerine yalnızca gözlemlenmiş kaynakları kabul eden typed enum. Bu, "bir LLM çıktısı
+/// veya insan tahmini asla kod kanıtı sayılamaz" kuralını tip sistemine taşır (Patch 2):
+/// `HumanVision`/`LlmGuess`/`InferredIntent` imkansız.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ObservedCodeMetricSource {
+    /// SCIP semantic index (en yüksek güven — gerçek field-access/cross-ref).
+    Scip,
+    /// tree-sitter syntactic extraction (imports, class defs).
+    TreeSitter,
+    /// Diğer static analyzer (Faz 4 stub sonrası, osp-analyzer bridge).
+    StaticAnalyzer,
+}
+
+/// Observed kod kanıt gücü `[0,1]` (INV-C6 type-level, Patch 3).
+///
+/// `ScalarSimilarity` (INV-C1) paterninin "kanıt gücü" için uygulanması. Çıplak `f64`
+/// tekrar riskini (`-1.0`, `2.0`, `NaN`) type-level engeller. [`crate::anchoring`] (scorer
+/// `code_evidence_score`, gate `evidence_strength`) bu newtype'ı görür.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct EvidenceStrength(f64);
+
+impl EvidenceStrength {
+    /// `[0,1]` range-check + finiteness. NaN, ±∞, negatif, >1 → `EvidenceStrengthOutOfRange`.
+    /// Not 1: `is_finite()` öncelikli — NaN/inf range-check'i yanıltmasın.
+    pub fn new(value: f64) -> Result<Self, EvidenceStrengthOutOfRange> {
+        if value.is_finite() && (0.0..=1.0).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err(EvidenceStrengthOutOfRange { value })
+        }
+    }
+
+    pub fn zero() -> Self {
+        Self(0.0)
+    }
+    pub fn one() -> Self {
+        Self(1.0)
+    }
+    pub fn get(&self) -> f64 {
+        self.0
+    }
+}
+
+/// `EvidenceStrength` değer aralığı dışı hatası.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EvidenceStrengthOutOfRange {
+    pub value: f64,
+}
+
+impl std::fmt::Display for EvidenceStrengthOutOfRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "EvidenceStrength [0,1] dışı veya non-finite: {} (INV-C6)",
+            self.value
+        )
+    }
+}
+
+impl std::error::Error for EvidenceStrengthOutOfRange {}
+
+/// Bir CodeEntity için observed (ölçülmüş) kod kanıtı (INV-C6 — Patch 1/2/5).
+///
+/// # INV-C6 yapısal garanti
+/// - **Private field'lar + public smart constructor `new`** (Patch 1): dışarıdan struct
+///   literal construct edilemez (trybuild `c6_observed_evidence_literal`); ama **gelecekteki
+///   osp-analyzer bridge crate'i `new(...)` çağırabilir** (`pub(crate)` DEĞİL — dış provider
+///   geçerli evidence üretebilir). İnvariant'lar constructor içinde korunur.
+/// - **`ObservedCodeMetricSource` typed enum** (Patch 2): `MetricSource::Placeholder`/
+///   `Heuristic` imkansız — sadece gözlemlenmiş kaynaklar.
+/// - **`confidence: EvidenceStrength`** (Not 2): çak `f64` değil, range-checked newtype.
+/// - **Serialize-only** (Not 3): `Deserialize` YOK — diskten evidence reconstruct edip
+///   INV-C6 boundary'yi bypass etmeyi engeller (PR30 serde boundary paterni).
+/// - **`physical_vector: PhysicalCodeVector`**: PhysicalCode family (INV-C2). Intent
+///   (`ConceptualIntentVector`) buraya TYPE-LEVEL verilmez (trybuild
+///   `c6_intent_carries_physical_vector`).
+///
+/// # Observed ≠ Accepted (Patch 5)
+/// Bu evidence bir CodeEntity'nin *ölçülmüş fiziksel yapısını* taşır. Node'un graph
+/// acceptance status'unu (Candidate→Accepted) değiştirmez. Operator acceptance ayrı
+/// lane'dir (INV-C3).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ObservedCodeEvidence {
+    code_entity_id: ConceptNodeId,
+    physical_vector: PhysicalCodeVector,
+    metric_source: ObservedCodeMetricSource,
+    confidence: EvidenceStrength,
+    /// Unix epoch saniye (chrono bağımlılığı yok — Faz 1 stratejisi).
+    measured_at: u64,
+}
+
+impl ObservedCodeEvidence {
+    /// Public smart constructor — invariant'lar burada korunur (Patch 1).
+    ///
+    /// Dış crate (osp-analyzer bridge, test) geçerli observed evidence üretebilir; ama
+    /// field'lar private olduğu için struct literal ile *geçersiz* evidence enjekte edemez.
+    pub fn new(
+        code_entity_id: ConceptNodeId,
+        physical_vector: PhysicalCodeVector,
+        metric_source: ObservedCodeMetricSource,
+        confidence: EvidenceStrength,
+        measured_at: u64,
+    ) -> Self {
+        Self {
+            code_entity_id,
+            physical_vector,
+            metric_source,
+            confidence,
+            measured_at,
+        }
+    }
+
+    /// Bu evidence'ın bağlı olduğu CodeEntity node ID'si.
+    pub fn code_entity_id(&self) -> &ConceptNodeId {
+        &self.code_entity_id
+    }
+
+    /// Ölçülen fiziksel yapı (Paper 1 eksenleri, INV-C2 PhysicalCode family).
+    pub fn physical_vector(&self) -> &PhysicalCodeVector {
+        &self.physical_vector
+    }
+
+    /// Metric kaynağı (INV-C6 — observed provenance).
+    pub fn metric_source(&self) -> ObservedCodeMetricSource {
+        self.metric_source
+    }
+
+    /// Kanıt güven katsayısı `[0,1]` (EvidenceStrength newtype).
+    pub fn confidence(&self) -> EvidenceStrength {
+        self.confidence
+    }
+
+    /// Ölçüm zaman damgası (Unix epoch saniye).
+    pub fn measured_at(&self) -> u64 {
+        self.measured_at
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // ConceptNodeKind — Concept graph node türü
 // ═══════════════════════════════════════════════════════════════════════════════
 

@@ -157,10 +157,10 @@ impl AnchorPipeline {
         // 3. Extract
         let extracted = self.extractor.extract(&packet, graph);
 
-        // 4. Score
+        // 4. Score (Faz 4: ctx.code_evidence provider thread — Not 5)
         let scored: Vec<_> = extracted
             .into_iter()
-            .map(|e| self.scorer.score(e, graph, source))
+            .map(|e| self.scorer.score(e, graph, source, ctx.code_evidence))
             .collect();
 
         // 5. Gate (ctx INV-C4 authority taşır)

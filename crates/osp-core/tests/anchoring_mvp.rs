@@ -145,6 +145,10 @@ const FIXTURE_FILES: &[(&str, &str)] = &[
         "fix_010_unanchored",
         include_str!("fixtures/anchoring/fix_010_unanchored.json"),
     ),
+    (
+        "fix_011_implemented_by_with_evidence",
+        include_str!("fixtures/anchoring/fix_011_implemented_by_with_evidence.json"),
+    ),
 ];
 
 fn load_fixture(name: &str) -> AnchoringFixture {
@@ -256,7 +260,7 @@ fn anchor_mvp_runs_all_fixtures() {
             Err(e) => panic!("fixture {}: beklenmeyen hata: {:?}", f.id, e),
         }
     }
-    assert_eq!(ran, 10, "tüm 10 fixture işlenmeli");
+    assert_eq!(ran, 11, "tüm 11 fixture işlenmeli");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -415,12 +419,16 @@ fn anchor_mvp_candidate_isolation_inv_c3() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Test 7 — ImplementedBy üretilmez (Faz 1 disiplini)
+// Test 7 — ImplementedBy üretilmez (Faz 1-3 fixture'ları — implement lemması yok)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #[test]
 fn anchor_mvp_does_not_emit_implemented_by() {
-    // Hiçbir fixture ImplementedBy üretmemeli (code evidence Faz 4)
+    // Faz 4 sonrası: ImplementedBy artık "implement" lemması + typed CodeEntity: ref
+    // varsa EXTRACTION aşamasında üretilir, ama gate evidence ister. Bu fixture'ların
+    // (fix_001..fix_010) hiçbiri implement lemması içermiyor → ImplementedBy candidate
+    // üretilmez. Faz 4 pozitif yolu fix_011 fixture'ında test edilir (T9).
+    // Default context (provider yok) → evidence yok → gate reject (backward-compat).
     let pipeline = AnchorPipeline::default_pipeline();
     for f in load_all() {
         let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
@@ -438,14 +446,14 @@ fn anchor_mvp_does_not_emit_implemented_by() {
                     .any(|c| c.edge_kind() == ConceptEdgeKind::ImplementedBy);
                 assert!(
                     !has_impl,
-                    "fixture {}: ImplementedBy üretilmemeli (Faz 1 code evidence yok)",
+                    "fixture {}: ImplementedBy üretilmemeli (Faz 1-3 fixture'larında implement lemması yok)",
                     f.id
                 );
             }
             Err(osp_core::anchoring::pipeline::AnchorError::Gate(
                 osp_core::anchoring::gate::GateError::ImplementedByRequiresCodeEvidence,
             )) => {
-                // Eğer extractor yanlışlıkla ürettiyse gate reddetti — bu da doğru davranış
+                // Eğer extractor ürettiyse (Faz 4+) gate evidence olmadan reddetti — doğru.
             }
             Err(_) => { /* diğer hatalar bu test için ilgisiz */ }
         }
@@ -517,4 +525,82 @@ fn anchor_mvp_glossary_seed_consistent() {
     assert_eq!(g.canonical_for("ödeme"), Some("Payment"));
     assert_eq!(g.canonical_for("güven"), Some("Trust"));
     assert_eq!(g.canonical_for("kullanıcı"), Some("User"));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Test 11 — Faz 4: fix_011 ImplementedBy with code evidence (INV-C6 pozitif yol)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn anchor_mvp_fix_011_implemented_by_rejected_without_provider() {
+    // Backward-compat: default context (provider yok) → ImplementedBy reject.
+    // Extractor "implement eder" + typed CodeEntity: gördüğü için ImplementedBy candidate
+    // üretir, ama gate evidence (provider) olmadan reddeder.
+    let f = load_fixture("fix_011_implemented_by_with_evidence");
+    let pipeline = AnchorPipeline::default_pipeline();
+    let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
+    let result = pipeline.run_with_source(
+        &f.input.text,
+        "tr",
+        store.graph(),
+        PacketSource::ExplicitUser,
+        &AnchorGateContext::no_authority(),
+    );
+    assert!(
+        matches!(
+            result,
+            Err(osp_core::anchoring::pipeline::AnchorError::Gate(
+                osp_core::anchoring::gate::GateError::ImplementedByRequiresCodeEvidence
+            ))
+        ),
+        "fix_011 default context: provider yok → ImplementedBy reject (backward-compat)"
+    );
+}
+
+#[test]
+fn anchor_mvp_fix_011_implemented_by_accepted_with_provider() {
+    // Faz 4 pozitif yol: provider + evidence object → ImplementedBy kabul.
+    use osp_core::anchoring::code_evidence::InMemoryCodeEvidenceProvider;
+    use osp_core::anchoring::types::{
+        ConceptNodeId, EvidenceStrength, ObservedCodeEvidence, ObservedCodeMetricSource,
+        PhysicalCodeVector,
+    };
+
+    let f = load_fixture("fix_011_implemented_by_with_evidence");
+    let pipeline = AnchorPipeline::default_pipeline();
+    let store = InMemoryAnchorStore::with_seed(graph_seed_from_given(&f.given));
+
+    // Patch 6: explicit ObservedCodeEvidence seed (GraphSeed.code_entities yeterli değil).
+    let evidence = ObservedCodeEvidence::new(
+        ConceptNodeId("CodeEntity:AuthService".into()),
+        PhysicalCodeVector::new(0.42, 0.78, 0.30, 1.1, 5.0),
+        ObservedCodeMetricSource::Scip,
+        EvidenceStrength::new(0.85).unwrap(),
+        1_700_000_000,
+    );
+    let provider = InMemoryCodeEvidenceProvider::from_evidence(vec![evidence]);
+    let ctx = AnchorGateContext::with_code_evidence(None, &provider);
+
+    let plan = pipeline
+        .run_with_source(
+            &f.input.text,
+            "tr",
+            store.graph(),
+            PacketSource::ExplicitUser,
+            &ctx,
+        )
+        .expect("fix_011: evidence + provider → ImplementedBy kabul");
+
+    // Pozitif ImplementedBy üretildi (INV-C6 pozitif yol).
+    assert!(
+        plan.candidates()
+            .iter()
+            .any(|c| c.edge_kind() == ConceptEdgeKind::ImplementedBy),
+        "fix_011: ImplementedBy evidence ile üretilmeli"
+    );
+    // High-stake → operator review gerekli (Not 4 — explanation mevcut).
+    assert!(
+        plan.requires_operator_review(),
+        "fix_011: ImplementedBy high-stake → operator review"
+    );
 }

@@ -55,7 +55,8 @@ impl<'a> Extractor<'a> {
             }
         }
 
-        // 2. Typed-prefix referansları parse (CodeEntityCandidate:Foo, Decision:Bar)
+        // 2. Typed-prefix referansları parse (CodeEntityCandidate:Foo, Decision:Bar,
+        //    Faz 4: CodeEntity:Foo + "implement" lemması → ImplementedBy)
         for word in packet.text.split_whitespace() {
             let cleaned = word.trim_matches(|c: char| !c.is_alphanumeric() && c != ':' && c != '_');
             if let Some(r) = TypedNodeRef::parse(cleaned) {
@@ -70,8 +71,17 @@ impl<'a> Extractor<'a> {
                     }
                     ConceptNodeKind::RiskCandidate => ConceptEdgeKind::DerivesRisk,
                     ConceptNodeKind::CodeEntity => {
-                        // §8.6: gerçek CodeEntity doğrudan bağlanamaz — candidate olmadan
-                        continue;
+                        // Faz 4 (deterministic ImplementedBy trigger): typed CodeEntity:
+                        // ref + "implement" lemması → ImplementedBy candidate. Doğal dil
+                        // genişletme Faz 5+; Faz 4 sadece bu kesin trigger.
+                        //
+                        // §8.6: implement lemması YOKSA gerçek CodeEntity doğrudan
+                        // bağlanamaz (ONT-candidate) — skip.
+                        if self.has_implement_lemma(&text_lower) {
+                            ConceptEdgeKind::ImplementedBy
+                        } else {
+                            continue;
+                        }
                     }
                     _ => ConceptEdgeKind::Mentions,
                 };
@@ -152,6 +162,20 @@ impl<'a> Extractor<'a> {
         text_lower.contains("çeliş")
             || text_lower.contains("ihlal")
             || text_lower.contains("contradict")
+    }
+
+    /// Faz 4 — deterministic ImplementedBy trigger lemma kontrolü.
+    ///
+    /// "implement" lemması: "implement eder" / "implements" / "implemented by" /
+    /// "tarafından implemente edilir" (TR/EN). Doğal dil genişletme Faz 5+'ya; Faz 4
+    /// sadece bu kesin trigger. typed `CodeEntity:` ref ile birlikte → ImplementedBy.
+    fn has_implement_lemma(&self, text_lower: &str) -> bool {
+        text_lower.contains("implement eder")
+            || text_lower.contains("implements")
+            || text_lower.contains("implemented by")
+            || text_lower.contains("implemente edilir")
+            || text_lower.contains("tarafından implemente")
+            || text_lower.contains("implement eder.")
     }
 
     fn derive_rule_name(&self, text: &str) -> String {

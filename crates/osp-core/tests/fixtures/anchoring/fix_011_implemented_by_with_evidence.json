@@ -1,0 +1,55 @@
+{
+  "schema_version": "anchoring.fixture.v1",
+  "id": "fix_011_implemented_by_with_evidence",
+  "invariants": ["INV-C6"],
+  "given": {
+    "concepts": [
+      {
+        "id": "Concept:AuthenticationService",
+        "canonical": "AuthenticationService",
+        "aliases": ["auth service", "kimlik doğrulama servisi"],
+        "decision_status": "Accepted"
+      }
+    ],
+    "decisions": [],
+    "code_entities": [
+      {
+        "id": "CodeEntity:AuthService",
+        "status": "Observed"
+      }
+    ]
+  },
+  "input": {
+    "text": "CodeEntity:AuthService, AuthenticationService kavramını implement eder.",
+    "language": "tr"
+  },
+  "expected": {
+    "packet_type": "UserVision",
+    "concepts": ["AuthenticationService"],
+    "edges": [
+      { "kind": "Mentions", "target": "Concept:AuthenticationService", "requires_explanation": false },
+      { "kind": "ImplementedBy", "target": "CodeEntity:AuthService", "requires_explanation": true }
+    ],
+    "decision_status": "Candidate",
+    "position_family": "ConceptualIntent",
+    "requires_operator_review": true,
+    "anchor_decision": "RequireOperatorReview",
+    "threshold_band": "Strong",
+    "negative_assertions": [
+      "ImplementedBy ancak observed code evidence (ObservedCodeEvidence) ile açılır — node varlığı tek başına yetmez (Patch 6)",
+      "ObservedCodeEvidence provenance lane'dir; node acceptance status'unu (Candidate) değiştirmez (Patch 5, D15)",
+      "ImplementedBy high-stake → explanation zorunlu (INV-C7); evidence explanation'ı bypass etmez (Not 4)"
+    ]
+  },
+  "score": {
+    "_comment": "Faz 4: code_evidence_score artık provider'dan (InMemoryCodeEvidenceProvider seed)",
+    "semantic_similarity": 0.0,
+    "ontology_type_compatibility": 1.0,
+    "graph_context_score": null,
+    "domain_term_match": 1.0,
+    "code_evidence_score": 0.85,
+    "temporal_trust_score": null,
+    "decision_status_score": null
+  },
+  "notes": "Faz 4 pozitif ImplementedBy fixture'ı. Deterministic trigger: typed CodeEntity:AuthService ref + 'implement eder' lemması (extractor.rs has_implement_lemma). Test provider (InMemoryCodeEvidenceProvider) CodeEntity:AuthService için ObservedCodeEvidence (confidence 0.85, MetricSource Scip) seed'ler. Gate evidence object varlığını (find_evidence, Not 5) + explanation (Not 4) kontrolüyle ImplementedBy'yi kabul eder. CodeEntity node status Candidate kalır (Patch 5) — observed evidence acceptance değildir."
+}

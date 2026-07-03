@@ -14,8 +14,9 @@ Paper 2'nin `paper2-notes/` pattern'ini izler (README + stage dosyaları + evide
 | **Faz 1** | ✅ Tamamlandı | In-memory deterministic MVP — 5 bileşen pipeline (Classifier, Extractor, Scorer, Gate, Store) |
 | **Faz 2** | ✅ Tamamlandı | INV-C1..C8 type-level enforcement hardening (compile-time garantiler) |
 | **Faz 3a** | ✅ PR30 | AnchorStore trait + serde boundary (osp-core) |
-| Faz 3b-c | Planlandı | osp-kuzu spike + KuzuAnchorStore (PR31-32) |
-| Faz 4 | Planlandı | Code evidence integration (symbol index, ImplementedBy) |
+| Faz 3b-c | ⏸️ Ertelendi | KuzuDB arşivlendi (Ekim 2025, Apple satın alma) — successor projeler olgunlaşınca |
+| **Faz 4** | ✅ Tamamlandı | Code evidence integration — CodeEvidenceProvider trait + evidence-gated ImplementedBy + INV-C6 type-level |
+| Faz 4.1 | Planlandı | PositionSnapshot/HasPosition graph wiring (Faz 4'ten ayrıldı) |
 | Faz 5 | Planlandı | Task/Predicate integration → Paper 2 navigator bridge |
 | Faz 6 | Planlandı | Concept Synthesis (code repo → concept hipotezleri) |
 | Faz 7 | Planlandı | Embedding + LLM-assisted candidate generation |
@@ -36,6 +37,7 @@ Mekanizma önce deterministic olarak kanıtlanır, stochastic katmanlar sonra ek
 - [`faz1-deterministic-mvp.md`](faz1-deterministic-mvp.md) — Faz 1 implementation evidence
 - [`faz2-invariant-hardening.md`](faz2-invariant-hardening.md) — Faz 2 type-level enforcement evidence
 - [`faz3a-anchorstore-trait.md`](faz3a-anchorstore-trait.md) — Faz 3a AnchorStore trait + serde boundary
+- [`faz4-code-evidence.md`](faz4-code-evidence.md) — Faz 4 CodeEvidenceProvider + evidence-gated ImplementedBy + INV-C6
 
 ## Evidence
 
