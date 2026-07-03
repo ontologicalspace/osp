@@ -26,8 +26,9 @@
 //! test'leri (`tests/`) bu constructor'ları çağıramaz → invariant by-pass
 //! compile-time engellenir. Faz 8 operator console gerçek API ile bu gate'leri açar.
 
-// Faz 1/2 modülleri
+// Faz 1/2/4 modülleri
 pub mod classifier;
+pub mod code_evidence;
 pub mod edit_distance;
 pub mod extractor;
 pub mod gate;
@@ -37,12 +38,13 @@ pub mod store;
 pub mod typed_ref;
 pub mod types;
 
-// Faz 2: runtime tipleri kökten erişilebilir (API stabilitesi)
+// Faz 2/4: runtime tipleri kökten erişilebilir (API stabilitesi)
 pub use types::{
     AnchorCandidate, AnchorPlan, AnchorScoreBreakdown, CanonicalRedirect, CanonicalRedirectReason,
     ConceptEdge, ConceptGraph, ConceptGraphSnapshot, ConceptNode, ConceptNodeId, ConceptNodeKind,
-    ConceptPacket, ConceptPacketId, ConceptualIntentVector, EmptyExplanation, EvidenceVector,
-    ExtractedAnchorCandidate, GraphSeed, NonEmptyExplanation, PacketSource,
+    ConceptPacket, ConceptPacketId, ConceptualIntentVector, EmptyExplanation, EvidenceStrength,
+    EvidenceStrengthOutOfRange, EvidenceVector, ExtractedAnchorCandidate, GraphSeed,
+    NonEmptyExplanation, ObservedCodeEvidence, ObservedCodeMetricSource, PacketSource,
     PersistedAnchorCandidateAudit, PersistedAnchorPlanAudit, PersistedRedirectAudit,
     PhysicalCodeVector, PositionSnapshot, PositionSnapshotId, PositionVector, ScalarSimilarity,
     SimilarityOutOfRange,

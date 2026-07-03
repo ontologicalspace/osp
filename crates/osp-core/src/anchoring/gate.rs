@@ -129,21 +129,65 @@ impl SupersedeAuthority {
     }
 }
 
-/// Gate context — INV-C4 authority + ileride diğer capability'ler.
+/// Gate context — INV-C4 authority + INV-C6 code evidence + ileride diğer capability'ler.
 ///
 /// `decide` çağrılırken verilir. `Supersedes` candidate varsa `supersede_authority`
 /// kontrol edilir; yoksa `GateError::SupersedeAuthorityRequired`. Faz 8 operator console
 /// bu context'i doldurur.
-#[derive(Debug, Clone, Default)]
-pub struct AnchorGateContext {
+///
+/// # Faz 4 — code evidence provider (Not 5)
+/// `code_evidence: Option<&dyn CodeEvidenceProvider>` — gate `ImplementedBy` için
+/// `find_evidence()` ile **evidence object varlığını** kontrol eder (strength değil).
+/// `None` → Faz 1-2 backward-compat (ImplementedBy reject).
+///
+/// # Clone/Copy/Default (review patch R3/R4)
+/// `&dyn Trait` ve `SupersedeAuthority` ikisi de `Copy` → context `Clone + Copy`.
+/// `Debug` custom kalır (dyn provider Debug olmayabilir). `Default = no_authority()`
+/// (downstream compat — Faz 1-2'de `Default` vardı).
+#[derive(Clone, Copy)]
+pub struct AnchorGateContext<'a> {
     pub supersede_authority: Option<SupersedeAuthority>,
+    pub code_evidence: Option<&'a dyn crate::anchoring::code_evidence::CodeEvidenceProvider>,
 }
 
-impl AnchorGateContext {
-    /// Faz 2 default: hiçbir authority yok (operator API Faz 8).
+impl<'a> std::fmt::Debug for AnchorGateContext<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AnchorGateContext")
+            .field("supersede_authority", &self.supersede_authority)
+            .field(
+                "code_evidence",
+                &self.code_evidence.map(|_| "<dyn CodeEvidenceProvider>"),
+            )
+            .finish()
+    }
+}
+
+impl<'a> Default for AnchorGateContext<'a> {
+    /// Faz 1-2 backward-compat: `no_authority()` ile eşdeğer (provider None).
+    fn default() -> Self {
+        Self::no_authority()
+    }
+}
+
+impl<'a> AnchorGateContext<'a> {
+    /// Faz 1-2 default: hiçbir authority yok, code evidence provider yok (Faz 4).
+    /// ImplementedBy reject edilir (backward-compat), Supersedes authority ister.
     pub fn no_authority() -> Self {
         Self {
             supersede_authority: None,
+            code_evidence: None,
+        }
+    }
+
+    /// Code evidence provider ile context oluştur (INV-C6 — Faz 4).
+    /// `ImplementedBy` evidence varsa kabul edilebilir.
+    pub fn with_code_evidence(
+        supersede_authority: Option<SupersedeAuthority>,
+        code_evidence: &'a dyn crate::anchoring::code_evidence::CodeEvidenceProvider,
+    ) -> Self {
+        Self {
+            supersede_authority,
+            code_evidence: Some(code_evidence),
         }
     }
 }
@@ -269,16 +313,43 @@ impl AnchorGate {
         }
     }
 
-    /// §8.6 + ImplementedBy + Supersedes validation.
+    /// §8.6 + ImplementedBy (evidence-gated) + Supersedes validation.
+    ///
+    /// # Faz 4 — ImplementedBy evidence-gated (Not 4/5)
+    /// ImplementedBy blanket-reject DEĞİL. `ctx.code_evidence` provider varsa ve
+    /// `find_evidence()` gerçek `ObservedCodeEvidence` object döndürürse → kabul.
+    /// Provider yok veya evidence object yok → `ImplementedByRequiresCodeEvidence`.
+    ///
+    /// **Not 5:** gate `find_evidence()` ile **object varlığını** kontrol eder;
+    /// `evidence_strength > 0` tek başına açmaz (scorer strength kullanır, gate object).
+    ///
+    /// **Not 4 (sıra garantisi):** INV-C7 explanation kontrolü `decide()`'de bu metodtan
+    /// ÖNCE yapılır (line 176-183). Yani pozitif ImplementedBy = evidence VAR **ve**
+    /// explanation VAR. Evidence explanation requirement'ı bypass etmez.
     fn validate_edge_kind(
         &self,
         c: &AnchorCandidate,
         _graph: &ConceptGraph,
         ctx: &AnchorGateContext,
     ) -> Result<(), GateError> {
-        // Faz 1: ImplementedBy yasak (code evidence Faz 4)
+        // Faz 4: ImplementedBy — evidence-gated (provider + object required).
         if c.edge_kind == ConceptEdgeKind::ImplementedBy {
-            return Err(GateError::ImplementedByRequiresCodeEvidence);
+            match ctx.code_evidence {
+                Some(provider) => {
+                    // Not 5: object varlığı kontrolü (strength değil).
+                    let evidence = provider
+                        .find_evidence(&c.target_node_id)
+                        .map_err(|_| GateError::ImplementedByRequiresCodeEvidence)?;
+                    if evidence.is_none() {
+                        return Err(GateError::ImplementedByRequiresCodeEvidence);
+                    }
+                    // Evidence object mevcut → kabul (explanation zaten decide() adım 1'de).
+                }
+                None => {
+                    // Provider yok → Faz 1-2 backward-compat (reject).
+                    return Err(GateError::ImplementedByRequiresCodeEvidence);
+                }
+            }
         }
         // INV-C4: Supersedes authority gerekli. ctx.supersede_authority yoksa reject.
         // Faz 2'de context default None → reject. Faz 8 operator console authority verir.
@@ -522,6 +593,93 @@ mod tests {
     }
 
     #[test]
+    fn gate_accepts_implemented_by_with_evidence() {
+        // Faz 4 pozitif yol: ImplementedBy + provider + evidence object → kabul.
+        let g = AnchorGate::new(glossary());
+        let c = candidate(
+            "CodeEntity:AuthService",
+            ConceptEdgeKind::ImplementedBy,
+            0.90,
+            Some("SCIP-observed implementation"),
+        );
+        let evidence = crate::anchoring::types::ObservedCodeEvidence::new(
+            ConceptNodeId("CodeEntity:AuthService".into()),
+            crate::anchoring::types::PhysicalCodeVector::new(0.42, 0.78, 0.30, 1.1, 5.0),
+            crate::anchoring::types::ObservedCodeMetricSource::Scip,
+            crate::anchoring::types::EvidenceStrength::new(0.85).unwrap(),
+            1_700_000_000,
+        );
+        let provider =
+            crate::anchoring::code_evidence::InMemoryCodeEvidenceProvider::from_evidence(vec![
+                evidence,
+            ]);
+        let ctx = AnchorGateContext::with_code_evidence(None, &provider);
+        let plan = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph(), &ctx)
+            .expect("evidence + explanation → ImplementedBy kabul");
+        assert!(plan
+            .candidates()
+            .iter()
+            .any(|c| c.edge_kind() == ConceptEdgeKind::ImplementedBy));
+    }
+
+    #[test]
+    fn implemented_by_evidence_does_not_bypass_explanation() {
+        // Not 4: evidence VAR ama explanation YOK → MissingExplanation (INV-C7 önce).
+        // Evidence explanation requirement'ı bypass etmez.
+        let g = AnchorGate::new(glossary());
+        let c = candidate(
+            "CodeEntity:AuthService",
+            ConceptEdgeKind::ImplementedBy,
+            0.90,
+            None, // explanation yok → INV-C7 önce reject
+        );
+        let evidence = crate::anchoring::types::ObservedCodeEvidence::new(
+            ConceptNodeId("CodeEntity:AuthService".into()),
+            crate::anchoring::types::PhysicalCodeVector::new(0.42, 0.78, 0.30, 1.1, 5.0),
+            crate::anchoring::types::ObservedCodeMetricSource::Scip,
+            crate::anchoring::types::EvidenceStrength::one(),
+            1_700_000_000,
+        );
+        let provider =
+            crate::anchoring::code_evidence::InMemoryCodeEvidenceProvider::from_evidence(vec![
+                evidence,
+            ]);
+        let ctx = AnchorGateContext::with_code_evidence(None, &provider);
+        let err = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph(), &ctx)
+            .unwrap_err();
+        assert!(
+            matches!(err, GateError::MissingExplanation { .. }),
+            "evidence explanation'ı bypass etmez (Not 4)"
+        );
+    }
+
+    #[test]
+    fn implemented_by_rejects_when_provider_has_no_evidence_object() {
+        // Not 5: gate find_evidence() ile OBJECT varlığını kontrol eder.
+        // Provider mevcut ama bu CodeEntity için evidence object yok → reject.
+        let g = AnchorGate::new(glossary());
+        let c = candidate(
+            "CodeEntity:NotInProvider",
+            ConceptEdgeKind::ImplementedBy,
+            0.90,
+            Some("impl"),
+        );
+        // Provider var ama CodeEntity:NotInProvider için evidence seed'lenmedi.
+        let provider = crate::anchoring::code_evidence::InMemoryCodeEvidenceProvider::empty();
+        let ctx = AnchorGateContext::with_code_evidence(None, &provider);
+        let err = g
+            .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph(), &ctx)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            GateError::ImplementedByRequiresCodeEvidence,
+            "object yok → reject (Not 5 — strength değil object)"
+        );
+    }
+
+    #[test]
     fn gate_rejects_supersedes_without_authority() {
         let g = AnchorGate::new(glossary());
         let c = candidate(
@@ -553,6 +711,7 @@ mod tests {
         );
         let ctx = AnchorGateContext {
             supersede_authority: Some(SupersedeAuthority::issue_operator_for_tests()),
+            code_evidence: None,
         };
         let plan = g
             .decide(&ConceptPacketId("p".into()), vec![c], &empty_graph(), &ctx)

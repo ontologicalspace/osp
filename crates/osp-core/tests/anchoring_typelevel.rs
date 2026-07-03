@@ -1,6 +1,6 @@
-//! Faz 2 type-level invariant compile-fail testleri.
+//! Faz 2/4 type-level invariant compile-fail testleri.
 //!
-//! [`trybuild`] ile 5 INV compile-time garantiyi doğrular. Bu testler IHMAL
+//! [`trybuild`] ile 10 INV compile-time garantiyi doğrular. Bu testler IHMAL
 //! edilemez: "invariant korunuyor" iddiasının en güçlü kanıtı — runtime testler
 //! invariant'ın çalıştığını gösterir, compile-fail testler ihlalin İMKANSIZ olduğunu kanıtlar.
 //!
@@ -10,6 +10,11 @@
 //! - `c2_family_incompatible.rs` — INV-C2: PositionVector family ayrımı
 //! - `c3_operator_acceptance_construct.rs` — INV-C3: OperatorAcceptance external construct
 //! - `c4_supersede_authority_construct.rs` — INV-C4: SupersedeAuthority external construct
+//! - `c8_anchorplan_deserialize.rs` — INV-C8: AnchorPlan Deserialize (Faz 3 serde boundary)
+//! - `c3_conceptgraph_deserialize.rs` — INV-C3: ConceptGraph Deserialize (Faz 3 serde boundary)
+//! - `c6_observed_evidence_literal.rs` — INV-C6: ObservedCodeEvidence literal construct (Faz 4)
+//! - `c6_intent_carries_physical_vector.rs` — INV-C6+C2: intent vector observed evidence'a (Faz 4)
+//! - `c6_observed_evidence_deserialize.rs` — INV-C6: ObservedCodeEvidence Deserialize (Faz 4)
 
 #[test]
 fn type_level_invariants_compile_fail() {
@@ -21,4 +26,8 @@ fn type_level_invariants_compile_fail() {
     t.compile_fail("tests/compile_fail/c4_supersede_authority_construct.rs");
     t.compile_fail("tests/compile_fail/c8_anchorplan_deserialize.rs");
     t.compile_fail("tests/compile_fail/c3_conceptgraph_deserialize.rs");
+    // Faz 4 — INV-C6 (code evidence type-level)
+    t.compile_fail("tests/compile_fail/c6_observed_evidence_literal.rs");
+    t.compile_fail("tests/compile_fail/c6_intent_carries_physical_vector.rs");
+    t.compile_fail("tests/compile_fail/c6_observed_evidence_deserialize.rs");
 }

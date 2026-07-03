@@ -764,6 +764,18 @@ Her karar: **karar + gerekçe + OSP ile tutarlılık + itiraz varsa çözüm.**
 
 **OSP tutarlılık:** INV-C3 (candidate isolation) yapısal bir kısıtı — yeni varlık oluşturma da onay disiplinine tabi. Q13 ile birlikte tanımlandı (v0.2).
 
+### D15 — INV-C6 modelleme: Observed provenance yorumu (Faz 4)
+
+**Karar:** "Observed" yeni bir `DecisionStatus` variantı **değildir**. İki lane net ayrılır: `DecisionStatus` = graph acceptance lane (Candidate→InReview→Accepted), `ObservedCodeEvidence` = epistemik provenance lane (MetricSource'tan). Bir CodeEntity node'unun observed olması operator-accepted decision anlamına gelmez; Candidate kalır, observed olma durumu `ObservedCodeEvidence` içinde taşınır.
+
+**Gerekçe:** §9'un yapısal garantisi asimetriktir — structural facts (`MetricSource::TreeSitter/Scip`, Observed) ve intent hypotheses (`DecisionStatus::Candidate`, Inferred). "Observed" MetricSource provenance'ın anlamıdır, ayrı enum slot değil. `DecisionStatus::Observed` eklemek graph acceptance lifecycle ile epistemik sınıfı karıştırır.
+
+**OSP tutarlılık:** INV-C6 (§7.2/§9) — kod metric'leri Observed, koddan çıkarılan niyet Inferred. D4/D9 ile uyumlu. "Observed code reality is evidence, not acceptance."
+
+**Type-level garantiler (Faz 4):** `ObservedCodeEvidence` private fields + public smart constructor (dış crate literal construct edemez ama `new()` ile geçerli evidence üretebilir), `ObservedCodeMetricSource` typed enum (`Placeholder`/`Heuristic` imkansız), `EvidenceStrength` newtype (`[0,1]`), Serialize-only (Deserialize YOK — INV-C6 serde boundary). 3 trybuild compile-fail test.
+
+**Erteleme notu:** Gerçek osp-analyzer bridge ertelendi (osp-analyzer symbol-granular değil). Deterministik stub (`InMemoryCodeEvidenceProvider`) ile mechanism proof. `CodeEvidenceProvider` trait (D7-abstraction, AnchorStore pattern) osp-core'u analyzer-agnostic tutar.
+
 ---
 
 ## 11. Fazlama
@@ -795,10 +807,24 @@ Faz 3 — Kuzu persistence
   AnchorPlan persist/read roundtrip
   Graph query örnekleri (özgün §11)
 
+  ⚠️ DURUM (2026-07): Faz 3a (PR30 — AnchorStore trait + serde boundary) tamamlandı.
+  Faz 3b-c (osp-kuzu spike + KuzuAnchorStore) ERTİK — KuzuDB Ekim 2025'te arşivlendi
+  (Kùzu Inc. Apple satın alma, repo archived, v0.11.3 son sürüm). PR30 persistence-safety'nin
+  backend-bağımsız kısmını (INV-C3/C8 serde boundary) zaten teslim etti. Gerçek graph backend
+  successor projeler (LadybugDB/SurrealDB/DuckPGQ) olgunlaşınca tekrar değerlendirilecek.
+  D7 (AnchorStore trait) backend değişimini tek crate ile sınırlar.
+
 Faz 4 — Code evidence integration
   CodeEntity symbol index (Paper 1 analyzer bridge)
   EXPECTED_IMPLEMENTATION vs IMPLEMENTED_BY ayrımı
   Kod kanıtı olmayan yüksek riskli vizyon sorguları
+
+  ✅ DURUM (2026-07): Tamamlandı. INV-C6 type-level: ObservedCodeEvidence + CodeEvidenceProvider
+  trait (D7-abstraction, AnchorStore pattern) + evidence-gated ImplementedBy. Gerçek analyzer
+  bridge ertelendi (osp-analyzer symbol-granular değil, file-granular metric only); deterministik
+  stub (InMemoryCodeEvidenceProvider) ile mechanism proof. INV-C6 modelleme: D15 (provenance
+  yorumu — Observed, DecisionStatus variantı değil, MetricSource provenance'ı). Faz 4.1
+  (PositionSnapshot/HasPosition wiring) ayrıldı.
 
 Faz 5 — Task/Predicate integration → Paper 2 navigator bridge
   RuleCandidate → PredicateSet üretimi

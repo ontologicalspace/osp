@@ -4,6 +4,7 @@
 //! INV-C1: `semantic_similarity` skalar 0.0 placeholder (embedding vektörü GÖRİLMEZ).
 //! 7 pozitif + 2 penalty bileşen. `raw_total()` + `total_clamped()`.
 
+use crate::anchoring::code_evidence::CodeEvidenceProvider;
 use crate::anchoring::types::{
     AnchorCandidate, AnchorScoreBreakdown, ConceptGraph, ExtractedAnchorCandidate, PacketSource,
 };
@@ -24,13 +25,18 @@ impl AnchorScorer {
     }
 
     /// Extracted adayı skorla → AnchorCandidate.
+    ///
+    /// Faz 4: `code_evidence` provider eklenir. `None` → Faz 1-2 backward-compat
+    /// (`code_evidence_score=0`). Not 5: scorer `evidence_strength()` skalar kullanır;
+    /// gate `find_evidence()` object varlığını kontrol eder.
     pub fn score(
         &self,
         extracted: ExtractedAnchorCandidate,
         graph: &ConceptGraph,
         packet_source: PacketSource,
+        code_evidence: Option<&dyn CodeEvidenceProvider>,
     ) -> AnchorCandidate {
-        let breakdown = self.score_breakdown(&extracted, graph, packet_source);
+        let breakdown = self.score_breakdown(&extracted, graph, packet_source, code_evidence);
         AnchorCandidate::from_scored(extracted, breakdown)
     }
 
@@ -39,6 +45,7 @@ impl AnchorScorer {
         c: &ExtractedAnchorCandidate,
         graph: &ConceptGraph,
         packet_source: PacketSource,
+        code_evidence: Option<&dyn CodeEvidenceProvider>,
     ) -> AnchorScoreBreakdown {
         let mut b = AnchorScoreBreakdown::zeroed();
 
@@ -55,8 +62,10 @@ impl AnchorScorer {
         // domain_term_match: target adında glossary terimi (yüksek güven)
         b.domain_term_match = self.domain_term_strength(&c.target_node_id, graph);
 
-        // code_evidence_score: Faz 1 = 0.0 (code analizi Faz 4)
-        b.code_evidence_score = 0.0;
+        // code_evidence_score: Faz 4 — provider'dan (Not 5). Sadece code-related
+        // edge kind'lerde evidence aranır; diğerleri 0.0. Provider None → 0.0.
+        b.code_evidence_score =
+            self.code_evidence_strength(&c.target_node_id, c.edge_kind, code_evidence);
 
         // temporal_trust_score: kaynak güveni (§6.2 hiyerarşi)
         b.temporal_trust_score = self.temporal_trust(packet_source);
@@ -148,6 +157,36 @@ impl AnchorScorer {
         }
     }
 
+    /// Faz 4 (§8.1, Not 5): code evidence strength skalar — sadece code-related
+    /// edge kind'lerde provider'a sorulur. Provider `None` (Faz 1-2 backward-compat)
+    /// veya evidence bulunamazsa `0.0`.
+    ///
+    /// **Önemli:** scorer `evidence_strength()` *skalarını* kullanır (weight 0.10).
+    /// Gate `ImplementedBy` için ayrıca `find_evidence()` ile **object varlığını** kontrol
+    /// eder — strength yüksek olsa bile object yoksa gate reject eder.
+    fn code_evidence_strength(
+        &self,
+        target_id: &crate::anchoring::types::ConceptNodeId,
+        edge_kind: ConceptEdgeKind,
+        provider: Option<&dyn CodeEvidenceProvider>,
+    ) -> f64 {
+        // Sadece code-related edge kind'lerde evidence anlamı var (§8.3).
+        match edge_kind {
+            ConceptEdgeKind::ImplementedBy
+            | ConceptEdgeKind::ExpectedImplementation
+            | ConceptEdgeKind::Constrains
+            | ConceptEdgeKind::EvidencedBy => {}
+            _ => return 0.0,
+        }
+        match provider {
+            Some(p) => p
+                .evidence_strength(target_id)
+                .map(|s| s.get())
+                .unwrap_or(0.0),
+            None => 0.0,
+        }
+    }
+
     fn decision_status_score(
         &self,
         target_id: &crate::anchoring::types::ConceptNodeId,
@@ -191,6 +230,7 @@ mod tests {
             extracted("Concept:Payment", ConceptEdgeKind::Mentions),
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
+            None,
         );
         assert_eq!(ac.score.semantic_similarity.get(), 0.0);
     }
@@ -202,6 +242,7 @@ mod tests {
             extracted("Concept:Payment", ConceptEdgeKind::Mentions),
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
+            None,
         );
         assert_eq!(ac.score.ontology_type_compatibility, 1.0);
     }
@@ -213,6 +254,7 @@ mod tests {
             extracted("RiskCandidate:X", ConceptEdgeKind::DerivesRisk),
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
+            None,
         );
         assert_eq!(ac.score.ontology_type_compatibility, 1.0);
     }
@@ -224,6 +266,7 @@ mod tests {
             extracted("Concept:X", ConceptEdgeKind::Mentions),
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
+            None,
         );
         assert!(ac.score.temporal_trust_score > 0.8);
     }
@@ -235,6 +278,7 @@ mod tests {
             extracted("Concept:X", ConceptEdgeKind::Mentions),
             &ConceptGraph::new(),
             PacketSource::Agent,
+            None,
         );
         assert!(ac.score.temporal_trust_score < 0.5);
     }
@@ -246,6 +290,7 @@ mod tests {
             extracted("Decision:X", ConceptEdgeKind::Contradicts),
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
+            None,
         );
         assert!(
             ac.score.contradiction_penalty > 0.0,
@@ -260,6 +305,7 @@ mod tests {
             extracted("Concept:Payment", ConceptEdgeKind::Mentions),
             &ConceptGraph::new(),
             PacketSource::ExplicitUser,
+            None,
         );
         let total = ac.score.total_clamped();
         assert!((0.0..=1.0).contains(&total), "total_clamped [0,1]");
@@ -292,7 +338,75 @@ mod tests {
             extracted("Concept:Payment", ConceptEdgeKind::Mentions),
             &graph,
             PacketSource::ExplicitUser,
+            None,
         );
         assert_eq!(ac.score.decision_status_score, 1.0);
+    }
+
+    #[test]
+    fn code_evidence_score_zero_without_provider() {
+        // Faz 1-2 backward-compat: provider None → code_evidence_score = 0.
+        let s = AnchorScorer::new();
+        let ac = s.score(
+            extracted("CodeEntity:X", ConceptEdgeKind::ImplementedBy),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+            None,
+        );
+        assert_eq!(ac.score.code_evidence_score, 0.0);
+    }
+
+    #[test]
+    fn code_evidence_score_zero_for_non_code_edge_kind() {
+        // Non-code edge kind'lerde evidence aranmaz (Mentions vb.) → 0.
+        let s = AnchorScorer::new();
+        let evidence = crate::anchoring::types::ObservedCodeEvidence::new(
+            ConceptNodeId("CodeEntity:X".into()),
+            crate::anchoring::types::PhysicalCodeVector::new(0.1, 0.2, 0.3, 0.4, 1.0),
+            crate::anchoring::types::ObservedCodeMetricSource::Scip,
+            crate::anchoring::types::EvidenceStrength::one(),
+            0,
+        );
+        let provider =
+            crate::anchoring::code_evidence::InMemoryCodeEvidenceProvider::from_evidence(vec![
+                evidence,
+            ]);
+        let ac = s.score(
+            extracted("CodeEntity:X", ConceptEdgeKind::Mentions),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+            Some(&provider),
+        );
+        assert_eq!(
+            ac.score.code_evidence_score, 0.0,
+            "Mentions code edge değil → evidence_score 0"
+        );
+    }
+
+    #[test]
+    fn code_evidence_score_from_provider_strength() {
+        // Faz 4: ImplementedBy + provider → code_evidence_score = evidence_strength (Not 5).
+        let s = AnchorScorer::new();
+        let evidence = crate::anchoring::types::ObservedCodeEvidence::new(
+            ConceptNodeId("CodeEntity:AuthService".into()),
+            crate::anchoring::types::PhysicalCodeVector::new(0.42, 0.78, 0.30, 1.1, 5.0),
+            crate::anchoring::types::ObservedCodeMetricSource::Scip,
+            crate::anchoring::types::EvidenceStrength::new(0.85).unwrap(),
+            1_700_000_000,
+        );
+        let provider =
+            crate::anchoring::code_evidence::InMemoryCodeEvidenceProvider::from_evidence(vec![
+                evidence,
+            ]);
+        let ac = s.score(
+            extracted("CodeEntity:AuthService", ConceptEdgeKind::ImplementedBy),
+            &ConceptGraph::new(),
+            PacketSource::ExplicitUser,
+            Some(&provider),
+        );
+        assert_eq!(
+            ac.score.code_evidence_score, 0.85,
+            "Not 5: scorer evidence_strength() skalarını kullanır"
+        );
     }
 }
