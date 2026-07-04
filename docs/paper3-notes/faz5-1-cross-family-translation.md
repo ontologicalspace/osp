@@ -139,7 +139,7 @@ taahhüt yaratır) ama backward-compat açısından bilgilendirme değeri taşı
 - LLM-assisted axis hint inference (Faz 7)
 - Alias/glossary genişletme + ayraç normalizasyonu olgunlaştırma (Faz 5.2)
 - Tam ConceptualIntent 6-axis → PhysicalCode 5-axis matematiksel translation
-- `unicode-normalization` crate ile gerçek NFC (Mikro-1 decomposed — şu an fold tablosu precomposed yakalar)
+- Unicode normalization genişletmeleri / daha kapsamlı alias-glossary normalization olgunlaştırması
 - Datalog-like predicate evaluator
 
 ## Sırada
