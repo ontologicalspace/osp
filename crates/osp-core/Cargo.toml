@@ -12,6 +12,7 @@ serde = { workspace = true }   # Serialize/Deserialize — Faz 2 persistence (wo
 bincode = "1"                  # Binary snapshot serialization — Faz 2 event-sourcing
 toml = "0.8"                   # Vision config parsing — Faz 2 vision_config
 tracing = { workspace = true } # Faz 2.5 persistence logging
+unicode-normalization = "0.1"  # Faz 5.1: normalize_for_axis_match gerçek NFC (decomposed → precomposed)
 # Faz 1.5: git2 = "0.18" (lokal God-mode witness — inv #8: osp-core DEĞİL, osp-analyzer)
 
 [dev-dependencies]
