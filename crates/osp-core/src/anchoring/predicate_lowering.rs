@@ -458,10 +458,20 @@ impl CrossFamilyHint {
             }
             seen.push(hint.axis);
         }
+        // D2-1 (review): smart ctor deterministic sort uygula — sadece merge_axis_hints'ta
+        // değil, public constructor da kendi invariant'ını korusun. confidence desc
+        // (total_cmp) + axis sort_order asc.
+        let mut sorted = axis_candidates;
+        sorted.sort_by(|a, b| {
+            b.confidence()
+                .get()
+                .total_cmp(&a.confidence().get())
+                .then_with(|| a.axis().sort_order().cmp(&b.axis().sort_order()))
+        });
         Ok(Self {
             from_family,
             to_family,
-            axis_candidates,
+            axis_candidates: sorted,
         })
     }
 
@@ -783,7 +793,6 @@ impl PredicateStub {
     }
     /// Faz 5.1 — Computed legacy accessor (D1-3). CrossFamilyHint'ten türetilir.
     /// SingleCandidate → Some(axis), Multiple/NoAxis → None.
-    #[allow(deprecated)]
     pub fn suggested_axis(&self) -> Option<PhysicalCodeMetricAxis> {
         self.cross_family_hint
             .as_ref()
@@ -873,20 +882,20 @@ pub enum PredicateLoweringError {
 /// Alias pattern'leri de fold edilmiş formda saklanmalı ("bağımlılık" → "bagimlilik").
 /// Eşleşme sadece normalize uzayda.
 ///
-/// # Mikro-1 (NFC decomposed)
-/// NFC'in tek işi: decomposed girdi (U+0049 + U+0307) → precomposed (U+0130 'İ') → fold yakalar.
-/// Precomposed `"İ"` trivially geçer; asıl kanıt `"I\u{0307}"` decomposed girdisiyle.
+/// # NFC decomposed (Mikro-1 — review R2 patch)
+/// Gerçek NFC: `unicode-normalization` crate ile decomposed girdi (U+0049 + U+0307) →
+/// precomposed (U+0130 'İ') → fold yakalar. Decomposed `"I\u{0307}"` → `"i"` (NFC birleştirir,
+/// fold yakalar).
 fn normalize_for_axis_match(input: &str) -> String {
-    // 1. NFC normalize (decomposed → precomposed). unicode-normalization crate yok —
-    //    char-level fold tablosu NFC sonrası için yeterli (PR36 deterministic).
-    //    Not: gerçek NFC için `unicode-normalization` gerekir; şimdilik fold tablosu
-    //    precomposed Türkçe karakterleri yakalar (decomposed vakası Mikro-1 testinde).
-    // 2. Türkçe karakter fold (büyük + küçük) + ASCII lowercase.
+    use unicode_normalization::UnicodeNormalization;
+    // 1. NFC normalize (decomposed → precomposed). Gerçek NFC — review R2 patch.
+    // 2. Türkçe karakter fold (büyük + küçük).
+    // 3. ASCII lowercase (Unicode-aware değil — deterministic eşleşme uzayı, Mikro-2).
     input
-        .chars()
+        .nfc()
         .flat_map(|c| {
             let folded: &[char] = match c {
-                'I' | 'İ' | 'ı' | 'i' => &['i'],
+                'I' | 'İ' | 'ı' => &['i'],
                 'Ğ' | 'ğ' => &['g'],
                 'Ü' | 'ü' => &['u'],
                 'Ş' | 'ş' => &['s'],
@@ -940,10 +949,17 @@ pub fn lower_rule_to_predicate_stub(
     add_keyword_axis(PhysicalCodeMetricAxis::Cohesion, &["cohesion"]);
     add_keyword_axis(PhysicalCodeMetricAxis::Instability, &["instability"]);
     add_keyword_axis(PhysicalCodeMetricAxis::Entropy, &["entropy"]);
-    // R1-4: witness-depth/witness depth/witness_depth canonical, bare "witness" değil.
+    // R1-4 + review R4: witness-depth/witness depth/witness_depth/witnessdepth canonical.
+    // bare "witness" değil (false-positive). witnessdepth ayraçsız — camelCase canonical
+    // ("WitnessDepthLimit" → "witnessdepthlimit") eşleşmesi için.
     add_keyword_axis(
         PhysicalCodeMetricAxis::WitnessDepth,
-        &["witness-depth", "witness depth", "witness_depth"],
+        &[
+            "witness-depth",
+            "witness depth",
+            "witness_depth",
+            "witnessdepth",
+        ],
     );
 
     // LanguageAlias (Türkçe karşılıklar, R2-2 — fold edilmiş formda).
@@ -1788,34 +1804,37 @@ mod tests {
 
     #[test]
     fn lowering_bare_witness_is_not_axis_candidate() {
-        // R1-4: "requires two witnesses" → bare witness değil, witness-depth/depth/_ canonical.
+        // R1-4 + review R5: "requires two witnesses" → bare witness değil. Önceki test
+        // `if let Some(hint)` içindeydi — hint None ise assert hiç çalışmıyordu (vacuous).
+        // Doğrudan assert: bare witness → hiç axis adayı yok (hint None veya empty).
         let rule = rule_candidate("RequiresTwoWitnesses");
         let outcome = lower_rule_to_predicate_stub(&rule).unwrap();
         match outcome {
             PredicateLoweringOutcome::Stub(stub) => {
-                // bare witness → NoAxisCandidate (hint yok veya axisCandidates boş)
-                if let Some(hint) = stub.cross_family_hint() {
-                    assert!(
-                        !hint
-                            .axis_candidates()
-                            .iter()
-                            .any(|ah| ah.axis() == PhysicalCodeMetricAxis::WitnessDepth),
-                        "bare witness → WitnessDepth adayı olmamalı (R1-4 false-positive)"
-                    );
-                }
+                assert!(
+                    stub.cross_family_hint().is_none()
+                        || stub
+                            .cross_family_hint()
+                            .map(|h| h.axis_candidates().is_empty())
+                            .unwrap_or(true),
+                    "bare witness → NoAxisCandidate (hiç WitnessDepth adayı yok)"
+                );
             }
         }
     }
 
     #[test]
     fn lowering_witness_depth_canonical_matches() {
-        // R1-4/Mikro-3: witness-depth/witness depth/witness_depth canonical.
-        // "witness depth" (boşluklu) pattern eşleşmesi.
-        let rule = rule_candidate("Low witness depth required");
+        // R1-4/Mikro-3 + review R4: witness-depth/witness depth/witness_depth/witnessdepth
+        // canonical. camelCase "WitnessDepthLimit" → normalize "witnessdepthlimit" →
+        // "witnessdepth" pattern eşleşmesi (ayraçsız, review R4 patch).
+        let rule = rule_candidate("WitnessDepthLimit");
         let outcome = lower_rule_to_predicate_stub(&rule).unwrap();
         match outcome {
             PredicateLoweringOutcome::Stub(stub) => {
-                let hint = stub.cross_family_hint().expect("witness depth → hint");
+                let hint = stub
+                    .cross_family_hint()
+                    .expect("WitnessDepthLimit (camelCase) → witnessdepth pattern → hint");
                 assert_eq!(
                     hint.axis_candidates()[0].axis(),
                     PhysicalCodeMetricAxis::WitnessDepth
@@ -1861,6 +1880,46 @@ mod tests {
     }
 
     #[test]
+    fn mixed_template_axis_constraint_is_tighter_than_legacy() {
+        // Review R6 (D1): belgelenmemiş ikinci sıkılaştırma. Eski kod suggested_axis'i
+        // yalnız suggested == [MetricThreshold] iken set ediyordu — "CouplingAzaltmali"
+        // (MetricThreshold + MetricDelta karışık) → axis None, operator serbest.
+        // Yeni kod: karışık template'te de SingleCandidate(Coupling) → binding artık
+        // kısıtlı. INV-P3 ruhuna uygun (bilinçli sıkılaştırma), ama belgelenmeli.
+        let rule = rule_candidate("CouplingAzaltmali");
+        let outcome = lower_rule_to_predicate_stub(&rule).unwrap();
+        match outcome {
+            PredicateLoweringOutcome::Stub(stub) => {
+                let hint = stub
+                    .cross_family_hint()
+                    .expect("coupling var → SingleCandidate(Coupling), MetricDelta'ya rağmen");
+                assert_eq!(hint.ambiguity(), TranslationAmbiguity::SingleCandidate);
+                assert_eq!(
+                    hint.axis_candidates()[0].axis(),
+                    PhysicalCodeMetricAxis::Coupling
+                );
+            }
+        }
+        // Pinleyen bind test: CouplingAzaltmali stub'ında Cohesion bind → AxisMismatch.
+        let stub = match lower_rule_to_predicate_stub(&rule_candidate("CouplingAzaltmali")).unwrap()
+        {
+            PredicateLoweringOutcome::Stub(s) => s,
+        };
+        let binding = MetricThresholdBinding::new(
+            PhysicalCodeMetricAxis::Cohesion, // Coupling değil → mismatch
+            crate::trajectory::PredicateScope::Node(1),
+            crate::trajectory::ComparisonOp::Le,
+            NormalizedMetricThreshold::new(0.70).unwrap(),
+        );
+        let cap = crate::trajectory::OperatorCapability::issue();
+        let err = bind_metric_threshold(&stub, binding, &cap).unwrap_err();
+        assert!(
+            matches!(err, BindingError::AxisMismatch { .. }),
+            "mixed-template SingleCandidate(Coupling) → Cohesion bind = AxisMismatch (R6 sıkılaştırma)"
+        );
+    }
+
+    #[test]
     fn lowering_turkish_unicode_normalization() {
         // R2-3: BAĞIMLILIK / Bağımlılık / bağımlılık → hepsi Coupling.
         for canonical in ["YuksekBagimlilik", "YÜKSEKBAĞIMLILIK", "BağımlılıkRisk"] {
@@ -1884,18 +1943,28 @@ mod tests {
 
     #[test]
     fn lowering_decomposed_i_normalization() {
-        // Mikro-1: decomposed İ (U+0049 + U+0307) → NFC → precomposed İ → fold → i.
-        // "BAĞIMLILIK" decomposed formda girdiğinde eşleşme çalışmalı.
-        let decomposed = "BA\u{0307}GIMLILIK"; // Ğ decomposed değil ama İ decomposed
+        // R3 (review patch): gerçek NFC decomposed test. D1'in tespiti — önceki test
+        // yanlış vektör ("BA\u{0307}" combining dot A'da, İ değil) + `let _ = stub` ile
+        // hiçbir şey kanıtlamıyordu (sham test). Doğru vektör: decomposed İ (U+0049 + U+0307)
+        // + instability keyword → NFC → precomposed İ → fold → "i" → "instability" eşleşir.
+        let decomposed = "I\u{0307}nstabilityLimit"; // decomposed İ + instability
         let rule = rule_candidate(decomposed);
         let outcome = lower_rule_to_predicate_stub(&rule).unwrap();
-        // Not: tam decomposed NFC için unicode-normalization gerekir; fold tablosu
-        // precomposed yakalar. Bu test precomposed yolunu kanıtlar (decomposed Mikro-1
-        // doc notu: gerçek NFC Faz 5.2'de unicode-normalization ile).
         match outcome {
             PredicateLoweringOutcome::Stub(stub) => {
-                // En azından stub üretildi (hata yok). Axis eşleşmesi NFC'ye bağlı.
-                let _ = stub;
+                let hint = stub
+                    .cross_family_hint()
+                    .expect("decomposed İ + instability → Instability hint (NFC çalıştı)");
+                assert_eq!(
+                    hint.ambiguity(),
+                    TranslationAmbiguity::SingleCandidate,
+                    "NFC decomposed → precomposed → fold → instability eşleşmeli"
+                );
+                assert_eq!(
+                    hint.axis_candidates()[0].axis(),
+                    PhysicalCodeMetricAxis::Instability,
+                    "decomposed İ normalize edildi, instability yakalandı"
+                );
             }
         }
     }

@@ -96,6 +96,24 @@ olarak imkansız invariant. Confidence sıralama/açıklama içindir, aggregate 
 - legacy redirect
 - **2 trybuild compile-fail** (INV-P3): CrossFamilyHint literal + deserialize. Toplam **18 type-level invariant**
 
+## Sıkılaştırma notları (R1-3 + R6 — bilinçli davranış değişiklikleri)
+
+PR36, Faz 5b'ye göre iki bilinçli sıkılaştırma getirir (both INV-P3 ruhuna uygun):
+
+1. **Multi-axis rules** (R1-3): Önceden çoklu eksen `None`'a collapse → operator tamamen
+   serbest. Artık çoklu eksen aday listesi → operator listeyle sınırlı
+   (`AxisNotInCandidates`). *"Multi-axis rules: önceden unconstrained, artık
+   candidate-constrained (INV-P3 gereği)."*
+
+2. **Mixed-template axis constraint** (R6): Önceden `suggested_axis` yalnız
+   `suggested == [MetricThreshold]` iken set ediliyordu — `"CouplingAzaltmali"` gibi
+   karışık template (MetricThreshold + MetricDelta) → axis `None`, operator serbest.
+   Artık karışık template'te de `SingleCandidate(Coupling)` üretiliyor → binding kısıtlı.
+   Pinleyen test: `mixed_template_axis_constraint_is_tighter_than_legacy`.
+
+Her iki sıkılaştırma da INV-P3 ruhuna uygun (translation aday anlam korur, binding
+taahhüt yaratır) ama backward-compat açısından bilgilendirme değeri taşıyor.
+
 ## Başarı kriterleri (R2'nin kilit listesi)
 ```
 ✅ CrossFamilyHint source of truth
