@@ -288,7 +288,7 @@ pub struct DecisionRecord {
     pub node_digest_serde: u64, // NodeDigest private field ama Serialize; serde için get()
     pub decision: DecisionKind,
     pub reason: NonEmptyExplanation,
-    pub basis_sha256: [u8; 32],
+    pub basis_fingerprint: [u8; 32],
     pub prior_status: DecisionStatus,
     pub new_status: DecisionStatus,
     pub at: SystemTime,
@@ -384,9 +384,13 @@ impl OperatorReviewSession {
         }
     }
 
-    /// Candidate/InReview → Accepted. INV-C12: basis karar anındaki içeriğe karşı
+    /// Candidate → Accepted. INV-C12: basis karar anındaki içeriğe karşı
     /// tazelik-doğrulamalı. INV-C13: promotion + ledger append atomik
     /// (`store.apply_decision` içinde).
+    ///
+    /// **v1 scope:** Yalnız `DecisionStatus::Candidate` node'lar review edilebilir
+    /// (`PresentedBasis::compile` `candidate_query` üzerinden bulur; o da sadece
+    /// Candidate döndürür). `InReview` şemada reserved, v1 akışında kullanılmaz.
     pub fn accept<S: AnchorStore + ?Sized>(
         &mut self,
         store: &mut S,
@@ -402,8 +406,9 @@ impl OperatorReviewSession {
         Ok(record)
     }
 
-    /// Candidate/InReview → Rejected. Reject de reason + basis ister —
+    /// Candidate → Rejected. Reject de reason + basis ister —
     /// reddedilen candidate, gerekçesiyle negatif epistemik veri olur.
+    /// (Accept ile aynı Candidate-only v1 scope.)
     pub fn reject<S: AnchorStore + ?Sized>(
         &mut self,
         store: &mut S,
@@ -688,7 +693,6 @@ mod tests {
     #[test]
     fn ledger_is_append_only_seq_monotonic() {
         // INV-C13: seq monotonik artar, ledger append-only.
-        let mut store = InMemoryAnchorStore::new();
         let mk_node = |id: &str| ConceptNode {
             id: ConceptNodeId(id.into()),
             canonical: id.split(':').nth(1).unwrap_or(id).into(),
@@ -700,7 +704,7 @@ mod tests {
         let mut seed = GraphSeed::default();
         seed.rule_candidates.push(mk_node("RuleCandidate:A"));
         seed.rule_candidates.push(mk_node("RuleCandidate:B"));
-        store = InMemoryAnchorStore::with_seed(seed);
+        let mut store = InMemoryAnchorStore::with_seed(seed);
 
         let mut session = OperatorReviewSession::open_for_operator(OperatorId::new("op"));
         let id_a = ConceptNodeId("RuleCandidate:A".into());
@@ -720,5 +724,67 @@ mod tests {
         assert_eq!(ledger[0].seq, 1);
         assert_eq!(ledger[1].seq, 2);
         assert!(ledger[1].seq > ledger[0].seq);
+    }
+
+    /// Path 6 gerçek kanıtı: apply_decision doğrudan çağrılıp Accepted node'a
+    /// uygulandığında StoreError::NotPromotableFrom döner. Bu, session yolundan
+    /// (NotFound öncesi) erişilemeyen dalın doğrudan egzersizidir — defense-in-depth.
+    /// Aynı zamanda "basis digest status'u dışlar → kabul sonrası da taze" kanıtı.
+    #[test]
+    fn apply_decision_rejects_accepted_node_not_promotable_from() {
+        use crate::anchoring::store::{AnchorStore, StoreError};
+        let node = ConceptNode {
+            id: ConceptNodeId("RuleCandidate:AlreadyAccepted".into()),
+            canonical: "AlreadyAccepted".into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: DecisionStatus::Accepted,
+            position_family: PositionFamily::ConceptualIntent,
+        };
+        let mut seed = GraphSeed::default();
+        seed.rule_candidates.push(node);
+        let mut store = InMemoryAnchorStore::with_seed(seed);
+
+        // Accepted node için basis derle (candidate_query'den DÜŞTÜĞÜ için NotFound beklenir).
+        let id = ConceptNodeId("RuleCandidate:AlreadyAccepted".into());
+        let err_compile = PresentedBasis::compile(&store, &id).unwrap_err();
+        assert!(
+            matches!(err_compile, ReviewError::NotFound(_)),
+            "Accepted node candidate_query'de değil → NotFound"
+        );
+
+        // Ama apply_decision doğrudan (DecisionApplication::new in-crate) çağrılırsa
+        // NotPromotableFrom döner — bu dal session yolundan erişilemez ama defense-in-depth
+        // katmanı gerçekten savunuyor kanıtı. Önce basis'i Candidate bir node üzerinden
+        // derive edip Accepted node id'sine application üretelim (in-crate ctor).
+        let cand_node = ConceptNode {
+            id: ConceptNodeId("RuleCandidate:Promotable".into()),
+            canonical: "Promotable".into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: DecisionStatus::Candidate,
+            position_family: PositionFamily::ConceptualIntent,
+        };
+        let mut seed2 = GraphSeed::default();
+        seed2.rule_candidates.push(cand_node);
+        let store2 = InMemoryAnchorStore::with_seed(seed2);
+        let cand_id = ConceptNodeId("RuleCandidate:Promotable".into());
+        let basis = PresentedBasis::compile(&store2, &cand_id).unwrap();
+
+        // Şimdi Accepted node'un olduğu store'da apply_decision'ı Accepted id ile çağır.
+        let app = DecisionApplication::new(
+            id.clone(), // Accepted node id
+            DecisionKind::Accept,
+            basis,
+            NonEmptyExplanation::new("should reject").unwrap(),
+            SessionId("session:test".into()),
+            OperatorId::new("test"),
+            SystemTime::now(),
+        );
+        let err = AnchorStore::apply_decision(&mut store, app).unwrap_err();
+        assert!(
+            matches!(err, StoreError::NotPromotableFrom(DecisionStatus::Accepted)),
+            "NotPromotableFrom(Accepted) bekleniyordu, got {err:?}"
+        );
     }
 }

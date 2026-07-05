@@ -435,8 +435,7 @@ fn build_e2e_binding_chain_replay() -> Value {
             "decision_record_seq": decision_record.seq,
             "decision_record_decision": format!("{:?}", decision_record.decision),
             "ledger_length": ledger.len(),
-            "operator": "e2e-replay-operator",
-            "faz": "8a — Paper 3 v1.1: seeded notu kalktı, gerçek promotion"
+            "operator": "e2e-replay-operator"
         }
     });
 
@@ -496,7 +495,7 @@ fn build_e2e_binding_chain_replay() -> Value {
             "INV-C3 (Candidate→Accepted promotion — REAL via OperatorReviewSession, Faz 8a; INV-C12 informed acceptance + INV-C13 no-decision-without-record)",
             "INV-T2 (Task genesis requires OperatorCapability)"
         ],
-        "summary": "Sentence never became a task by itself. It passed through: ConceptPacket → Classifier → Extractor → RuleCandidate (REAL pipeline, Step 1) → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted (SEEDED, INV-C3 enforced in-crate) → create task → registry. Each gate is type-level enforced."
+        "summary": "Sentence never became a task by itself. It passed through: ConceptPacket → Classifier → Extractor → RuleCandidate (REAL pipeline, Step 1) → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted (REAL promotion via OperatorReviewSession, INV-C12/C13) → create task → registry. Each gate is enforced at the type boundary, constructor boundary, or regression-test boundary."
     })
 }
 
@@ -655,26 +654,28 @@ fn build_e2e_rejected_paths_replay() -> Value {
             },
             {
                 "path": 5,
-                "name": "StaleBasis / NotFound (INV-C12 TOCTOU — node değişti veya yok)",
+                "name": "NotFound (integration) / StaleBasis (unit) — INV-C12 TOCTOU",
                 "gate": "PresentedBasis::compile + OperatorReviewSession::accept (INV-C12 informed acceptance)",
-                "input": { "node": "RuleCandidate:Yok (arasında değişti veya yok)" },
-                "expected_rejection_variant": "ReviewError::StaleBasis (TOCTOU) / NotFound",
+                "input": { "integration": "RuleCandidate:Yok (not found)", "unit_stalebasis": "node canonical changed after basis compile" },
+                "expected_rejection_variant": "ReviewError::NotFound (integration) / StaleBasis (unit TOCTOU)",
                 "actual_error_variant": format!("{err5_unknown:?}"),
-                "invariant": "INV-C12: karar anındaki temel, adayın karar anındaki içeriğine karşı tazelik-doğrulamalı. StaleBasis tam kanıt review.rs::review_session_stale_basis_rejects_touctou unit test'inde.",
-                "exercised_by_test_name": "e2e_rejected_paths_snapshot_matches_frozen_json + review_session_stale_basis_rejects_touctou (unit)"
+                "invariant": "INV-C12: karar anındaki temel, adayın karar anındaki içeriğine karşı tazelik-doğrulamalı.",
+                "note": "Integration test graph private → TOCTOU manipülasyon yapılamaz; StaleBasis tam kanıtı review.rs unit test'inde.",
+                "exercised_by_test_name": "e2e_rejected_paths_snapshot_matches_frozen_json (NotFound) + review_session_stale_basis_rejects_touctou (StaleBasis unit)"
             },
             {
                 "path": 6,
-                "name": "NotPromotable (Accepted/Rejected node → tekrar accept denemesi)",
-                "gate": "AnchorStore::apply_decision (INV-C13 + NotPromotableFrom)",
-                "input": { "node": "zaten Accepted/Rejected node" },
-                "expected_rejection_variant": "StoreError::NotPromotableFrom",
-                "actual_error_variant": "NotPromotableFrom (Accepted/Deprecated/Rejected → accept/reject reddedilir; diriltme ayrı mekanizma)",
-                "invariant": "INV-C13 + NotPromotable: Accepted/Deprecated/Rejected durumundan accept/reject geçilemez. Tam kanıt review.rs::review_session_not_promotable_rejects_accepted_node unit test'inde.",
-                "exercised_by_test_name": "review_session_not_promotable_rejects_accepted_node (unit) + store.rs apply_decision NotPromotableFrom"
+                "name": "NotPromotableFrom (Accepted node → apply_decision)",
+                "gate": "AnchorStore::apply_decision (INV-C13 + NotPromotableFrom defense-in-depth)",
+                "input": { "node": "RuleCandidate:AlreadyAccepted (DecisionStatus::Accepted)" },
+                "expected_rejection_variant": "StoreError::NotPromotableFrom(Accepted)",
+                "actual_error_variant": "StoreError::NotPromotableFrom(Accepted) — DecisionApplication doğrudan apply_decision'a verildi (in-crate pub(crate) ctor)",
+                "invariant": "INV-C13 + NotPromotable: Accepted/Deprecated/Rejected durumundan accept/reject geçilemez (diriltme ayrı mekanizma).",
+                "note": "Integration test DecisionApplication::new (pub(crate)) ctor'a erişemez; tam kanıt review.rs unit test'inde (apply_decision_rejects_accepted_node_not_promotable_from).",
+                "exercised_by_test_name": "apply_decision_rejects_accepted_node_not_promotable_from (review.rs unit, in-crate pub(crate) ctor)"
             }
         ],
-        "summary": "Six rejected paths prove the gates are real: a gate that only passes is indistinguishable from no gate. Paths 1-4 integration test'te, paths 5-6 (Faz 8a INV-C12/C13) review.rs unit test'lerinde tam kanıtlandı. Compile-time tarafı trybuild'lerde (22 test kümülatif)."
+        "summary": "Six rejected paths prove the gates are real: a gate that only passes is indistinguishable from no gate. Paths 1-4 are exercised in this integration builder; paths 5-6 (Faz 8a INV-C12/C13) are proven in review.rs unit tests — StaleBasis TOCTOU (graph_mut pub(crate)) and NotPromotableFrom (DecisionApplication::new pub(crate) ctor). Compile-time side: 22 cumulative trybuild tests across the workspace."
     })
 }
 

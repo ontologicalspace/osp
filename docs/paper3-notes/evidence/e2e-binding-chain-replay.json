@@ -99,7 +99,6 @@
       "accepted_task_candidate_ref": {
         "decision_record_decision": "Accept",
         "decision_record_seq": 1,
-        "faz": "8a — Paper 3 v1.1: seeded notu kalktı, gerçek promotion",
         "id": "TaskCandidate:ReduceCoupling",
         "invariants": "INV-C12 (informed acceptance — node_digest TOCTOU) + INV-C13 (no decision without record — atomic ledger append)",
         "ledger_length": 1,
@@ -141,7 +140,7 @@
     }
   ],
   "subtitle": "Candidate→Accepted promotion (INV-C3) via OperatorReviewSession (Faz 8a REAL promotion). INV-C12 (informed acceptance) + INV-C13 (no decision without record) canlı.",
-  "summary": "Sentence never became a task by itself. It passed through: ConceptPacket → Classifier → Extractor → RuleCandidate (REAL pipeline, Step 1) → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted (SEEDED, INV-C3 enforced in-crate) → create task → registry. Each gate is type-level enforced.",
+  "summary": "Sentence never became a task by itself. It passed through: ConceptPacket → Classifier → Extractor → RuleCandidate (REAL pipeline, Step 1) → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted (REAL promotion via OperatorReviewSession, INV-C12/C13) → create task → registry. Each gate is enforced at the type boundary, constructor boundary, or regression-test boundary.",
   "thesis": "The sentence never becomes a task by itself.",
   "title": "Paper 3 — End-to-End Binding Chain Replay (lowering→task segment)"
 }

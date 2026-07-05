@@ -125,7 +125,13 @@ pub trait AnchorStore {
     /// AnchorPlan uygula. Tüm yeni node/edge'ler Candidate (INV-C5).
     fn apply_plan(&mut self, plan: &AnchorPlan) -> Result<ApplyResult, Self::Error>;
 
-    /// INV-C3: Candidate → Accepted. `OperatorAcceptance` gerekir (Faz 8 operator).
+    /// INV-C3: Candidate → Accepted. `OperatorAcceptance` gerekir.
+    ///
+    /// **Legacy/trusted-test path (Faz 8a scope out):** Bu metod in-crate testler ve
+    /// `seed_trusted` bootstrap için var; `DecisionRecord` ledger yazMAZ. INV-C13
+    /// ("no decision without record") kapsamı *reviewed operator decision path*'tir
+    /// (`apply_decision`); bu legacy path trusted boundary exception olarak kabul edilir.
+    /// Operator console (Faz 8b) bu legacy yolu deprecated edecek.
     fn promote_to_accepted(
         &mut self,
         node_id: &ConceptNodeId,
@@ -137,6 +143,9 @@ pub trait AnchorStore {
     /// `OperatorReviewSession`. Store uygulama + `DecisionRecord` üretimi +
     /// append'in tek işlemde yapılmasından sorumludur (`seq`, `prior_status`,
     /// `new_status`, `at` store/apply anına ait).
+    ///
+    /// INV-C13 kapsamı: bu metod *reviewed operator decision path*'tir. `promote_to_accepted`
+    /// (legacy/trusted-test) ve `seed_trusted` (bootstrap) bu invariantın kapsam dışındadır.
     fn apply_decision(
         &mut self,
         application: crate::anchoring::review::DecisionApplication,
@@ -416,9 +425,10 @@ impl AnchorStore for InMemoryAnchorStore {
         self.decision_seq += 1;
         let seq = self.decision_seq;
         let basis = application.basis();
-        // basis_sha256: PresentedBasis alanlarının FNV-based deterministic digest'i.
-        // (serde_json lib'e taşımadan; v1'de yeterli, ileri sürüm gerçek sha256.)
-        let basis_sha256 = basis_fingerprint(basis);
+        // basis_fingerprint: PresentedBasis seçili alanlarının (canonical + node_digest +
+        // candidate_id) FNV-based deterministic fingerprint'i. Audit-security hash DEĞİL
+        // (v1'de harici crate yok); cryptographic için ileri sürüm sha2 crate.
+        let basis_fp = basis_fingerprint(basis);
         let record = DecisionRecord {
             seq,
             session_id: application.session_id().clone(),
@@ -427,7 +437,7 @@ impl AnchorStore for InMemoryAnchorStore {
             node_digest_serde: basis.node_digest().get(),
             decision,
             reason: application.reason().clone(),
-            basis_sha256,
+            basis_fingerprint: basis_fp,
             prior_status,
             new_status,
             at: application.decided_at(),

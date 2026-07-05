@@ -8,14 +8,16 @@
 
 | Parameter | Value |
 |---|---|
-| OSP commit (frozen evidence, hash₁) | `481690d6f904d312ac08232c4572a13232ef2848` (`481690d`) |
-| Branch | `docs/paper3-draft` |
+| OSP commit (frozen evidence) | `481690d` (Aşama 1 freeze, PR #37) — Faz 8a evidence bu commit üstüne |
+| Branch | `feat/paper3-faz8a-operator-review` (PR #40) |
 | Frozen date | 2026-07-05 |
 | Rust toolchain | `rustc 1.95.0 (59807616e 2026-04-14)` |
-| osp-core tests | 447 (Paper 1/2/3 birleşik; paper3_evidence + paper3_heldout dahil) |
-| Paper 3 trybuild (type-level) | 11 Paper 3'e özgü (kümülatif 18 bağlam) — `tests/anchoring_typelevel.rs` |
+| osp-core tests | 494 (Paper 1/2/3 birleşik; paper3_evidence + paper3_heldout + review.rs unit dahil) |
+| Paper 3 trybuild (type-level) | 13 Paper 3'e özgü invariant (INV-C1..C8, C12, C13, P1..P3), 22 cumulative compile-fail test — `tests/anchoring_typelevel.rs` |
 | Golden fixtures | 13 (`anchoring.fixture.v1`) |
 | Held-out fixtures | 5 (4 held_out + 1 regression_anchored) |
+| E2E binding chain | Step 6 REAL promotion via `OperatorReviewSession` (Faz 8a) |
+| Rejected paths | 6 (AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted, NotFound/StaleBasis, NotPromotableFrom) |
 | Snapshot discipline | `PAPER3_FREEZE=1 cargo test -p osp-core --test {paper3_evidence,paper3_heldout} -- --ignored --nocapture` |
 
 ## Evidence strata (5 katman)
@@ -32,8 +34,8 @@
 
 | Dosya | sha256 |
 |---|---|
-| `e2e-binding-chain-replay.json` | `4214d911255c0ff83e5367778e2006bf79a55c578314c525b6dad4a926842f67` |
-| `e2e-rejected-paths-replay.json` | `4d274163ca8772262763151c387044e734b0ebd3933b242cf8bd21f54a603ef7` |
+| `e2e-binding-chain-replay.json` | `be733f384a2d443d81243042b6f58362bfc6e847296d74c10e01a3336ebd62f3` |
+| `e2e-rejected-paths-replay.json` | `66a9a892e5d67e4a0d5d1fbbd80a99c901616a6396532b0bfc369879a08d334e` |
 | `held-out-adversarial-fixtures.json` | `12babf65966e89d99d4d98460369695a3a54a4e52f2deceacbbb40d43fad7a41` |
 
 ## Üretim komutları
