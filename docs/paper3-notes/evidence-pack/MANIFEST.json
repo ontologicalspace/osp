@@ -38,15 +38,8 @@
       "schema_version": "conformance.v1",
       "sha256": "ffadf793ec562af069701411362ec7904518ca266016433b376d2b252980fb63",
       "paper_section": "7.2"
-    },
-    {
-      "file": "run-metadata.json",
-      "purpose": "Volatile run info: frozen commit, rust toolchain, osp-core test count, trybuild counts, evidence strata",
-      "generated_by_test": "manual + frozen",
-      "schema_version": "run-metadata.v1",
-      "sha256": "1bdda5e5ace7faf37ae04fae8f77e6cdeaa31fd0ae88919dc9b912794bf724f1",
-      "paper_section": "7 (metadata)"
     }
   ],
-  "integrity_note": "Each sha256 is recorded both here and in run-metadata.json. The repository-form (LF-normalized) sha256 is authoritative; Windows CRLF checkouts will produce different working-tree hashes."
+  "integrity_note": "sha256 values are computed over repository LF-normalized content. run-metadata.json is intentionally excluded from this manifest — it is a sibling integrity file, not a child of the pack; the two reference each other.",
+  "excluded_files": ["run-metadata.json (sibling integrity file, not part of manifest scope)"]
 }
