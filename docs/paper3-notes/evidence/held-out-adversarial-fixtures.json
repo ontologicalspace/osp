@@ -1,0 +1,152 @@
+{
+  "description": "Geliştirmede kullanılmamış (veya explicitly regression-anchored) cümleler. RQ1 totoloji olmasın diye. Beklentiler ikiye split: expected_pipeline_behavior + expected_lowering_behavior.",
+  "fixtures": [
+    {
+      "category": "held_out",
+      "expected_conformance_state": "Conform",
+      "expected_lowering_behavior": {
+        "ambiguity": "SingleCandidate",
+        "axes": "[Coupling]",
+        "cross_family_hint_present": true
+      },
+      "expected_pipeline_behavior": {
+        "derives_rule": true,
+        "packet_type": "Requirement",
+        "produced_canonical": "ModüllerArasıBağımlılık",
+        "rule_marker_matched": "malı (RULE_MARKERS)",
+        "rule_signal": true
+      },
+      "held_out_or_regression_reason": "Held-out sette sıfır Türkçe; RQ2 (iki dilli lowering) totoloji-olmayan kanıt. TR alias chain (bağımlılık → bagiml → Coupling) + TR rule marker (malı).",
+      "id": "held_001",
+      "invariants": [
+        "INV-P3",
+        "INV-P1"
+      ],
+      "language": "tr",
+      "note": null,
+      "sentence": "Modüller arası bağımlılık azaltılmalı."
+    },
+    {
+      "category": "held_out",
+      "expected_conformance_state": "KnownLimitation",
+      "expected_lowering_behavior": {
+        "ambiguity": "SingleCandidate",
+        "axes": "[Coupling]",
+        "cross_family_hint_present": true
+      },
+      "expected_pipeline_behavior": {
+        "derives_rule": true,
+        "packet_type": "Requirement",
+        "produced_canonical": "TheCouplingsIn",
+        "rule_marker_matched": "must not (RULE_MARKERS)",
+        "rule_signal": true
+      },
+      "held_out_or_regression_reason": "Semantik false-positive: 'couplings' fiziksel boru, yazılım metric değil. Matcher Coupling hint üretir (YANLIŞ).",
+      "id": "held_002",
+      "invariants": [
+        "INV-P3",
+        "INV-P1"
+      ],
+      "language": "en",
+      "note": "The deterministic matcher can confuse lexical coupling with software coupling. The matcher is not the contribution; the binding protocol is.",
+      "sentence": "The couplings in the pipe assembly must not be reused."
+    },
+    {
+      "category": "held_out",
+      "expected_conformance_state": "KnownLimitation",
+      "expected_lowering_behavior": {
+        "ambiguity": "SingleCandidate",
+        "axes": "[Coupling]",
+        "cross_family_hint_present": true
+      },
+      "expected_pipeline_behavior": {
+        "derives_rule": true,
+        "packet_type": "Requirement",
+        "produced_canonical": "CouplingRuleMust",
+        "rule_marker_matched": "must not (RULE_MARKERS)",
+        "rule_signal": true
+      },
+      "held_out_or_regression_reason": "Negasyon vakası: 'must not' rule marker + coupling axis, ama anlam NEGATİF (rule devre dışı). Coarse classifier negasyon yakalayamaz.",
+      "id": "held_003",
+      "invariants": [
+        "INV-P3",
+        "INV-P1"
+      ],
+      "language": "en",
+      "note": "Coarse classifier negation yakalayamaz; RuleCandidate yine üretilir. Negation-aware lowering Faz 6.",
+      "sentence": "Coupling rule must not be enforced during tests."
+    },
+    {
+      "category": "held_out",
+      "expected_conformance_state": "Conform",
+      "expected_lowering_behavior": {
+        "ambiguity": "MultipleCandidates",
+        "axes": "[Coupling, Cohesion]",
+        "cross_family_hint_present": true
+      },
+      "expected_pipeline_behavior": {
+        "derives_rule": true,
+        "packet_type": "Requirement",
+        "produced_canonical": "CouplingAndCohesion",
+        "rule_marker_matched": "must not (RULE_MARKERS)",
+        "rule_signal": true
+      },
+      "held_out_or_regression_reason": "MultipleCandidates: canonical hem coupling hem cohesion → ambiguity Multiple. A6 negatif yol #2 (AxisNotInCandidates) ile ortak.",
+      "id": "held_004",
+      "invariants": [
+        "INV-P3",
+        "INV-P1"
+      ],
+      "language": "en",
+      "note": null,
+      "sentence": "Coupling and cohesion must not diverge."
+    },
+    {
+      "category": "regression_anchored",
+      "expected_conformance_state": "Conform",
+      "expected_lowering_behavior": {
+        "ambiguity": "NoAxisCandidate (hint None)",
+        "axes": "[]",
+        "cross_family_hint_present": false
+      },
+      "expected_pipeline_behavior": {
+        "derives_rule": true,
+        "packet_type": "Requirement",
+        "produced_canonical": "WitnessCountMust",
+        "rule_marker_matched": "must not (RULE_MARKERS)",
+        "rule_signal": true
+      },
+      "held_out_or_regression_reason": "REGRESSION-ANCHORED (held_out DEĞİL): PR36 bare-witness testinin pipeline tekrarı. canonical WitnessCountMust → bare witness var, witnessdepth yok → NoAxisCandidate.",
+      "id": "held_005",
+      "invariants": [
+        "INV-P3",
+        "INV-P1"
+      ],
+      "language": "en",
+      "note": "PR36 davranışı: bare witness WitnessDepth axis üretmez (witnessdepth ayrımı).",
+      "sentence": "Witness count must not create metric evidence."
+    }
+  ],
+  "generated_by_command": "PAPER3_FREEZE=1 cargo test -p osp-core --test paper3_heldout -- --ignored --nocapture",
+  "generated_test_name": "regenerate_paper3_heldout_json",
+  "methodology_note": "Cümle seçimi 'canonical-kesme tuzağı' (derive_rule_name ilk 3 kelime → lowering canonical üzerinden axis tarar) ve 'marker-kaçırma tuzağı' (must vs must not) göz önünde tutularak yapıldı. Her cümle paper3_evidence.rs::preflight testinde gerçek pipeline koşusuyla pinlenmiştir.",
+  "schema_version": "held-out.v1",
+  "summary": {
+    "design_discipline": "Her cümle 'canonical-kesme' ve 'marker-kaçırma' tuzaklarından kaçacak şekilde seçildi. paper3_evidence.rs::preflight testinde pinlenmiştir.",
+    "expected_conformance_states": {
+      "Conform": 3,
+      "KnownLimitation": 2,
+      "PartialConform": 0,
+      "RejectAsExpected": 0,
+      "UnexpectedFailure": 0
+    },
+    "held_out": 4,
+    "languages": {
+      "en": 4,
+      "tr": 1
+    },
+    "regression_anchored": 1,
+    "total": 5
+  },
+  "title": "Paper 3 — Held-out / Adversarial Fixture Set"
+}

@@ -1,117 +1,142 @@
 {
-  "title": "Paper 3 — End-to-End Binding Chain Replay",
-  "description": "Uçtan uca ontological binding chain: human sentence → RuleCandidate → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted → create task → registry. Each gate type-level enforced.",
-  "generated_by": "crates/osp-core/tests/paper3_evidence.rs (cargo test --test paper3_evidence -- --nocapture)",
-  "osp_commit": "0d269e7 (main, post-Faz 5.1)",
-  "date": "2026-07-04",
-  "thesis": "The sentence never becomes a task by itself.",
+  "gates_enforced": [
+    "INV-C5 (apply_plan Candidate-only write — Step 1 REAL pipeline)",
+    "INV-P1 (RuleCandidate → PredicateStub, never ExecutablePredicateSet)",
+    "INV-P2 (keyword hint ≠ executable predicate — operator binding zorunlu)",
+    "INV-P3 (translation preserves candidate meaning — ambiguity computed, REAL pipeline)",
+    "INV-C3 (Candidate→Accepted promotion — enforced in-crate by store_promotion_requires_operator_acceptance; acceptance state seeded in this replay)",
+    "INV-T2 (Task genesis requires OperatorCapability)"
+  ],
+  "generated_by_command": "PAPER3_FREEZE=1 cargo test -p osp-core --test paper3_evidence -- --ignored --nocapture",
+  "generated_test_name": "regenerate_paper3_evidence_json",
+  "schema_version": "e2e-replay.v1",
   "steps": [
     {
-      "step": 1,
-      "name": "Human sentence (source)",
-      "input": "Modules must not have high coupling — NoHighCouplingDependency rule.",
-      "pipeline_trace": "ConceptPacket (UserVision) → Classifier (rule signal) → Extractor (DerivesRule) → RuleCandidate node",
-      "note": "Pipeline adımı Faz 1'de kanıtlandı (13 fixture). Evidence burada RuleCandidate'ı doğrudan graph'a seed eder."
+      "apply_result": {
+        "new_edges": 1,
+        "new_nodes": 1
+      },
+      "cross_checked": true,
+      "decision_status": "Candidate",
+      "invariant": "INV-C5: apply_plan her zaman Candidate yazar",
+      "name": "Human sentence → RuleCandidate (REAL pipeline run, INV-C5 Candidate)",
+      "node_kind": "RuleCandidate",
+      "pipeline_run": true,
+      "pipeline_trace": "ConceptPacket (ExplicitUser) → Classifier ('must not' RULE_MARKERS → rule signal true; 'must' REQUIREMENT_MARKERS → packet Requirement) → Extractor (DerivesRule) → gate → AnchorPlan → apply_plan → graph insert",
+      "produced_canonical": "CouplingMustNot",
+      "produced_node_id": "RuleCandidate:CouplingMustNot",
+      "seed": false,
+      "sentence": "Coupling must not exceed module threshold.",
+      "sentence_selection_rationale": "rule name derived from first 3 words (derive_rule_name); lowering scans canonical for axis keywords (coupling/cohesion/...) — sentence chosen so canonical preserves 'coupling'",
+      "step": 1
     },
     {
-      "step": 2,
       "name": "RuleCandidate in concept graph (INV-C3 Candidate lane)",
       "node": {
-        "id": "RuleCandidate:NoHighCouplingDependency",
-        "canonical": "NoHighCouplingDependency",
-        "node_kind": "RuleCandidate",
+        "canonical": "CouplingMustNot",
         "decision_status": "Candidate",
+        "id": "RuleCandidate:CouplingMustNot",
+        "node_kind": "RuleCandidate",
         "position_family": "ConceptualIntent"
-      }
+      },
+      "step": 2
     },
     {
-      "step": 3,
       "name": "RuleCandidate → PredicateStub (INV-P1)",
       "predicate_stub": {
-        "reason": "MetricUnresolved",
-        "unresolved_slots": ["Metric", "Threshold", "Scope", "Comparator"],
-        "suggested_templates": ["MetricThreshold"],
         "completeness": 0.0,
-        "invariant": "INV-P1: RuleCandidate lowering produces PredicateStub, never ExecutablePredicateSet"
-      }
+        "invariant": "INV-P1: RuleCandidate lowering produces PredicateStub, never ExecutablePredicateSet",
+        "reason": "MetricUnresolved",
+        "suggested_templates": [
+          "MetricThreshold"
+        ],
+        "unresolved_slots": [
+          "Metric",
+          "Threshold",
+          "Scope",
+          "Comparator"
+        ]
+      },
+      "step": 3
     },
     {
-      "step": 4,
-      "name": "CrossFamilyHint (INV-P3 — ambiguity-preserving translation)",
       "cross_family_hint": {
         "ambiguity": "SingleCandidate",
         "axis_candidates": [
           {
             "axis": "Coupling",
-            "source": "KeywordMatch",
             "confidence": 1.0,
-            "reason": "canonical 'NoHighCouplingDependency' contains keyword 'coupling'"
+            "reason": "canonical 'CouplingMustNot' contains keyword 'coupling'",
+            "source": "KeywordMatch"
           }
         ],
         "from_family": "ConceptualIntent",
-        "to_family": "PhysicalCode",
-        "invariant": "INV-P3: Translation preserves candidate meaning; binding alone creates commitment"
-      }
+        "invariant": "INV-P3: Translation preserves candidate meaning; binding alone creates commitment",
+        "to_family": "PhysicalCode"
+      },
+      "name": "CrossFamilyHint (INV-P3 — ambiguity-preserving translation, REAL pipeline output)",
+      "step": 4
     },
     {
-      "step": 5,
+      "executable_predicate_set": {
+        "invariant": "INV-P2: keyword hint ≠ executable predicate — operator binding zorunlu",
+        "metric": "Coupling",
+        "predicate_count": 1,
+        "required_source": "Some(Scip)",
+        "threshold": 0.55
+      },
       "name": "Operator binding → ExecutablePredicateSet (INV-P2)",
       "operator_binding": {
         "axis": "Coupling",
-        "scope": "Node(1)",
+        "capability": "OperatorCapability::issue_for_operator_session (trusted-boundary)",
         "comparator": "Le",
-        "threshold": 0.55,
-        "capability": "OperatorCapability::issue_for_operator_session (trusted-boundary)"
+        "scope": "Node(1)",
+        "threshold": 0.55
       },
-      "executable_predicate_set": {
-        "predicate_count": 1,
-        "metric": "Coupling",
-        "threshold": 0.55,
-        "required_source": "Scip",
-        "mode": "All",
-        "invariant": "INV-P2: keyword hint ≠ executable predicate — operator binding zorunlu"
-      }
+      "step": 5
     },
     {
-      "step": 6,
-      "name": "Accepted TaskCandidate verified (INV-C3)",
       "accepted_task_candidate_ref": {
+        "feature_gated_bypass": "NOT OPENED — açılırsa INV-C3 sulandırılır",
         "id": "TaskCandidate:ReduceCoupling",
-        "verified_by": "verify_accepted_task_candidate (three-gate API, gate 1)",
-        "note": "promote via OperatorAcceptance (pub(crate), INV-C3) — Faz 8 operator console ile gelecek. Evidence amaçlı Accepted durumda seed edilmiştir."
-      }
+        "promote_exercised_by_test": "store_promotion_requires_operator_acceptance (in-crate, store.rs #[cfg(test)])",
+        "reason_seeded": "OperatorAcceptance is pub(crate) by INV-C3 design; integration test cannot mint it. Promotion enforced in-crate; replay seeds the Accepted state. Faz 8 operator console gerçek API ile bu gate'i açar.",
+        "verified_by": "verify_accepted_task_candidate (three-gate API, gate 1)"
+      },
+      "name": "Accepted TaskCandidate verified (INV-C3 — acceptance SEEDED, promotion enforced in-crate)",
+      "seeded": true,
+      "step": 6
     },
     {
+      "name": "create_task (INV-T2, three-gate API gate 3)",
       "step": 7,
-      "name": "create_task (INV-T2, three-gate API, gate 3)",
       "task": {
-        "task_id": "12902110864651591960 (deterministic FNV hash from candidate ID)",
+        "allowed_operations": [
+          "RemoveImport"
+        ],
+        "allowed_operations_provenance": "operator-supplied at task genesis (create_task_from_accepted_candidate parameter) — not derived from binding, not hardcoded",
+        "constraints": 0,
+        "invariant": "INV-T2: OperatorCapability olmadan trajectory::Task doğmaz",
         "label": "Task from accepted candidate: ReduceCoupling",
-        "status": "Pending",
         "milestone_id": 0,
         "predicate_count": 1,
-        "allowed_operations": ["RemoveImport"],
-        "constraints": [],
-        "invariant": "INV-T2: OperatorCapability olmadan trajectory::Task doğmaz"
+        "status": "Pending",
+        "task_id": "12902110864651591960"
       }
     },
     {
-      "step": 8,
       "name": "Registry insertion + resolve (navigator-compatible)",
       "registry": {
-        "size": 1,
+        "note": "Task is navigator-compatible — Paper 2 AgentNavigator can run_task with this Task.",
         "resolved": true,
         "resolved_status": "Pending",
-        "note": "Task is navigator-compatible — Paper 2 AgentNavigator can run_task with this Task."
-      }
+        "size": 1
+      },
+      "step": 8
     }
   ],
-  "gates_traversed": [
-    "INV-C3 (Candidate isolation → Accepted via OperatorAcceptance)",
-    "INV-P1 (RuleCandidate → PredicateStub, never ExecutablePredicateSet)",
-    "INV-P2 (keyword hint ≠ executable predicate — operator binding zorunlu)",
-    "INV-P3 (translation preserves candidate meaning — ambiguity computed)",
-    "INV-T2 (Task genesis requires OperatorCapability)"
-  ],
-  "summary": "Sentence never became a task by itself. It passed through: ConceptPacket → RuleCandidate → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted → create task → registry. Each gate is type-level enforced."
+  "subtitle": "Candidate→Accepted promotion (INV-C3) enforced in-crate (store_promotion_requires_operator_acceptance); acceptance state seeded here. Faz 8 operator console real API.",
+  "summary": "Sentence never became a task by itself. It passed through: ConceptPacket → Classifier → Extractor → RuleCandidate (REAL pipeline, Step 1) → PredicateStub → CrossFamilyHint → operator binding → ExecutablePredicateSet → verify accepted (SEEDED, INV-C3 enforced in-crate) → create task → registry. Each gate is type-level enforced.",
+  "thesis": "The sentence never becomes a task by itself.",
+  "title": "Paper 3 — End-to-End Binding Chain Replay (lowering→task segment)"
 }
