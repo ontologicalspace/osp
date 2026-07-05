@@ -1,0 +1,47 @@
+{
+  "schema_version": "conformance.v1",
+  "title": "Paper 3 — Conformance Results (5-state, 18 cümle)",
+  "description": "13 golden + 5 held-out fixture'ın sıkı conformance sonuçları. 5-state dürüst sınıflandırma. Non-conform/KnownLimitation SİLİNMEZ — RQ1 inandırıcılığı oradan gelir.",
+  "frozen_evidence_commit": "481690d6f904d312ac08232c4572a13232ef2848",
+  "methodology": "Her cümle Faz 1 deterministic pipeline (run_with_source + apply_plan). Expected fixture davranışı gerçek çıktıyla karşılaştırılır. 5-state: Conform / PartialConform / KnownLimitation / RejectAsExpected / UnexpectedFailure.",
+  "states": ["Conform", "PartialConform", "KnownLimitation", "RejectAsExpected", "UnexpectedFailure"],
+  "golden_fixtures": [
+    {"id": "fix_001", "text_short": "Kullanıcı ödeme yaparken...", "packet_type": "UserVision", "decision": "RequireOperatorReview", "conformance": "Conform", "note": "DerivesRisk + Mentions"},
+    {"id": "fix_002", "text_short": "Domain katmanı bağımlı olmamalı", "packet_type": "Requirement", "decision": "RequireOperatorReview", "conformance": "Conform", "note": "DerivesRule:NoDomainToInfrastructureDependency"},
+    {"id": "fix_003", "text_short": "Event Sourcing kararını referans al", "packet_type": "Decision", "decision": "TentativeLink", "conformance": "Conform", "note": "DependsOnDecision (precedence #2)"},
+    {"id": "fix_004", "text_short": "Controller'larda business logic olmaması", "packet_type": "AntiGoal", "decision": "RequireOperatorReview", "conformance": "Conform", "note": "AntiGoalOf (precedence #1)"},
+    {"id": "fix_005", "text_short": "...varsayılıyor", "packet_type": "Assumption", "decision": "TentativeLink", "conformance": "Conform", "note": "Mentions only (precedence #3)"},
+    {"id": "fix_006", "text_short": "AuthService module'ünde implement edilmeli", "packet_type": "UserVision", "decision": "RequireOperatorReview", "conformance": "PartialConform", "note": "ImplementedBy Faz 4 evidence ister; default context reject — expected edges üretildi ama gate evidence gerektirir"},
+    {"id": "fix_007", "text_short": "...çelişiyor", "packet_type": "UserVision", "decision": "MarkContradiction", "conformance": "PartialConform", "note": "Contradicts üretilirse MarkContradiction; coarse classifier Decision: typed-prefix parse edemeyebilir (Faz 2 calibration)"},
+    {"id": "fix_008", "text_short": "Sistere yeni ödeme (payment)", "packet_type": "UserVision", "decision": "TentativeLink", "conformance": "Conform", "note": "INV-C8 canon gate redirect (ödeme→Payment)"},
+    {"id": "fix_009", "text_short": "...bildirimler göndermek faydalı", "packet_type": "UserVision", "decision": "CreateNode", "conformance": "Conform", "note": "Mentions:Notification"},
+    {"id": "fix_010", "text_short": "Belki hafta sonu bazı şeyleri gözden geçirmek", "packet_type": "Assumption", "decision": "MarkUnanchored", "conformance": "RejectAsExpected", "note": "Vague → boş candidates"},
+    {"id": "fix_011", "text_short": "CodeEntity:AuthService implement eder", "packet_type": "UserVision", "decision": "RequireOperatorReview", "conformance": "RejectAsExpected", "note": "Default context (provider yok) → ImplementedByRequiresCodeEvidence gate reject"},
+    {"id": "fix_012", "text_short": "TaskCandidate:AuthServiceRefactor görev", "packet_type": "UserVision", "decision": "RequireOperatorReview", "conformance": "Conform", "note": "DerivesTask (task signal + typed ref, Faz 5a Patch 7)"},
+    {"id": "fix_013", "text_short": "NoHighCouplingDependency kuralı coupling azaltmalı", "packet_type": "UserVision", "decision": "RequireOperatorReview", "conformance": "Conform", "note": "DerivesRule + lowering PredicateStub (INV-P1, Faz 5a)"}
+  ],
+  "held_out_fixtures": [
+    {"id": "held_001", "text_short": "Modüller arası bağımlılık azaltılmalı (TR)", "packet_type": "Requirement", "canonical": "ModüllerArasıBağımlılık", "ambiguity": "SingleCandidate(Coupling)", "conformance": "Conform", "note": "TR alias chain (bagiml) + TR rule marker (malı)"},
+    {"id": "held_002", "text_short": "The couplings in the pipe assembly must not be reused", "packet_type": "Requirement", "canonical": "TheCouplingsIn", "ambiguity": "SingleCandidate(Coupling)", "conformance": "KnownLimitation", "note": "Semantik false-positive: fiziksel boru → YANLIŞ Coupling hint. §10 Threats."},
+    {"id": "held_003", "text_short": "Coupling rule must not be enforced during tests", "packet_type": "Requirement", "canonical": "CouplingRuleMust", "ambiguity": "SingleCandidate(Coupling)", "conformance": "KnownLimitation", "note": "Negasyon: anlam NEGATİF ama RuleCandidate üretildi. Negation Faz 6."},
+    {"id": "held_004", "text_short": "Coupling and cohesion must not diverge", "packet_type": "Requirement", "canonical": "CouplingAndCohesion", "ambiguity": "MultipleCandidates(Coupling,Cohesion)", "conformance": "Conform", "note": "MultipleCandidates (A6 AxisNotInCandidates ile ortak)"},
+    {"id": "held_005", "text_short": "Witness count must not create metric evidence", "packet_type": "Requirement", "canonical": "WitnessCountMust", "ambiguity": "NoAxisCandidate (hint None)", "conformance": "Conform", "note": "Bare-witness exclusion (PR36): witnessdepth değil → NoAxisCandidate"}
+  ],
+  "summary": {
+    "total": 18,
+    "by_state": {
+      "Conform": {"golden": 9, "held_out": 3, "total": 12},
+      "PartialConform": {"golden": 2, "held_out": 0, "total": 2},
+      "KnownLimitation": {"golden": 0, "held_out": 2, "total": 2},
+      "RejectAsExpected": {"golden": 2, "held_out": 0, "total": 2},
+      "UnexpectedFailure": {"golden": 0, "held_out": 0, "total": 0}
+    },
+    "conform_rate": "12/18 (67%)",
+    "commentary": "Conform oranı %67 — Faz 1 deterministic classifier golden coverage güçlü. PartialConform (2) coarse-grained itiraf (ImplementedBy evidence, Decision typed-prefix). KnownLimitation (2) held-out değerini kanıtlar (semantik false-positive + negasyon → §10). RejectAsExpected (2) INV reject'leri. UnexpectedFailure=0 — tüm davranışlar açıklandı."
+  },
+  "reproducibility": {
+    "golden_conformance": "cargo test -p osp-core --test anchoring_mvp",
+    "held_out_conformance": "cargo test -p osp-core --test paper3_heldout",
+    "all_paper3_evidence": "cargo test -p osp-core --test paper3_evidence --test paper3_heldout"
+  }
+}
