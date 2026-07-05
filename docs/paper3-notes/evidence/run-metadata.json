@@ -1,0 +1,62 @@
+{
+  "schema_version": "run-metadata.v1",
+  "title": "Paper 3 — Run Metadata (Evidence Freeze)",
+  "note": "Tek ev of volatile kanıt bilgileri. Evidence JSON'lar saf deterministik builder çıktısıdır — volatile alan içermez (snapshot drift imkânsız).",
+  "frozen_evidence_commit": "481690d6f904d312ac08232c4572a13232ef2848",
+  "frozen_evidence_commit_short": "481690d",
+  "branch": "docs/paper3-draft",
+  "frozen_date": "2026-07-05",
+  "rust_toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "osp_core_test_count": 447,
+  "evidence_strata": [
+    {
+      "stratum": 1,
+      "name": "type-level trybuild",
+      "purpose": "INV-C1..C8, INV-P1..P3 compile-time enforcement",
+      "evidence": "11 Paper 3'e özgü (kümülatif 18 bağlam)",
+      "test": "tests/anchoring_typelevel.rs"
+    },
+    {
+      "stratum": 2,
+      "name": "golden fixture conformance",
+      "purpose": "13 fixture pipeline davranışı",
+      "evidence": "anchoring_mvp.rs + anchoring_fixtures.rs",
+      "test": "cargo test -p osp-core --test anchoring_mvp"
+    },
+    {
+      "stratum": 3,
+      "name": "held-out adversarial",
+      "purpose": "5 cümle totoloji-olmayan RQ1",
+      "evidence": "held-out-adversarial-fixtures.json",
+      "test": "paper3_heldout.rs"
+    },
+    {
+      "stratum": 4,
+      "name": "e2e binding chain replay",
+      "purpose": "uçtan uca zincir (lowering→task segment; acceptance seeded INV-C3)",
+      "evidence": "e2e-binding-chain-replay.json",
+      "test": "paper3_evidence.rs"
+    },
+    {
+      "stratum": 5,
+      "name": "e2e rejected paths replay",
+      "purpose": "4 reddedilen kapı (AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted)",
+      "evidence": "e2e-rejected-paths-replay.json",
+      "test": "paper3_evidence.rs"
+    }
+  ],
+  "evidence_json_sha256": {
+    "e2e-binding-chain-replay.json": "9890bdc48f0904a4b206b5a7c70b3892726a71912f50787cdf2f7ca123ecb396",
+    "e2e-rejected-paths-replay.json": "f7bbd11ef2d786d80d0de9a4a38927fc582d7ff3317325bc44da4d103c48594d",
+    "held-out-adversarial-fixtures.json": "12babf65966e89d99d4d98460369695a3a54a4e52f2deceacbbb40d43fad7a41"
+  },
+  "snapshot_discipline": {
+    "drift_detection": "cargo test -p osp-core --test paper3_evidence (--test paper3_heldout)",
+    "regeneration": "PAPER3_FREEZE=1 cargo test -p osp-core --test {target} -- --ignored --nocapture",
+    "principle": "Test altına alınmayan invariant ihlal edilir."
+  },
+  "golden_fixtures": 13,
+  "held_out_fixtures": 5,
+  "paper3_specific_trybuild": 11,
+  "cumulative_trybuild_context": 18
+}
