@@ -56,12 +56,17 @@ pub enum StoreError {
     NotCandidate(ConceptNodeId),
     #[error("node {0:?} durumundan promote edilemez (Accepted/Deprecated/Rejected)")]
     NotPromotableFrom(DecisionStatus),
+    #[error("basis candidate mismatch: basis={basis}, application={application}")]
+    BasisCandidateMismatch {
+        basis: ConceptNodeId,
+        application: ConceptNodeId,
+    },
     #[error("snapshot version uyumsuz: expected={expected}, found={found}")]
     InvalidSnapshotVersion { expected: u32, found: u32 },
 }
 
 /// `PresentedBasis`'in deterministic fingerprint'i → `[u8; 32]`.
-/// `DecisionRecord.basis_sha256` için. v1'de FNV-based (harici crate yok);
+/// `DecisionRecord.basis_fingerprint` için. v1'de FNV-based (harici crate yok);
 /// audit kayıt bütünlüğü için yeterli, cryptographic security değil (doc'a not).
 /// İleri sürüm: gerçek sha256 crate + serde serialize.
 fn basis_fingerprint(basis: &crate::anchoring::review::PresentedBasis) -> [u8; 32] {
@@ -391,6 +396,18 @@ impl AnchorStore for InMemoryAnchorStore {
 
         let id = application.candidate_id();
         let decision = application.decision();
+
+        // Defense-in-depth (Review 1 tasarım gözlemi): basis.candidate_id ile
+        // application.candidate_id eşleşmeli. Session bu kontrolü yapar ama apply_decision
+        // da yapmalı — NotPromotableFrom için aynı defense-in-depth argümanı.
+        // **Kontrol sırası:** id-mismatch ÖNCE, sonra NotPromotableFrom.
+        let basis = application.basis();
+        if basis.candidate_id() != id {
+            return Err(StoreError::BasisCandidateMismatch {
+                basis: basis.candidate_id().clone(),
+                application: id.clone(),
+            });
+        }
 
         // Node'u bul + prior_status + NotPromotable kontrolü.
         let node = self

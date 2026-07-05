@@ -24,11 +24,11 @@
 
 | Stratum | Amaç | Kanıt | Test |
 |---|---|---|---|
-| **(1) Type-level trybuild** | INV-C1..C8, INV-P1..P3 compile-time | 11 Paper 3'e özgü (kümülatif 18) | `tests/anchoring_typelevel.rs` |
+| **(1) Type-level trybuild** | INV-C1..C8, INV-C12, INV-C13, INV-P1..P3 compile-time | 13 Paper 3'e özgü invariant (22 cumulative compile-fail) | `tests/anchoring_typelevel.rs` |
 | **(2) Golden fixture conformance** | 13 fixture pipeline davranışı | `anchoring_mvp.rs` + `anchoring_fixtures.rs` | `cargo test -p osp-core --test anchoring_mvp` |
 | **(3) Held-out adversarial** | 5 cümle totoloji-olmayan RQ1 | `held-out-adversarial-fixtures.json` | `paper3_heldout.rs` |
-| **(4) E2E binding chain replay** | Uçtan uca zincir (lowering→task) | `e2e-binding-chain-replay.json` | `paper3_evidence.rs` |
-| **(5) E2E rejected paths replay** | 4 reddedilen kapı | `e2e-rejected-paths-replay.json` | `paper3_evidence.rs` |
+| **(4) E2E binding chain replay** | Uçtan uca zincir; Step 6 REAL promotion (Faz 8a) | `e2e-binding-chain-replay.json` | `paper3_evidence.rs` |
+| **(5) E2E rejected paths replay** | 6 reddedilen kapı (paths 5-6 unit test'lerde) | `e2e-rejected-paths-replay.json` | `paper3_evidence.rs` + `review.rs` unit |
 
 ## Evidence JSON dosyaları + sha256
 

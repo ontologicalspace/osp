@@ -12,8 +12,8 @@
     {
       "stratum": 1,
       "name": "type-level trybuild",
-      "purpose": "INV-C1..C8, INV-P1..P3 compile-time enforcement",
-      "evidence": "11 Paper 3'e özgü (kümülatif 18 bağlam)",
+      "purpose": "INV-C1..C8, INV-C12, INV-C13, INV-P1..P3 compile-time enforcement",
+      "evidence": "13 Paper 3'e özgü invariant (22 cumulative compile-fail test workspace geneli)",
       "test": "tests/anchoring_typelevel.rs"
     },
     {
@@ -33,16 +33,16 @@
     {
       "stratum": 4,
       "name": "e2e binding chain replay",
-      "purpose": "uçtan uca zincir (lowering→task segment; acceptance seeded INV-C3)",
+      "purpose": "uçtan uca zincir (lowering→task segment); Step 6 REAL promotion via OperatorReviewSession (Faz 8a)",
       "evidence": "e2e-binding-chain-replay.json",
       "test": "paper3_evidence.rs"
     },
     {
       "stratum": 5,
       "name": "e2e rejected paths replay",
-      "purpose": "4 reddedilen kapı (AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted)",
+      "purpose": "6 reddedilen kapı (AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted, NotFound/StaleBasis, NotPromotableFrom)",
       "evidence": "e2e-rejected-paths-replay.json",
-      "test": "paper3_evidence.rs"
+      "test": "paper3_evidence.rs + review.rs unit (StaleBasis, NotPromotableFrom)"
     }
   ],
   "evidence_json_sha256": {

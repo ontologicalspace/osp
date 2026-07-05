@@ -97,7 +97,7 @@ pub enum DecisionKind {
 /// `ConceptNode` içeriğinin **deterministik freshness fingerprint**'i.
 ///
 /// **NOT:** Bu bir audit-security hash DEĞİLDİR — tazelik kontrolü için, çarpışma
-/// direnci ikincil. Audit-security için `basis_sha256` zaten `DecisionRecord`'da var.
+/// direnci ikincil. Audit-security için `basis_fingerprint` zaten `DecisionRecord`'da var.
 ///
 /// `decision_status` HARİÇ tutulur (promotion sonrası her zaman stale görünürdü).
 /// Hesaplama: FNV-1a(canonical + sorted(aliases) + node_kind + position_family).
@@ -733,50 +733,38 @@ mod tests {
     #[test]
     fn apply_decision_rejects_accepted_node_not_promotable_from() {
         use crate::anchoring::store::{AnchorStore, StoreError};
+        // Candidate node seed'le, basis derive et, sonra session ile promote et.
         let node = ConceptNode {
-            id: ConceptNodeId("RuleCandidate:AlreadyAccepted".into()),
-            canonical: "AlreadyAccepted".into(),
-            aliases: vec![],
-            node_kind: ConceptNodeKind::RuleCandidate,
-            decision_status: DecisionStatus::Accepted,
-            position_family: PositionFamily::ConceptualIntent,
-        };
-        let mut seed = GraphSeed::default();
-        seed.rule_candidates.push(node);
-        let mut store = InMemoryAnchorStore::with_seed(seed);
-
-        // Accepted node için basis derle (candidate_query'den DÜŞTÜĞÜ için NotFound beklenir).
-        let id = ConceptNodeId("RuleCandidate:AlreadyAccepted".into());
-        let err_compile = PresentedBasis::compile(&store, &id).unwrap_err();
-        assert!(
-            matches!(err_compile, ReviewError::NotFound(_)),
-            "Accepted node candidate_query'de değil → NotFound"
-        );
-
-        // Ama apply_decision doğrudan (DecisionApplication::new in-crate) çağrılırsa
-        // NotPromotableFrom döner — bu dal session yolundan erişilemez ama defense-in-depth
-        // katmanı gerçekten savunuyor kanıtı. Önce basis'i Candidate bir node üzerinden
-        // derive edip Accepted node id'sine application üretelim (in-crate ctor).
-        let cand_node = ConceptNode {
-            id: ConceptNodeId("RuleCandidate:Promotable".into()),
-            canonical: "Promotable".into(),
+            id: ConceptNodeId("RuleCandidate:WillBeAccepted".into()),
+            canonical: "WillBeAccepted".into(),
             aliases: vec![],
             node_kind: ConceptNodeKind::RuleCandidate,
             decision_status: DecisionStatus::Candidate,
             position_family: PositionFamily::ConceptualIntent,
         };
-        let mut seed2 = GraphSeed::default();
-        seed2.rule_candidates.push(cand_node);
-        let store2 = InMemoryAnchorStore::with_seed(seed2);
-        let cand_id = ConceptNodeId("RuleCandidate:Promotable".into());
-        let basis = PresentedBasis::compile(&store2, &cand_id).unwrap();
+        let mut seed = GraphSeed::default();
+        seed.rule_candidates.push(node);
+        let mut store = InMemoryAnchorStore::with_seed(seed);
+        let id = ConceptNodeId("RuleCandidate:WillBeAccepted".into());
 
-        // Şimdi Accepted node'un olduğu store'da apply_decision'ı Accepted id ile çağır.
+        // Basis derive et (Candidate durumdan).
+        let basis = PresentedBasis::compile(&store, &id).unwrap();
+
+        // Session ile gerçek promotion → Accepted.
+        let mut session =
+            OperatorReviewSession::open_for_operator(OperatorId::new("test"));
+        session
+            .accept(&mut store, &id, basis.clone(), NonEmptyExplanation::new("first").unwrap())
+            .unwrap();
+
+        // Artık node Accepted. apply_decision doğrudan çağrılırsa (in-crate ctor)
+        // basis.candidate_id == application.candidate_id (eşleşir — defense-in-depth id check),
+        // sonra NotPromotableFrom(Accepted). basis digest status dışladığı için hala taze.
         let app = DecisionApplication::new(
-            id.clone(), // Accepted node id
+            id.clone(),
             DecisionKind::Accept,
             basis,
-            NonEmptyExplanation::new("should reject").unwrap(),
+            NonEmptyExplanation::new("should reject — already accepted").unwrap(),
             SessionId("session:test".into()),
             OperatorId::new("test"),
             SystemTime::now(),
@@ -785,6 +773,48 @@ mod tests {
         assert!(
             matches!(err, StoreError::NotPromotableFrom(DecisionStatus::Accepted)),
             "NotPromotableFrom(Accepted) bekleniyordu, got {err:?}"
+        );
+    }
+
+    /// Defense-in-depth id-mismatch: apply_decision basis.candidate_id ≠ application.candidate_id
+    /// reddeder. Session bu kontrolü yapar ama apply_decision da yapar (Review 1 gözlemi).
+    /// Kontrol sırası: id-mismatch ÖNCE, NotPromotableFrom sonra.
+    #[test]
+    fn apply_decision_rejects_basis_application_id_mismatch() {
+        use crate::anchoring::store::{AnchorStore, StoreError};
+        // İki Candidate node — basis birinden, application diğerinden.
+        let mk = |id: &str| ConceptNode {
+            id: ConceptNodeId(id.into()),
+            canonical: id.split(':').nth(1).unwrap_or(id).into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: DecisionStatus::Candidate,
+            position_family: PositionFamily::ConceptualIntent,
+        };
+        let mut seed = GraphSeed::default();
+        seed.rule_candidates.push(mk("RuleCandidate:A"));
+        seed.rule_candidates.push(mk("RuleCandidate:B"));
+        let store = InMemoryAnchorStore::with_seed(seed);
+
+        // A için basis derive et.
+        let basis =
+            PresentedBasis::compile(&store, &ConceptNodeId("RuleCandidate:A".into())).unwrap();
+
+        // Application'ı B id'siyle kur (in-crate ctor) — mismatch.
+        let mut store = store;
+        let app = DecisionApplication::new(
+            ConceptNodeId("RuleCandidate:B".into()), // application id ≠ basis id (A)
+            DecisionKind::Accept,
+            basis,
+            NonEmptyExplanation::new("mismatch").unwrap(),
+            SessionId("session:test".into()),
+            OperatorId::new("test"),
+            SystemTime::now(),
+        );
+        let err = AnchorStore::apply_decision(&mut store, app).unwrap_err();
+        assert!(
+            matches!(err, StoreError::BasisCandidateMismatch { .. }),
+            "BasisCandidateMismatch bekleniyordu (id-mismatch önce), got {err:?}"
         );
     }
 }
