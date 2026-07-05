@@ -588,7 +588,7 @@ fn build_e2e_rejected_paths_replay() -> Value {
     };
     let mut stale_seed = GraphSeed::default();
     stale_seed.rule_candidates.push(stale_node);
-    let mut stale_store = InMemoryAnchorStore::with_seed(stale_seed);
+    let stale_store = InMemoryAnchorStore::with_seed(stale_seed);
     let stale_id = osp_core::anchoring::types::ConceptNodeId("RuleCandidate:StaleTest".into());
     let _stale_basis = PresentedBasis::compile(&stale_store, &stale_id).expect("basis");
     // Integration testte graph private → canonical değiştiremeyiz. StaleBasis'in tam TOCTOU
