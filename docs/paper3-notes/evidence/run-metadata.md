@@ -32,8 +32,8 @@
 
 | Dosya | sha256 |
 |---|---|
-| `e2e-binding-chain-replay.json` | `9890bdc48f0904a4b206b5a7c70b3892726a71912f50787cdf2f7ca123ecb396` |
-| `e2e-rejected-paths-replay.json` | `f7bbd11ef2d786d80d0de9a4a38927fc582d7ff3317325bc44da4d103c48594d` |
+| `e2e-binding-chain-replay.json` | `4214d911255c0ff83e5367778e2006bf79a55c578314c525b6dad4a926842f67` |
+| `e2e-rejected-paths-replay.json` | `4d274163ca8772262763151c387044e734b0ebd3933b242cf8bd21f54a603ef7` |
 | `held-out-adversarial-fixtures.json` | `12babf65966e89d99d4d98460369695a3a54a4e52f2deceacbbb40d43fad7a41` |
 
 ## Üretim komutları
