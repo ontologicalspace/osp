@@ -1,7 +1,7 @@
 # Paper 3 Notes — Project Genesis Layer
 
 > Paper 3: Concept Anchoring + Concept Synthesis + Operator Acceptance.
-> Tasarım dokümanı: [`docs/concept-anchoring-design.md`](../concept-anchoring-design.md) (v0.2.1).
+> Tasarım dokümanı: [`docs/roadmap/paper3-design.md`](../roadmap/paper3-design.md) (v0.2.1).
 
 Bu dizin, Paper 3'ün implementasyon evidence'larını ve stage notlarını toplar.
 Paper 2'nin `paper2-notes/` pattern'ini izler (README + stage dosyaları + evidence/).

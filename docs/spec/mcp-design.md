@@ -2,7 +2,7 @@
 
 > **Durum:** v0.1 tasarım + G1 implementasyonu TAMAMLANDI (4 tool canlı, INV-T1 doğrulandı)
 > **Tarih:** 2026-06-29 (G1 impl), 2026-06-30 (tasarım)
-> **İlişki:** `docs/agent-trajectory-roadmap.md` §8 Aşama G1 (osp-mcp), `docs/invariant-spec.md`
+> **İlişki:** `docs/roadmap/paper2-roadmap.md` §8 Aşama G1 (osp-mcp), `docs/spec/invariants.md`
 > **Kanal:** `crates/osp-mcp/` (rmcp 0.8, stdio) — README.md MCP client config içerir
 > **Kaynak:** Beyin fırtınası (arkadaş yorumu — CLI first, MCP second) + review revizyonu
 
@@ -340,6 +340,6 @@ MCP olmadan: agent tüm repo dump alır, RAG maliyeti patlar. MCP ile: `get_agen
 
 - [modelcontextprotocol/rust-sdk](https://github.com/modelcontextprotocol/rust-sdk) — resmi rmcp
 - [MCP spec 2025-06-18](https://modelcontextprotocol.io/) — protocol schema
-- `docs/agent-trajectory-roadmap.md` §8 Aşama G
-- `docs/invariant-spec.md` INV-T1..T8
+- `docs/roadmap/paper2-roadmap.md` §8 Aşama G
+- `docs/spec/invariants.md` INV-T1..T8
 - Beyin fırtınası: arkadaş yorumu (CLI first, MCP second) + review revizyonu

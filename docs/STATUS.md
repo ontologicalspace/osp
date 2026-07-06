@@ -1,11 +1,11 @@
 # OSP — Proje Durumu (STATUS)
 
 > **Son güncelleme:** 2026-07-05 (Paper 3 v1.1 public manuscript — arXiv editorial pass tamam, Zenodo yolunda)
-> **Detaylı roadmap:** [`agent-trajectory-roadmap.md`](agent-trajectory-roadmap.md)
-> **Invariant spec:** [`invariant-spec.md`](invariant-spec.md)
-> **MCP tasarım:** [`mcp-design.md`](mcp-design.md)
+> **Detaylı roadmap:** [`roadmap/paper2-roadmap.md`](roadmap/paper2-roadmap.md)
+> **Invariant spec:** [`spec/invariants.md`](spec/invariants.md)
+> **MCP tasarım:** [`spec/mcp-design.md`](spec/mcp-design.md)
 > **Paper 2 kanıtları:** [`paper2-notes/`](paper2-notes/)
-> **Paper 3 tasarım + kanıtları:** [`concept-anchoring-design.md`](concept-anchoring-design.md) + [`paper3-notes/`](paper3-notes/)
+> **Paper 3 tasarım + kanıtları:** [`roadmap/paper3-design.md`](roadmap/paper3-design.md) + [`paper3-notes/`](paper3-notes/)
 
 OSP (Ontological Space Protocol / Software Physics) — software architecture analysis +
 AI agent navigation. Üç makale stratejisi: **Paper 1** (statik uzay, kanıtlandı v2.6) +
@@ -28,7 +28,7 @@ osp-desktop       ⬜ E (3D viewer donduruldu — Aşama 1-3 hover edge tamam)
 G2c corpus runner ✅ G2c-1→5 TAMAM (RQ9 kanıt + gerçek LLM + external corpus 26/26 Completed)
 osp-sdk (H)       ⬜ — TypeScript/Python/Rust bindings (opsiyonel)
 osp-desktop/3D    ⬜ E opsiyonel — trajectory correction UI
-Paper 2           ✍️ DRAFT v1.2 yazıldı (docs/paper2-draft-v1.md) — review sonrası arXiv adayı
+Paper 2           ✍️ DRAFT v1.2 yazıldı (docs/papers/paper2-agent-trajectory.md) — review sonrası arXiv adayı
 Paper 3           ✅ v1.1 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52cc9c9)
 ```
 
@@ -91,7 +91,7 @@ için draft deposit bekliyor. **719 test, 0 development marker, 367 kelime abstr
 - **5-state conformance** (18 cümle: Conform 12, PartialConform 2, KnownLimitation 2, RejectAsExpected 2) — `conformance-results.json`
 - **Run-metadata** (volatile'lerin tek evi: commit hash, sha256) — `run-metadata.json`
 - 7 faz evidence dosyası (`paper3-notes/faz*.md`)
-- **Aşama 2 iskelet:** `docs/paper3-draft-v1.md`
+- **Aşama 2 iskelet:** `docs/papers/paper3-concept-anchoring.md`
 
 #### Snapshot disiplini (A5)
 - Normal CI: `cargo test -p osp-core --test paper3_evidence --test paper3_heldout` (drift yakalar)
@@ -161,7 +161,7 @@ Paper 2 yazımı için katman bazında hazırlık durumu (review 4):
 - Evidence pack hazır: `docs/paper3-notes/evidence-pack/` (README + MANIFEST)
 - Detaylı handoff: [`paper3-notes/HANDOFF.md`](paper3-notes/HANDOFF.md)
 
-Paper 2 v1.2 review ile arXiv adayı (docs/paper2-draft-v1.md).
+Paper 2 v1.2 review ile arXiv adayı (docs/papers/paper2-agent-trajectory.md).
 Paper 3 v1.1 public manuscript — Zenodo yolunda.
 
 ## Test Durumu

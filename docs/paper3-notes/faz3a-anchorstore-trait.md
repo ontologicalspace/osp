@@ -2,7 +2,7 @@
 
 > **Tarih:** 2026-07-03
 > **Durum:** ✅ PR30 — review + commit
-> **Tasarım:** [`docs/concept-anchoring-design.md`](../concept-anchoring-design.md) v0.2.1, D7, §11 Faz 3
+> **Tasarım:** [`docs/roadmap/paper3-design.md`](../roadmap/paper3-design.md) v0.2.1, D7, §11 Faz 3
 
 ## Özet
 

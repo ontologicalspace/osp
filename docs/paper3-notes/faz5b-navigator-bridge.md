@@ -2,7 +2,7 @@
 
 > **Tarih:** 2026-07-03
 > **Durum:** ✅ Tek PR — review + commit
-> **Tasarım:** [`docs/concept-anchoring-design.md`](../concept-anchoring-design.md) v0.2.1+, §11 Faz 5, INV-P2 (yeni), D17 (yeni)
+> **Tasarım:** [`docs/roadmap/paper3-design.md`](../roadmap/paper3-design.md) v0.2.1+, §11 Faz 5, INV-P2 (yeni), D17 (yeni)
 
 ## Özet
 

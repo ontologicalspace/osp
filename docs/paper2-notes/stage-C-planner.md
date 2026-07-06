@@ -6,7 +6,7 @@
 > milestone scope ve loss dağılımına göre deterministic decomposition policies ile
 > 1 veya daha fazla Task üretir. Agent decomposition yapmaz."
 > **Testler:** 9 yeni test, osp-core 256→265, workspace 461→470
-> **Spec:** `docs/agent-trajectory-roadmap.md` §8 Aşama C
+> **Spec:** `docs/roadmap/paper2-roadmap.md` §8 Aşama C
 
 ---
 
