@@ -3,13 +3,13 @@
 > **⚠️ Out-of-scope note.** This note is intentionally outside the Paper 3 claim surface.
 > It is a brainstorming artifact for future interaction surfaces and does not define
 > protocol invariants. It does not modify, extend, or contradict any claim in
-> `paper3-draft-v1.md`. Decision numbers use the **DS** prefix (DS1–DS3) to avoid
-> collision with the `concept-anchoring-design.md` decision namespace (D1–D18).
+> `papers/paper3-concept-anchoring.md`. Decision numbers use the **DS** prefix (DS1–DS3) to avoid
+> collision with the `roadmap/paper3-design.md` decision namespace (D1–D18).
 
 > **Sürüm:** v0.1-draft (Brainstorming)
 > **Tarih:** 2026-07-03
 > **Durum:** Kavramsal model olgunlaştırma dokümanı — **strictly out of Paper 3 scope**.
-> **İlişki:** `docs/concept-anchoring-design.md` (Paper 3), `docs/agent-trajectory-roadmap.md` (Paper 2), `docs/paper-draft-v2.6.md` (Paper 1). Bu doküman, bu üç katmanın üzerine inşa edilen tüm kullanıcı/arayüz etkileşim modellerini tanımlar.
+> **İlişki:** `docs/roadmap/paper3-design.md` (Paper 3), `docs/roadmap/paper2-roadmap.md` (Paper 2), `docs/papers/paper1-static-space.md` (Paper 1). Bu doküman, bu üç katmanın üzerine inşa edilen tüm kullanıcı/arayüz etkileşim modellerini tanımlar.
 
 ---
 
@@ -168,7 +168,7 @@ Bu etkileşim modeli, OSP'nin mevcut ontolojisine şu kararları ekler:
 
 ## 5. Yeni Invariant Önerileri (Proposal)
 
-Bu etkileşim modeli, mevcut invariant'lara (INV #1-15, INV-T1-T8, INV-C1-C8) şunları ekler. Durum: proposal — implementation sırasında `docs/invariant-spec.md` Bölüm D'ye taşınır.
+Bu etkileşim modeli, mevcut invariant'lara (INV #1-15, INV-T1-T8, INV-C1-C8) şunları ekler. Durum: proposal — implementation sırasında `docs/spec/invariants.md` Bölüm D'ye taşınır.
 
 ### INV-C9 — Interaction Surfaces Cannot Mutate Accepted Knowledge Without Capability
 
@@ -231,4 +231,4 @@ Bu çok katmanlı etkileşim modeli, OSP'nin geniş kitlelerce benimsenmesinin a
 
 ---
 
-*Bu doküman, OSP'nin kavramsal olgunlaştırma sürecinin bir parçasıdır. Paper 3'ün "Interaction Surfaces" bölümüne adaydır. INV-C9 ve INV-C10, implementation sırasında `docs/invariant-spec.md`'ye taşınır.*
+*Bu doküman, OSP'nin kavramsal olgunlaştırma sürecinin bir parçasıdır. Paper 3'ün "Interaction Surfaces" bölümüne adaydır. INV-C9 ve INV-C10, implementation sırasında `docs/spec/invariants.md`'ye taşınır.*

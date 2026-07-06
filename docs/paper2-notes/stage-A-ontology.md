@@ -4,7 +4,7 @@
 > **Tarih:** 2026-06-30
 > **Dosya:** `crates/osp-core/src/trajectory.rs` (yeni modül)
 > **Testler:** 13 test, INV-T1..T8 type-level enforcement (osp-core 232→245)
-> **Spec:** `docs/invariant-spec.md` v3
+> **Spec:** `docs/spec/invariants.md` v3
 
 ---
 

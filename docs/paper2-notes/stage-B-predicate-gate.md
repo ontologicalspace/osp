@@ -5,7 +5,7 @@
 > **Tez:** "Verilmiş bir Task ve Claim için engine, task predicate'ini provenance-aware
 > şekilde değerlendirir ve deterministic AttemptOutcome üretir."
 > **Testler:** 11 yeni test (10 done-criteria + 1 ek), osp-core 245→256
-> **Spec:** `docs/invariant-spec.md` INV-T5 güncellendi
+> **Spec:** `docs/spec/invariants.md` INV-T5 güncellendi
 
 ---
 

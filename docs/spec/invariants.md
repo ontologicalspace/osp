@@ -7,8 +7,8 @@
 > Bu spec her invariant için **yapısal garanti** (type-level) + **test** + **ihlal örneği** tanımlar.
 
 ## İlişkili Dokümanlar
-- `docs/agent-trajectory-roadmap.md` — INV-T1..T7'nin ontolojik bağlamı
-- `docs/paper-draft-v2.6.md` — INV #1..#15'in paper karşılığı
+- `docs/roadmap/paper2-roadmap.md` — INV-T1..T7'nin ontolojik bağlamı
+- `docs/papers/paper1-static-space.md` — INV #1..#15'in paper karşılığı
 - Kod: `crates/osp-core/src/*.rs` — type-level enforcement
 
 ---
@@ -376,7 +376,7 @@ karşılığı. "Sessiz erozyon" önlenir.
 
 ## Sonraki Adım
 
-Bu spec + `agent-trajectory-roadmap.md` oturunca:
+Bu spec + `roadmap/paper2-roadmap.md` oturunca:
 1. Aşama A (ontolojik tipler) — bu spec'teki invariant'ları type-level enforce eden tipler.
 2. `crates/osp-core/tests/invariants.rs` — D2 test matrisi.
 3. Her aşamada spec'e uyum kontrolü.
@@ -384,4 +384,4 @@ Bu spec + `agent-trajectory-roadmap.md` oturunca:
 ---
 
 *Bu doküman review 1'in "formal invariant spec" önerisi üzerine kuruldu.
-Kaynak: INV #1..#15 (paper-draft-v2.6.md), INV-T1..T7 (agent-trajectory-roadmap.md + 3 review).*
+Kaynak: INV #1..#15 (paper-draft-v2.6.md), INV-T1..T7 (roadmap/paper2-roadmap.md + 3 review).*

@@ -2,7 +2,7 @@
 
 > **Tek ev** of volatile kanıt bilgileri (commit/tarih/toolchain/sha256). Evidence JSON'lar
 > saf deterministik builder çıktısıdır — volatile alan içermez (snapshot drift imkânsız).
-> Paper 2 pattern'i (`paper2-draft-v1.md` run-metadata tablosu) izlenmiştir.
+> Paper 2 pattern'i (`papers/paper2-agent-trajectory.md` run-metadata tablosu) izlenmiştir.
 
 ## Run metadata
 

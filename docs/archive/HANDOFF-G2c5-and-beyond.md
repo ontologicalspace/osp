@@ -112,12 +112,12 @@ cargo test --workspace --exclude osp-desktop
 
 ### 6. Önemli dosyalar
 - `docs/STATUS.md` — proje durumu özeti (Readiness Matrix)
-- `docs/agent-trajectory-roadmap.md` — §8 aşama planı, §12 karar günlüğü
+- `docs/roadmap/paper2-roadmap.md` — §8 aşama planı, §12 karar günlüğü
 - `docs/paper2-notes/` — stage-A'dan stage-G2c-4'e evidence notes
 - `docs/paper2-notes/evidence/` — JSON evidence + results.md
 - `crates/osp-analyzer/examples/g2c_corpus_matrix.rs` — corpus runner
-- `docs/invariant-spec.md` — INV-T1..T8 + INV #1..#15
-- `docs/mcp-design.md` — MCP server tasarımı
+- `docs/spec/invariants.md` — INV-T1..T8 + INV #1..#15
+- `docs/spec/spec/mcp-design.md` — MCP server tasarımı
 
 ---
 

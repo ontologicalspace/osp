@@ -76,7 +76,7 @@ DOI'ler için draft deposit bekliyor.
 
 | Dosya | Açıklama |
 |---|---|
-| `docs/paper3-draft-v1.md` | **Paper 3 v1.1 public manuscript** (9042 kelime, 0 marker) |
+| `docs/papers/paper3-concept-anchoring.md` | **Paper 3 v1.1 public manuscript** (9042 kelime, 0 marker) |
 | `docs/paper3-notes/evidence-pack/README.md` | Zenodo evidence pack açıklaması |
 | `docs/paper3-notes/evidence-pack/MANIFEST.json` | sha256 + test mapping (4 evidence dosya) |
 | `docs/paper3-notes/evidence/` | Frozen evidence JSON'lar + run-metadata |

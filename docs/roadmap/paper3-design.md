@@ -8,9 +8,9 @@
 
 ## İlişkili Dokümanlar
 
-- `docs/paper-draft-v2.6.md` — Paper 1 (statik uzay, MetricValue provenance, inv #4 engine ölçer)
-- `docs/paper2-draft-v1.md` — Paper 2 (INV-T1 predicate epistemolojisi, INV-T2 operator genesis, INV-T8 lane disiplini)
-- `docs/invariant-spec.md` — INV #1-15 (Paper 1) + INV-T1-T8 (Paper 2); INV-C1-C8 bu dokümanda proposal, implementation'da Bölüm C'ye taşınır
+- `docs/papers/paper1-static-space.md` — Paper 1 (statik uzay, MetricValue provenance, inv #4 engine ölçer)
+- `docs/papers/paper2-agent-trajectory.md` — Paper 2 (INV-T1 predicate epistemolojisi, INV-T2 operator genesis, INV-T8 lane disiplini)
+- `docs/spec/invariants.md` — INV #1-15 (Paper 1) + INV-T1-T8 (Paper 2); INV-C1-C8 bu dokümanda proposal, implementation'da Bölüm C'ye taşınır
 - `docs/osp-core-design.md`, `docs/space-engine-design.md` — mevcut core tasarım pattern'leri
 
 ## Kaynaklar
@@ -588,7 +588,7 @@ Bu, INV-C3'ün (candidate isolation) yapısal bir kısıtıdır: yüksek abstrac
 
 ## 9. INV-C1..C8 Invariant Önerileri (Proposal)
 
-Aşağıdaki 8 invariant Paper 3'ün omurgasıdır. **Durum: proposal** — implementation sırasında (`crates/osp-core/src/anchoring/` oluşunca) `docs/invariant-spec.md` Bölüm C'ye taşınır. INV #1-15 (Paper 1) ve INV-T1-T8 (Paper 2) ile çakışmadıkları doğrulanmalıdır.
+Aşağıdaki 8 invariant Paper 3'ün omurgasıdır. **Durum: proposal** — implementation sırasında (`crates/osp-core/src/anchoring/` oluşunca) `docs/spec/invariants.md` Bölüm C'ye taşınır. INV #1-15 (Paper 1) ve INV-T1-T8 (Paper 2) ile çakışmadıkları doğrulanmalıdır.
 
 ### INV-C1 — Embedding proposes, never decides
 
@@ -825,7 +825,7 @@ Faz 0 — Spec + fixture
   Bu design doc (bitti)
   + 10 golden fixture cümlesi (özgün §17)
   + beklenen ConceptPacket/edge/position sonuçları
-  Çıktı: docs/concept-anchoring-design.md, crates/osp-core/tests/fixtures/anchoring/*.json
+  Çıktı: docs/roadmap/paper3-design.md, crates/osp-core/tests/fixtures/anchoring/*.json
 
 Faz 1 — In-memory deterministic MVP
   ConceptPacket, AnchorCandidate, AnchorPlan, PositionSnapshot tipleri
@@ -1027,5 +1027,5 @@ Arkadaş incelemesi (7 nokta) ve üç yönlü beyin fırtınası sonucu alınan 
 
 ---
 
-*Doküman kaynakları: özgün `concept-anchoring-algorithm-requirements.md` (v0.1-draft) + Concept Synthesis/Genesis Layer genişletmesi + 5 sınır hassasiyeti düzeltmesi. INV-C1-C8 implementation'da `docs/invariant-spec.md` Bölüm C'ye taşınır.*
+*Doküman kaynakları: özgün `concept-anchoring-algorithm-requirements.md` (v0.1-draft) + Concept Synthesis/Genesis Layer genişletmesi + 5 sınır hassasiyeti düzeltmesi. INV-C1-C8 implementation'da `docs/spec/invariants.md` Bölüm C'ye taşınır.*
 

@@ -10,9 +10,9 @@
 
 **Paper:** v2.6 (arXiv then ACM TOSEM target) — 5 research questions, 23-repo corpus across 5 languages
 (Python, TypeScript, JavaScript, Rust, Go), 18,952 real LCOM4 classes analyzed via SCIP. See
-[`docs/paper-draft-v2.6.md`](docs/paper-draft-v2.6.md).
+[`docs/papers/paper1-static-space.md`](docs/papers/paper1-static-space.md).
 
-**Vision source:** [`SoftwarePhysics.txt`](SoftwarePhysics.txt) · **Paper:** [`docs/paper-draft-v2.6.md`](docs/paper-draft-v2.6.md)
+**Vision source:** [`SoftwarePhysics.txt`](SoftwarePhysics.txt) · **Paper:** [`docs/papers/paper1-static-space.md`](docs/papers/paper1-static-space.md)
 
 ---
 
@@ -152,10 +152,10 @@ osp/
 ### Two-Paper Strategy
 
 - **Paper 1 (Static Space)** — ✅ done. SCIP + tree-sitter + 5-axis + vision + witness +
-  tri-state. 23-repo corpus, 18,952 LCOM4 classes. [`docs/paper-draft-v2.6.md`](docs/paper-draft-v2.6.md)
+  tri-state. 23-repo corpus, 18,952 LCOM4 classes. [`docs/papers/paper1-static-space.md`](docs/papers/paper1-static-space.md)
 - **Paper 2 (Dynamic / Agent Trajectory)** — in progress. Task = measurement predicate,
   PredicateGate, navigator loop, calibration feedback. CLI + MCP truth surfaces done.
-  Paper writing **deferred to the end** (data-driven). [`docs/agent-trajectory-roadmap.md`](docs/agent-trajectory-roadmap.md)
+  Paper writing **deferred to the end** (data-driven). [`docs/roadmap/paper2-roadmap.md`](docs/roadmap/paper2-roadmap.md)
 
 ---
 
@@ -177,8 +177,8 @@ powershell -File scripts/clone-corpus.ps1
 powershell -File scripts/run-corpus.ps1
 ```
 
-See [`docs/scip-cohesion-results.md`](docs/scip-cohesion-results.md) (primary corpus) and
-[`docs/corpus28-results.md`](docs/corpus28-results.md) (extended Rust/Go) for the full datasets.
+See [`docs/results/scip-cohesion.md`](docs/results/scip-cohesion.md) (primary corpus) and
+[`docs/results/corpus28.md`](docs/results/corpus28.md) (extended Rust/Go) for the full datasets.
 
 ### Token-Size Benchmark (RQ5)
 
@@ -227,7 +227,7 @@ See [`docs/STATUS.md`](docs/STATUS.md) for the full stage-by-stage status.
 - **MetricValue Provenance:** Every metric carries source, confidence, and coverage
 - **15 Invariants:** Structurally enforced at the type level (author-witness rejection, RawPosition/DerivedPosition separation, LLM stateless, etc.)
 
-Full formalism: [`docs/OSP-formalism.md`](docs/OSP-formalism.md)
+Full formalism: [`docs/spec/formalism.md`](docs/spec/formalism.md)
 
 ---
 
@@ -237,21 +237,21 @@ Full formalism: [`docs/OSP-formalism.md`](docs/OSP-formalism.md)
 
 | Document | Content |
 |---|---|
-| [`docs/paper-draft-v2.6.md`](docs/paper-draft-v2.6.md) | Paper v2.6 (5 RQs, 23-repo/5-lang corpus, real LCOM4 data, token benchmark) |
-| [`docs/OSP-formalism.md`](docs/OSP-formalism.md) | Mathematical model (coordinate system, BFT proof, commit operator) |
-| [`docs/scip-cohesion-results.md`](docs/scip-cohesion-results.md) | Primary 15-repo corpus LCOM4 cohesion results |
-| [`docs/corpus28-results.md`](docs/corpus28-results.md) | Extended 23-repo results (Rust/Go cohesion + coupling + foam analysis) |
-| [`docs/calibration-corpus.md`](docs/calibration-corpus.md) | Corpus selection methodology |
-| [`docs/literature-scan.md`](docs/literature-scan.md) | Related work + originality analysis |
+| [`docs/papers/paper1-static-space.md`](docs/papers/paper1-static-space.md) | Paper v2.6 (5 RQs, 23-repo/5-lang corpus, real LCOM4 data, token benchmark) |
+| [`docs/spec/formalism.md`](docs/spec/formalism.md) | Mathematical model (coordinate system, BFT proof, commit operator) |
+| [`docs/results/scip-cohesion.md`](docs/results/scip-cohesion.md) | Primary 15-repo corpus LCOM4 cohesion results |
+| [`docs/results/corpus28.md`](docs/results/corpus28.md) | Extended 23-repo results (Rust/Go cohesion + coupling + foam analysis) |
+| [`docs/results/calibration-corpus.md`](docs/results/calibration-corpus.md) | Corpus selection methodology |
+| [`docs/results/literature-scan.md`](docs/results/literature-scan.md) | Related work + originality analysis |
 
 **Paper 2 (Dynamic / Agent Trajectory):**
 
 | Document | Content |
 |---|---|
 | [`docs/STATUS.md`](docs/STATUS.md) | ⭐ Project status summary — stage table, what's done, what's next |
-| [`docs/agent-trajectory-roadmap.md`](docs/agent-trajectory-roadmap.md) | Roadmap (motivation, ontology, INV-T1..T8, §8 stage plan) |
-| [`docs/invariant-spec.md`](docs/invariant-spec.md) | Formal invariant spec (INV-T1..T8 trajectory + INV #1..#15 space) |
-| [`docs/mcp-design.md`](docs/mcp-design.md) | MCP server design (6 "never" principles, tool categories, INV matrix) |
+| [`docs/roadmap/paper2-roadmap.md`](docs/roadmap/paper2-roadmap.md) | Roadmap (motivation, ontology, INV-T1..T8, §8 stage plan) |
+| [`docs/spec/invariants.md`](docs/spec/invariants.md) | Formal invariant spec (INV-T1..T8 trajectory + INV #1..#15 space) |
+| [`docs/spec/mcp-design.md`](docs/spec/mcp-design.md) | MCP server design (6 "never" principles, tool categories, INV matrix) |
 | [`docs/paper2-notes/`](docs/paper2-notes/) | Evidence notes per stage (A→G1) — data-driven paper writing source |
 
 *Internal design specs (core/engine/analyzer design, session notes, dogfooding logs)

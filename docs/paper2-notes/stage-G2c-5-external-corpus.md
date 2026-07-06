@@ -89,7 +89,7 @@ axis_regression:   0/24 (multi-axis safety confirmed)
 - `docs/paper2-notes/evidence/g2c-external-corpus-20260702.json` — 26 cell evidence
 - `docs/paper2-notes/evidence/g2c-external-corpus-results.md` — RQ6-9 + threats
 - `docs/STATUS.md` — G2c-5 ✅, Paper 2 minimum gate doldu
-- `docs/agent-trajectory-roadmap.md` §8 — G2c-5 ✅
+- `docs/roadmap/paper2-roadmap.md` §8 — G2c-5 ✅
 
 ## Paper 2 minimum gate — DOLDU ✅
 
