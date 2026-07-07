@@ -36,7 +36,7 @@ Paper 3           ✅ v1.1 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52c
 
 Paper 3 **v1.1 public manuscript** — first-complete draft + Faz 8a real promotion + threat/limitations
 tightening + arXiv editorial pass tamam. **Zenodo evidence pack hazır** (README + MANIFEST), DOI'ler
-için draft deposit bekliyor. **719 test, 0 development marker, 367 kelime abstract.**
+için draft deposit bekliyor. **730 test, 0 development marker, 367 kelime abstract.**
 
 ### Bu oturumda yapılanlar (PR #37-#42)
 
@@ -69,14 +69,20 @@ için draft deposit bekliyor. **719 test, 0 development marker, 367 kelime abstr
 | Faz 7 | Planlandı | Embedding + LLM-assisted candidate generation |
 | Faz 8 | Planlandı | Desktop integration (Project Reality Cockpit) |
 | **Faz 8a** | ✅ PR40-41 | OperatorReviewSession (INV-C12/C13 real promotion) + threat tightening |
-| Faz 8b | Planlandı | SupersedeSession + ReopenSession + CLI `osp review` + desktop Cockpit |
-| Faz 8c | Planlandı | promote_to_accepted kaldırma (legacy path migrate) |
+| **Faz 8b** | 🚧 PR48 | Başladı — `DecisionStatus::SupersededAccepted` + `mainline_history()` (INV-C14). Sırada: PR #49 `apply_supersede`, PR #50 `SupersedeSession`, PR #51 CLI `osp review` |
+| Faz 8c | ✅ PR47 | promote_to_accepted kaldırma (legacy path migrate) |
 
-### Invariant'lar (13 Paper 3'e özgü + INV-T2 boundary)
+### Invariant'lar (14 Paper 3'e özgü + INV-T2 boundary)
+
+> INV-C14 (Faz 8b PR #48) eklendi: acceptance-provenance projection.
+> 10 type-enforced genesis + 3 type-enforced lowering/translation (P1-P3) + 1 runtime projection (C14) = 14.
+> Toplam type-enforced = 13 (10 genesis + 3 lowering); INV-C14 tek runtime-asserted invariant.
+> Compile-fail count 22'de sabit (C14 runtime-asserted, type-level değil).
 
 - **INV-C1..C8** (anchoring): embedding proposes/C2 family/C3 candidate isolation/C4 supersede authority/C5 inferred not accepted/C6 code intent hypothesis/C7 explainable/C8 canonicalized
 - **INV-C12** (informed acceptance): basis karar anındaki içeriğe karşı node_digest tazelik-doğrulamalı (TOCTOU)
 - **INV-C13** (no reviewed operator decision without record): Accepted/Rejected geçişi DecisionRecord ile atomik
+- **INV-C14** (acceptance-provenance projection, runtime-asserted — Faz 8b PR #48): `mainline_query ⊆ mainline_history`, SupersededAccepted current projection'da değil, history'de
 - **INV-P1** (predicate lowering): RuleCandidate → PredicateStub, never ExecutablePredicateSet
 - **INV-P2** (binding): keyword hint ≠ executable predicate — operator binding zorunlu
 - **INV-P3** (translation): ambiguity-preserving — translation proposes candidate meaning, binding creates commitment
@@ -175,7 +181,7 @@ cargo test --workspace --exclude osp-desktop
 - osp-cli: smoke
 - osp-mcp: 8 unit + 7 INV-T1 integration
 - osp-spike: ~32
-- Toplam: 719+ test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
+- Toplam: 730 test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
 
 ## Önemli Commit'ler
 
