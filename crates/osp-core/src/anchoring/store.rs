@@ -199,8 +199,9 @@ pub trait AnchorStore {
 
     /// INV-C15 (Faz 8b): Atomic supersession transition. Status (Accepted→SupersededAccepted)
     /// + successor edge (successor→superseded, `Supersedes`) tek işlemde. `SupersedeApplication`
-    /// opaque (private fields, pub(crate) ctor, no Deserialize) — tek üretici PR #50
-    /// `SupersedeSession`. Store: seq/prior_status/new_status/edge record üretiminden sorumludur.
+    /// opaque (private fields, pub(crate) ctor, no Deserialize) — production üretici
+    /// `SupersedeSession` (PR #50); test üretici `issue_operator_for_tests`. Store:
+    /// seq/prior_status/new_status/edge record üretiminden sorumludur.
     fn apply_supersede(
         &mut self,
         application: crate::anchoring::review::SupersedeApplication,
@@ -734,7 +735,10 @@ impl AnchorStore for InMemoryAnchorStore {
             .decision_status = new_status;
 
         // (12b) Successor edge: successor → superseded (Accepted/committed, high-stake INV-C7).
-        // Candidate proposal edge silinmez — historical proposal provenance olarak kalır (PR #50).
+        // Candidate Supersedes proposals are preserved as historical proposal provenance.
+        // A successful session appends a distinct Accepted Supersedes lineage edge; it does
+        // not promote or delete the proposal edge (lane-sensitive separation). Kalıcı
+        // sözleşme (PR #50, 4-tur review mutabık).
         let edge = ConceptEdge {
             from: successor_id.clone(),
             to: superseded_id.clone(),

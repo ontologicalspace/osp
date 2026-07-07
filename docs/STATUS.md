@@ -36,7 +36,7 @@ Paper 3           ✅ v1.1 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52c
 
 Paper 3 **v1.1 public manuscript** — first-complete draft + Faz 8a real promotion + threat/limitations
 tightening + arXiv editorial pass tamam. **Zenodo evidence pack hazır** (README + MANIFEST), DOI'ler
-için draft deposit bekliyor. **752 test, 0 development marker, 367 kelime abstract.**
+için draft deposit bekliyor. **762 test, 0 development marker, 367 kelime abstract.**
 
 ### Bu oturumda yapılanlar (PR #37-#42)
 
@@ -69,7 +69,7 @@ için draft deposit bekliyor. **752 test, 0 development marker, 367 kelime abstr
 | Faz 7 | Planlandı | Embedding + LLM-assisted candidate generation |
 | Faz 8 | Planlandı | Desktop integration (Project Reality Cockpit) |
 | **Faz 8a** | ✅ PR40-41 | OperatorReviewSession (INV-C12/C13 real promotion) + threat tightening |
-| **Faz 8b** | 🚧 PR49 | PR #48 ✅ (varyant + INV-C14). PR #49: `SupersedeApplication` + `apply_supersede` (INV-C15 atomic). Sırada: PR #50 `SupersedeSession`, PR #51 CLI `osp review` |
+| **Faz 8b** | 🚧 PR50 | PR #48 ✅ (varyant + INV-C14). PR #49 ✅ (`SupersedeApplication` + `apply_supersede`, INV-C15 atomic). PR #50: `SupersedeSession` + crate-private authority issuer (INV-C15 production invocation). Sırada: PR #51 CLI `osp review` |
 | Faz 8c | ✅ PR47 | promote_to_accepted kaldırma (legacy path migrate) |
 
 ### Invariant'lar (15 Paper 3'e özgü + INV-T2 boundary)
@@ -182,7 +182,7 @@ cargo test --workspace --exclude osp-desktop
 - osp-cli: smoke
 - osp-mcp: 8 unit + 7 INV-T1 integration
 - osp-spike: ~32
-- Toplam: 752 test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
+- Toplam: 762 test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
 
 ## Önemli Commit'ler
 

@@ -28,7 +28,7 @@
 > `ef022a9`, evidence generation commit olarak kaydedilir. Doğrula:
 > `git log -1 --format=%H -- docs/paper3-notes/evidence/e2e-binding-chain-replay.json`
 
-## Current protocol metadata (INV-C15 sonrası — evrilir)
+## Current protocol metadata (INV-C15 production path — PR #50 sonrası)
 
 İki eksen: **kapsam** (genesis / lowering / projection / transition) × **enforcement** (type-level / runtime-asserted).
 
@@ -38,11 +38,12 @@
 | ↳ type-enforced genesis (INV-C1..C8, C12, C13) | 10 |
 | ↳ type-enforced lowering/translation (INV-P1..P3) | 3 |
 | ↳ runtime projection invariant (INV-C14, Faz 8b PR #48) | 1 |
-| ↳ runtime atomic transition invariant (INV-C15, Faz 8b PR #49) | 1 |
+| ↳ runtime atomic transition invariant (INV-C15, Faz 8b PR #49 atomik + PR #50 production invocation) | 1 |
 | **Toplam type-enforced** (genesis + lowering) | **13** |
 | **Toplam runtime-asserted** | **2** (C14 projection + C15 transition) |
-| Compile-fail test count | 24 (INV-C14/C15 runtime-asserted; 2 yeni supersede opacity trybuild C13-paralel boundary korur) |
+| Compile-fail test count | 24 (INV-C14/C15 runtime-asserted; 2 supersede opacity trybuild C13-paralel boundary korur; PR #50 yeni compile-fail eklemez — `pub(crate)` issuer yapısal garanti olarak yeterli) |
 | `DecisionStatus` variants | 5 (Candidate, Accepted, Deprecated, Rejected, SupersededAccepted) |
+| INV-C15 production invocation | `SupersedeSession` (PR #50) — crate-private authority issuer + parametresiz `supersede()` + token içeride mint |
 
 > **Taksonomi notu (Review PR #48/#49):** P1-P3 lowering invariant'ları da type-enforced'dur
 > (trybuild katmanında, strata tablosu (1) ile tutarlı). "13 type-enforced = 10 genesis + 3 lowering";
