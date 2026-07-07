@@ -780,12 +780,16 @@ impl AnchorStore for InMemoryAnchorStore {
     }
 
     fn mainline_query(&self) -> Result<Vec<ConceptNode>, Self::Error> {
-        Ok(self
+        let mut nodes: Vec<ConceptNode> = self
             .graph
             .nodes_iter()
             .filter(|n| n.decision_status.is_current_mainline())
             .cloned()
-            .collect())
+            .collect();
+        // Deterministic presentation order — `mainline_history` ile aynı desen.
+        // Agent-facing context tekrarlanabilirliği: graph ekleme sırasına değil ID'ye bağlı.
+        nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(nodes)
     }
 
     fn mainline_history(&self) -> Result<Vec<ConceptNode>, Self::Error> {
@@ -1362,6 +1366,36 @@ mod tests {
             .collect();
         assert_eq!(
             history,
+            vec![
+                "RuleCandidate:Alpha".to_string(),
+                "RuleCandidate:Zeta".to_string()
+            ],
+            "deterministic ID-ascending order regardless of insertion order"
+        );
+    }
+
+    /// `mainline_query` deterministik ID sıralaması — ters insert'ten bağımsız.
+    /// `mainline_history` ile aynı sunum sırası (agent-facing context tekrarlanabilirliği).
+    /// Sadece Accepted node'lar (INV-C3 current mainline); SupersededAccepted hariç.
+    #[test]
+    fn mainline_query_is_deterministically_ordered() {
+        let mk = node_with_status;
+        // Ters sırayla insert (Z, A) — çıktı sıralı olmalı (A, Z).
+        let mut seed = GraphSeed::default();
+        seed.rule_candidates
+            .push(mk("RuleCandidate:Zeta", DecisionStatus::Accepted));
+        seed.rule_candidates
+            .push(mk("RuleCandidate:Alpha", DecisionStatus::Accepted));
+        let store = InMemoryAnchorStore::with_seed(seed);
+
+        let current: Vec<String> = store
+            .mainline_query()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id.0)
+            .collect();
+        assert_eq!(
+            current,
             vec![
                 "RuleCandidate:Alpha".to_string(),
                 "RuleCandidate:Zeta".to_string()
