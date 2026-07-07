@@ -138,9 +138,14 @@ pub enum PositionFamily {
 ///
 /// `SupersededAccepted` (Faz 8b) is a terminal acceptance-lane status: a node that was
 /// accepted and later replaced by a newer accepted decision. It retains accepted provenance
-/// without current effectiveness. The successor-edge invariant will be established atomically
-/// by the supersede application path (planned, PR #49); until then, no production store-transition
-/// API produces this status (public construction and deserialization can represent it).
+/// without current effectiveness. The successor-edge invariant is established atomically by
+/// `apply_supersede` (PR #49, INV-C15); the production invocation path is `SupersedeSession`
+/// (PR #50), which mints `SupersedeAuthority` internally and creates the opaque
+/// `SupersedeApplication`. Public construction and deserialization can still represent the
+/// status for graph replay. External callers cannot mint `SupersedeAuthority` or construct
+/// `SupersedeApplication` directly; they can request the transition only through
+/// `SupersedeSession`, whose operator authorization remains an INV-C11 deployment
+/// responsibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum DecisionStatus {

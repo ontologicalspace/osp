@@ -132,6 +132,34 @@ impl SupersedeAuthority {
             _private: (),
         }
     }
+
+    /// Crate-private production issuer (PR #50). `SupersedeSession`'ın tek production caller
+    /// olduğu authority üretim kapısı.
+    ///
+    /// **Capability confinement (structural):** external crate'ler bu metodu çağıramaz
+    /// (`pub(crate)`) → `SupersedeAuthority` dışarıda mint edilemez. INV-C4 artık C3'ün
+    /// `OperatorReviewSession` ile ulaştığı olgunluğa paralel: capability structurally
+    /// confined, `SupersedeSession` public entrypoint'tir, application dışarıda üretilemez.
+    ///
+    /// **Operator authorization (INV-C11, type-level DEĞİL):** `pub(crate)` external
+    /// confinement'i garanti eder ama osp-core içi diğer modüller de çağırabilir.
+    /// *"Preserving `SupersedeSession` as the sole in-crate production caller is a TCB
+    /// discipline."* Çağıranın gerçekten authorized operator olup olmadığı deployment/runtime
+    /// boundary'sinde kalır — tip sistemi insan kimliğini doğrulayamaz.
+    ///
+    /// **Level:** v1'de `Operator`. İleride ExplicitUser/WitnessedArchitectDecision gerekirse
+    /// `SupersedeSession::open_for_operator`'a düz-veri level *talebi* eklenir; capability
+    /// yine dışarı çıkmaz (session içeride mint eder).
+    ///
+    /// **`#[allow(dead_code)]` YOK:** production caller canlı koddur (SupersedeSession).
+    /// Allow eklemek maskelerdi — ileride session çağrısı yanlışlıkla koparsa dead-code
+    /// uyarısı sigorta olarak çalışmalı.
+    pub(crate) fn issue_for_supersede_session() -> Self {
+        Self {
+            level: SupersedeAuthorityLevel::Operator,
+            _private: (),
+        }
+    }
 }
 
 /// Gate context — INV-C4 authority + INV-C6 code evidence + ileride diğer capability'ler.

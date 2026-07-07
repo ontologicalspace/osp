@@ -36,7 +36,7 @@ Paper 3           ✅ v1.1 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52c
 
 Paper 3 **v1.1 public manuscript** — first-complete draft + Faz 8a real promotion + threat/limitations
 tightening + arXiv editorial pass tamam. **Zenodo evidence pack hazır** (README + MANIFEST), DOI'ler
-için draft deposit bekliyor. **752 test, 0 development marker, 367 kelime abstract.**
+için draft deposit bekliyor. **764 workspace test (osp-desktop hariç), 0 development marker, 367 kelime abstract.**
 
 ### Bu oturumda yapılanlar (PR #37-#42)
 
@@ -69,7 +69,7 @@ için draft deposit bekliyor. **752 test, 0 development marker, 367 kelime abstr
 | Faz 7 | Planlandı | Embedding + LLM-assisted candidate generation |
 | Faz 8 | Planlandı | Desktop integration (Project Reality Cockpit) |
 | **Faz 8a** | ✅ PR40-41 | OperatorReviewSession (INV-C12/C13 real promotion) + threat tightening |
-| **Faz 8b** | 🚧 PR49 | PR #48 ✅ (varyant + INV-C14). PR #49: `SupersedeApplication` + `apply_supersede` (INV-C15 atomic). Sırada: PR #50 `SupersedeSession`, PR #51 CLI `osp review` |
+| **Faz 8b** | 🚧 PR50 | PR #48 ✅ (varyant + INV-C14). PR #49 ✅ (`SupersedeApplication` + `apply_supersede`, INV-C15 atomic). PR #50: `SupersedeSession` + crate-private authority issuer (INV-C15 production invocation). Sırada: PR #51 CLI `osp review` |
 | Faz 8c | ✅ PR47 | promote_to_accepted kaldırma (legacy path migrate) |
 
 ### Invariant'lar (15 Paper 3'e özgü + INV-T2 boundary)
@@ -90,7 +90,7 @@ için draft deposit bekliyor. **752 test, 0 development marker, 367 kelime abstr
 
 ### Paper 3 kanıtları (Aşama 1 evidence freeze sertleştirildi)
 
-- 18 type-level trybuild compile-fail (11 Paper 3'e özgü: INV-C + INV-P)
+- **Frozen evidence snapshot (Aşama 1):** 18 type-level trybuild compile-fail (11 Paper 3'e özgü: INV-C + INV-P) — **current protocol envanteri 24** (Faz 8a/8b trybuild'leri sonrası; bkz. run-metadata.md current protocol tablosu)
 - 450+ osp-core testi, 13 golden fixture + **5 held-out adversarial** (4 held_out + 1 regression_anchored)
 - **E2E binding chain replay** (Adım 1 gerçek pipeline koşusu) — `e2e-binding-chain-replay.json`
 - **E2E rejected paths replay** (4 negatif yol: AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted) — `e2e-rejected-paths-replay.json`
@@ -176,13 +176,13 @@ Paper 3 v1.1 public manuscript — Zenodo yolunda.
 ```
 cargo test --workspace --exclude osp-desktop
 ```
-- osp-core: 494 unit + integration (Paper 1/2/3 birleşik, 22 type-level trybuild)
+- osp-core: 502 lib unit + 30 integration (anchoring_mvp/fixtures/evidence/heldout/typelevel) = 532; 24 type-level compile-fail (trybuild)
 - osp-analyzer: ~148 + 4 smoke
 - osp-llm-runtime: ~12
 - osp-cli: smoke
 - osp-mcp: 8 unit + 7 INV-T1 integration
 - osp-spike: ~32
-- Toplam: 752 test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
+- **Toplam: 764 workspace test (osp-desktop hariç)**, hepsi yeşil. Clippy pre-existing uyarılar mevcut (CI warning-only `|| true`); PR #50 değiştirdiği 5 anchoring src dosyasında 0 yeni uyarı.
 
 ## Önemli Commit'ler
 

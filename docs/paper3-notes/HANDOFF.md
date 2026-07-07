@@ -1,21 +1,23 @@
-# Paper 3 — Handoff Notu (Faz 8b sürecinde — PR #49 tamam)
+# Paper 3 — Handoff Notu (Faz 8b sürecinde — PR #50 review/merge bekliyor)
 
-> **Tarih:** 2026-07-07 (PR #49 implementasyonu sırasında güncellendi)
-> **Dal:** `faz8b-apply-supersede` (PR #49 branch)
-> **Base:** `main` (`a392191`, PR #48 merged)
-> **Durum:** Faz 8b ilerliyor — PR #48 (varyant + INV-C14) ✅ merged, PR #49 (`apply_supersede` + INV-C15) implementasyonda, PR #50 (`SupersedeSession`) sırada.
+> **Tarih:** 2026-07-08 (PR #50 review turu sonrası güncellendi)
+> **Dal:** `faz8b-supersede-session` (PR #50 branch, push edildi — CI başarılı)
+> **Base:** `main` (`a39f3c8`, PR #49 merged)
+> **Durum:** Faz 8b epistemik çekirdek tamam — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 (`SupersedeSession` + crate-private authority issuer) açık, kod + doğrulama + 2-tur review fix tamam, review/merge bekliyor. PR #51 (CLI `osp review`) sırada.
 
 ---
 
 ## Nerede duruyoruz
 
 Paper 3 (Concept Anchoring / Genesis Layer) **v1.1 public manuscript** + Faz 8a (OperatorReviewSession) +
-Faz 8c (legacy promote kaldırma) + PR #48 (varyant + INV-C14) tamam. **PR #49** Faz 8b'nin üretici
-yolunu ekler: `SupersedeApplication` + `apply_supersede` (INV-C15 atomic transition). PR #50
-(`SupersedeSession` + production authority issuer) sırada.
+Faz 8c (legacy promote kaldırma) + PR #48 (varyant + INV-C14) + PR #49 (`apply_supersede` + INV-C15 atomic) tamam.
+**PR #50** Faz 8b'nin production invocation organını ekler: `SupersedeSession` + crate-private authority issuer
+(INV-C15 production path). Faz 8b'nin üç PR'lık kemeri (varyant → atomik mekanizma → güvenilir sınır) bununla kapanır.
 
-**752 test, 0 regression** (PR #48 sonrası 730 + 22 yeni test). 24 trybuild (2 opacity eklendi).
-Zenodo DOI'leri canlı (P1/P2/P3/pack). arXiv ertelendi (Faz 8b tamamlansın diye).
+**osp-core lib: 502 test** (PR #49 sonrası 492 + 10 yeni SupersedeSession); **24 compile-fail** (değişmedi);
+**workspace total 764** (osp-desktop hariç); **0 regression**. PR #50 yeni compile-fail eklemez —
+`pub(crate)` issuer yapısal garanti olarak yeterli. Zenodo DOI'leri canlı (P1/P2/P3/pack).
+arXiv ertelendi (Faz 8b tamamlansın diye).
 
 ## PR #48 — ne yapıldı (bu oturumda)
 
@@ -80,20 +82,80 @@ Zenodo DOI'leri canlı (P1/P2/P3/pack). arXiv ertelendi (Faz 8b tamamlansın diy
 - Fingerprint stabil + direction-sensitive
 - serde round-trip + 2 opacity trybuild (C13-paralel boundary)
 
-## Sıradaki PR'lar (Faz 8b devam)
+## PR #50 — ne yapıldı (bu oturumda)
 
-### PR #50 — `SupersedeSession` + production authority issuer
-- Faz 8a `OperatorReviewSession` desenine paralel. `SupersedeApplication`'ı içeride üretir.
-- **Production `issue_for_supersede_session` ctor** (gate.rs'deki `#[cfg(test)]` issuer'lar
-  production'a taşınır; `SupersedeAuthority` hala Copy → "issuance-gated, not consumed").
-- **Candidate proposal kaderi (Review PR #49 tur 2):** pipeline `Supersedes` Candidate proposal
-  üretir → session inceler → apply. Proposal edge silinmez mi, promote mu edilir, askıda mı kalır?
-  PR #50 tasarım sorusu. apply_supersede committed edge ekler, matching Candidate edge'e dokunmaz.
-- **Halef kaderi (kayıt):** successor reject/deprecate edilirse superseded node'un kaderi ne?
-  PR #50-51 tasarım alanı.
+### Kod
+- **`SupersedeSession`** — Faz 8a `OperatorReviewSession` deseninin supersede aynası. Public
+  entrypoint; `SupersedeAuthority`'yi **içeride** mint eder (`issue_for_supersede_session`, crate-private),
+  `SupersedeApplication`'ı içeride üretir, token dışarı çıkmaz. `supersede()` authority parametresi
+  almaz. Sözleşme: *"token dışarı çıkmaz, application dışarıda üretilemez, session public entrypoint'tir,
+  store atomik geçişi korur, gerçek operator yetkilendirmesi deployment sınırında kalır."*
+- **`issue_for_supersede_session`** (gate.rs) — **crate-private** production issuer (public DEĞİL —
+  4-tur review mutabık). `pub(crate)` external capability confinement'i garanti eder; "sole in-crate
+  production caller" TCB/code-review discipline. `#[allow(dead_code)]` YOK (production caller canlı kod).
+- **`SupersedeSession::supersede` deterministic precedence** (1-11): basis mismatch → tek mainline_query
+  snapshot → currentness → çift freshness → counter checked_add (mutation öncesi) → internal authority
+  → application → store.apply_supersede (defense-in-depth) → counter assign (başarılı store op sonrası).
+- **`SupersedeError` genişletme** — `StaleSupersededBasis`/`StaleSuccessorBasis`/`SupersedeBasisMismatch`
+  (store ile aynı ad) /`SessionCounterExhausted`. `NodeDigest` doğrudan (serde derive etmiyor).
+- **`SupersedeApplication::new` cleanup** — `#[cfg_attr(not(test), allow(dead_code))]` kaldırıldı
+  (production caller SupersedeSession).
+- **Candidate proposal kaderi (kalıcı sözleşme — 4-tur review mutabık):** Opsiyon (a) — Candidate
+  `Supersedes` edge historical proposal provenance olarak korunur; başarılı session ayrı Accepted
+  lineage edge ekler, proposal edge'i promote/delamine ETMEZ (lane-sensitive separation). Kod (store.rs:737)
+  + test (review.rs) + paper (line 97) üçü zaten bunu söylüyordu; PR #50 yorumu kalıcı sözleşmeye çevirdi.
+
+### Testler (10 yeni SupersedeSession unit test, 0 failed)
+
+**Sayım metodolojisi (Review PR #50 tur 1 §P2):** tek "total" sayısı yerine kapsamlı döküm —
+kapsamlar karışmasın (PR #49 754 vs PR #50 762 tutarsızlığı ders).
+
+| Kapsam | Sayı |
+|---|---|
+| osp-core lib unit tests | 502 (PR #49 sonrası 492 + 10 yeni SupersedeSession) |
+| compile-fail cases (trybuild) | 24 (değişmedi) |
+| workspace cargo-test (osp-desktop hariç) | 764 passed |
+| yeni SupersedeSession unit tests | 10 |
+| downstream crate tests (cli/mcp/analyzer/spike) | yeşil |
+
+1. Mutlu yol (authority_level==Operator internal issuance kanıtı)
+2. Stale superseded basis (TOCTOU) + unchanged + counter==0
+3. Stale successor basis (TOCTOU) + unchanged + counter==0
+4. Basis endpoint mismatch + unchanged + counter==0
+5. **Store-rejection passthrough (Tur 3+4 §3)** — seed committed edge (B→A), session.supersede(A,C) →
+   `AlreadySuperseded` boxed, **downcast** ile doğrulanır + unchanged + counter==0
+6. Close summary (supersedes==1)
+7. Zero-supersede close (supersedes==0)
+8. A→B→C zincir (summary.supersedes==2, INV-C15 cardinalite)
+9. Candidate edge preserved (coexistence; opsiyon (a) lock)
+10. Counter exhaustion (u64::MAX → SessionCounterExhausted + unchanged)
+
+### 4-tur review disiplini ( metodolojik ders)
+Plan 4 tur review gördü; her tur mimari/claim doğruluğunu sıkıştırdı:
+- **Tur 1+2 bloklayıcı:** issuer `pub(crate)` (public DEĞİL), `supersede()` authority parametresiz,
+  token içeride mint, counter `checked_add`, Candidate proposal opsiyon (a).
+- **Tur 2 isim:** `SupersedeBasisMismatch` (store ile aynı ad); tazelik çift-katman kaydı.
+- **Tur 3:** capability confinement vs operator authorization ayrımı; `#[allow(dead_code)]` eklenmez;
+  passthrough testi; INV-C11 → PR #51; makale "three PRs earlier" düş.
+- **Tur 4:** "sole caller" TCB discipline; passthrough downcast; counter precedence session/store ayrımı;
+  snippet comment; `SupersedeSessionSummary` derive seti.
+
+**Tazelik çift-katman (kalıcı kayıt — Tur 2 §3):** digest karşılaştırma hem session'da (typed-error
+ergonomisi, erken) hem store'da (`StoreError::Stale*`, defense-in-depth) yaşar. Generic `S::Error`
+üzerinden store hatası pattern-match edilemediği için session erken kontrol eder. *Digest semantiği
+değişirse iki yer değişmeli (constraint-propagation hata sınıfı).*
+
+## Sıradaki PR'lar
 
 ### PR #51 — CLI `osp review` + desktop Cockpit
-- Operator-console surface. `OperatorReviewSession` + `SupersedeSession` interactive loop.
+- Operator-console (insana bakan) yüzey. `OperatorReviewSession` + `SupersedeSession` interactive loop.
+- **INV-C11 agent-surface negatif testi (kabul kriteri — PR #50 sözleşme kaydı):** CLI/console yüzeyi
+  eklenirken osp-mcp tool registry'de ve agent-facing API'de `open_for_operator`/`SupersedeSession`/supersede
+  yokluğu runtime assertion ile sabitlenir. Makale "must be enforced at the deployment surface" der
+  (enforcement claim değil). Şu an agent yüzeyinde supersede'e dair hiçbir şey yok — yokluğun yokluğunu
+  assert etmek boş küme üzerinde vacuous test olur; PR #51 yüzeyi tanımlayınca belirginleşir.
+- **Session'ın proposal'dan başlatılması (proposal→basis köprüsü):** PR #51+ tasarım alanı.
+- **Halef kaderi:** successor reject/deprecate edilirse superseded node'un kaderi ne? PR #51+ tasarım alanı.
 
 ## Model A (normatif sözleşme)
 
@@ -142,11 +204,11 @@ en değerli çıktı bu oldu.
 | Dosya | Açıklama |
 |---|---|
 | `docs/papers/paper3-concept-anchoring.md` | Paper 3 v1.1 + INV-C14/C15 (15 Paper-3 invariant) |
-| `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (gen commit `ef022a9`, baseline `481690d`) + current protocol (15) |
+| `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (gen commit `ef022a9`, baseline `481690d`) + current protocol (15, PR #50 production invocation) |
 | `crates/osp-core/src/anchoring/mod.rs` | `DecisionStatus` enum + helper'lar (`is_current_mainline`, `preserves_accepted_provenance`) |
-| `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + `apply_supersede` (INV-C15) + `audit_seq` (global) + cycle helper + 11 StoreError varyant |
-| `crates/osp-core/src/anchoring/review.rs` | `SupersedeApplication` + `PresentedSupersedeBasis` + `SupersedeRecord` + `supersede_basis_fingerprint` (4-lane) + 24 unit test (mutlu yol + error-path matrisi + zincir + consolidation + fingerprint + compile) |
-| `crates/osp-core/src/anchoring/gate.rs` | `SupersedeAuthorityLevel` serde derive (audit) |
+| `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + `apply_supersede` (INV-C15) + `audit_seq` (global) + cycle helper + 11 StoreError varyant + Candidate proposal provenance kalıcı sözleşme |
+| `crates/osp-core/src/anchoring/review.rs` | `OperatorReviewSession` + `DecisionApplication` + **`SupersedeSession` + `SupersedeSessionSummary` (PR #50)** + `SupersedeApplication` + `PresentedSupersedeBasis` + `SupersedeRecord` + `supersede_basis_fingerprint` (4-lane) + 47 unit test (mutlu yol + error-path matrisi + zincir + consolidation + fingerprint + session) |
+| `crates/osp-core/src/anchoring/gate.rs` | `SupersedeAuthorityLevel` serde derive (audit) + **`issue_for_supersede_session` crate-private issuer (PR #50)** |
 | `crates/osp-core/src/anchoring/scorer.rs` | 5. kol (SupersededAccepted = 0.4) |
 | `crates/osp-core/src/task_bridge.rs` | `is_current_mainline()` helper + regresyon testi |
 | `crates/osp-core/tests/anchoring_mvp.rs` | `status_from_str` fail-closed + parser testleri |
@@ -162,6 +224,7 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-🚧 **PR #49 branch'te (`faz8b-apply-supersede`), henüz push edilmedi.**
-- main: `a392191` (PR #48 merged — varyant + INV-C14)
-- PR #49: kod + test + dokü tamam, doğrulama sonrası push.
+✅ **PR #50 açık (`faz8b-supersede-session`, push edildi — CI başarılı), review/merge bekliyor.**
+- main: `a39f3c8` (PR #49 merged — `apply_supersede` + INV-C15 atomic)
+- PR #50 head: `c0c72d0` + dokü-fix turu. Kod (502 lib test, 0 yeni clippy) + 10 yeni test + dokü.
+- 4-tur plan review + 2-tur kod review tamam; iki reviewer da approve/merge verdi.
