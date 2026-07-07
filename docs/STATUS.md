@@ -90,7 +90,7 @@ için draft deposit bekliyor. **764 workspace test (osp-desktop hariç), 0 devel
 
 ### Paper 3 kanıtları (Aşama 1 evidence freeze sertleştirildi)
 
-- 18 type-level trybuild compile-fail (11 Paper 3'e özgü: INV-C + INV-P)
+- **Frozen evidence snapshot (Aşama 1):** 18 type-level trybuild compile-fail (11 Paper 3'e özgü: INV-C + INV-P) — **current protocol envanteri 24** (Faz 8a/8b trybuild'leri sonrası; bkz. run-metadata.md current protocol tablosu)
 - 450+ osp-core testi, 13 golden fixture + **5 held-out adversarial** (4 held_out + 1 regression_anchored)
 - **E2E binding chain replay** (Adım 1 gerçek pipeline koşusu) — `e2e-binding-chain-replay.json`
 - **E2E rejected paths replay** (4 negatif yol: AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted) — `e2e-rejected-paths-replay.json`

@@ -1,9 +1,9 @@
-# Paper 3 — Handoff Notu (Faz 8b sürecinde — PR #50 tamam)
+# Paper 3 — Handoff Notu (Faz 8b sürecinde — PR #50 review/merge bekliyor)
 
-> **Tarih:** 2026-07-07 (PR #50 implementasyonu sırasında güncellendi)
-> **Dal:** `faz8b-supersede-session` (PR #50 branch)
+> **Tarih:** 2026-07-08 (PR #50 review turu sonrası güncellendi)
+> **Dal:** `faz8b-supersede-session` (PR #50 branch, push edildi — CI başarılı)
 > **Base:** `main` (`a39f3c8`, PR #49 merged)
-> **Durum:** Faz 8b epistemik çekirdek tamam — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 (`SupersedeSession` + crate-private authority issuer) implementasyonda. PR #51 (CLI `osp review`) sırada.
+> **Durum:** Faz 8b epistemik çekirdek tamam — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 (`SupersedeSession` + crate-private authority issuer) açık, kod + doğrulama + 2-tur review fix tamam, review/merge bekliyor. PR #51 (CLI `osp review`) sırada.
 
 ---
 
@@ -120,8 +120,6 @@ kapsamlar karışmasın (PR #49 754 vs PR #50 762 tutarsızlığı ders).
 
 1. Mutlu yol (authority_level==Operator internal issuance kanıtı)
 2. Stale superseded basis (TOCTOU) + unchanged + counter==0
-1. Mutlu yol (authority_level==Operator internal issuance kanıtı)
-2. Stale superseded basis (TOCTOU) + unchanged + counter==0
 3. Stale successor basis (TOCTOU) + unchanged + counter==0
 4. Basis endpoint mismatch + unchanged + counter==0
 5. **Store-rejection passthrough (Tur 3+4 §3)** — seed committed edge (B→A), session.supersede(A,C) →
@@ -130,7 +128,7 @@ kapsamlar karışmasın (PR #49 754 vs PR #50 762 tutarsızlığı ders).
 7. Zero-supersede close (supersedes==0)
 8. A→B→C zincir (summary.supersedes==2, INV-C15 cardinalite)
 9. Candidate edge preserved (coexistence; opsiyon (a) lock)
-10. Counter exhaustion (u32::MAX → SessionCounterExhausted + unchanged)
+10. Counter exhaustion (u64::MAX → SessionCounterExhausted + unchanged)
 
 ### 4-tur review disiplini ( metodolojik ders)
 Plan 4 tur review gördü; her tur mimari/claim doğruluğunu sıkıştırdı:
@@ -226,7 +224,7 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-🚧 **PR #50 branch'te (`faz8b-supersede-session`), doğrulama sonrası push.**
+✅ **PR #50 açık (`faz8b-supersede-session`, push edildi — CI başarılı), review/merge bekliyor.**
 - main: `a39f3c8` (PR #49 merged — `apply_supersede` + INV-C15 atomic)
-- PR #50: kod (502 lib test, 0 yeni clippy) + 10 yeni test + dokü tamam.
-- 4-tur review tamam; merge öncesi checklist (Tur 4 §nihai karar) doğrulandı.
+- PR #50 head: `c0c72d0` + dokü-fix turu. Kod (502 lib test, 0 yeni clippy) + 10 yeni test + dokü.
+- 4-tur plan review + 2-tur kod review tamam; iki reviewer da approve/merge verdi.
