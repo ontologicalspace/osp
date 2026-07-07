@@ -14,9 +14,10 @@ Faz 8c (legacy promote kaldırma) + PR #48 (varyant + INV-C14) + PR #49 (`apply_
 **PR #50** Faz 8b'nin production invocation organını ekler: `SupersedeSession` + crate-private authority issuer
 (INV-C15 production path). Faz 8b'nin üç PR'lık kemeri (varyant → atomik mekanizma → güvenilir sınır) bununla kapanır.
 
-**762 test, 0 regression** (PR #49 sonrası 752 + 10 yeni SupersedeSession testi). 24 trybuild (değişmedi —
-PR #50 yeni compile-fail eklemez, `pub(crate)` issuer yapısal garanti olarak yeterli). Zenodo DOI'leri canlı
-(P1/P2/P3/pack). arXiv ertelendi (Faz 8b tamamlansın diye).
+**osp-core lib: 502 test** (PR #49 sonrası 492 + 10 yeni SupersedeSession); **24 compile-fail** (değişmedi);
+**workspace total 764** (osp-desktop hariç); **0 regression**. PR #50 yeni compile-fail eklemez —
+`pub(crate)` issuer yapısal garanti olarak yeterli. Zenodo DOI'leri canlı (P1/P2/P3/pack).
+arXiv ertelendi (Faz 8b tamamlansın diye).
 
 ## PR #48 — ne yapıldı (bu oturumda)
 
@@ -104,7 +105,21 @@ PR #50 yeni compile-fail eklemez, `pub(crate)` issuer yapısal garanti olarak ye
   lineage edge ekler, proposal edge'i promote/delamine ETMEZ (lane-sensitive separation). Kod (store.rs:737)
   + test (review.rs) + paper (line 97) üçü zaten bunu söylüyordu; PR #50 yorumu kalıcı sözleşmeye çevirdi.
 
-### Testler (10 yeni, 762 total, 0 failed)
+### Testler (10 yeni SupersedeSession unit test, 0 failed)
+
+**Sayım metodolojisi (Review PR #50 tur 1 §P2):** tek "total" sayısı yerine kapsamlı döküm —
+kapsamlar karışmasın (PR #49 754 vs PR #50 762 tutarsızlığı ders).
+
+| Kapsam | Sayı |
+|---|---|
+| osp-core lib unit tests | 502 (PR #49 sonrası 492 + 10 yeni SupersedeSession) |
+| compile-fail cases (trybuild) | 24 (değişmedi) |
+| workspace cargo-test (osp-desktop hariç) | 764 passed |
+| yeni SupersedeSession unit tests | 10 |
+| downstream crate tests (cli/mcp/analyzer/spike) | yeşil |
+
+1. Mutlu yol (authority_level==Operator internal issuance kanıtı)
+2. Stale superseded basis (TOCTOU) + unchanged + counter==0
 1. Mutlu yol (authority_level==Operator internal issuance kanıtı)
 2. Stale superseded basis (TOCTOU) + unchanged + counter==0
 3. Stale successor basis (TOCTOU) + unchanged + counter==0

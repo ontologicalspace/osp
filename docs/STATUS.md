@@ -36,7 +36,7 @@ Paper 3           ✅ v1.1 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52c
 
 Paper 3 **v1.1 public manuscript** — first-complete draft + Faz 8a real promotion + threat/limitations
 tightening + arXiv editorial pass tamam. **Zenodo evidence pack hazır** (README + MANIFEST), DOI'ler
-için draft deposit bekliyor. **762 test, 0 development marker, 367 kelime abstract.**
+için draft deposit bekliyor. **764 workspace test (osp-desktop hariç), 0 development marker, 367 kelime abstract.**
 
 ### Bu oturumda yapılanlar (PR #37-#42)
 
@@ -176,13 +176,13 @@ Paper 3 v1.1 public manuscript — Zenodo yolunda.
 ```
 cargo test --workspace --exclude osp-desktop
 ```
-- osp-core: 494 unit + integration (Paper 1/2/3 birleşik, 22 type-level trybuild)
+- osp-core: 502 lib unit + 30 integration (anchoring_mvp/fixtures/evidence/heldout/typelevel) = 532; 24 type-level compile-fail (trybuild)
 - osp-analyzer: ~148 + 4 smoke
 - osp-llm-runtime: ~12
 - osp-cli: smoke
 - osp-mcp: 8 unit + 7 INV-T1 integration
 - osp-spike: ~32
-- Toplam: 762 test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
+- **Toplam: 764 workspace test (osp-desktop hariç)**, hepsi yeşil. Clippy pre-existing uyarılar mevcut (CI warning-only `|| true`); PR #50 değiştirdiği 5 anchoring src dosyasında 0 yeni uyarı.
 
 ## Önemli Commit'ler
 

@@ -799,7 +799,7 @@ pub(crate) fn supersede_basis_fingerprint(basis: &PresentedSupersedeBasis) -> [u
 pub struct SupersedeSessionSummary {
     pub session_id: SessionId,
     pub operator: OperatorId,
-    pub supersedes: u32,
+    pub supersedes: u64,
 }
 
 /// Operator supersede oturumu — INV-C15 production invocation boundary'si.
@@ -826,7 +826,7 @@ pub struct SupersedeSession {
     session_id: SessionId,
     operator: OperatorId,
     opened_at: SystemTime,
-    supersedes: u32,
+    supersedes: u64,
 }
 
 impl SupersedeSession {
@@ -2476,7 +2476,7 @@ mod tests {
     }
 
     /// Counter exhaustion: supersedes=u64::MAX set → SessionCounterExhausted + store unchanged.
-    /// (Counter u32 → MAX set; checked_add overflow mutation öncesi yakalanır.)
+    /// checked_add overflow mutation öncesi yakalanır; counter yalnız başarılı store op sonrası assign edilir.
     #[test]
     fn supersede_session_counter_exhaustion_leaves_store_unchanged() {
         let mut store = store_with_two_accepted("RuleCandidate:Old", "RuleCandidate:New");
@@ -2485,19 +2485,8 @@ mod tests {
         let (mut session, basis) = session_with_basis(&store, &old, &new);
         let reason = NonEmptyExplanation::new("exhausted").unwrap();
 
-        // Counter'ı MAX'a zorla (field private → test için session'ı yeniden kuramayız;
-        // bunun yerine MAX+1 başarısız olana kadar supersede yapmak yerine, doğrudan
-        // checked_add overflow'ı tetiklemek için supersedes'ı MAX'a set eden bir helper yok.
-        // Bu yüzden u32::MAX supersede yapıp bir sonrakinde exhaust edelim — pratik değil.
-        //
-        // Alternatif: counter u32; bir supersede yap, sonra session'ı MAX-1'e getirmek
-        // yerine, test invariant'ı checked_add'in mutation öncesi olduğunu zaten gösterir.
-        // PR #49 audit_seq exhaustion testiyle aynı deseni uygula: audit_seq test helper
-        // store'da var (set_audit_seq_for_tests) ama session counter'da yok.
-        //
-        // Çözüm: counter overflow'u u32::MAX'ta tetikle — session.supersedes private field.
-        // Test modülü içinde olduğumuz için field erişimi: session.supersedes = u32::MAX.
-        session.supersedes = u32::MAX;
+        // Test modülü aynı dosyada olduğundan private field'a doğrudan erişilir.
+        session.supersedes = u64::MAX;
 
         let before = snapshot_store(&store);
         let err = session
@@ -2508,6 +2497,6 @@ mod tests {
             "got {err:?}"
         );
         assert_eq!(snapshot_store(&store), before, "store unchanged");
-        assert_eq!(session.supersedes, u32::MAX, "counter unchanged on error");
+        assert_eq!(session.supersedes, u64::MAX, "counter unchanged on error");
     }
 }

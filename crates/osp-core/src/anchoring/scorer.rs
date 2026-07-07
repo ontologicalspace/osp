@@ -190,8 +190,9 @@ impl AnchorScorer {
     /// Scores **current anchoring relevance** (operational impact), NOT epistemic
     /// confidence. `SupersededAccepted` < `Candidate` (no longer an active decision)
     /// but > `Deprecated` (preserves accepted provenance, replacement-lineage
-    /// semantics). The successor relation is established atomically by `apply_supersede`
-    /// (PR #49, INV-C15).
+    /// semantics). For nodes transitioned through `apply_supersede`, the successor
+    /// relation is established atomically (PR #49, INV-C15). Seeded/deserialized
+    /// states require the future persisted-graph validator.
     fn decision_status_score(
         &self,
         target_id: &crate::anchoring::types::ConceptNodeId,

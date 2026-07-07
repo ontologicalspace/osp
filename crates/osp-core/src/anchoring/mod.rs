@@ -141,8 +141,11 @@ pub enum PositionFamily {
 /// without current effectiveness. The successor-edge invariant is established atomically by
 /// `apply_supersede` (PR #49, INV-C15); the production invocation path is `SupersedeSession`
 /// (PR #50), which mints `SupersedeAuthority` internally and creates the opaque
-/// `SupersedeApplication` (public construction and deserialization can still represent the
-/// status for graph replay, but no external caller can drive the transition).
+/// `SupersedeApplication`. Public construction and deserialization can still represent the
+/// status for graph replay. External callers cannot mint `SupersedeAuthority` or construct
+/// `SupersedeApplication` directly; they can request the transition only through
+/// `SupersedeSession`, whose operator authorization remains an INV-C11 deployment
+/// responsibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum DecisionStatus {
