@@ -145,7 +145,7 @@ en değerli çıktı bu oldu.
 | `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (gen commit `ef022a9`, baseline `481690d`) + current protocol (15) |
 | `crates/osp-core/src/anchoring/mod.rs` | `DecisionStatus` enum + helper'lar (`is_current_mainline`, `preserves_accepted_provenance`) |
 | `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + `apply_supersede` (INV-C15) + `audit_seq` (global) + cycle helper + 11 StoreError varyant |
-| `crates/osp-core/src/anchoring/review.rs` | `SupersedeApplication` + `PresentedSupersedeBasis` + `SupersedeRecord` + `supersede_basis_fingerprint` (4-lane) + 21 unit test (mutlu yol + error-path matrisi + zincir + consolidation + fingerprint) |
+| `crates/osp-core/src/anchoring/review.rs` | `SupersedeApplication` + `PresentedSupersedeBasis` + `SupersedeRecord` + `supersede_basis_fingerprint` (4-lane) + 24 unit test (mutlu yol + error-path matrisi + zincir + consolidation + fingerprint + compile) |
 | `crates/osp-core/src/anchoring/gate.rs` | `SupersedeAuthorityLevel` serde derive (audit) |
 | `crates/osp-core/src/anchoring/scorer.rs` | 5. kol (SupersededAccepted = 0.4) |
 | `crates/osp-core/src/task_bridge.rs` | `is_current_mainline()` helper + regresyon testi |

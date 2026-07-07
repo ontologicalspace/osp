@@ -285,7 +285,7 @@ impl DecisionApplication {
 /// tarih okur. `PresentedBasis` Serialize-only kalırken bunun serbest olması
 /// kasıtlı: yasağın ilkesi "yeniden inşa = yetki sahteciliği"; bir karar kaydını
 /// diskten okumak yetki vermez.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DecisionRecord {
     pub seq: u64,
     pub session_id: SessionId,
@@ -685,7 +685,7 @@ impl SupersedeApplication {
 /// Supersede ledger kaydı. `DecisionRecord` deseni: Deserialize serbest
 /// (diskten okumak yetki vermez, tarih okur). Global `audit_seq` (decision ile paylaşımlı)
 /// → cross-ledger total order. Full graph replay ayrıca initial snapshot + event stream ister.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SupersedeRecord {
     pub seq: u64,
     pub session_id: SessionId,
@@ -1193,23 +1193,32 @@ mod tests {
         )
     }
 
-    /// INV-C15 "On Err unchanged" kanıtı: error-path testleri için tam store-state snapshot.
-    /// ConceptGraph (PartialEq) + audit_seq + iki ledger uzunluğu + edge sayısı.
-    /// Review PR #49: her error path mutation öncesi ve sonrası aynı snapshot olmalı.
-    fn snapshot_store(store: &InMemoryAnchorStore) -> (usize, usize, usize, usize, u64) {
-        (
-            store.graph().node_count(), // node sayısı
-            store.graph().edge_count(), // edge sayısı (Candidate + committed)
-            store.decision_ledger().len(),
-            store.supersede_ledger().len(),
-            store.audit_seq_for_tests(),
-        )
+    /// INV-C15 "On Err unchanged" kanıtı: error-path testleri için **tam store-state** snapshot.
+    /// ConceptGraph (Clone+PartialEq — node/edge *içeriği*: status, from/to/kind, aliases),
+    /// iki ledger Vec'leri (kayıt *içeriği*: operator/reason/digest), audit_seq.
+    /// Review PR #49 tur 6: count/length değil gerçek içerik — status/from-to/kayıt mutasyonu
+    /// yakalanır (sayılar aynı kalıp içerik değişirse bu snapshot kırılır).
+    #[derive(Debug, Clone, PartialEq)]
+    struct StoreSnapshot {
+        graph: crate::anchoring::types::ConceptGraph,
+        decision_ledger: Vec<DecisionRecord>,
+        supersede_ledger: Vec<SupersedeRecord>,
+        audit_seq: u64,
+    }
+
+    fn snapshot_store(store: &InMemoryAnchorStore) -> StoreSnapshot {
+        StoreSnapshot {
+            graph: store.graph().clone(),
+            decision_ledger: store.decision_ledger(),
+            supersede_ledger: store.supersede_ledger(),
+            audit_seq: store.audit_seq_for_tests(),
+        }
     }
 
     /// "On Err unchanged" assertion: apply_supersede hatadan sonra store değişmemeli.
-    /// (ConceptGraph PartialEq + audit_seq + ledger uzunlukları; Review PR #49 tur 5.)
+    /// Tam graph + iki ledger + audit_seq (Review PR #49 tur 6: içerik karşılaştırması).
     fn assert_store_unchanged_by_supersede_error(
-        before: (usize, usize, usize, usize, u64),
+        before: StoreSnapshot,
         store: &InMemoryAnchorStore,
         ctx: &str,
     ) {
@@ -1549,13 +1558,14 @@ mod tests {
         };
         let old = ConceptNodeId("RuleCandidate:Old".into());
         let new = ConceptNodeId("TaskCandidate:New".into());
-        let err = store
-            .apply_supersede(supersede_app(&store, &old, &new))
-            .unwrap_err();
+        let app = supersede_app(&store, &old, &new);
+        let before = snapshot_store(&store);
+        let err = store.apply_supersede(app).unwrap_err();
         assert!(
             matches!(err, StoreError::IncompatibleSupersedeEndpoints { .. }),
             "got {err:?}"
         );
+        assert_store_unchanged_by_supersede_error(before, &store, "IncompatibleSupersedeEndpoints");
     }
 
     /// Stale superseded basis: basis derle, superseded'ın canonical'ını değiştir → StaleSupersededBasis.
@@ -1717,8 +1727,8 @@ mod tests {
         assert_store_unchanged_by_supersede_error(before, &store, "SupersedeBasisMismatch");
     }
 
-    /// Cycle: B→A committed edge seed'le, sonra B→A denenir (superseded=B, successor=A).
-    /// Cycle check: superseded(B) →* successor(A)? B→A zaten var → cycle!
+    /// Cycle: mevcut committed edge B→A; attempted edge A→B (superseded=B, successor=A).
+    /// Cycle check: superseded(B) →* successor(A)? B→A zaten var → A→B eklemek cycle oluşturur.
     /// (Production API dizisiyle unreachable — her Supersedes hedefi atomik SupersededAccepted
     /// olur; seeded/deserialized adversarial graph savunması.)
     #[test]
@@ -1726,7 +1736,7 @@ mod tests {
         let mut store = store_with_two_accepted("RuleCandidate:A", "RuleCandidate:B");
         let a = ConceptNodeId("RuleCandidate:A".into());
         let b = ConceptNodeId("RuleCandidate:B".into());
-        // B→A committed edge seed'le (A henüz Accepted — gerçek apply yapmadık).
+        // Mevcut committed edge: B→A (A henüz Accepted — gerçek apply yapmadık).
         store.graph_mut().insert_edge(ConceptEdge {
             from: b.clone(),
             to: a.clone(),
@@ -1734,7 +1744,7 @@ mod tests {
             decision_status: DecisionStatus::Accepted,
             explanation: Some(NonEmptyExplanation::new("seeded B→A").unwrap()),
         });
-        // B→A denenir (superseded=B, successor=A): B→*A yolu zaten var → cycle.
+        // Attempted edge: A→B (superseded=B, successor=A). B→*A yolu zaten var → cycle.
         let app = supersede_app(&store, &b, &a);
         let before = snapshot_store(&store);
         let err = store.apply_supersede(app).unwrap_err();
