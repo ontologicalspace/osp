@@ -44,10 +44,12 @@ arXiv 1 hafta ertelendi (Faz 8b tamamlansın diye).
 - `superseded_accepted_cannot_seed_task_genesis` (task_bridge regresyonu)
 
 ### Dokü
-- Makale (`paper3-concept-anchoring.md`): INV-C14 propagation — type-enforced sayısı **10'da kaldı**,
-  C14 ayrı paragrafta (runtime-asserted). C4 satırı gelecek kipinde successor invariant.
+- Makale (`paper3-concept-anchoring.md`): INV-C14 propagation — **genesis** type-enforced sayısı
+  **10'da kaldı** (toplam type-enforced 13: 10 genesis + 3 lowering); C14 tek runtime-asserted.
+  C14 ayrı paragrafta. C4 satırı gelecek kipinde successor invariant.
 - Roadmap (`paper3-design.md`): enum (5 varyant), lane model (mutual-exclusion cümlesi).
-- `run-metadata.md`: **iki başlık** — frozen snapshot (13, commit `481690d`'nin gerçeği) +
+- `run-metadata.md`: **iki başlık** — frozen snapshot (evidence generation commit `ef022a9`,
+  baseline `481690d`) +
   current protocol (14, INV-C14 sonrası envanter).
 
 ## Sıradaki PR'lar (Faz 8b devam)
@@ -91,15 +93,17 @@ ayrımına geçilmeli (`DecisionOutcome + LifecycleStatus`) ve `preserves_accept
 ## 6 tur review'ün metodolojik dersi (HANDOFF'a işlendi)
 
 > **Çok-yüzeyli sayım propagation en riskli işlem sınıfıdır.** "Bir enum varyantı ekleyelim"
-> boyutundaki bir iş, dokunduğu her yüzeyi (tip, skor, sorgu semantiği, parser, invariant sayımı,
+> boyutundaki bir iş, dokunduğu her yüzey (tip, skor, sorgu semantiği, parser, invariant sayımı,
 > frozen kanıt sınırı, makale dili, downstream uyumluluk) bilinçli kararlara bağlamayı gerektirir.
-> Niteleyici taşımazsan "type-enforced 10" ile "runtime C14" çelişir; frozen koşu ile current
-> envanter karışır. **Evidence-first disiplini:** kanıt neyi kanıtladıysa metni onu söylemeli.
+> "genesis type-enforced 10" ile "Paper-3 total type-enforced 13" ayrımı korunmazsa, lowering
+> invariant'ları taksonomide kaybolur; frozen koşu ile current envanter karışır.
+> **Evidence-first disiplini:** kanıt neyi kanıtladıysa metni onu söylemeli.
+> **Mekanik PR checklist maddesi:** `grep -rn "type-enforced" docs/` — tüm yüzeyleri tek seferde yakalar.
 
 Altı turda yakalananlar (sıra ile):
 1. mainline_query dar kalmalı (geçmiş ayrı kapı)
 2. `status_from_str` fail-open (bloklayıcı) + INV-C14 exact-set test
-3. type-enforced sayısı 10'da (C14 runtime) + run-metadata frozen/current ayrımı
+3. genesis type-enforced sayısı 10'da (toplam type-enforced 13: 10 genesis + 3 lowering; C14 runtime) + run-metadata frozen/current ayrımı
 4. enum sona eklenmeli + deterministic sıralama + enum helper'ları merkezileştir
 5. task_bridge helper kullanmalı + merge-base CI-dayanıklılık
 6. task_bridge regresyon testi + `#[should_panic(expected=...)]` + run-metadata doğruluk
@@ -122,7 +126,7 @@ en değerli çıktı bu oldu.
 | Dosya | Açıklama |
 |---|---|
 | `docs/papers/paper3-concept-anchoring.md` | Paper 3 v1.1 + INV-C14 (14 Paper-3 invariant) |
-| `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (13) + current protocol (14) |
+| `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (gen commit `ef022a9`, baseline `481690d`) + current protocol (14) |
 | `crates/osp-core/src/anchoring/mod.rs` | `DecisionStatus` enum + helper'lar (`is_current_mainline`, `preserves_accepted_provenance`) |
 | `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + helper-refactor + NotPromotableFrom kol |
 | `crates/osp-core/src/anchoring/review.rs` | `apply_decision_rejects_superseded_accepted_not_promotable` testi |

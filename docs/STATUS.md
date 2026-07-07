@@ -74,9 +74,10 @@ için draft deposit bekliyor. **730 test, 0 development marker, 367 kelime abstr
 
 ### Invariant'lar (14 Paper 3'e özgü + INV-T2 boundary)
 
-> INV-C14 (Faz 8b PR #48) eklendi: acceptance-provenance projection. 10 type-enforced +
-> 1 runtime projection (C14) + 3 lowering (P1-P3) = 14. Compile-fail count 22'de sabit
-> (C14 runtime-asserted, type-level değil).
+> INV-C14 (Faz 8b PR #48) eklendi: acceptance-provenance projection.
+> 10 type-enforced genesis + 3 type-enforced lowering/translation (P1-P3) + 1 runtime projection (C14) = 14.
+> Toplam type-enforced = 13 (10 genesis + 3 lowering); INV-C14 tek runtime-asserted invariant.
+> Compile-fail count 22'de sabit (C14 runtime-asserted, type-level değil).
 
 - **INV-C1..C8** (anchoring): embedding proposes/C2 family/C3 candidate isolation/C4 supersede authority/C5 inferred not accepted/C6 code intent hypothesis/C7 explainable/C8 canonicalized
 - **INV-C12** (informed acceptance): basis karar anındaki içeriğe karşı node_digest tazelik-doğrulamalı (TOCTOU)
@@ -180,7 +181,7 @@ cargo test --workspace --exclude osp-desktop
 - osp-cli: smoke
 - osp-mcp: 8 unit + 7 INV-T1 integration
 - osp-spike: ~32
-- Toplam: 719+ test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
+- Toplam: 730 test, hepsi yeşil (`RUSTFLAGS="-D warnings"` temiz)
 
 ## Önemli Commit'ler
 
