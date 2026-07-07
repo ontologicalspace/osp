@@ -1,23 +1,22 @@
-# Paper 3 — Handoff Notu (Faz 8b sürecinde — PR #50 review/merge bekliyor)
+# Paper 3 — Handoff Notu (Faz 8b epistemik çekirdek TAMAM)
 
-> **Tarih:** 2026-07-08 (PR #50 review turu sonrası güncellendi)
-> **Dal:** `faz8b-supersede-session` (PR #50 branch, push edildi — CI başarılı)
-> **Base:** `main` (`a39f3c8`, PR #49 merged)
-> **Durum:** Faz 8b epistemik çekirdek tamam — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 (`SupersedeSession` + crate-private authority issuer) açık, kod + doğrulama + 2-tur review fix tamam, review/merge bekliyor. PR #51 (CLI `osp review`) sırada.
+> **Tarih:** 2026-07-08 (PR #51 merge sonrası güncellendi)
+> **Dal:** `main` (`4195ced`, PR #51 merged)
+> **Durum:** Faz 8b epistemik çekirdek TAMAM — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation), PR #51 ✅ (`mainline_query` deterministic ordering). C4, C3'ün simetrisine ulaştı (iki geçiş türü, iki session, iki record, tek audit_seq). Sırada: makale stale temizliği → arXiv; CLI `osp review` (insana bakan yüzey) ileride.
 
 ---
 
 ## Nerede duruyoruz
 
 Paper 3 (Concept Anchoring / Genesis Layer) **v1.1 public manuscript** + Faz 8a (OperatorReviewSession) +
-Faz 8c (legacy promote kaldırma) + PR #48 (varyant + INV-C14) + PR #49 (`apply_supersede` + INV-C15 atomic) tamam.
-**PR #50** Faz 8b'nin production invocation organını ekler: `SupersedeSession` + crate-private authority issuer
-(INV-C15 production path). Faz 8b'nin üç PR'lık kemeri (varyant → atomik mekanizma → güvenilir sınır) bununla kapanır.
+Faz 8c (legacy promote kaldırma) + PR #48 (varyant + INV-C14) + PR #49 (`apply_supersede` + INV-C15 atomic) +
+PR #50 (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation) + PR #51
+(`mainline_query` deterministic ordering) tamam. Faz 8b'in dört PR'lık kemeri (varyant → atomik mekanizma →
+güvenilir sınır → deterministik projeksiyon) kapandı.
 
-**osp-core lib: 502 test** (PR #49 sonrası 492 + 10 yeni SupersedeSession); **24 compile-fail** (değişmedi);
-**workspace total 764** (osp-desktop hariç); **0 regression**. PR #50 yeni compile-fail eklemez —
-`pub(crate)` issuer yapısal garanti olarak yeterli. Zenodo DOI'leri canlı (P1/P2/P3/pack).
-arXiv ertelendi (Faz 8b tamamlansın diye).
+**osp-core lib: 503 test** (PR #50: 492→502 +10 SupersedeSession; PR #51: 502→503 +1 determinism);
+**24 compile-fail** (değişmedi); **workspace total 765** (osp-desktop hariç); **0 regression**.
+Zenodo DOI'leri canlı (P1/P2/P3/pack). arXiv — Faz 8b epistemik çekirdek kapandığı için dondurma gerek yok artık.
 
 ## PR #48 — ne yapıldı (bu oturumda)
 
@@ -224,7 +223,7 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-✅ **PR #50 açık (`faz8b-supersede-session`, push edildi — CI başarılı), review/merge bekliyor.**
-- main: `a39f3c8` (PR #49 merged — `apply_supersede` + INV-C15 atomic)
-- PR #50 head: `c0c72d0` + dokü-fix turu. Kod (502 lib test, 0 yeni clippy) + 10 yeni test + dokü.
-- 4-tur plan review + 2-tur kod review tamam; iki reviewer da approve/merge verdi.
+✅ **Faz 8b epistemik çekirdek TAMAM — tüm PR'ler merged.**
+- main: `4195ced` (PR #51 merged — `mainline_query` deterministic ordering)
+- PR #48-#51 merged; Faz 8b'in dört PR'lık kemeri kapandı (varyant → atomik mekanizma → güvenilir sınır → deterministik projeksiyon).
+- 503 lib test + 24 compile-fail + workspace 765 yeşil.

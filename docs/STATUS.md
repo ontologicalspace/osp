@@ -69,7 +69,7 @@ için draft deposit bekliyor. **764 workspace test (osp-desktop hariç), 0 devel
 | Faz 7 | Planlandı | Embedding + LLM-assisted candidate generation |
 | Faz 8 | Planlandı | Desktop integration (Project Reality Cockpit) |
 | **Faz 8a** | ✅ PR40-41 | OperatorReviewSession (INV-C12/C13 real promotion) + threat tightening |
-| **Faz 8b** | 🚧 PR50 | PR #48 ✅ (varyant + INV-C14). PR #49 ✅ (`SupersedeApplication` + `apply_supersede`, INV-C15 atomic). PR #50: `SupersedeSession` + crate-private authority issuer (INV-C15 production invocation). Sırada: PR #51 CLI `osp review` |
+| **Faz 8b** | ✅ PR48-51 | PR #48 ✅ (varyant + INV-C14). PR #49 ✅ (`apply_supersede` + INV-C15 atomic). PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation). PR #51 ✅ (`mainline_query` deterministic ordering, agent-facing reproducibility). Epistemik çekirdek tamam; sıradaki: CLI `osp review` (insana bakan yüzey) |
 | Faz 8c | ✅ PR47 | promote_to_accepted kaldırma (legacy path migrate) |
 
 ### Invariant'lar (15 Paper 3'e özgü + INV-T2 boundary)
