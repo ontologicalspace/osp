@@ -139,6 +139,19 @@ impl NodeDigest {
     pub fn get(self) -> u64 {
         self.0
     }
+
+    /// Raw u64'ten digest kur — operator yüzeyinde (CLI `--basis-digest`) "gördüğünü
+    /// onaylama" tazelik karşılaştırması için. FNV tabanlı non-cryptographic bir
+    /// **karşılaştırma değeri**dir — authority/capability token DEĞİL, güvenlik önlemi
+    /// de değildir; amaç, operator'ın gördüğü basis ile karar anındaki basis'in aynı
+    /// olduğunu doğrulamak (INV-C12 informed-acceptance precondition).
+    ///
+    /// `pub(crate)` değil çünkü CLI operator yüzeyi (`osp review`) osp-core dışında;
+    /// `PresentedBasis::compile` hala tek **üretim** yolu (bu yalnızca re-construction
+    /// için karşılaştırma değeri üretir).
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

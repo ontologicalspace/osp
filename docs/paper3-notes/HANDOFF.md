@@ -1,8 +1,8 @@
-# Paper 3 — Handoff Notu (Faz 8b epistemik çekirdek TAMAM)
+# Paper 3 — Handoff Notu (CLI `osp review` vertical slice TAMAM)
 
-> **Tarih:** 2026-07-08 (PR #51 merge sonrası güncellendi)
-> **Dal:** `main` (`4195ced`, PR #51 merged)
-> **Durum:** Faz 8b epistemik çekirdek TAMAM — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation), PR #51 ✅ (`mainline_query` deterministic ordering). C4, C3'ün simetrisine ulaştı (iki geçiş türü, iki session, iki record, tek audit_seq). **Paper 3 v1.3 Zenodo'da canlı** (`10.5281/zenodo.21251821`, CC-BY-4.0). Sırada: PR #52 merge → arXiv (endorsement: Jimenez e-postası hazır); CLI `osp review` (insana bakan yüzey) ileride.
+> **Tarih:** 2026-07-08 (CLI osp review branch — commit öncesi)
+> **Dal:** `feat/cli-osp-review` (main `5ed13c1` üstünde)
+> **Durum:** Faz 8b epistemik çekirdek TAMAM (PR #48-51) + **CLI `osp review` vertical slice TAMAM** — persistent `AnchorStoreSnapshot` round-trip (graph + iki ledger + audit_seq, invariant-validasyonlu restore), Candidate-only seed bootstrap, one-shot subcommand'lar + interactive wizard (tek `ReviewApplicationService`), basis-freshness (`expected_basis_digest`), INV-C11 MCP/CLI surface ayrımı (negatif test). Paper 3 v1.3 Zenodo'da canlı (`10.5281/zenodo.21251821`); markdown kaynak INV-C11 + known gap güncellendi (v1.4 derive adayı). Sırada: supersession operator surface (ayrı PR), analysis → candidate bridge (sonraki milestone).
 
 ---
 
@@ -144,17 +144,82 @@ ergonomisi, erken) hem store'da (`StoreError::Stale*`, defense-in-depth) yaşar.
 üzerinden store hatası pattern-match edilemediği için session erken kontrol eder. *Digest semantiği
 değişirse iki yer değişmeli (constraint-propagation hata sınıfı).*
 
-## Sıradaki PR'lar
+## CLI `osp review` vertical slice — ne yapıldı (bu dalda)
 
-### PR #51 — CLI `osp review` + desktop Cockpit
-- Operator-console (insana bakan) yüzey. `OperatorReviewSession` + `SupersedeSession` interactive loop.
-- **INV-C11 agent-surface negatif testi (kabul kriteri — PR #50 sözleşme kaydı):** CLI/console yüzeyi
-  eklenirken osp-mcp tool registry'de ve agent-facing API'de `open_for_operator`/`SupersedeSession`/supersede
-  yokluğu runtime assertion ile sabitlenir. Makale "must be enforced at the deployment surface" der
-  (enforcement claim değil). Şu an agent yüzeyinde supersede'e dair hiçbir şey yok — yokluğun yokluğunu
-  assert etmek boş küme üzerinde vacuous test olur; PR #51 yüzeyi tanımlayınca belirginleşir.
-- **Session'ın proposal'dan başlatılması (proposal→basis köprüsü):** PR #51+ tasarım alanı.
-- **Halef kaderi:** successor reject/deprecate edilirse superseded node'un kaderi ne? PR #51+ tasarım alanı.
+### osp-core (`crates/osp-core/src/anchoring/`)
+- **`AnchorStoreSnapshot`** + **`SnapshotError`** (`store.rs`/`mod.rs` re-export) — kalıcı store snapshot
+  (graph + decision_records + supersede_records + audit_sequence). `ConceptGraphSnapshot` (yalnız graph)
+  genişletmesi; restore invariant-validasyonlu.
+- **`NodeDigest::from_raw(u64)`** (`review.rs`) — CLI `--basis-digest` için. FNV non-crypto tazelik
+  karşılaştırma değeri (güvenlik önlemi DEĞİL, capability token DEĞİL); `PresentedBasis::compile` hala
+  tek üretim yolu.
+- **`InMemoryAnchorStore::export_snapshot`** + **`restore_snapshot`** — export canonical sıralı
+  (nodes→NodeId, edges→(source,kind,target), records→audit_seq) → bit-identik + JSON diff okunabilir.
+  Restore: graph schema + node uniqueness + edge endpoints + record→node existence (tek yönlü —
+  seed_trusted Accepted ledger'sız) + record→status forward integrity + dense audit_seq (union unique +
+  {1..N} + ==N) + INV-C15 üç yönlü triangulation (committed edge ↔ record ↔ status, lane-sensitive,
+  cycle absence, successor chain geçerli).
+- **`restore_trusted_snapshot` deprecated** + **`restore_graph_only_for_trusted_bootstrap`** açık-ad
+  wrapper (graph-only, ledger/audit_seq discard — persistence restoration için DEĞİL).
+
+### osp-cli (`crates/osp-cli/src/`)
+- **`store_io.rs`** — `PersistedStore` envelope (revision + store_schema_version + snapshot) + `StoreLock`
+  (fs4 OS-level advisory, sabit `.lock` dosyası, process-death'ta release) + `atomic_replace` (aynı dizin
+  tmp → fsync → dir sync → Windows `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` / POSIX rename).
+- **`application/repository.rs`** — `ReviewStoreRepository` trait + `FileReviewStore`. `mutate()` tek
+  persistent transaction: lock → reload → validate → op → **revision R+1 serialize öncesi** → atomic
+  save. One-shot ve interactive aynı yol.
+- **`application/review.rs`** — `ReviewApplicationService` (query/mutation ayrımı). `ReviewMutationCommand`
+  `expected_basis_digest` precondition (lock altında — yeni TOCTOU yok). Session'ın StaleBasis'i
+  tautolojik ama zararsız.
+- **`seed_file.rs`** — `CandidateSeedFile` DTO (nodes-only; status/id alanları yok, `deny_unknown_fields`,
+  duplicate canonical kontrolü, id kind+canonical'dan türetilir). Candidate hard-code → illegal state
+  unrepresentable.
+- **`commands/graph.rs`** — `osp graph init/status/validate` (Candidate-only bootstrap, existing → fail,
+  post-init restore-validasyon).
+- **`commands/review.rs`** — `osp review list/show/accept/reject` (confirmation: TTY basis göster +
+  `[y/N]`; non-TTY/`--yes` → `--basis-digest` zorunlu). `--operator` zorunlu (mutation), `$OSP_OPERATOR`
+  fallback, generic "operator" default yok.
+- **`review_session.rs`** — interactive wizard (generic `R: BufRead, W: Write`; her mutation `mutate()`,
+  gösterilen basis korunur).
+
+### osp-mcp (`crates/osp-mcp/tests/`)
+- **`inv_c11_agent_surface.rs`** — dar adlandırma. Statik kaynak taraması: MCP source'da review/supersede
+  authority tool literal'ları + `open_for_operator`/`SupersedeSession::open_for_operator` çağrıları yokluğu.
+  "Partial deployment-surface regression test, not process-level isolation proof."
+
+### Testler (0 regression)
+- **osp-core lib:** 503 → 521 (+18 AnchorStoreSnapshot test: round-trip, dense audit_seq, C15 üç yönlü
+  violation matrisi, canonical bit-identik, forward integrity, successor chain, lane-sensitivity).
+- **osp-cli:** 17 unit (store_io 4, repository 3, seed_file 6, review_session 3, +1) + 11 integration
+  (graph init/status/validate, review list/accept, stale basis, restart-safe, operator requirement,
+  corrupt store, JSON output).
+- **osp-mcp:** +2 INV-C11 agent-surface regression.
+
+### Paper güncellemesi (`docs/papers/paper3-concept-anchoring.md`)
+- **INV-C11 (:279, :297):** CLI operator-facing / MCP agent-facing yeniden sınıflandırma ("CLI çağıran
+  operator" DEME — attribution, auth deployment boundary).
+- **Known gap (:93):** "closed for evaluated `AnchorStoreSnapshot` path" (triangulation); alternate
+  backends equivalent validation.
+- **§10 limitation + §11.3 future work:** CLI `osp review` evaluated; supersession surface + Cockpit +
+  remaining sessions future work.
+- **PR/Faz YOK** paper prose'ta — "evaluated artifact" dili. paper3.tex (dist) eski v1.3; derive aracı
+  sonraki revizyonda senkronize eder.
+
+## Sıradaki işler
+
+### Supersession operator surface (ayrı PR)
+- `osp review supersede <old> <new>` + interactive lineage preview. Snapshot formatı zaten supersession'ı
+  kapsar (üretmez ama restore eder + show görüntüler). Bu PR persistence/repo/seed altyapısını yeniden kullanır.
+
+### Analysis → candidate bridge (sonraki milestone)
+- `AnalysisResult → CandidateBatch → GraphSeed` projection protocol. Acceptance kriterleri (persistent
+  review lifecycle) geçti; şimdi candidate üretim kaynağı. Ayrı `feat(anchor): project analyzer output`.
+
+### Diğer
+- **TUI v2:** dialoguer/rustyline, fuzzy, renk (v1 stdio yeterli).
+- **Snapshot content-digest** (v2): elle JSON düzenleme tahrifatı için.
+- **arXiv:** v1.3 epistemik çekirdek tamam; CLI surface sonraki revizyon (v1.4) adayı.
 
 ## Model A (normatif sözleşme)
 
@@ -205,12 +270,19 @@ en değerli çıktı bu oldu.
 | `docs/papers/paper3-concept-anchoring.md` | Paper 3 v1.3 + INV-C14/C15 (15 Paper-3 invariant) |
 | `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (gen commit `ef022a9`, baseline `481690d`) + current protocol (15, PR #50 production invocation) |
 | `crates/osp-core/src/anchoring/mod.rs` | `DecisionStatus` enum + helper'lar (`is_current_mainline`, `preserves_accepted_provenance`) |
-| `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + `apply_supersede` (INV-C15) + `audit_seq` (global) + cycle helper + 11 StoreError varyant + Candidate proposal provenance kalıcı sözleşme |
-| `crates/osp-core/src/anchoring/review.rs` | `OperatorReviewSession` + `DecisionApplication` + **`SupersedeSession` + `SupersedeSessionSummary` (PR #50)** + `SupersedeApplication` + `PresentedSupersedeBasis` + `SupersedeRecord` + `supersede_basis_fingerprint` (4-lane) + 47 unit test (mutlu yol + error-path matrisi + zincir + consolidation + fingerprint + session) |
+| `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + `apply_supersede` (INV-C15) + `audit_seq` (global) + cycle helper + 11 StoreError varyant + **`AnchorStoreSnapshot` + `SnapshotError` + `export_snapshot`/`restore_snapshot` (validate_snapshot + has_committed_supersedes_cycle) + `restore_graph_only_for_trusted_bootstrap` (deprecate wrapper) + 18 snapshot test** |
+| `crates/osp-core/src/anchoring/review.rs` | `OperatorReviewSession` + `DecisionApplication` + **`SupersedeSession` + `SupersedeSessionSummary` (PR #50)** + `SupersedeApplication` + `PresentedSupersedeBasis` + `SupersedeRecord` + `supersede_basis_fingerprint` (4-lane) + **`NodeDigest::from_raw` (CLI --basis-digest)** + 47 unit test |
 | `crates/osp-core/src/anchoring/gate.rs` | `SupersedeAuthorityLevel` serde derive (audit) + **`issue_for_supersede_session` crate-private issuer (PR #50)** |
 | `crates/osp-core/src/anchoring/scorer.rs` | 5. kol (SupersededAccepted = 0.4) |
 | `crates/osp-core/src/task_bridge.rs` | `is_current_mainline()` helper + regresyon testi |
 | `crates/osp-core/tests/anchoring_mvp.rs` | `status_from_str` fail-closed + parser testleri |
+| `crates/osp-cli/src/store_io.rs` | **`PersistedStore` envelope + `StoreLock` (fs4) + `atomic_replace` (Windows MoveFileEx / POSIX rename) + read/write_persisted_store** |
+| `crates/osp-cli/src/application/` | **`repository.rs` (`ReviewStoreRepository` + `FileReviewStore`, tek persistent transaction) + `review.rs` (`ReviewApplicationService`, query/mutation, expected_basis_digest)** |
+| `crates/osp-cli/src/seed_file.rs` | **`CandidateSeedFile` DTO (nodes-only, deny_unknown_fields, id derive, Candidate hard-code)** |
+| `crates/osp-cli/src/commands/{graph,review}.rs` | **`osp graph init/status/validate` + `osp review list/show/accept/reject/session`** |
+| `crates/osp-cli/src/review_session.rs` | **interactive wizard (generic R/W)** |
+| `crates/osp-cli/tests/review_flow.rs` | **11 integration test (stale basis, restart-safe, operator, corrupt, canonical)** |
+| `crates/osp-mcp/tests/inv_c11_agent_surface.rs` | **INV-C11 agent-surface regression (static source scan)** |
 
 ## Kullanıcıya not
 
@@ -223,12 +295,13 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-✅ **Faz 8b epistemik çekirdek TAMAM — tüm PR'ler merged. v1.3 Zenodo'da canlı.**
-- main: `4195ced` (PR #51 merged — `mainline_query` deterministic ordering)
-- PR #48-#51 merged; Faz 8b'in dört PR'lık kemeri kapandı (varyant → atomik mekanizma → güvenilir sınır → deterministik projeksiyon).
-- 503 lib test + 24 compile-fail + workspace 765 yeşil.
+✅ **Faz 8b epistemik çekirdek + CLI `osp review` vertical slice TAMAM.**
+- main: `5ed13c1` (PR #52 merged — stale cleanup + paper3 artifact üretim aracı).
+- `feat/cli-osp-review` dalı: CLI `osp review` (accept/reject + persistent AnchorStoreSnapshot).
+- Faz 8b PR #48-51 merged; CLI osp review bu dalda (commit öncesi).
+- **521 lib test** (503 → 521, +18 AnchorStoreSnapshot) + **24 compile-fail** + **osp-cli 17 unit + 11 integration** + **osp-mcp +2 INV-C11** yeşil.
 
-## Yayın durumu (v1.3)
+## Yayın durumu (v1.3 → v1.4 adayı)
 
 **Paper 3 v1.3 Zenodo'da yayımlandı** — Faz 8b supersession vocabulary tamam.
 

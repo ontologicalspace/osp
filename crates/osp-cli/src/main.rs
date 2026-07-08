@@ -9,8 +9,13 @@
 
 use clap::{Parser, Subcommand};
 
+mod application;
 mod commands;
+mod errors;
 mod mock_llm;
+mod review_session;
+mod seed_file;
+mod store_io;
 
 /// OSP — Ontological Space Protocol CLI (truth surface).
 #[derive(Parser, Debug)]
@@ -40,6 +45,16 @@ enum Commands {
     },
     /// Evidence ledger export.
     Evidence(commands::EvidenceArgs),
+    /// Concept graph işlemleri (init, status, validate) — Candidate-only bootstrap.
+    Graph {
+        #[command(subcommand)]
+        action: GraphAction,
+    },
+    /// Operator review (list, show, accept, reject) — Candidate → Accepted/Rejected.
+    Review {
+        #[command(subcommand)]
+        action: ReviewAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -56,6 +71,30 @@ enum TaskAction {
     View(commands::TaskViewArgs),
 }
 
+#[derive(Subcommand, Debug)]
+enum GraphAction {
+    /// Candidate seed JSON → trusted store (nodes-only bootstrap).
+    Init(commands::graph::GraphInitArgs),
+    /// Store durumu (node/edge/ledger counts, audit_seq).
+    Status(commands::graph::GraphStatusArgs),
+    /// Restore + invariant-validasyon (read-only).
+    Validate(commands::graph::GraphValidateArgs),
+}
+
+#[derive(Subcommand, Debug)]
+enum ReviewAction {
+    /// Candidate lane'i listele.
+    List(commands::review::ReviewListArgs),
+    /// Node detayı + basis digest (Candidate için).
+    Show(commands::review::ReviewShowArgs),
+    /// Candidate → Accepted (OperatorReviewSession, informed basis).
+    Accept(commands::review::ReviewAcceptArgs),
+    /// Candidate → Rejected.
+    Reject(commands::review::ReviewRejectArgs),
+    /// Interactive review wizard (argümansız `osp review`).
+    Session(commands::review::ReviewSessionArgs),
+}
+
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
@@ -69,5 +108,17 @@ fn main() -> anyhow::Result<()> {
             TaskAction::View(args) => commands::run_task_view(args),
         },
         Commands::Evidence(args) => commands::run_evidence_export(args),
+        Commands::Graph { action } => match action {
+            GraphAction::Init(args) => commands::graph::run_graph_init(args),
+            GraphAction::Status(args) => commands::graph::run_graph_status(args),
+            GraphAction::Validate(args) => commands::graph::run_graph_validate(args),
+        },
+        Commands::Review { action } => match action {
+            ReviewAction::List(args) => commands::review::run_review_list(args),
+            ReviewAction::Show(args) => commands::review::run_review_show(args),
+            ReviewAction::Accept(args) => commands::review::run_review_accept(args),
+            ReviewAction::Reject(args) => commands::review::run_review_reject(args),
+            ReviewAction::Session(args) => commands::review::run_review_session(args),
+        },
     }
 }

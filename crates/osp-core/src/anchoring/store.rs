@@ -113,6 +113,102 @@ pub enum StoreError {
     AuditSequenceExhausted,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// AnchorStoreSnapshot + SnapshotError — kalıcı store snapshot (Faz: CLI osp review)
+//
+// `ConceptGraphSnapshot` (types.rs) yalnız graph'ı taşır; `restore_trusted_snapshot`
+// bu yüzden ledger/audit_seq'i DISCARD eder (graph-only bootstrap). Kalıcı operator
+// review için tüm state gerekir: graph + decision ledger + supersede ledger + audit_seq.
+//
+// `restore_snapshot` invariant-validasyon yapar — "persistence epistemic gate'leri
+// bypass etmemeli" (Paper 3 §9.3). Bu, paper3'ün "representable-but-not-transitioned
+// nodes remain a known gap for a future persisted-graph validator" gap'ini evaluated
+// `AnchorStoreSnapshot` path için kapatır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+use crate::anchoring::review::{DecisionRecord, SupersedeRecord};
+
+/// Kalıcı store snapshot — graph + iki ledger + audit_seq. `ConceptGraphSnapshot`'ın
+/// (yalnız graph) genişletilmiş hali; `restore_snapshot` ile geri yüklenir.
+///
+/// **audit_seq semantiği:** last-used (her mutation `checked_add(1)` üretip assign eder).
+/// Boş ledger → 0; N kayıt → sequence kümesi tam `{1..N}`, `audit_seq == N`.
+///
+/// **Serialization:** `export_snapshot` canonical sıralı üretir (nodes→NodeId ascending,
+/// edges→(source,kind,target), records→audit_seq) — bit-identik + JSON diff okunabilir.
+///
+/// **schema_version outer'da değil:** `ConceptGraphSnapshot`'ın inner `schema_version`'ı
+/// korunur; store-seviye migration (ileride) CLI envelope'unda (`PersistedStore`).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AnchorStoreSnapshot {
+    pub graph: crate::anchoring::types::ConceptGraphSnapshot,
+    /// INV-C13 append-only decision ledger.
+    pub decision_records: Vec<DecisionRecord>,
+    /// INV-C15 append-only supersede ledger. `decision_records` ile global `audit_seq` paylaşır.
+    pub supersede_records: Vec<SupersedeRecord>,
+    /// Global audit sequence — iki ledger paylaşımlı (cross-ledger total order).
+    pub audit_sequence: u64,
+}
+
+/// `restore_snapshot` validasyon hatası. Tüm snapshot-level invariant ihlalleri tek
+/// tipte toplanır (inner `ConceptGraphSnapshot.schema_version` mismatch dahil) —
+/// CLI eşlemesi temiz kalır (R4 küçük not).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SnapshotError {
+    #[error("snapshot graph schema version uyumsuz: expected={expected}, found={found}")]
+    GraphSchemaMismatch { expected: u32, found: u32 },
+    #[error("duplicate node id in snapshot: {0}")]
+    DuplicateNodeId(ConceptNodeId),
+    #[error("edge endpoint node not found: {0}")]
+    EdgeEndpointNotFound(ConceptNodeId),
+    #[error("decision record references missing node: {0}")]
+    DecisionRecordNodeMissing(ConceptNodeId),
+    #[error("supersede record references missing node: {0}")]
+    SupersedeRecordNodeMissing(ConceptNodeId),
+    /// record varsa target status ile uyumlu olmalı (forward integrity, R3#4).
+    /// seed_trusted istisnası: Accepted node record'suz olabilir; ama record varsa
+    /// status tutarlı olmalı.
+    #[error(
+        "decision record {seq} decision={decision:?} inconsistent with node status {status:?}"
+    )]
+    DecisionStatusInconsistent {
+        seq: u64,
+        decision: crate::anchoring::review::DecisionKind,
+        status: DecisionStatus,
+    },
+    #[error("supersede record {seq} inconsistent: superseded status {superseded_status:?}, successor status {successor_status:?}")]
+    SupersedeStatusInconsistent {
+        seq: u64,
+        superseded_status: DecisionStatus,
+        successor_status: DecisionStatus,
+    },
+    /// Aynı node için en fazla 1 reviewed accept/reject record (reopen yok — schema v1).
+    #[error(
+        "duplicate reviewed decision record for node {node}: seq {first_seq} and {second_seq}"
+    )]
+    DuplicateReviewedRecord {
+        node: ConceptNodeId,
+        first_seq: u64,
+        second_seq: u64,
+    },
+    /// audit_seq yoğunluk ihlali (R3#8): union'da unique + contiguous + == max.
+    #[error("audit sequence not dense: expected {expected}, found {found}")]
+    AuditSequenceNotDense { expected: u64, found: u64 },
+    #[error("audit sequence has duplicate: {0}")]
+    AuditSequenceDuplicate(u64),
+    /// INV-C15 üç yönlü triangulation: committed Supersedes edge ↔ SupersedeRecord ↔ status.
+    #[error("supersede triangulation mismatch: committed edge pairs != record pairs")]
+    SupersedeTriangulationMismatch,
+    #[error("superseded node {0} has no committed incoming Supersedes edge")]
+    SupersedeMissingIncomingEdge(ConceptNodeId),
+    #[error("node {0} has multiple committed incoming Supersedes edges")]
+    SupersedeMultipleIncomingEdges(ConceptNodeId),
+    #[error("committed Supersedes edge target {0} is not SupersededAccepted")]
+    SupersedeEdgeTargetNotSuperseded(ConceptNodeId),
+    #[error("supersede cycle detected in committed edges")]
+    SupersedeCycle,
+}
+
 /// `PresentedBasis`'in deterministic fingerprint'i → `[u8; 32]`.
 /// `DecisionRecord.basis_fingerprint` için. v1'de FNV-based (harici crate yok);
 /// audit kayıt bütünlüğü için yeterli, cryptographic security değil (doc'a not).
@@ -310,7 +406,37 @@ impl InMemoryAnchorStore {
     /// Snapshot `schema_version` mevcut `SCHEMA_VERSION` ile eşleşmeli; değilse
     /// `StoreError::InvalidSnapshotVersion`. Trusted restore boundary'nin en hassas
     /// kapısı — Accepted node içerebilir, o yüzden version mismatch reject.
+    /// **Deprecated** — graph-only trusted bootstrap. **Decision ve supersession
+    /// provenance'ı (ledger'lar) ve audit sequence'i discard eder.** Kalıcı operator
+    /// review restoration için [`restore_snapshot`](Self::restore_snapshot) kullanın;
+    /// bu method yalnızca graph-only bootstrap/test içindir.
+    ///
+    /// Açık ad: [`restore_graph_only_for_trusted_bootstrap`](Self::restore_graph_only_for_trusted_bootstrap).
+    #[deprecated(
+        since = "0.1.0",
+        note = "Graph-only trusted bootstrap. Do not use for persistence restoration; \
+                decision and supersession provenance and audit sequence are discarded. \
+                Use restore_snapshot for full-state restore."
+    )]
     pub fn restore_trusted_snapshot(
+        snapshot: crate::anchoring::types::ConceptGraphSnapshot,
+    ) -> Result<Self, StoreError> {
+        Self::restore_graph_only_for_trusted_bootstrap(snapshot)
+    }
+
+    /// Graph-only trusted bootstrap — `ConceptGraphSnapshot`'tan graph'ı geri yükler
+    /// (Faz 3, INV-C3 persistence boundary). `restore_trusted_snapshot`'ın açık-ad
+    /// versiyonu. **Ledger/audit_seq yüklenmez** (sıfırlanır); kalıcı restore için
+    /// [`restore_snapshot`](Self::restore_snapshot).
+    ///
+    /// INV-C3 persistence boundary: bu trusted restore path (operator-belirlenmiş
+    /// Accepted node'lar dahil). Normal mutation DEĞİL — snapshot deserialize.
+    ///
+    /// # schema_version kontrolü
+    /// Snapshot `schema_version` mevcut `SCHEMA_VERSION` ile eşleşmeli; değilse
+    /// `StoreError::InvalidSnapshotVersion`. Trusted restore boundary'nin en hassas
+    /// kapısı — Accepted node içerebilir, o yüzden version mismatch reject.
+    pub fn restore_graph_only_for_trusted_bootstrap(
         snapshot: crate::anchoring::types::ConceptGraphSnapshot,
     ) -> Result<Self, StoreError> {
         use crate::anchoring::types::ConceptGraphSnapshot;
@@ -327,6 +453,75 @@ impl InMemoryAnchorStore {
         for edge in snapshot.edges {
             s.graph.insert_edge(edge);
         }
+        Ok(s)
+    }
+
+    /// Store state'inin kalıcı snapshot'ını üretir (graph + iki ledger + audit_seq).
+    ///
+    /// **Canonical serialization:** nodes NodeId ascending, edges (source,kind,target),
+    /// records audit_seq sıralı — `ConceptGraph.nodes` HashMap nondeterministic sıra
+    /// verir; export deterministic olmalı (bit-identik round-trip + JSON diff okunabilirliği).
+    pub fn export_snapshot(&self) -> AnchorStoreSnapshot {
+        use crate::anchoring::types::ConceptGraphSnapshot;
+        // Canonical: nodes sorted by id.
+        let mut nodes: Vec<ConceptNode> = self.graph.nodes_iter().cloned().collect();
+        nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        // Canonical: edges sorted by (from, kind, to).
+        let mut edges: Vec<ConceptEdge> = self.graph.edges().cloned().collect();
+        edges.sort_by(|a, b| {
+            a.from
+                .0
+                .cmp(&b.from.0)
+                .then_with(|| format!("{:?}", a.kind).cmp(&format!("{:?}", b.kind)))
+                .then_with(|| a.to.0.cmp(&b.to.0))
+        });
+        // Canonical: records sorted by audit seq.
+        let mut decision_records = self.decision_ledger.clone();
+        decision_records.sort_by_key(|r| r.seq);
+        let mut supersede_records = self.supersede_ledger.clone();
+        supersede_records.sort_by_key(|r| r.seq);
+        AnchorStoreSnapshot {
+            graph: ConceptGraphSnapshot {
+                nodes,
+                edges,
+                schema_version: ConceptGraphSnapshot::SCHEMA_VERSION,
+            },
+            decision_records,
+            supersede_records,
+            audit_sequence: self.audit_seq,
+        }
+    }
+
+    /// Kalıcı snapshot'tan store'u geri yükler + invariant-validasyon yapar.
+    ///
+    /// **"Persistence does not weaken epistemic gates"** (Paper 3 §9.3): restore,
+    /// deserialize ile epistemic gate'leri bypass etmemeli. Bu method, paper3'ün
+    /// "representable-but-not-transitioned nodes remain a known gap for a future
+    /// persisted-graph validator" gap'ini evaluated `AnchorStoreSnapshot` path için
+    /// kapatır (alternate backends equivalent validation gerekir).
+    ///
+    /// Validasyon (restore sırasında):
+    /// - graph schema_version uyumu
+    /// - node ID uniqueness; edge endpoint existence
+    /// - record → node existence (tek yönlü — seed_trusted Accepted node'lar ledger'sız)
+    /// - record → status forward integrity (Accept→Accepted|SupersededAccepted;
+    ///   Reject→Rejected; Supersede→SupersededAccepted/Accepted)
+    /// - aynı node en fazla 1 reviewed accept/reject record (reopen yok — schema v1)
+    /// - audit_seq yoğunluk: union'da unique + `{1..N}` + `audit_seq == N`
+    /// - INV-C15 üç yönlü triangulation: committed Supersedes edge ↔ SupersedeRecord ↔ status
+    pub fn restore_snapshot(snapshot: AnchorStoreSnapshot) -> Result<Self, SnapshotError> {
+        validate_snapshot(&snapshot)?;
+        let graph = snapshot.graph;
+        let mut s = Self::new();
+        for node in graph.nodes {
+            s.graph.insert_node(node);
+        }
+        for edge in graph.edges {
+            s.graph.insert_edge(edge);
+        }
+        s.decision_ledger = snapshot.decision_records;
+        s.supersede_ledger = snapshot.supersede_records;
+        s.audit_seq = snapshot.audit_sequence;
         Ok(s)
     }
 
@@ -411,7 +606,7 @@ impl InMemoryAnchorStore {
             for e in self.graph.edges() {
                 if e.kind == ConceptEdgeKind::Supersedes
                     && e.decision_status == DecisionStatus::Accepted
-                    && &e.from == &current
+                    && e.from == current
                 {
                     stack.push(e.to.clone());
                 }
@@ -856,6 +1051,268 @@ impl crate::anchoring::types::ConceptPacketId {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// validate_snapshot — restore_snapshot'ın invariant-validasyonu
+//
+// "Persistence does not weaken epistemic gates" (Paper 3 §9.3). Bu fonksiyon,
+// paper3'ün "representable-but-not-transitioned nodes remain a known gap for a
+// future persisted-graph validator" gap'ini evaluated `AnchorStoreSnapshot` path
+// için kapatır. Alternate backends equivalent validation gerekir.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// `restore_snapshot` öncesi snapshot invariant-validasyonu. Tüm ihlaller
+/// `SnapshotError` olarak döner; mutation yapılmadan (pure validation).
+fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError> {
+    use crate::anchoring::review::DecisionKind;
+    use crate::anchoring::types::ConceptGraphSnapshot;
+    use crate::anchoring::ConceptEdgeKind;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // (1) Graph schema version.
+    if snapshot.graph.schema_version != ConceptGraphSnapshot::SCHEMA_VERSION {
+        return Err(SnapshotError::GraphSchemaMismatch {
+            expected: ConceptGraphSnapshot::SCHEMA_VERSION,
+            found: snapshot.graph.schema_version,
+        });
+    }
+
+    // Node id set + uniqueness.
+    let mut node_ids: BTreeSet<String> = BTreeSet::new();
+    for n in &snapshot.graph.nodes {
+        if !node_ids.insert(n.id.0.clone()) {
+            return Err(SnapshotError::DuplicateNodeId(n.id.clone()));
+        }
+    }
+    let node_exists = |id: &ConceptNodeId| node_ids.contains(&id.0);
+
+    // (2) Edge endpoint existence.
+    for e in &snapshot.graph.edges {
+        if !node_exists(&e.from) {
+            return Err(SnapshotError::EdgeEndpointNotFound(e.from.clone()));
+        }
+        if !node_exists(&e.to) {
+            return Err(SnapshotError::EdgeEndpointNotFound(e.to.clone()));
+        }
+    }
+
+    // Status lookup (id → status) — record→status forward integrity için.
+    let status_of: BTreeMap<String, DecisionStatus> = snapshot
+        .graph
+        .nodes
+        .iter()
+        .map(|n| (n.id.0.clone(), n.decision_status))
+        .collect();
+
+    // (3)(4) Decision record → node existence + status forward integrity.
+    let mut reviewed_nodes: BTreeMap<String, u64> = BTreeMap::new(); // node → first seq
+    for r in &snapshot.decision_records {
+        if !node_exists(&r.candidate_id) {
+            return Err(SnapshotError::DecisionRecordNodeMissing(
+                r.candidate_id.clone(),
+            ));
+        }
+        let status = status_of
+            .get(&r.candidate_id.0)
+            .copied()
+            .unwrap_or(DecisionStatus::Candidate);
+        let consistent = match r.decision {
+            DecisionKind::Accept => {
+                status == DecisionStatus::Accepted || status == DecisionStatus::SupersededAccepted
+            }
+            DecisionKind::Reject => status == DecisionStatus::Rejected,
+        };
+        if !consistent {
+            return Err(SnapshotError::DecisionStatusInconsistent {
+                seq: r.seq,
+                decision: r.decision,
+                status,
+            });
+        }
+        // (5) Aynı node en fazla 1 reviewed accept/reject record (reopen yok — schema v1).
+        if let Some(&prev) = reviewed_nodes.get(&r.candidate_id.0) {
+            return Err(SnapshotError::DuplicateReviewedRecord {
+                node: r.candidate_id.clone(),
+                first_seq: prev,
+                second_seq: r.seq,
+            });
+        }
+        reviewed_nodes.insert(r.candidate_id.0.clone(), r.seq);
+    }
+
+    // (3) Supersede record → node existence (her iki endpoint) + status forward integrity.
+    for r in &snapshot.supersede_records {
+        if !node_exists(&r.superseded) {
+            return Err(SnapshotError::SupersedeRecordNodeMissing(
+                r.superseded.clone(),
+            ));
+        }
+        if !node_exists(&r.successor) {
+            return Err(SnapshotError::SupersedeRecordNodeMissing(
+                r.successor.clone(),
+            ));
+        }
+        let sup_status = status_of
+            .get(&r.superseded.0)
+            .copied()
+            .unwrap_or(DecisionStatus::Candidate);
+        let suc_status = status_of
+            .get(&r.successor.0)
+            .copied()
+            .unwrap_or(DecisionStatus::Candidate);
+        // superseded SupersededAccepted; successor Accepted veya (chain'de) SupersededAccepted.
+        if sup_status != DecisionStatus::SupersededAccepted
+            || (suc_status != DecisionStatus::Accepted
+                && suc_status != DecisionStatus::SupersededAccepted)
+        {
+            return Err(SnapshotError::SupersedeStatusInconsistent {
+                seq: r.seq,
+                superseded_status: sup_status,
+                successor_status: suc_status,
+            });
+        }
+    }
+
+    // (6) audit_seq yoğunluk: union'da unique + {1..N} + audit_seq == N.
+    let mut all_seqs: Vec<u64> = snapshot
+        .decision_records
+        .iter()
+        .map(|r| r.seq)
+        .chain(snapshot.supersede_records.iter().map(|r| r.seq))
+        .collect();
+    all_seqs.sort_unstable();
+    let mut seen: BTreeSet<u64> = BTreeSet::new();
+    for &s in &all_seqs {
+        if !seen.insert(s) {
+            return Err(SnapshotError::AuditSequenceDuplicate(s));
+        }
+    }
+    let n = all_seqs.len() as u64;
+    for (idx, &s) in all_seqs.iter().enumerate() {
+        let expected = (idx as u64) + 1;
+        if s != expected {
+            return Err(SnapshotError::AuditSequenceNotDense { expected, found: s });
+        }
+    }
+    let expected_audit = n;
+    if snapshot.audit_sequence != expected_audit {
+        return Err(SnapshotError::AuditSequenceNotDense {
+            expected: expected_audit,
+            found: snapshot.audit_sequence,
+        });
+    }
+
+    // (7) INV-C15 üç yönlü triangulation: committed Supersedes edge ↔ SupersedeRecord ↔ status.
+    //     Lane-sensitive: yalnız committed (Accepted) Supersedes edge'leri sayılır.
+    //     Edge yönü: successor --Supersedes--> superseded (from=successor, to=superseded).
+    let committed_pairs: BTreeSet<(String, String)> = snapshot
+        .graph
+        .edges
+        .iter()
+        .filter(|e| {
+            e.kind == ConceptEdgeKind::Supersedes && e.decision_status == DecisionStatus::Accepted
+        })
+        .map(|e| (e.from.0.clone(), e.to.0.clone()))
+        .collect();
+    let recorded_pairs: BTreeSet<(String, String)> = snapshot
+        .supersede_records
+        .iter()
+        .map(|r| (r.successor.0.clone(), r.superseded.0.clone()))
+        .collect();
+    if committed_pairs != recorded_pairs {
+        return Err(SnapshotError::SupersedeTriangulationMismatch);
+    }
+
+    // (7a) Her SupersededAccepted node'un tam 1 committed incoming edge'i (cardinality).
+    let mut incoming: BTreeMap<String, u32> = BTreeMap::new();
+    for pair in &committed_pairs {
+        *incoming.entry(pair.1.clone()).or_default() += 1;
+    }
+    for n in &snapshot.graph.nodes {
+        if n.decision_status == DecisionStatus::SupersededAccepted {
+            let count = incoming.get(&n.id.0).copied().unwrap_or(0);
+            if count == 0 {
+                return Err(SnapshotError::SupersedeMissingIncomingEdge(n.id.clone()));
+            }
+            if count > 1 {
+                return Err(SnapshotError::SupersedeMultipleIncomingEdges(n.id.clone()));
+            }
+        }
+    }
+    // (7b) Her committed edge'in target'ı SupersededAccepted.
+    for pair in &committed_pairs {
+        let target_status = status_of
+            .get(&pair.1)
+            .copied()
+            .unwrap_or(DecisionStatus::Candidate);
+        if target_status != DecisionStatus::SupersededAccepted {
+            return Err(SnapshotError::SupersedeEdgeTargetNotSuperseded(
+                ConceptNodeId(pair.1.clone()),
+            ));
+        }
+    }
+
+    // (7c) Committed-only cycle absence: successor --Supersedes--> superseded graph'ında cycle yok.
+    //      DFS over committed edges only (lane-sensitive).
+    if has_committed_supersedes_cycle(&snapshot.graph.edges) {
+        return Err(SnapshotError::SupersedeCycle);
+    }
+
+    Ok(())
+}
+
+/// Committed (Accepted) Supersedes edge'lerinden oluşan graph'ta cycle var mı?
+/// Lane-sensitive: Candidate proposal edge'leri dahil DEĞİL. Edge yönü:
+/// successor --Supersedes--> superseded (from=successor, to=superseded).
+fn has_committed_supersedes_cycle(edges: &[crate::anchoring::types::ConceptEdge]) -> bool {
+    use crate::anchoring::ConceptEdgeKind;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    // Committed adjacency: from → [to, ...].
+    let mut adj: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for e in edges {
+        if e.kind == ConceptEdgeKind::Supersedes && e.decision_status == DecisionStatus::Accepted {
+            adj.entry(e.from.0.clone())
+                .or_default()
+                .push(e.to.0.clone());
+        }
+    }
+
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut stack: BTreeSet<String> = BTreeSet::new();
+
+    fn dfs(
+        node: &str,
+        adj: &BTreeMap<String, Vec<String>>,
+        visited: &mut BTreeSet<String>,
+        stack: &mut BTreeSet<String>,
+    ) -> bool {
+        if stack.contains(node) {
+            return true;
+        }
+        if visited.contains(node) {
+            return false;
+        }
+        visited.insert(node.to_string());
+        stack.insert(node.to_string());
+        if let Some(neighbors) = adj.get(node) {
+            for n in neighbors {
+                if dfs(n, adj, visited, stack) {
+                    return true;
+                }
+            }
+        }
+        stack.remove(node);
+        false
+    }
+
+    for start in adj.keys() {
+        if dfs(start, &adj, &mut visited, &mut stack) {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1021,8 +1478,8 @@ mod tests {
     }
 
     #[test]
-    fn restore_trusted_snapshot_roundtrip() {
-        // Faz 3: ConceptGraphSnapshot restore (INV-C3 trusted boundary)
+    fn restore_graph_only_for_trusted_bootstrap_roundtrip() {
+        // Faz 3: ConceptGraphSnapshot restore (INV-C3 trusted boundary — graph-only).
         use crate::anchoring::types::ConceptGraphSnapshot;
         let node = ConceptNode {
             id: ConceptNodeId("Concept:Payment".into()),
@@ -1037,7 +1494,8 @@ mod tests {
             edges: vec![],
             schema_version: 1,
         };
-        let store = InMemoryAnchorStore::restore_trusted_snapshot(snapshot).unwrap();
+        let store =
+            InMemoryAnchorStore::restore_graph_only_for_trusted_bootstrap(snapshot).unwrap();
         assert_eq!(store.node_count().unwrap(), 1);
         assert_eq!(
             store.mainline_query().unwrap().len(),
@@ -1047,15 +1505,16 @@ mod tests {
     }
 
     #[test]
-    fn restore_trusted_snapshot_rejects_version_mismatch() {
-        // Faz 3 #2: schema_version mismatch → InvalidSnapshotVersion
+    fn restore_graph_only_for_trusted_bootstrap_rejects_version_mismatch() {
+        // Faz 3 #2: schema_version mismatch → InvalidSnapshotVersion (graph-only).
         use crate::anchoring::types::ConceptGraphSnapshot;
         let snapshot = ConceptGraphSnapshot {
             nodes: vec![],
             edges: vec![],
             schema_version: 999, // mismatch
         };
-        let err = InMemoryAnchorStore::restore_trusted_snapshot(snapshot).unwrap_err();
+        let err =
+            InMemoryAnchorStore::restore_graph_only_for_trusted_bootstrap(snapshot).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -1420,4 +1879,437 @@ mod tests {
     // Not: apply_decision'ın SupersededAccepted terminal-statü defense-in-depth testi
     // review.rs test bloğunda — orada SessionId constructor erişilebilir (aynı modül).
     // (apply_decision_rejects_superseded_accepted_not_promotable)
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // AnchorStoreSnapshot — export/restore round-trip + invariant-validasyon testleri.
+    //
+    // "Persistence does not weaken epistemic gates" — restore_snapshot, deserialize
+    // ile epistemic gate'leri bypass etmemeli. paper3'ün "known gap" cümlesini
+    // (representable-but-not-transitioned nodes) evaluated AnchorStoreSnapshot path
+    // için kapatır.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    use crate::anchoring::review::{
+        OperatorId, OperatorReviewSession, PresentedBasis, SupersedeSession,
+    };
+    use crate::anchoring::NonEmptyExplanation;
+
+    /// Test yardımcı: belirli statüde node seed'le.
+    fn snap_node(id: &str, status: DecisionStatus) -> ConceptNode {
+        ConceptNode {
+            id: ConceptNodeId(id.into()),
+            canonical: id.split(':').nth(1).unwrap_or(id).into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: status,
+            position_family: PositionFamily::ConceptualIntent,
+        }
+    }
+
+    /// Test yardımcı: Candidate node'lu store (review için).
+    fn snap_store_with_candidates(ids: &[&str]) -> InMemoryAnchorStore {
+        let mut seed = GraphSeed::default();
+        for id in ids {
+            seed.rule_candidates
+                .push(snap_node(id, DecisionStatus::Candidate));
+        }
+        InMemoryAnchorStore::with_seed(seed)
+    }
+
+    /// Test yardımcı: Candidate'ı Accepted'e promote et (production path — OperatorReviewSession).
+    fn snap_accept(
+        store: &mut InMemoryAnchorStore,
+        id: &str,
+    ) -> crate::anchoring::review::DecisionRecord {
+        let nid = ConceptNodeId(id.into());
+        let basis = PresentedBasis::compile(store, &nid).expect("basis");
+        let reason = NonEmptyExplanation::new("test accept").unwrap();
+        let mut session = OperatorReviewSession::open_for_operator(OperatorId::new("test"));
+        session.accept(store, &nid, basis, reason).expect("accept")
+    }
+
+    /// Test yardımcı: Candidate'ı Rejected'a çevir (production path).
+    fn snap_reject(
+        store: &mut InMemoryAnchorStore,
+        id: &str,
+    ) -> crate::anchoring::review::DecisionRecord {
+        let nid = ConceptNodeId(id.into());
+        let basis = PresentedBasis::compile(store, &nid).expect("basis");
+        let reason = NonEmptyExplanation::new("test reject").unwrap();
+        let mut session = OperatorReviewSession::open_for_operator(OperatorId::new("test"));
+        session.reject(store, &nid, basis, reason).expect("reject")
+    }
+
+    /// Test yardımcı: supersede (production path — SupersedeSession).
+    fn snap_supersede(
+        store: &mut InMemoryAnchorStore,
+        superseded: &str,
+        successor: &str,
+    ) -> crate::anchoring::review::SupersedeRecord {
+        use crate::anchoring::review::PresentedSupersedeBasis;
+        let sup = ConceptNodeId(superseded.into());
+        let suc = ConceptNodeId(successor.into());
+        let basis = PresentedSupersedeBasis::compile(store, &sup, &suc).expect("basis");
+        let reason = NonEmptyExplanation::new("test supersede").unwrap();
+        let mut session = SupersedeSession::open_for_operator(OperatorId::new("test"));
+        session
+            .supersede(store, &sup, &suc, basis, reason)
+            .expect("supersede")
+    }
+
+    /// Mutlu yol round-trip: seed → accept/reject → supersede → export → restore → aynı state.
+    #[test]
+    fn snapshot_roundtrip_preserves_full_state() {
+        let mut store =
+            snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // seq 1
+        snap_reject(&mut store, "RuleCandidate:B"); // seq 2
+        snap_accept(&mut store, "RuleCandidate:C"); // seq 3
+        snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:C"); // seq 4
+
+        let before = snapshot_store(&store);
+        let exported = store.export_snapshot();
+        let restored = InMemoryAnchorStore::restore_snapshot(exported).expect("restore");
+        let after = snapshot_store(&restored);
+        assert_eq!(after.graph, before.graph, "graph identical");
+        assert_eq!(
+            after.decision_records, before.decision_records,
+            "decision ledger identical"
+        );
+        assert_eq!(
+            after.supersede_records, before.supersede_records,
+            "supersede ledger identical"
+        );
+        assert_eq!(
+            after.audit_sequence, before.audit_sequence,
+            "audit_seq preserved"
+        );
+    }
+
+    /// Snapshot yardımcı: full store-state karşılaştırma için.
+    fn snapshot_store(store: &InMemoryAnchorStore) -> AnchorStoreSnapshot {
+        store.export_snapshot()
+    }
+
+    /// audit_seq yoğunluk: boş ledger → audit_seq == 0.
+    #[test]
+    fn snapshot_empty_store_has_audit_seq_zero() {
+        let store = InMemoryAnchorStore::new();
+        let exported = store.export_snapshot();
+        assert_eq!(exported.audit_sequence, 0);
+        assert!(exported.decision_records.is_empty());
+        assert!(exported.supersede_records.is_empty());
+        InMemoryAnchorStore::restore_snapshot(exported).expect("empty restore");
+    }
+
+    /// audit_seq yoğunluk: union unique + {1..N} + == N. (production yollar dense üretir)
+    #[test]
+    fn snapshot_dense_audit_sequence_validates() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // seq 1
+        snap_reject(&mut store, "RuleCandidate:B"); // seq 2
+        let exported = store.export_snapshot();
+        assert_eq!(exported.audit_sequence, 2);
+        let seqs: Vec<u64> = exported.decision_records.iter().map(|r| r.seq).collect();
+        assert_eq!(seqs, vec![1, 2]);
+        InMemoryAnchorStore::restore_snapshot(exported).expect("dense validates");
+    }
+
+    /// audit_seq yoğunluk ihlali: audit_seq != max(seq) → reject.
+    #[test]
+    fn snapshot_audit_seq_mismatch_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:A"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // seq 1, audit_seq 1
+        let mut exported = store.export_snapshot();
+        exported.audit_sequence = 99; // yanlış
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(
+            err,
+            SnapshotError::AuditSequenceNotDense {
+                expected: 1,
+                found: 99
+            }
+        ));
+    }
+
+    /// audit_seq boşluk (gap) → reject.
+    #[test]
+    fn snapshot_audit_seq_gap_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // seq 1
+        snap_accept(&mut store, "RuleCandidate:B"); // seq 2
+        let mut exported = store.export_snapshot();
+        exported.decision_records[1].seq = 5; // boşluk
+        exported.audit_sequence = 5;
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::AuditSequenceNotDense { .. }),
+            "gap should reject, got {err:?}"
+        );
+    }
+
+    /// audit_seq duplicate → reject.
+    #[test]
+    fn snapshot_audit_seq_duplicate_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // seq 1
+        snap_accept(&mut store, "RuleCandidate:B"); // seq 2
+        let mut exported = store.export_snapshot();
+        exported.decision_records[1].seq = 1; // duplicate seq 1
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(err, SnapshotError::AuditSequenceDuplicate(1)));
+    }
+
+    /// record → node existence: kayıt olmayan node'a referans → reject.
+    #[test]
+    fn snapshot_decision_record_missing_node_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:A"]);
+        snap_accept(&mut store, "RuleCandidate:A");
+        let mut exported = store.export_snapshot();
+        exported.decision_records[0].candidate_id = ConceptNodeId("RuleCandidate:Ghost".into());
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(err, SnapshotError::DecisionRecordNodeMissing(_)));
+    }
+
+    /// record → status forward integrity: Accept record ama node Candidate → reject.
+    #[test]
+    fn snapshot_decision_status_inconsistent_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:A"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // node Accepted, record Accept
+        let mut exported = store.export_snapshot();
+        exported.graph.nodes[0].decision_status = DecisionStatus::Candidate; // node'u geri al
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::DecisionStatusInconsistent { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// C15 triangulation: SupersedeRecord var ama committed edge yok → reject.
+    #[test]
+    fn snapshot_supersede_missing_edge_rejected() {
+        let mut store =
+            snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"]);
+        snap_accept(&mut store, "RuleCandidate:A");
+        snap_accept(&mut store, "RuleCandidate:C");
+        snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:C"); // C→A edge + record
+        let mut exported = store.export_snapshot();
+        exported.graph.edges.retain(|e| {
+            !(e.kind == ConceptEdgeKind::Supersedes
+                && e.decision_status == DecisionStatus::Accepted)
+        });
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                SnapshotError::SupersedeTriangulationMismatch
+                    | SnapshotError::SupersedeMissingIncomingEdge(_)
+            ),
+            "got {err:?}"
+        );
+    }
+
+    /// C15 triangulation: committed edge var ama record yok → reject.
+    #[test]
+    fn snapshot_supersede_missing_record_rejected() {
+        let mut store =
+            snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"]);
+        snap_accept(&mut store, "RuleCandidate:A"); // seq 1
+        snap_accept(&mut store, "RuleCandidate:C"); // seq 2
+        snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:C"); // seq 3
+        let mut exported = store.export_snapshot();
+        exported.supersede_records.clear();
+        // audit_seq düzelt: supersede record (seq 3) kalktı → audit_seq 2 olmalı,
+        // böylece yoğunluk patlamadan triangulation mismatch yakalanır.
+        exported.audit_sequence = 2;
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(err, SnapshotError::SupersedeTriangulationMismatch));
+    }
+
+    /// C15: SupersededAccepted node ama incoming committed edge yok → reject.
+    #[test]
+    fn snapshot_superseded_without_incoming_edge_rejected() {
+        let mut store =
+            snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"]);
+        snap_accept(&mut store, "RuleCandidate:A");
+        snap_accept(&mut store, "RuleCandidate:C");
+        snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:C"); // seq 3 (accept, accept, supersede)
+        let mut exported = store.export_snapshot();
+        // Hem edge hem record kaldır, node SupersededAccepted kalsın.
+        exported.graph.edges.retain(|e| {
+            !(e.kind == ConceptEdgeKind::Supersedes
+                && e.decision_status == DecisionStatus::Accepted)
+        });
+        exported.supersede_records.clear();
+        // audit_seq düzelt: artık sadece 2 decision record (A accept seq 1, C accept seq 2),
+        // supersede seq 3 kalktı → audit_seq 2 olmalı.
+        exported.audit_sequence = 2;
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::SupersedeMissingIncomingEdge(_)),
+            "got {err:?}"
+        );
+    }
+
+    /// C15: lane-sensitivity — Candidate Supersedes edge cardinality/cycle'i etkilemiyor.
+    #[test]
+    fn snapshot_candidate_supersede_edge_does_not_affect_validation() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:Old", "RuleCandidate:New"]);
+        snap_accept(&mut store, "RuleCandidate:Old");
+        snap_accept(&mut store, "RuleCandidate:New");
+        // Candidate Supersedes edge ekle (apply_plan proposal simülasyonu).
+        store.graph_mut().insert_edge(ConceptEdge {
+            from: ConceptNodeId("RuleCandidate:New".into()),
+            to: ConceptNodeId("RuleCandidate:Old".into()),
+            kind: ConceptEdgeKind::Supersedes,
+            decision_status: DecisionStatus::Candidate,
+            explanation: Some(NonEmptyExplanation::new("candidate proposal").unwrap()),
+        });
+        let exported = store.export_snapshot();
+        InMemoryAnchorStore::restore_snapshot(exported).expect("candidate edge engellemedi");
+    }
+
+    /// Successor chain (C→B→A) geçerli — successor sonradan supersede edilmiş olabilir.
+    #[test]
+    fn snapshot_successor_chain_valid() {
+        let mut store =
+            snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"]);
+        snap_accept(&mut store, "RuleCandidate:A");
+        snap_accept(&mut store, "RuleCandidate:B");
+        snap_accept(&mut store, "RuleCandidate:C");
+        snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:B"); // B→A
+        snap_supersede(&mut store, "RuleCandidate:B", "RuleCandidate:C"); // C→B
+        let exported = store.export_snapshot();
+        let restored = InMemoryAnchorStore::restore_snapshot(exported).expect("chain valid");
+        assert_eq!(
+            restored
+                .graph()
+                .node(&ConceptNodeId("RuleCandidate:A".into()))
+                .unwrap()
+                .decision_status,
+            DecisionStatus::SupersededAccepted
+        );
+        assert_eq!(
+            restored
+                .graph()
+                .node(&ConceptNodeId("RuleCandidate:B".into()))
+                .unwrap()
+                .decision_status,
+            DecisionStatus::SupersededAccepted
+        );
+        assert_eq!(
+            restored
+                .graph()
+                .node(&ConceptNodeId("RuleCandidate:C".into()))
+                .unwrap()
+                .decision_status,
+            DecisionStatus::Accepted
+        );
+    }
+
+    /// Canonical serialization bit-identik: aynı store → aynı JSON bytes.
+    #[test]
+    fn snapshot_export_is_canonical_bit_identical() {
+        let mk = |order: &str| -> InMemoryAnchorStore {
+            let mut seed = GraphSeed::default();
+            let ids: &[&str] = if order == "forward" {
+                &[
+                    "RuleCandidate:Zeta",
+                    "RuleCandidate:Alpha",
+                    "RuleCandidate:Mid",
+                ]
+            } else {
+                &[
+                    "RuleCandidate:Mid",
+                    "RuleCandidate:Alpha",
+                    "RuleCandidate:Zeta",
+                ]
+            };
+            for id in ids {
+                seed.rule_candidates
+                    .push(snap_node(id, DecisionStatus::Candidate));
+            }
+            InMemoryAnchorStore::with_seed(seed)
+        };
+        let e1 = mk("forward").export_snapshot();
+        let e2 = mk("reverse").export_snapshot();
+        let j1 = serde_json::to_string(&e1).unwrap();
+        let j2 = serde_json::to_string(&e2).unwrap();
+        assert_eq!(
+            j1, j2,
+            "canonical serialization bit-identical regardless of insertion order"
+        );
+        let ids: Vec<&str> = e1.graph.nodes.iter().map(|n| n.id.0.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "RuleCandidate:Alpha",
+                "RuleCandidate:Mid",
+                "RuleCandidate:Zeta"
+            ]
+        );
+    }
+
+    /// Graph schema mismatch → SnapshotError.
+    #[test]
+    fn snapshot_graph_schema_mismatch_rejected() {
+        let store = InMemoryAnchorStore::new();
+        let mut exported = store.export_snapshot();
+        exported.graph.schema_version = 999;
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(
+            err,
+            SnapshotError::GraphSchemaMismatch {
+                expected: 1,
+                found: 999
+            }
+        ));
+    }
+
+    /// Duplicate node id → reject.
+    #[test]
+    fn snapshot_duplicate_node_id_rejected() {
+        let mut exported = InMemoryAnchorStore::new().export_snapshot();
+        let n = snap_node("RuleCandidate:Dup", DecisionStatus::Candidate);
+        exported.graph.nodes.push(n.clone());
+        exported.graph.nodes.push(n);
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(err, SnapshotError::DuplicateNodeId(_)));
+    }
+
+    /// Edge endpoint missing → reject.
+    #[test]
+    fn snapshot_edge_endpoint_missing_rejected() {
+        let mut exported = InMemoryAnchorStore::new().export_snapshot();
+        exported.graph.edges.push(ConceptEdge {
+            from: ConceptNodeId("RuleCandidate:Ghost".into()),
+            to: ConceptNodeId("RuleCandidate:Also".into()),
+            kind: ConceptEdgeKind::RelatedTo,
+            decision_status: DecisionStatus::Candidate,
+            explanation: None,
+        });
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(matches!(err, SnapshotError::EdgeEndpointNotFound(_)));
+    }
+
+    /// Supersede read-only korunma: round-trip sonrası supersede ledger + status korunuyor.
+    #[test]
+    fn snapshot_preserves_supersede_readonly() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:Old", "RuleCandidate:New"]);
+        snap_accept(&mut store, "RuleCandidate:Old");
+        snap_accept(&mut store, "RuleCandidate:New");
+        snap_supersede(&mut store, "RuleCandidate:Old", "RuleCandidate:New");
+        let exported = store.export_snapshot();
+        assert_eq!(exported.supersede_records.len(), 1);
+        let restored = InMemoryAnchorStore::restore_snapshot(exported).expect("restore");
+        assert_eq!(restored.supersede_ledger().len(), 1);
+        assert_eq!(
+            restored
+                .graph()
+                .node(&ConceptNodeId("RuleCandidate:Old".into()))
+                .unwrap()
+                .decision_status,
+            DecisionStatus::SupersededAccepted
+        );
+    }
 }

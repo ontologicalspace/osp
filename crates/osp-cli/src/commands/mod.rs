@@ -10,6 +10,25 @@ use osp_analyzer::contract::AnalysisConfig;
 use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
 
+pub mod graph;
+pub mod review;
+
+/// Output format (text/json).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputFormat {
+    Text,
+    Json,
+}
+
+impl OutputFormat {
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "json" => Self::Json,
+            _ => Self::Text,
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Komut argüman yapıları
 // ═══════════════════════════════════════════════════════════════════════════════

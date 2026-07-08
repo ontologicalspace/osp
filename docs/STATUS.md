@@ -69,7 +69,7 @@ için draft deposit bekliyor. **764 workspace test (osp-desktop hariç), 0 devel
 | Faz 7 | Planlandı | Embedding + LLM-assisted candidate generation |
 | Faz 8 | Planlandı | Desktop integration (Project Reality Cockpit) |
 | **Faz 8a** | ✅ PR40-41 | OperatorReviewSession (INV-C12/C13 real promotion) + threat tightening |
-| **Faz 8b** | ✅ PR48-51 | PR #48 ✅ (varyant + INV-C14). PR #49 ✅ (`apply_supersede` + INV-C15 atomic). PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation). PR #51 ✅ (`mainline_query` deterministic ordering, agent-facing reproducibility). Epistemik çekirdek tamam; sıradaki: CLI `osp review` (insana bakan yüzey) |
+| **Faz 8b** | ✅ PR48-51 + CLI | PR #48 ✅ (varyant + INV-C14). PR #49 ✅ (`apply_supersede` + INV-C15 atomic). PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation). PR #51 ✅ (`mainline_query` deterministic ordering). **CLI `osp review`** ✅ (`feat/cli-osp-review`): persistent `AnchorStoreSnapshot` round-trip (validate), Candidate-only seed, one-shot + interactive wizard (`ReviewApplicationService`), basis-freshness (`expected_basis_digest`), INV-C11 MCP/CLI surface ayrımı. Epistemik çekirdek + operator review yüzeyi tamam; sıradaki: supersession surface (ayrı PR), analysis bridge |
 | Faz 8c | ✅ PR47 | promote_to_accepted kaldırma (legacy path migrate) |
 
 ### Invariant'lar (15 Paper 3'e özgü + INV-T2 boundary)
