@@ -108,18 +108,10 @@ impl CandidateSeedFile {
 
 /// kind + canonical'dan node id türet (ConceptNodeKind prefix konvansiyonu).
 /// `store.rs`'teki `kind_from_id` ile simetrik (id → kind prefix → kind).
+/// `kind.as_prefix()` kullanılır — manuel mapping ID/kind uyumsuzluğu yaratır
+/// (örn. CodeEntityCandidate → "CodeEntity:" çakışması; Review 2.tur P1.2).
 fn derive_node_id(kind: ConceptNodeKind, canonical: &str) -> String {
-    let prefix = match kind {
-        ConceptNodeKind::Concept => "Concept",
-        ConceptNodeKind::Decision => "Decision",
-        ConceptNodeKind::CodeEntity => "CodeEntity",
-        ConceptNodeKind::CodeEntityCandidate => "CodeEntity",
-        ConceptNodeKind::RuleCandidate => "RuleCandidate",
-        ConceptNodeKind::TaskCandidate => "TaskCandidate",
-        ConceptNodeKind::RiskCandidate => "RiskCandidate",
-        ConceptNodeKind::Risk => "Risk",
-    };
-    format!("{prefix}:{canonical}")
+    format!("{}:{canonical}", kind.as_prefix())
 }
 
 #[cfg(test)]
@@ -212,5 +204,26 @@ mod tests {
                 found: 99
             }
         ));
+    }
+
+    /// CodeEntityCandidate → doğru prefix "CodeEntityCandidate:" (Review 2.tur P1.2).
+    /// Manuel mapping "CodeEntity:" üretirdi → ID/kind uyumsuzluğu + çakışma riski.
+    #[test]
+    fn seed_code_entity_candidate_uses_correct_prefix() {
+        let json = r#"{
+            "schema_version": 1,
+            "nodes": [{"canonical": "PaymentService", "kind": "CodeEntityCandidate"}]
+        }"#;
+        let seed = CandidateSeedFile::from_json(json).unwrap();
+        let graph = seed.to_graph_seed().unwrap();
+        assert_eq!(graph.code_entities.len(), 1);
+        assert_eq!(
+            graph.code_entities[0].id.0, "CodeEntityCandidate:PaymentService",
+            "CodeEntityCandidate doğru prefix almalı (CodeEntity değil)"
+        );
+        assert_eq!(
+            graph.code_entities[0].node_kind,
+            ConceptNodeKind::CodeEntityCandidate
+        );
     }
 }

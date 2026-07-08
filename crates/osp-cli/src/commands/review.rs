@@ -17,9 +17,14 @@ use crate::application::review::{ReviewMutationCommand, ReviewQuery};
 use crate::application::ReviewApplicationService;
 use crate::commands::OutputFormat;
 
-// Interactive session — review_session.rs modülünde (generic R/W). Re-export edilir
-// ki `ReviewAction::Session(commands::review::ReviewSessionArgs)` çalışsın.
+// Interactive session — review_session.rs modülünde (generic R/W). Re-export edilir.
 pub use crate::review_session::{run_review_session, ReviewSessionArgs};
+
+/// Argümansız `osp review` — default store + operator prompt ile interactive session.
+/// Root flag yoktur (Review 2.tur P1.1); subcommand'lar kendi --store/--operator taşır.
+pub fn run_review_session_default() -> anyhow::Result<()> {
+    run_review_session(ReviewSessionArgs::default())
+}
 
 /// `osp review list` — candidate lane.
 #[derive(Args, Debug)]
@@ -211,18 +216,26 @@ fn run_review_mutation<M: MutationArgs>(args: M, accept: bool) -> anyhow::Result
 }
 
 /// Operator kimliği çöz: --operator > $OSP_OPERATOR > fail (generic "operator" default yok).
+/// Boş/whitespace değer reject edilir (Review 2.tur P2.3) — attribution boş olamaz.
 fn resolve_operator(flag: Option<String>) -> Result<String, anyhow::Error> {
     if let Some(op) = flag {
-        return Ok(op);
+        return normalize_operator(&op);
     }
     if let Ok(env_op) = std::env::var("OSP_OPERATOR") {
-        if !env_op.trim().is_empty() {
-            return Ok(env_op);
-        }
+        return normalize_operator(&env_op);
     }
     Err(anyhow::anyhow!(
         "Operator identity is required. Provide --operator <id> or set OSP_OPERATOR env var."
     ))
+}
+
+/// Operator değerini normalize: trim + boş reject. Flag/env/prompt için ortak.
+fn normalize_operator(value: &str) -> Result<String, anyhow::Error> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("operator identity cannot be empty");
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Hex digest parse → NodeDigest.

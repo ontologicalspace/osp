@@ -24,8 +24,10 @@ use crate::errors::StoreIoError;
 
 /// Kalıcı store envelope — store state + persistence metadata (revision).
 ///
-/// `revision`: optimistic concurrency için. Read-only işlemler artırmaz; başarısız
-/// mutation artırmaz; başarılı persistent mutation tam bir kez artırır.
+/// `revision`: monotonic audit/display sayacı. Read-only işlemler artırmaz; başarısız
+/// mutation artırmaz; başarılı persistent mutation tam bir kez artırır. Exclusive lock
+/// altında increment edildiği için CAS (compare-and-swap) gerekmez — pessimistic lock
+/// concurrency'yi sağlar, revision audit/display içindir (Review 2.tur F4).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PersistedStore {
     /// Envelope schema version (store-seviye migration; `ConceptGraphSnapshot`'ın
@@ -125,6 +127,11 @@ pub fn atomic_replace(store_path: &Path, contents: &[u8]) -> Result<(), StoreIoE
     // altında çoğunlukla güvenli ama crash-recovery'de orphan tmp çakışmasını önler).
     let tmp = dir.join(format!(".{}.{}.tmp", file_name, tmp_suffix()));
 
+    // Error-path cleanup guard (Review 2.tur F6): write/sync/rename fail ederse tmp
+    // geride kalmasın. Başarılı replace sonrası tmp zaten gitmiştir (no-op remove).
+    // Disk-full/crash durumunda best-effort — perfect cleanup guarantee değil.
+    let mut cleanup = TmpCleanup::new(tmp.clone());
+
     // (1) tmp oluştur + yaz.
     {
         let mut file = File::create(&tmp).map_err(|e| StoreIoError::WriteTmp {
@@ -149,6 +156,8 @@ pub fn atomic_replace(store_path: &Path, contents: &[u8]) -> Result<(), StoreIoE
         to: store_path.to_path_buf(),
         source: e,
     })?;
+    // Rename başarılı — tmp artık yok, cleanup'ı devre dışı bırak.
+    cleanup.disarm();
 
     // (4) Post-rename parent directory fsync — POSIX durability: rename'in directory
     //     entry değişikliğini crash'e dayanıklı hale getirmek için directory'nin rename'den
@@ -161,12 +170,14 @@ pub fn atomic_replace(store_path: &Path, contents: &[u8]) -> Result<(), StoreIoE
     Ok(())
 }
 
-/// Unique tmp suffix — process id + monotonic counter (collision-free, no extra dep).
+/// Unique tmp suffix — process id + monotonic counter, ayraçlı (Review 2.tur F5).
+/// `format!("{pid}{c}")` ayracsız collision yaratır: (pid=12,c=34) ve (pid=123,c=4)
+/// ikisi de "1234" üretir. Ayraç (`-`) bunu önler.
 fn tmp_suffix() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let c = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("{}{}", std::process::id(), c)
+    format!("{}-{}", std::process::id(), c)
 }
 
 /// Platform-safe atomic rename: Windows'ta `MOVEFILE_REPLACE_EXISTING`, POSIX'te `rename`.
@@ -245,6 +256,30 @@ pub fn write_persisted_store(
     let contents =
         serde_json::to_vec_pretty(persisted).map_err(|e| StoreIoError::Serialize { source: e })?;
     atomic_replace(store_path, &contents)
+}
+
+/// Error-path tmp cleanup guard (Review 2.tur F6). Drop'ta tmp dosyayı best-effort siler;
+/// `disarm()` başarılı replace sonrası no-op'a çevirir. Disk-full vb. perfect guarantee değil.
+struct TmpCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl TmpCleanup {
+    fn new(path: PathBuf) -> Self {
+        Self { path, armed: true }
+    }
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TmpCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[cfg(test)]

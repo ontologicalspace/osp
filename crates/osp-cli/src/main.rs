@@ -53,12 +53,12 @@ enum Commands {
         action: GraphAction,
     },
     /// Operator review (list, show, accept, reject) — Candidate → Accepted/Rejected.
-    /// Argümansız `osp review` interactive wizard açar.
+    /// Argümansız `osp review` interactive wizard açar (default store + operator prompt).
+    /// Subcommand'lar kendi --store/--operator flag'lerini taşır; root flag yoktur
+    /// (sessiz yok sayılma riski — Review 2.tur P1.1).
     Review {
         #[command(subcommand)]
         action: Option<ReviewAction>,
-        #[command(flatten)]
-        session: commands::review::ReviewSessionArgs,
     },
 }
 
@@ -116,8 +116,8 @@ fn main() -> anyhow::Result<()> {
             GraphAction::Status(args) => commands::graph::run_graph_status(args),
             GraphAction::Validate(args) => commands::graph::run_graph_validate(args),
         },
-        Commands::Review { action, session } => match action {
-            None => commands::review::run_review_session(session),
+        Commands::Review { action } => match action {
+            None => commands::review::run_review_session_default(),
             Some(ReviewAction::List(args)) => commands::review::run_review_list(args),
             Some(ReviewAction::Show(args)) => commands::review::run_review_show(args),
             Some(ReviewAction::Accept(args)) => commands::review::run_review_accept(args),

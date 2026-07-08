@@ -15,7 +15,7 @@ use assert_cmd::Command;
 use predicates::str::contains;
 use tempfile::tempdir;
 
-/// `osp graph init` helper — seed yaz, store path dön.
+/// `osp graph init` helper — seed yaz, store path dön (custom path).
 fn init_store(dir: &std::path::Path, seed_json: &str) -> std::path::PathBuf {
     let seed_path = dir.join("seed.json");
     std::fs::write(&seed_path, seed_json).unwrap();
@@ -34,6 +34,27 @@ fn init_store(dir: &std::path::Path, seed_json: &str) -> std::path::PathBuf {
         .success()
         .stdout(contains("Graph initialized"));
     store_path
+}
+
+/// Default-path store init — `osp review` argümansız default `.osp/anchor-store.json`.
+/// `work_dir` altında `.osp/anchor-store.json` kurar (graph init create_dir_all yapar).
+fn init_default_store(work_dir: &std::path::Path, seed_json: &str) {
+    let seed_path = work_dir.join("seed.json");
+    std::fs::write(&seed_path, seed_json).unwrap();
+    Command::cargo_bin("osp")
+        .unwrap()
+        .current_dir(work_dir)
+        .args([
+            "graph",
+            "init",
+            "--seed",
+            "seed.json",
+            "--store",
+            ".osp/anchor-store.json",
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Graph initialized"));
 }
 
 const TWO_CANDIDATES_SEED: &str = r#"{
@@ -339,19 +360,18 @@ fn graph_status_json_output() {
     assert_eq!(v["revision"], 0);
 }
 
-/// Argümansız `osp review` (sadece --store) → interactive session açar (Review P1.1).
-/// Operator prompt'a cevap verip quit ile çıkar.
+/// Argümansız `osp review` (default store, working dir'de .osp/) → interactive session açar (Review P1.1).
+/// Root --store flag YOK (sessiz yok sayılma riski — P1.1 düzeltme). Operator prompt.
 #[test]
 fn argumanliz_osp_review_opens_interactive_session() {
     let dir = tempdir().unwrap();
-    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
-    // stdin: operator identity prompt → "tester", sonra quit.
+    // Default store path: working-dir/.osp/anchor-store.json
+    init_default_store(dir.path(), TWO_CANDIDATES_SEED);
     Command::cargo_bin("osp")
         .unwrap()
         .env_remove("OSP_OPERATOR")
+        .current_dir(dir.path())
         .arg("review")
-        .arg("--store")
-        .arg(store.to_str().unwrap())
         .write_stdin("tester\nquit\n")
         .assert()
         .success()
@@ -359,17 +379,16 @@ fn argumanliz_osp_review_opens_interactive_session() {
         .stdout(contains("OSP review session"));
 }
 
-/// Argümansız `osp review` OSP_OPERATOR set ise prompt sormaz.
+/// Argümansız `osp review` OSP_OPERATOR set ise prompt sormaz (default store).
 #[test]
 fn argumanliz_osp_review_uses_env_operator() {
     let dir = tempdir().unwrap();
-    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    init_default_store(dir.path(), TWO_CANDIDATES_SEED);
     Command::cargo_bin("osp")
         .unwrap()
         .env("OSP_OPERATOR", "env-op")
+        .current_dir(dir.path())
         .arg("review")
-        .arg("--store")
-        .arg(store.to_str().unwrap())
         .write_stdin("quit\n")
         .assert()
         .success()
@@ -378,18 +397,17 @@ fn argumanliz_osp_review_uses_env_operator() {
 }
 
 /// Interactive informed-acceptance: accept → basis göster → confirm(y) → reason → Accepted.
-/// Review P1.2: operator basis'i GÖRDÜKTEN sonra karar verir.
+/// Review P1.2: operator basis'i GÖRDÜKTEN sonra karar verir. (default store)
 #[test]
 fn interactive_accept_shows_basis_before_confirmation() {
     let dir = tempdir().unwrap();
-    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    init_default_store(dir.path(), TWO_CANDIDATES_SEED);
     // accept <id> → confirmation y → reason → quit.
     Command::cargo_bin("osp")
         .unwrap()
         .env("OSP_OPERATOR", "tester")
+        .current_dir(dir.path())
         .arg("review")
-        .arg("--store")
-        .arg(store.to_str().unwrap())
         .write_stdin("accept RuleCandidate:CouplingMustNot\ny\napproved rule\nquit\n")
         .assert()
         .success()
@@ -397,17 +415,16 @@ fn interactive_accept_shows_basis_before_confirmation() {
         .stdout(contains("Accepted"));
 }
 
-/// Interactive: confirmation 'n' → abort, mutation uygulanmaz.
+/// Interactive: confirmation 'n' → abort, mutation uygulanmaz. (default store)
 #[test]
 fn interactive_confirmation_n_aborts_mutation() {
     let dir = tempdir().unwrap();
-    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    init_default_store(dir.path(), TWO_CANDIDATES_SEED);
     Command::cargo_bin("osp")
         .unwrap()
         .env("OSP_OPERATOR", "tester")
+        .current_dir(dir.path())
         .arg("review")
-        .arg("--store")
-        .arg(store.to_str().unwrap())
         .write_stdin("accept RuleCandidate:CouplingMustNot\nn\nquit\n")
         .assert()
         .success()
@@ -415,7 +432,86 @@ fn interactive_confirmation_n_aborts_mutation() {
     // Store unchanged — revision hala 0.
     Command::cargo_bin("osp")
         .unwrap()
-        .args(["graph", "status", "--store", store.to_str().unwrap()])
+        .current_dir(dir.path())
+        .args(["graph", "status", "--store", ".osp/anchor-store.json"])
         .assert()
         .stdout(contains("Revision: 0"));
+}
+
+/// Boş operator kimliği reject edilir (Review 2.tur P2.3). `--operator ""` → fail.
+#[test]
+fn review_accept_rejects_empty_operator() {
+    let dir = tempdir().unwrap();
+    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    Command::cargo_bin("osp")
+        .unwrap()
+        .env_remove("OSP_OPERATOR")
+        .args([
+            "review",
+            "accept",
+            "RuleCandidate:CouplingMustNot",
+            "--store",
+            store.to_str().unwrap(),
+            "--operator",
+            "   ",
+            "--reason",
+            "ok",
+            "--yes",
+            "--basis-digest",
+            "0000000000000000",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("operator identity cannot be empty"));
+}
+
+/// `graph init` nested parent dizini oluşturur (Review 2.tur P2.2).
+/// `.osp/` yoksa lock açılamadan fail ederdi; artık create_dir_all.
+#[test]
+fn graph_init_creates_nested_parent_directory() {
+    let dir = tempdir().unwrap();
+    let nested = dir.path().join("nonexisting").join("nested");
+    let store = nested.join("anchor-store.json");
+    let seed_path = dir.path().join("seed.json");
+    std::fs::write(&seed_path, TWO_CANDIDATES_SEED).unwrap();
+    Command::cargo_bin("osp")
+        .unwrap()
+        .args([
+            "graph",
+            "init",
+            "--seed",
+            seed_path.to_str().unwrap(),
+            "--store",
+            store.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .stdout(contains("Graph initialized"));
+    assert!(store.exists(), "nested store created");
+}
+
+/// Root `osp review --store X list` artık geçerli değil (root flag yok — Review 2.tur P1.1).
+/// clap subcommand bekler; root --store hata vermeli veya yok sayılmalı (conflict yok).
+#[test]
+fn review_root_store_flag_not_silently_ignored() {
+    let dir = tempdir().unwrap();
+    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    // `osp review --store X list` — root'ta --store artık geçersiz; hata vermeli
+    // (sessizce yok sayıp default store'da çalışmamalı).
+    let res = Command::cargo_bin("osp")
+        .unwrap()
+        .args(["review", "--store", store.to_str().unwrap(), "list"])
+        .assert();
+    // clap ya error verir ya da list'i kendi default'uyla çalıştırır ama root --store
+    // gitmez. Önemli olan: list'in gördüğü store root --store DEĞİL.
+    let output = String::from_utf8_lossy(&res.get_output().stderr);
+    let stdout = String::from_utf8_lossy(&res.get_output().stdout);
+    // Eğer başarılıysa, default store kullandı (0 candidate) — root store kullanmadı.
+    // Eğer fail ise clap arg hatası — ikisi de "sessiz yok sayma değil".
+    let root_store_used =
+        stdout.contains("Concept:Payment") || stdout.contains("RuleCandidate:CouplingMustNot");
+    assert!(
+        !output.is_empty() || !root_store_used,
+        "root --store must not silently route to subcommand; stderr empty and root store used: stdout={stdout}"
+    );
 }

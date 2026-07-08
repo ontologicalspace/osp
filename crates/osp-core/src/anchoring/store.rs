@@ -1016,12 +1016,16 @@ impl AnchorStore for InMemoryAnchorStore {
     }
 
     fn candidate_query(&self) -> Result<Vec<ConceptNode>, Self::Error> {
-        Ok(self
+        // Deterministic: HashMap iteration sırası process'ler arasında değişir.
+        // mainline_query/mainline_history ile aynı — ID ascending sort (Review 2.tur P2.1).
+        let mut nodes: Vec<ConceptNode> = self
             .graph
             .nodes_iter()
             .filter(|n| matches!(n.decision_status, DecisionStatus::Candidate))
             .cloned()
-            .collect())
+            .collect();
+        nodes.sort_by(|a, b| a.id.0.cmp(&b.id.0));
+        Ok(nodes)
     }
 
     fn node_count(&self) -> Result<usize, Self::Error> {
@@ -1298,37 +1302,40 @@ fn has_committed_supersedes_cycle(edges: &[crate::anchoring::types::ConceptEdge]
         }
     }
 
-    let mut visited: BTreeSet<String> = BTreeSet::new();
-    let mut stack: BTreeSet<String> = BTreeSet::new();
-
-    fn dfs(
-        node: &str,
-        adj: &BTreeMap<String, Vec<String>>,
-        visited: &mut BTreeSet<String>,
-        stack: &mut BTreeSet<String>,
-    ) -> bool {
-        if stack.contains(node) {
-            return true;
-        }
-        if visited.contains(node) {
-            return false;
-        }
-        visited.insert(node.to_string());
-        stack.insert(node.to_string());
-        if let Some(neighbors) = adj.get(node) {
-            for n in neighbors {
-                if dfs(n, adj, visited, stack) {
-                    return true;
-                }
-            }
-        }
-        stack.remove(node);
-        false
-    }
-
+    // İteratif DFS (renk-bazlı) — adversarial derin zincir stack overflow savunması
+    // (Review 2.tur F3). `restore_snapshot` güvenilir olmayan input'tan çalışır;
+    // recursion derinliği zincir uzunluğu kadardır → explicit stack ile sınırsız.
+    //
+    // Renkler: WHITE (ziyaret edilmedi), GRAY (path üzerinde — back-edge = cycle),
+    // BLACK (tamamen işlendi).
+    let mut gray: BTreeSet<String> = BTreeSet::new();
+    let mut black: BTreeSet<String> = BTreeSet::new();
     for start in adj.keys() {
-        if dfs(start, &adj, &mut visited, &mut stack) {
-            return true;
+        if black.contains(start) {
+            continue;
+        }
+        // (node, neighbor_index) stack — her frame bir node'un neighbor'larını tüketir.
+        let mut work: Vec<(String, usize)> = vec![(start.clone(), 0)];
+        gray.insert(start.clone());
+        while let Some((node, idx)) = work.last().cloned() {
+            let neighbors = adj.get(&node).cloned().unwrap_or_default();
+            if idx >= neighbors.len() {
+                // Tüm neighbor'lar işlendi — node BLACK, stack'ten çıkar.
+                work.pop();
+                gray.remove(&node);
+                black.insert(node);
+                continue;
+            }
+            // index'i ilerlet.
+            work.last_mut().unwrap().1 = idx + 1;
+            let next = neighbors[idx].clone();
+            if gray.contains(&next) {
+                return true; // back-edge → cycle
+            }
+            if !black.contains(&next) {
+                gray.insert(next.clone());
+                work.push((next, 0));
+            }
         }
     }
     false
@@ -1409,6 +1416,41 @@ mod tests {
             )]))
             .unwrap();
         assert_eq!(store.candidate_query().unwrap().len(), 1);
+    }
+
+    /// candidate_query deterministic — ID ascending sort (HashMap iteration random;
+    /// mainline_query ile aynı disiplin — Review 2.tur P2.1).
+    #[test]
+    fn candidate_query_is_deterministically_ordered() {
+        let mk = |id: &str| ConceptNode {
+            id: ConceptNodeId(id.into()),
+            canonical: id.split(':').nth(1).unwrap_or(id).into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: DecisionStatus::Candidate,
+            position_family: PositionFamily::ConceptualIntent,
+        };
+        let mut seed = GraphSeed::default();
+        // Farklı ekleme sırasıyla.
+        seed.rule_candidates.push(mk("RuleCandidate:Zeta"));
+        seed.rule_candidates.push(mk("RuleCandidate:Alpha"));
+        seed.rule_candidates.push(mk("RuleCandidate:Mid"));
+        let store = InMemoryAnchorStore::with_seed(seed);
+        let ids: Vec<String> = store
+            .candidate_query()
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id.0)
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "RuleCandidate:Alpha".to_string(),
+                "RuleCandidate:Mid".to_string(),
+                "RuleCandidate:Zeta".to_string(),
+            ],
+            "candidate_query ID-ascending deterministic regardless of insertion order"
+        );
     }
 
     #[test]

@@ -52,6 +52,17 @@ pub struct GraphValidateArgs {
 /// İki init process'i aynı anda `exists == false` göremez; `--force` aktif review
 /// mutation'ı ile yarışıp canonical store'u overwrite edemez.
 pub fn run_graph_init(args: GraphInitArgs) -> anyhow::Result<()> {
+    // (0) Parent directory oluştur (bootstrap sorumluluğu — Review 2.tur P2.2).
+    //     `.osp/` yoksa lock dosyası açılamadan fail eder. Review mutation tarafında
+    //     otomatik creation yok (eksik store orada hata vermeli).
+    if let Some(parent) = args.store.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                anyhow::anyhow!("cannot create store directory {}: {e}", parent.display())
+            })?;
+        }
+    }
+
     // (1) Exclusive lock — sabit .lock dosyası (review mutation'ları ile aynı).
     let _lock = StoreLock::acquire(&args.store)
         .map_err(|e| anyhow::anyhow!("cannot acquire store lock: {e}"))?;

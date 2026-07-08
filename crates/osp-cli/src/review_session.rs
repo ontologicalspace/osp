@@ -40,6 +40,17 @@ pub struct ReviewSessionArgs {
     pub operator: Option<String>,
 }
 
+impl Default for ReviewSessionArgs {
+    /// clap `default_value` attribute `#[derive(Default)]` tarafından görülmez;
+    /// elle set edilmeli — aksi halde boş path üretilir.
+    fn default() -> Self {
+        Self {
+            store: std::path::PathBuf::from(".osp/anchor-store.json"),
+            operator: None,
+        }
+    }
+}
+
 /// Interactive wizard handler — production stdin/stdout.
 pub fn run_review_session(args: ReviewSessionArgs) -> anyhow::Result<()> {
     let stdin = std::io::stdin();
@@ -59,18 +70,17 @@ pub fn run_review_session(args: ReviewSessionArgs) -> anyhow::Result<()> {
 
 /// Operator kimliği: --operator > $OSP_OPERATOR > prompt (interactive'te sor).
 /// One-shot'tan farklı: interactive'te prompt açılır, fail etmez.
+/// Boş/whitespace flag/env reject (Review 2.tur P2.3).
 fn resolve_operator<R: BufRead, W: Write>(
     flag: Option<String>,
     input: &mut R,
     output: &mut W,
 ) -> Result<String, anyhow::Error> {
     if let Some(op) = flag {
-        return Ok(op);
+        return normalize_operator(&op);
     }
     if let Ok(env_op) = std::env::var("OSP_OPERATOR") {
-        if !env_op.trim().is_empty() {
-            return Ok(env_op);
-        }
+        return normalize_operator(&env_op);
     }
     // Interactive prompt.
     write!(output, "Operator identity: ")?;
@@ -79,11 +89,16 @@ fn resolve_operator<R: BufRead, W: Write>(
     if input.read_line(&mut line)? == 0 {
         anyhow::bail!("no operator identity provided (EOF)");
     }
-    let op = line.trim().to_string();
-    if op.is_empty() {
+    normalize_operator(&line)
+}
+
+/// Operator değerini normalize: trim + boş reject. Flag/env/prompt için ortak.
+fn normalize_operator(value: &str) -> Result<String, anyhow::Error> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         anyhow::bail!("operator identity cannot be empty");
     }
-    Ok(op)
+    Ok(trimmed.to_owned())
 }
 
 /// Generic interactive loop. `R`/`W` test edilebilir I/O (Review 1#14).

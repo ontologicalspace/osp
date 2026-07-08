@@ -109,6 +109,14 @@ pub enum DecisionKind {
 /// `decision_status` HARİÇ tutulur (promotion sonrası her zaman stale görünürdü).
 /// Hesaplama: FNV-1a(canonical + sorted(aliases) + node_kind + position_family).
 /// `aliases` sıralanır — girilen sıra deterministic olmayabilir.
+///
+/// # Freshness scope — ileriye dönük risk (Review 2.tur F1)
+/// v1'de bu digest, `PresentedBasis`'in anlamlı içeriğinin tamamını kapsar (çünkü
+/// explanation/evidence_summary/high_stake_flags placeholder). Ama §7.6/§11'de bu
+/// alanlar komşu graph'tan/evidence'tan doldurulduğunda, digest yalnızca node'un kendi
+/// alanlarını kapsadığı için basis'ten dar hale gelir → komşu değişince StaleBasis
+/// tetiklenmez. O an geldiğinde: ya digest'i derlenmiş `PresentedBasis` üzerinden
+/// hesapla (`basis_digest` ayrımı), ya da basis'e yeni alan eklenirse fail eden guard koy.
 pub fn node_digest(node: &ConceptNode) -> NodeDigest {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut feed = |bytes: &[u8]| {
