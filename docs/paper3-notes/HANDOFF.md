@@ -2,7 +2,7 @@
 
 > **Tarih:** 2026-07-08 (PR #51 merge sonrası güncellendi)
 > **Dal:** `main` (`4195ced`, PR #51 merged)
-> **Durum:** Faz 8b epistemik çekirdek TAMAM — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation), PR #51 ✅ (`mainline_query` deterministic ordering). C4, C3'ün simetrisine ulaştı (iki geçiş türü, iki session, iki record, tek audit_seq). Sırada: makale stale temizliği → arXiv; CLI `osp review` (insana bakan yüzey) ileride.
+> **Durum:** Faz 8b epistemik çekirdek TAMAM — PR #48 ✅ (varyant + INV-C14), PR #49 ✅ (`apply_supersede` + INV-C15 atomic), PR #50 ✅ (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation), PR #51 ✅ (`mainline_query` deterministic ordering). C4, C3'ün simetrisine ulaştı (iki geçiş türü, iki session, iki record, tek audit_seq). **Paper 3 v1.3 Zenodo'da canlı** (`10.5281/zenodo.21251821`, CC-BY-4.0). Sırada: PR #52 merge → arXiv (endorsement: Jimenez e-postası hazır); CLI `osp review` (insana bakan yüzey) ileride.
 
 ---
 
@@ -223,7 +223,23 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-✅ **Faz 8b epistemik çekirdek TAMAM — tüm PR'ler merged.**
+✅ **Faz 8b epistemik çekirdek TAMAM — tüm PR'ler merged. v1.3 Zenodo'da canlı.**
 - main: `4195ced` (PR #51 merged — `mainline_query` deterministic ordering)
 - PR #48-#51 merged; Faz 8b'in dört PR'lık kemeri kapandı (varyant → atomik mekanizma → güvenilir sınır → deterministik projeksiyon).
 - 503 lib test + 24 compile-fail + workspace 765 yeşil.
+
+## Yayın durumu (v1.3)
+
+**Paper 3 v1.3 Zenodo'da yayımlandı** — Faz 8b supersession vocabulary tamam.
+
+| Kayıt | Concept DOI | v1.3 Version DOI | License |
+|---|---|---|---|
+| Paper 3 | `10.5281/zenodo.21220992` | `10.5281/zenodo.21251821` | CC-BY-4.0 |
+| Paper 1 | `10.5281/zenodo.21206545` | (v2.6) | CC-BY-4.0 |
+| Paper 2 | `10.5281/zenodo.21207704` | (v1.2) | CC-BY-4.0 |
+| Evidence Pack | `10.5281/zenodo.21207762` | (frozen) | CC-BY-4.0 |
+
+- **License düzeltmesi:** Üç makale + evidence pack artık **CC-BY-4.0** (önceki Apache-2.0 yanlıştı — makale yaratıcı eser, kod Apache-2.0 kalır). Tüm Zenodo kayıtları güncellendi.
+- **Cite pratiği:** Concept DOI kullanılır (her zaman en son versiyona resolve). Version DOI belirli sürümü işaret eder (v1.3 = `21251821`).
+- **arXiv sonrası:** v1.3 epistemik çekirdek (supersession vocabulary) tamamladığı için dondurma gerek yok. Jimenez e-postası hazır (endorsement).
+- **PR #52:** makale-kod tutarlılığı (markdown stale + PDF üretim aracı + v1.3 review düzeltmeleri). Merge sonrası arXiv yoluna çıkış.
