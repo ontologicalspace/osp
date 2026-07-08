@@ -28,22 +28,25 @@
 > `ef022a9`, evidence generation commit olarak kaydedilir. Doğrula:
 > `git log -1 --format=%H -- docs/paper3-notes/evidence/e2e-binding-chain-replay.json`
 
-## Current protocol metadata (INV-C15 production path — PR #50 sonrası)
+## Current protocol metadata (CLI `osp review` vertical slice — feat/cli-osp-review)
 
-İki eksen: **kapsam** (genesis / lowering / projection / transition) × **enforcement** (type-level / runtime-asserted).
+İki eksen: **kapsam** (genesis / lowering / projection / transition / persistence) × **enforcement** (type-level / runtime-asserted / restore-validated).
 
 | Parameter | Value |
 |---|---|
-| Current Paper-3-specific invariants | **15** |
+| Current Paper-3-specific invariants | **15** (değişmedi — CLI surface invariant eklemez, INV-C11 classification düzeltildi) |
 | ↳ type-enforced genesis (INV-C1..C8, C12, C13) | 10 |
 | ↳ type-enforced lowering/translation (INV-P1..P3) | 3 |
 | ↳ runtime projection invariant (INV-C14, Faz 8b PR #48) | 1 |
 | ↳ runtime atomic transition invariant (INV-C15, Faz 8b PR #49 atomik + PR #50 production invocation) | 1 |
 | **Toplam type-enforced** (genesis + lowering) | **13** |
 | **Toplam runtime-asserted** | **2** (C14 projection + C15 transition) |
-| Compile-fail test count | 24 (INV-C14/C15 runtime-asserted; 2 supersede opacity trybuild C13-paralel boundary korur; PR #50 yeni compile-fail eklemez — `pub(crate)` issuer yapısal garanti olarak yeterli) |
+| Compile-fail test count | 24 (değişmedi) |
 | `DecisionStatus` variants | 5 (Candidate, Accepted, Deprecated, Rejected, SupersededAccepted) |
 | INV-C15 production invocation | `SupersedeSession` (PR #50) — crate-private authority issuer + parametresiz `supersede()` + token içeride mint |
+| **Restore-validated persistence (CLI)** | `AnchorStoreSnapshot::restore_snapshot` — graph schema + node uniqueness + edge endpoints + record→node/status forward integrity + dense audit_seq (union unique + {1..N} + ==N) + INV-C15 üç yönlü triangulation (committed edge ↔ record ↔ status, lane-sensitive, cycle absence). paper3 "known gap" cümlesi evaluated path için kapatıldı. |
+| **INV-C11 surface classification (CLI)** | MCP = agent-facing (review/supersede authority yok, static regression test); `osp review` CLI = operator-facing (session expose eder — INV-T2 attribution, auth deployment boundary). |
+| **Operator review testleri** | osp-core lib 503→524 (+21 AnchorStoreSnapshot + restore validator); osp-cli 20 unit + 18 integration; osp-mcp +2 INV-C11 |
 
 > **Taksonomi notu (Review PR #48/#49):** P1-P3 lowering invariant'ları da type-enforced'dur
 > (trybuild katmanında, strata tablosu (1) ile tutarlı). "13 type-enforced = 10 genesis + 3 lowering";

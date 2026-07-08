@@ -40,6 +40,9 @@ pub mod store;
 pub mod typed_ref;
 pub mod types;
 
+// Faz: CLI osp review — kalıcı store snapshot (graph + ledgers + audit_seq).
+pub use store::{AnchorStoreSnapshot, SnapshotError};
+
 // Faz 2/4: runtime tipleri kökten erişilebilir (API stabilitesi)
 pub use types::{
     AnchorCandidate, AnchorPlan, AnchorScoreBreakdown, CanonicalRedirect, CanonicalRedirectReason,

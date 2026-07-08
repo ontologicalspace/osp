@@ -109,6 +109,14 @@ pub enum DecisionKind {
 /// `decision_status` HARİÇ tutulur (promotion sonrası her zaman stale görünürdü).
 /// Hesaplama: FNV-1a(canonical + sorted(aliases) + node_kind + position_family).
 /// `aliases` sıralanır — girilen sıra deterministic olmayabilir.
+///
+/// # Freshness scope — ileriye dönük risk (Review 2.tur F1)
+/// v1'de bu digest, `PresentedBasis`'in anlamlı içeriğinin tamamını kapsar (çünkü
+/// explanation/evidence_summary/high_stake_flags placeholder). Ama §7.6/§11'de bu
+/// alanlar komşu graph'tan/evidence'tan doldurulduğunda, digest yalnızca node'un kendi
+/// alanlarını kapsadığı için basis'ten dar hale gelir → komşu değişince StaleBasis
+/// tetiklenmez. O an geldiğinde: ya digest'i derlenmiş `PresentedBasis` üzerinden
+/// hesapla (`basis_digest` ayrımı), ya da basis'e yeni alan eklenirse fail eden guard koy.
 pub fn node_digest(node: &ConceptNode) -> NodeDigest {
     let mut hash: u64 = 0xcbf29ce484222325;
     let mut feed = |bytes: &[u8]| {
@@ -138,6 +146,19 @@ pub struct NodeDigest(u64);
 impl NodeDigest {
     pub fn get(self) -> u64 {
         self.0
+    }
+
+    /// Raw u64'ten digest kur — operator yüzeyinde (CLI `--basis-digest`) "gördüğünü
+    /// onaylama" tazelik karşılaştırması için. FNV tabanlı non-cryptographic bir
+    /// **karşılaştırma değeri**dir — authority/capability token DEĞİL, güvenlik önlemi
+    /// de değildir; amaç, operator'ın gördüğü basis ile karar anındaki basis'in aynı
+    /// olduğunu doğrulamak (INV-C12 informed-acceptance precondition).
+    ///
+    /// `pub(crate)` değil çünkü CLI operator yüzeyi (`osp review`) osp-core dışında;
+    /// `PresentedBasis::compile` hala tek **üretim** yolu (bu yalnızca re-construction
+    /// için karşılaştırma değeri üretir).
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
     }
 }
 
