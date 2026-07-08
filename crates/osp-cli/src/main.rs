@@ -1,10 +1,12 @@
 //! OSP CLI — truth surface (Aşama F1).
 //!
 //! "CLI = truth surface. UI/MCP/SDK ne yaparsa yapsın, en altta CLI/osp-core aynı sonucu
-//! üretmeli." CLI çalıştıran insan = operator (INV-T2). Agent decomposition yapamaz,
-//! hedef koordinat göremez (INV-T1).
+//! üretmeli." CLI operator-facing yüzeydir (INV-T2 attribution); çağıranın gerçekten
+//! operator olduğunun doğrulanması deployment/authentication sorumluluğudur (INV-C11).
+//! Agent decomposition yapamaz, hedef koordinat göremez (INV-T1).
 //!
-//! Komutlar: analyze, trajectory (init/attempt), task (view), evidence export.
+//! Komutlar: analyze, trajectory (init/attempt), task (view), evidence export,
+//! graph (init/status/validate), review (list/show/accept/reject/session).
 //! D1'de MockLlmClient; D3'te RuntimeLlmClient (osp-llm-runtime adapter).
 
 use clap::{Parser, Subcommand};
@@ -51,9 +53,12 @@ enum Commands {
         action: GraphAction,
     },
     /// Operator review (list, show, accept, reject) — Candidate → Accepted/Rejected.
+    /// Argümansız `osp review` interactive wizard açar.
     Review {
         #[command(subcommand)]
-        action: ReviewAction,
+        action: Option<ReviewAction>,
+        #[command(flatten)]
+        session: commands::review::ReviewSessionArgs,
     },
 }
 
@@ -91,8 +96,6 @@ enum ReviewAction {
     Accept(commands::review::ReviewAcceptArgs),
     /// Candidate → Rejected.
     Reject(commands::review::ReviewRejectArgs),
-    /// Interactive review wizard (argümansız `osp review`).
-    Session(commands::review::ReviewSessionArgs),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -113,12 +116,12 @@ fn main() -> anyhow::Result<()> {
             GraphAction::Status(args) => commands::graph::run_graph_status(args),
             GraphAction::Validate(args) => commands::graph::run_graph_validate(args),
         },
-        Commands::Review { action } => match action {
-            ReviewAction::List(args) => commands::review::run_review_list(args),
-            ReviewAction::Show(args) => commands::review::run_review_show(args),
-            ReviewAction::Accept(args) => commands::review::run_review_accept(args),
-            ReviewAction::Reject(args) => commands::review::run_review_reject(args),
-            ReviewAction::Session(args) => commands::review::run_review_session(args),
+        Commands::Review { action, session } => match action {
+            None => commands::review::run_review_session(session),
+            Some(ReviewAction::List(args)) => commands::review::run_review_list(args),
+            Some(ReviewAction::Show(args)) => commands::review::run_review_show(args),
+            Some(ReviewAction::Accept(args)) => commands::review::run_review_accept(args),
+            Some(ReviewAction::Reject(args)) => commands::review::run_review_reject(args),
         },
     }
 }

@@ -83,6 +83,9 @@ pub struct ReviewNodeDetails {
     /// Basis digest (operator'ın --basis-digest için). Sadece Candidate node'larda.
     pub basis_digest: Option<u64>,
     pub basis_digest_hex: Option<String>,
+    /// Successor node id — SupersededAccepted node'lar için (committed Supersedes edge'inden).
+    /// Edge yönü: successor --Supersedes--> superseded; bu node superseded ise successor'u göster.
+    pub superseded_by: Option<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -138,6 +141,23 @@ impl<R: ReviewStoreRepository> ReviewApplicationService<R> {
                         } else {
                             None
                         };
+                    // SupersededAccepted ise successor'u çöz (committed Supersedes edge: successor→superseded).
+                    let superseded_by = if n.decision_status
+                        == osp_core::anchoring::DecisionStatus::SupersededAccepted
+                    {
+                        store
+                            .graph()
+                            .edges()
+                            .find(|e| {
+                                e.to == n.id
+                                    && e.kind == osp_core::anchoring::ConceptEdgeKind::Supersedes
+                                    && e.decision_status
+                                        == osp_core::anchoring::DecisionStatus::Accepted
+                            })
+                            .map(|e| e.from.0.clone())
+                    } else {
+                        None
+                    };
                     ReviewNodeDetails {
                         id: n.id.0.clone(),
                         canonical: n.canonical.clone(),
@@ -145,6 +165,7 @@ impl<R: ReviewStoreRepository> ReviewApplicationService<R> {
                         decision_status: format!("{:?}", n.decision_status),
                         basis_digest: digest.map(|d| d.get()),
                         basis_digest_hex: digest.map(|d| format!("{:016x}", d.get())),
+                        superseded_by,
                     }
                 });
                 Ok(ReviewReadOutput::Show {
@@ -243,11 +264,11 @@ fn apply_review(
     if accept {
         session
             .accept(store, id, basis, reason)
-            .map_err(|e| map_review_error(e))
+            .map_err(map_review_error)
     } else {
         session
             .reject(store, id, basis, reason)
-            .map_err(|e| map_review_error(e))
+            .map_err(map_review_error)
     }
 }
 

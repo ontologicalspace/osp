@@ -207,6 +207,13 @@ pub enum SnapshotError {
     SupersedeEdgeTargetNotSuperseded(ConceptNodeId),
     #[error("supersede cycle detected in committed edges")]
     SupersedeCycle,
+    /// Aynı (successor, superseded) pair'ine ait birden fazla committed edge/record (Review P1.3).
+    #[error("duplicate supersede pair: successor={successor}, superseded={superseded}, count={count} (expected exactly 1)")]
+    SupersedeDuplicatePair {
+        successor: String,
+        superseded: String,
+        count: u32,
+    },
 }
 
 /// `PresentedBasis`'in deterministic fingerprint'i → `[u8; 32]`.
@@ -1204,27 +1211,41 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
     // (7) INV-C15 üç yönlü triangulation: committed Supersedes edge ↔ SupersedeRecord ↔ status.
     //     Lane-sensitive: yalnız committed (Accepted) Supersedes edge'leri sayılır.
     //     Edge yönü: successor --Supersedes--> superseded (from=successor, to=superseded).
-    let committed_pairs: BTreeSet<(String, String)> = snapshot
-        .graph
-        .edges
-        .iter()
-        .filter(|e| {
-            e.kind == ConceptEdgeKind::Supersedes && e.decision_status == DecisionStatus::Accepted
-        })
-        .map(|e| (e.from.0.clone(), e.to.0.clone()))
-        .collect();
-    let recorded_pairs: BTreeSet<(String, String)> = snapshot
-        .supersede_records
-        .iter()
-        .map(|r| (r.successor.0.clone(), r.superseded.0.clone()))
-        .collect();
+    //
+    //     Duplicate detection (Review P1.3): BTreeSet yerine BTreeMap<Pair, usize> —
+    //     aynı (successor, superseded) çiftine sahip iki committed edge set içinde tek
+    //     elemana çökerdi. Occurrence count ile her pair tam 1 kez görünmeli.
+    let mut committed_pairs: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for e in snapshot.graph.edges.iter().filter(|e| {
+        e.kind == ConceptEdgeKind::Supersedes && e.decision_status == DecisionStatus::Accepted
+    }) {
+        *committed_pairs
+            .entry((e.from.0.clone(), e.to.0.clone()))
+            .or_default() += 1;
+    }
+    let mut recorded_pairs: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for r in &snapshot.supersede_records {
+        *recorded_pairs
+            .entry((r.successor.0.clone(), r.superseded.0.clone()))
+            .or_default() += 1;
+    }
     if committed_pairs != recorded_pairs {
         return Err(SnapshotError::SupersedeTriangulationMismatch);
+    }
+    // Her pair occurrence count tam 1 olmalı (duplicate edge/record reject).
+    for (pair, count) in &committed_pairs {
+        if *count != 1 {
+            return Err(SnapshotError::SupersedeDuplicatePair {
+                successor: pair.0.clone(),
+                superseded: pair.1.clone(),
+                count: *count,
+            });
+        }
     }
 
     // (7a) Her SupersededAccepted node'un tam 1 committed incoming edge'i (cardinality).
     let mut incoming: BTreeMap<String, u32> = BTreeMap::new();
-    for pair in &committed_pairs {
+    for pair in committed_pairs.keys() {
         *incoming.entry(pair.1.clone()).or_default() += 1;
     }
     for n in &snapshot.graph.nodes {
@@ -1239,7 +1260,7 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
         }
     }
     // (7b) Her committed edge'in target'ı SupersededAccepted.
-    for pair in &committed_pairs {
+    for pair in committed_pairs.keys() {
         let target_status = status_of
             .get(&pair.1)
             .copied()
@@ -2310,6 +2331,63 @@ mod tests {
                 .unwrap()
                 .decision_status,
             DecisionStatus::SupersededAccepted
+        );
+    }
+
+    /// C15 duplicate pair detection (Review P1.3): aynı (successor, superseded) çiftine
+    /// sahip iki committed edge + iki record dense audit_seq ile — BTreeSet çökerdi,
+    /// BTreeMap occurrence count ile her pair tam 1 kez görünmeli.
+    #[test]
+    fn snapshot_duplicate_committed_supersede_pair_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:Old", "RuleCandidate:New"]);
+        snap_accept(&mut store, "RuleCandidate:Old"); // seq 1
+        snap_accept(&mut store, "RuleCandidate:New"); // seq 2
+        snap_supersede(&mut store, "RuleCandidate:Old", "RuleCandidate:New"); // seq 3
+        let mut exported = store.export_snapshot();
+        // Duplicate committed edge ekle (aynı pair New→Old).
+        exported.graph.edges.push(ConceptEdge {
+            from: ConceptNodeId("RuleCandidate:New".into()),
+            to: ConceptNodeId("RuleCandidate:Old".into()),
+            kind: ConceptEdgeKind::Supersedes,
+            decision_status: DecisionStatus::Accepted,
+            explanation: Some(NonEmptyExplanation::new("duplicate edge").unwrap()),
+        });
+        // Duplicate record ekle (seq 4, audit_seq 4 — dense korunur).
+        let mut dup_record = exported.supersede_records[0].clone();
+        dup_record.seq = 4;
+        exported.supersede_records.push(dup_record);
+        exported.audit_sequence = 4;
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        assert!(
+            matches!(err, SnapshotError::SupersedeDuplicatePair { count: 2, .. }),
+            "duplicate pair should reject, got {err:?}"
+        );
+    }
+
+    /// C15 duplicate SupersedeRecord (aynı pair, edge tek) → pair mismatch değil,
+    /// duplicate olarak yakalanmalı (BTreeMap count farkı → mismatch önce dönebilir;
+    /// bu test edge count 1, record count 2 → committed_pairs != recorded_pairs).
+    #[test]
+    fn snapshot_duplicate_record_with_single_edge_rejected() {
+        let mut store = snap_store_with_candidates(&["RuleCandidate:Old", "RuleCandidate:New"]);
+        snap_accept(&mut store, "RuleCandidate:Old");
+        snap_accept(&mut store, "RuleCandidate:New");
+        snap_supersede(&mut store, "RuleCandidate:Old", "RuleCandidate:New");
+        let mut exported = store.export_snapshot();
+        // Sadece record duplicate (edge tek) → recorded count 2, committed count 1.
+        let mut dup_record = exported.supersede_records[0].clone();
+        dup_record.seq = 4;
+        exported.supersede_records.push(dup_record);
+        exported.audit_sequence = 4;
+        let err = InMemoryAnchorStore::restore_snapshot(exported).unwrap_err();
+        // Pair map'ler farklı (count 1 vs 2) → TriangulationMismatch önce döner.
+        assert!(
+            matches!(
+                err,
+                SnapshotError::SupersedeTriangulationMismatch
+                    | SnapshotError::SupersedeDuplicatePair { .. }
+            ),
+            "duplicate record should reject, got {err:?}"
         );
     }
 }

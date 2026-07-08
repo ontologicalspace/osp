@@ -10,7 +10,7 @@ use clap::Args;
 use osp_core::anchoring::store::InMemoryAnchorStore;
 
 use crate::seed_file::CandidateSeedFile;
-use crate::store_io::{read_persisted_store, write_persisted_store, PersistedStore};
+use crate::store_io::{read_persisted_store, write_persisted_store, PersistedStore, StoreLock};
 
 /// `osp graph init --seed <path> --store <path>` — Candidate-only bootstrap.
 #[derive(Args, Debug)]
@@ -46,8 +46,17 @@ pub struct GraphValidateArgs {
 }
 
 /// `osp graph init` — Candidate seed → trusted store.
+///
+/// Aynı StoreLock protokolü kullanır (review mutation'ları ile tek concurrency sözleşmesi):
+/// lock → existence/force check → build + validate → atomic write → unlock (Review P2.3).
+/// İki init process'i aynı anda `exists == false` göremez; `--force` aktif review
+/// mutation'ı ile yarışıp canonical store'u overwrite edemez.
 pub fn run_graph_init(args: GraphInitArgs) -> anyhow::Result<()> {
-    // Existing store kontrolü.
+    // (1) Exclusive lock — sabit .lock dosyası (review mutation'ları ile aynı).
+    let _lock = StoreLock::acquire(&args.store)
+        .map_err(|e| anyhow::anyhow!("cannot acquire store lock: {e}"))?;
+
+    // (2) Existence/force check (lock altında).
     if args.store.exists() && !args.force {
         anyhow::bail!(
             "store file already exists at {}: use --force to overwrite",
@@ -55,7 +64,7 @@ pub fn run_graph_init(args: GraphInitArgs) -> anyhow::Result<()> {
         );
     }
 
-    // Seed parse.
+    // (3) Seed parse.
     let seed_json = std::fs::read_to_string(&args.seed)
         .map_err(|e| anyhow::anyhow!("cannot read seed file {}: {e}", args.seed.display()))?;
     let seed_file = CandidateSeedFile::from_json(&seed_json)
@@ -64,17 +73,18 @@ pub fn run_graph_init(args: GraphInitArgs) -> anyhow::Result<()> {
         .to_graph_seed()
         .map_err(|e| anyhow::anyhow!("seed validation failed: {e}"))?;
 
-    // with_seed → export → restore-validasyon (corrupt seed'i baştan yakala).
+    // (4) with_seed → export → restore-validasyon (corrupt seed'i baştan yakala).
     let store = InMemoryAnchorStore::with_seed(graph_seed);
     let snapshot = store.export_snapshot();
-    // restore_snapshot validasyonu koştur (init → validate → write).
     InMemoryAnchorStore::restore_snapshot(snapshot.clone())
         .map_err(|e| anyhow::anyhow!("post-init restore validation failed (corrupt seed): {e}"))?;
 
+    // (5) Atomic write (lock altında).
     let persisted = PersistedStore::from_snapshot(snapshot);
     write_persisted_store(&args.store, &persisted)
         .map_err(|e| anyhow::anyhow!("cannot write store: {e}"))?;
 
+    // lock drop → release.
     println!(
         "✓ Graph initialized ({} candidate nodes)",
         persisted.snapshot.graph.nodes.len()

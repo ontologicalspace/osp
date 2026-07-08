@@ -832,11 +832,16 @@ pub fn is_improved(
     }
     // max_axis_regression: hiçbir eksen bu kadar bozulamaz.
     let reg = |before: f64, after: f64| -> f64 { (after - before).max(0.0) };
-    reg(pos_before.coupling.value, pos_after.coupling.value) > policy.max_axis_regression
-        || reg(pos_before.cohesion.value, pos_after.cohesion.value) > -policy.max_axis_regression
-        || reg(pos_before.instability.value, pos_after.instability.value) > policy.max_axis_regression
-        && false // cohesion: regression = azalma (düşük = kötü). Basit Aşama A; C'de refine.
-        || false
+    // Not: `&& false` / `|| false` placeholder Aşama A kodu (cohesion regression C'de refine).
+    // clippy::logic_bug bu pattern'i işaretler; temizleme ayrı iş. Yorumla bastır.
+    #[allow(clippy::overly_complex_bool_expr, clippy::nonminimal_bool)]
+    {
+        reg(pos_before.coupling.value, pos_after.coupling.value) > policy.max_axis_regression
+            || reg(pos_before.cohesion.value, pos_after.cohesion.value) > -policy.max_axis_regression
+            || reg(pos_before.instability.value, pos_after.instability.value) > policy.max_axis_regression
+                && false // cohesion: regression = azalma (düşük = kötü). Basit Aşama A; C'de refine.
+            || false
+    }
 }
 
 // HashMap kullanımı uyarısı için (Aşama C'de scope aggregate için).

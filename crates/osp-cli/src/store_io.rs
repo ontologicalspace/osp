@@ -111,20 +111,19 @@ impl StoreLock {
 /// 2. Yaz + `sync_all` (fsync — içerik diske).
 /// 3. Parent directory `sync_all` (directory entry diske).
 /// 4. Platform-safe atomic replace:
-///    - POSIX: `rename` (existing destination overwrite atomik).
-///    - Windows: `MoveFileEx(MOVEFILE_REPLACE_EXISTING)` — `std::fs::rename` Windows'ta
-///      existing destination'da fail edebilir; bu yüzden atomic-replace helper.
+///    - POSIX: `rename` (existing destination overwrite atomik) + **post-rename** parent dir fsync.
+///    - Windows: `MoveFileEx(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`.
 pub fn atomic_replace(store_path: &Path, contents: &[u8]) -> Result<(), StoreIoError> {
     let dir = store_path
         .parent()
         .ok_or_else(|| StoreIoError::InvalidStorePath(store_path.to_path_buf()))?;
-    let tmp = dir.join(format!(
-        ".{}.tmp",
-        store_path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .ok_or_else(|| StoreIoError::InvalidStorePath(store_path.to_path_buf()))?
-    ));
+    let file_name = store_path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| StoreIoError::InvalidStorePath(store_path.to_path_buf()))?;
+    // Unique tmp adı: pid + monotonic counter (aynı dizinde collision yok, exclusive lock
+    // altında çoğunlukla güvenli ama crash-recovery'de orphan tmp çakışmasını önler).
+    let tmp = dir.join(format!(".{}.{}.tmp", file_name, tmp_suffix()));
 
     // (1) tmp oluştur + yaz.
     {
@@ -137,26 +136,37 @@ pub fn atomic_replace(store_path: &Path, contents: &[u8]) -> Result<(), StoreIoE
                 path: tmp.clone(),
                 source: e,
             })?;
-        // (2) fsync içerik.
+        // (2) fsync temp içerik (crash'te yarım dosya yok).
         file.sync_all().map_err(|e| StoreIoError::WriteTmp {
             path: tmp.clone(),
             source: e,
         })?;
     }
 
-    // (3) Parent directory sync (directory entry persistence) — best-effort fsync.
-    if let Ok(dir_file) = File::open(dir) {
-        let _ = dir_file.sync_all();
-    }
-
-    // (4) Atomic replace.
+    // (3) Atomic replace (rename) — POSIX'te directory entry değişikliği atomik.
     atomic_rename(&tmp, store_path).map_err(|e| StoreIoError::AtomicReplace {
         from: tmp.clone(),
         to: store_path.to_path_buf(),
         source: e,
     })?;
 
+    // (4) Post-rename parent directory fsync — POSIX durability: rename'in directory
+    //     entry değişikliğini crash'e dayanıklı hale getirmek için directory'nin rename'den
+    //     SONRA sync edilmesi gerekir (Review P2.2). Windows'ta MOVEFILE_WRITE_THROUGH
+    //     bunu zaten sağlar. Best-effort (bazı platformlar/FS'ler desteklemez).
+    if let Ok(dir_file) = File::open(dir) {
+        let _ = dir_file.sync_all();
+    }
+
     Ok(())
+}
+
+/// Unique tmp suffix — process id + monotonic counter (collision-free, no extra dep).
+fn tmp_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let c = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{}{}", std::process::id(), c)
 }
 
 /// Platform-safe atomic rename: Windows'ta `MOVEFILE_REPLACE_EXISTING`, POSIX'te `rename`.

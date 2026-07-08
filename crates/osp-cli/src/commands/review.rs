@@ -60,9 +60,6 @@ pub struct ReviewAcceptArgs {
     /// Confirmation'ı atla (non-TTY/CI). `--basis-digest` zorunlu.
     #[arg(long)]
     pub yes: bool,
-    /// Global revision CAS (opsiyonel — unrelated mutation reject için).
-    #[arg(long)]
-    pub expected_revision: Option<u64>,
 }
 
 /// `osp review reject <id>` — Candidate → Rejected.
@@ -79,8 +76,6 @@ pub struct ReviewRejectArgs {
     pub basis_digest: Option<String>,
     #[arg(long)]
     pub yes: bool,
-    #[arg(long)]
-    pub expected_revision: Option<u64>,
 }
 
 /// `osp review list` handler.
@@ -138,6 +133,9 @@ pub fn run_review_show(args: ReviewShowArgs) -> anyhow::Result<()> {
                     println!("  Canonical: {}", details.canonical);
                     println!("  Kind: {}", details.kind);
                     println!("  Status: {}", details.decision_status);
+                    if let Some(succ) = &details.superseded_by {
+                        println!("  Superseded by: {succ}");
+                    }
                     if let Some(hex) = &details.basis_digest_hex {
                         println!("  Basis digest: {hex}");
                         println!("    (accept/reject için --basis-digest {hex})");

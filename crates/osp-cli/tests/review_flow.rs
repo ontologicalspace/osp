@@ -338,3 +338,84 @@ fn graph_status_json_output() {
     assert_eq!(v["candidates"], 2);
     assert_eq!(v["revision"], 0);
 }
+
+/// Argümansız `osp review` (sadece --store) → interactive session açar (Review P1.1).
+/// Operator prompt'a cevap verip quit ile çıkar.
+#[test]
+fn argumanliz_osp_review_opens_interactive_session() {
+    let dir = tempdir().unwrap();
+    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    // stdin: operator identity prompt → "tester", sonra quit.
+    Command::cargo_bin("osp")
+        .unwrap()
+        .env_remove("OSP_OPERATOR")
+        .arg("review")
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .write_stdin("tester\nquit\n")
+        .assert()
+        .success()
+        .stdout(contains("Operator identity:"))
+        .stdout(contains("OSP review session"));
+}
+
+/// Argümansız `osp review` OSP_OPERATOR set ise prompt sormaz.
+#[test]
+fn argumanliz_osp_review_uses_env_operator() {
+    let dir = tempdir().unwrap();
+    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    Command::cargo_bin("osp")
+        .unwrap()
+        .env("OSP_OPERATOR", "env-op")
+        .arg("review")
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .write_stdin("quit\n")
+        .assert()
+        .success()
+        .stdout(contains("operator: env-op"))
+        .stdout(contains("candidates awaiting review"));
+}
+
+/// Interactive informed-acceptance: accept → basis göster → confirm(y) → reason → Accepted.
+/// Review P1.2: operator basis'i GÖRDÜKTEN sonra karar verir.
+#[test]
+fn interactive_accept_shows_basis_before_confirmation() {
+    let dir = tempdir().unwrap();
+    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    // accept <id> → confirmation y → reason → quit.
+    Command::cargo_bin("osp")
+        .unwrap()
+        .env("OSP_OPERATOR", "tester")
+        .arg("review")
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .write_stdin("accept RuleCandidate:CouplingMustNot\ny\napproved rule\nquit\n")
+        .assert()
+        .success()
+        .stdout(contains("this exact basis?"))
+        .stdout(contains("Accepted"));
+}
+
+/// Interactive: confirmation 'n' → abort, mutation uygulanmaz.
+#[test]
+fn interactive_confirmation_n_aborts_mutation() {
+    let dir = tempdir().unwrap();
+    let store = init_store(dir.path(), TWO_CANDIDATES_SEED);
+    Command::cargo_bin("osp")
+        .unwrap()
+        .env("OSP_OPERATOR", "tester")
+        .arg("review")
+        .arg("--store")
+        .arg(store.to_str().unwrap())
+        .write_stdin("accept RuleCandidate:CouplingMustNot\nn\nquit\n")
+        .assert()
+        .success()
+        .stdout(contains("aborted by operator"));
+    // Store unchanged — revision hala 0.
+    Command::cargo_bin("osp")
+        .unwrap()
+        .args(["graph", "status", "--store", store.to_str().unwrap()])
+        .assert()
+        .stdout(contains("Revision: 0"));
+}
