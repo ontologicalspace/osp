@@ -18,9 +18,10 @@
 //! (INV-C12/C13) telafi eder.
 //!
 //! # İki yeni invariant
-//! - **INV-C12 — Informed acceptance:** Karar kaydı karar anındaki temeli taşır;
-//!   temel adayın karar anındaki içeriğine karşı tazelik-doğrulamalıdır (`node_digest`).
-//!   Bayat temele onay → `StaleBasis` (TOCTOU açığı kapatır).
+//! - **INV-C12 — Fresh basis for reviewed transitions:** Karar kaydı karar anındaki
+//!   temeli taşır; temel adayın karar anındaki içeriğine karşı tazelik-doğrulamalıdır
+//!   (`node_digest`). Bayat temele onay → `StaleBasis` (TOCTOU açığı kapatır).
+//!   `PresentedSupersedeBasis` supersession için iki endpoint'in digest'ini taşır.
 //! - **INV-C13 — No decision without record:** Accepted/Rejected durum geçişi
 //!   karşılık gelen `DecisionRecord` ile atomik olarak paired olmalıdır
 //!   (`AnchorStore::apply_decision` içinde).

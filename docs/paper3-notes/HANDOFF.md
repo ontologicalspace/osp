@@ -8,7 +8,7 @@
 
 ## Nerede duruyoruz
 
-Paper 3 (Concept Anchoring / Genesis Layer) **v1.1 public manuscript** + Faz 8a (OperatorReviewSession) +
+Paper 3 (Concept Anchoring / Genesis Layer) **v1.3 public manuscript** + Faz 8a (OperatorReviewSession) +
 Faz 8c (legacy promote kaldırma) + PR #48 (varyant + INV-C14) + PR #49 (`apply_supersede` + INV-C15 atomic) +
 PR #50 (`SupersedeSession` + crate-private authority issuer, INV-C15 production invocation) + PR #51
 (`mainline_query` deterministic ordering) tamam. Faz 8b'in dört PR'lık kemeri (varyant → atomik mekanizma →
@@ -202,7 +202,7 @@ en değerli çıktı bu oldu.
 
 | Dosya | Açıklama |
 |---|---|
-| `docs/papers/paper3-concept-anchoring.md` | Paper 3 v1.1 + INV-C14/C15 (15 Paper-3 invariant) |
+| `docs/papers/paper3-concept-anchoring.md` | Paper 3 v1.3 + INV-C14/C15 (15 Paper-3 invariant) |
 | `docs/paper3-notes/evidence/run-metadata.md` | İki başlık: frozen snapshot (gen commit `ef022a9`, baseline `481690d`) + current protocol (15, PR #50 production invocation) |
 | `crates/osp-core/src/anchoring/mod.rs` | `DecisionStatus` enum + helper'lar (`is_current_mainline`, `preserves_accepted_provenance`) |
 | `crates/osp-core/src/anchoring/store.rs` | `mainline_history()` + `apply_supersede` (INV-C15) + `audit_seq` (global) + cycle helper + 11 StoreError varyant + Candidate proposal provenance kalıcı sözleşme |

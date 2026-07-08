@@ -217,19 +217,32 @@ def escape_latex_special(text):
 
 
 def transliterate_to_ascii(text):
-    """Code span icindeki Unicode karakterleri ASCII karsiliklarina cevir.
-    Texttt fontu cogu Unicode desteklemez; LaTeX komutlari texttt icinde sorun cikarir."""
-    # Turkce
+    """Code span icindeki Unicode karakterleri LaTeX-safe karsiliklarina cevir.
+    Texttt fontu (ec-lmtt10) cogu Unicode desteklemez; LaTeX accent komutlari
+    texttt icinde guvenle calisir. Turkce karakterler icin ASCII'ye cevirmek yerine
+    LaTeX accent representation kullaniriz — bu, dotted/dotless-I gibi argumanlarin
+    gorunurlugunu korur (transliteration argumani bozmaz)."""
+    # Turkce — LaTeX accent komutlari (texttt icinde guvenli)
     translit = {
-        'ı': 'i', 'İ': 'I', 'ğ': 'g', 'Ğ': 'G',
-        'ş': 's', 'Ş': 'S', 'ç': 'c', 'Ç': 'C',
-        'ö': 'o', 'Ö': 'O', 'ü': 'u', 'Ü': 'U',
+        'ı': r'\i{}',      # dotless i
+        'İ': r'\.{I}',     # dotted capital I
+        'ğ': r'\u{g}',     # breve g
+        'Ğ': r'\u{G}',     # breve G
+        'ş': r'\c{s}',     # cedilla s
+        'Ş': r'\c{S}',     # cedilla S
+        'ç': r'\c{c}',     # cedilla c
+        'Ç': r'\c{C}',     # cedilla C
+        'ö': r'\"{o}',     # umlaut o
+        'Ö': r'\"{O}',     # umlaut O
+        'ü': r'\"{u}',     # umlaut u
+        'Ü': r'\"{U}',     # umlaut U
         # Yaygin Avrupa dilleri
-        'é': 'e', 'è': 'e', 'ê': 'e', 'ë': 'e',
-        'á': 'a', 'à': 'a', 'â': 'a', 'ä': 'a',
-        'ñ': 'n', 'Ñ': 'N',
+        'é': r'\'{e}', 'è': r'\`{e}', 'ê': r'\^{e}', 'ë': r'\"{e}',
+        'á': r'\'{a}', 'à': r'\`{a}', 'â': r'\^{a}', 'ä': r'\"{a}',
+        'ñ': r'\~{n}', 'Ñ': r'\~{N}',
         'ß': 'ss',
-        # Matematik semboller (code icinde nadiren gecer)
+        # Matematik semboller (code icinde nadiren gecer — split_code_span_around_math
+        # bunlari ayri isler, ama transliteration fallback olarak kalsin)
         '→': '->', '←': '<-', '≥': '>=', '≤': '<=', '≠': '!=',
         '≈': '~', '∼': '~', '…': '...', '—': '--', '–': '-',
         '"': '"', '"': '"', ''': "'", ''': "'",
@@ -238,6 +251,52 @@ def transliterate_to_ascii(text):
     for unicode_char, ascii_eq in translit.items():
         text = text.replace(unicode_char, ascii_eq)
     return text
+
+
+# Code span icinde hâlâ kalan (transliterate'e girmeyen) Unicode matematik sembolleri.
+# Texttt fontu (ec-lmtt10) bunlari gosteremez; bunlari texttt'tan cikarip \ensuremath{} icine gom.
+# Ornek: `mainline_query() ∩ {X} = ∅` → \texttt{mainline_query()} $\cap$ \texttt{\{X\} =} $\emptyset$
+CODE_SPAN_MATH_SYMBOLS = {
+    '∈': r'\in',
+    '∉': r'\notin',
+    '∩': r'\cap',
+    '∪': r'\cup',
+    '∅': r'\emptyset',
+    '⊆': r'\subseteq',
+    '⊂': r'\subset',
+    '⊇': r'\supseteq',
+    '⊃': r'\supset',
+    '∀': r'\forall',
+    '∃': r'\exists',
+    '∄': r'\nexists',
+}
+
+
+def split_code_span_around_math(code):
+    """Code span metnini Unicode matematik sembolleri etrafinda bol.
+
+    Texttt icine giremeyecek (fontun desteklemedigi) sembolleri tespit edip, metni
+    onlarin etrafinda parcalara ayirir. Her parca:
+      - matematik sembolu ise → ensuremath wrapped (texttt DISINDA)
+      - digerleri → texttt'a gidecek (cagiran escape eder)
+    Donus: (parcalar listesi) — her parca (tip, deger); tip 'math' veya 'text'.
+    Cagiran, 'text' parcalarini \texttt{...} icine koyar, 'math' parcalarini oldugu gibi birakir.
+    """
+    if not any(sym in code for sym in CODE_SPAN_MATH_SYMBOLS):
+        return [('text', code)]
+    parts = []
+    current = []
+    for ch in code:
+        if ch in CODE_SPAN_MATH_SYMBOLS:
+            if current:
+                parts.append(('text', ''.join(current)))
+                current = []
+            parts.append(('math', CODE_SPAN_MATH_SYMBOLS[ch]))
+        else:
+            current.append(ch)
+    if current:
+        parts.append(('text', ''.join(current)))
+    return parts
 
 
 def convert_unicode(text):
@@ -319,9 +378,9 @@ def process_inline(text):
     def restore_code(m):
         idx = int(m.group(1))
         code = code_spans[idx]
-        # Code icindeki Unicode karakterleri ASCII'ye translit et
-        code_clean = transliterate_to_ascii(code)
-        # Escape LaTeX özel karakterleri
+        # Escape LaTeX özel karakterleri ONCE (backslash dahil) — raw code'a uygula.
+        # Sonra Turkce karakterleri LaTeX accent'e cevir; accent komutlarindaki \
+        # bozulmaz cunku esc() zaten calisti.
         def esc(s):
             s = s.replace('\\', r'\textbackslash{}')
             s = s.replace('_', r'\_')
@@ -332,26 +391,45 @@ def process_inline(text):
             s = s.replace('~', r'\textasciitilde{}')
             s = s.replace('^', r'\textasciicircum{}')
             return s
+        code_escaped = esc(code)
+        code_clean = transliterate_to_ascii(code_escaped)
 
-        if len(code_clean) > 12:
-            # Uzun code span — break point'lerden böl (camelCase, _, ::, /)
-            # ve her parçayı ayrı \texttt{} içine koy, aralarında boşluk
-            # Böylece LaTeX boşluk noktalarında kırabilir
-            import re as _re
-            # camelCase边界: RuleCandidate -> Rule Candidate
-            spaced = _re.sub(r'([a-z])([A-Z])', r'\1 \2', code_clean)
-            # _ sonrası boşluk ekle: bind_metric -> bind _ metric
-            spaced = _re.sub(r'_', r'_ ', spaced)
-            # :: sonrası boşluk: AnchorStore::apply -> AnchorStore :: apply
-            spaced = _re.sub(r'::', r':: ', spaced)
-            # / sonrası boşluk: crates/osp -> crates/ osp
-            spaced = _re.sub(r'/', r'/ ', spaced)
-            # Parçalara ayır, her parçayı texttt yap, boşlukla birleştir
-            parts = spaced.split(' ')
-            texttt_parts = [r'\texttt{' + esc(p) + '}' for p in parts if p]
-            return ' '.join(texttt_parts)
-        else:
-            return r'\texttt{' + esc(code_clean) + '}'
+        # Code span icinde hâlâ kalan (fontun gosteremedigi) Unicode matematik sembolleri
+        # varsa, metni onlarin etrafinda bol: matematik kismi \ensuremath{}, digerleri texttt.
+        segments = split_code_span_around_math(code_clean)
+
+        # code_clean zaten esc() + transliterate() gecmis; tekrar escape ETME.
+        # Identifier rendering kategorize (review §8): blanket >12 bolme yerine.
+        def render_text_segment(seg):
+            """Text segmenti icin kategori-bazli render:
+            - Dosya yolu (/ icerir) → \\path{} (her karakterde kirilir)
+            - Rust path (:: icerir) → tek \\texttt{}, :: sonrasi \\allowbreak
+            - Kisa CamelCase / genel → tek \\texttt{} (parcalama yok)
+            Uzun snake_case method isimleri (mainline_query vb.) \\texttt{} ile kalir;
+            \\nolinkurl escape sorunlu (\\_ gibi LaTeX escape'leri URL baglaminda gecersiz).
+            """
+            if '/' in seg and len(seg) > 12:
+                return r'\path{' + seg + '}'
+            if '::' in seg:
+                # Rust path: tek texttt, :: sonrasi allowbreak (taşarsa kir)
+                parts = seg.split('::')
+                if len(parts) == 2:
+                    return r'\texttt{' + parts[0] + r'::\allowbreak ' + parts[1] + '}'
+                return r'\texttt{' + seg + '}'
+            return r'\texttt{' + seg + '}'
+
+        # Hic matematik sembolu yoksa tek segment
+        if len(segments) == 1 and segments[0][0] == 'text':
+            return render_text_segment(segments[0][1])
+
+        # Matematik sembolu var: her segmenti tipine gore isle.
+        out_parts = []
+        for seg_type, seg_val in segments:
+            if seg_type == 'math':
+                out_parts.append(r'\ensuremath{' + seg_val + '}')
+            elif seg_val:
+                out_parts.append(render_text_segment(seg_val))
+        return ' '.join(out_parts)
 
     text = re.sub(r'ZZCODEMARKER(\d+)ZZ', restore_code, text)
 
@@ -439,62 +517,70 @@ def process_table(lines, start_idx):
         # 3+ kolon: icerik uzunluguna gore agirlikli bol
         col_spec = ' '.join([f'p{{{w:.3f}{width_unit}}}' for w in weights])
 
-    # Genis tablolar (4+ kolon veya geniş içerik) icin scriptsize + adjustbox
-    use_adjustbox = use_full_width
-    # Tüm geniş tablolar scriptsize (8pt) — okunaklı + sığar
+    # Genis tablolar (4+ kolon veya geniş içerik) icin longtable — sayfalar arasi bolunur.
+    # Dar tablolar (<=2 kolon veya kisa icerik) table/tabular kalir.
     if use_full_width:
+        # longtable: table/adjustbox ICINE konmaz; caption/label longtable icinde.
+        # endfirsthead (ilk sayfa header), endhead (devam header), endfoot (devam alti),
+        # endlastfoot (son sayfa alti) — profesyonel cok-sayfali tablo.
         font_cmd = r'\scriptsize'
+        latex = []
+        latex.append(r'\begingroup')
+        latex.append(r'\setlength{\tabcolsep}{3pt}')
+        latex.append(font_cmd)
+        latex.append(r'\begin{longtable}{' + col_spec + '}')
+        # Caption + label (longtable icinde)
+        caption_text = ' '.join(process_inline(c) for c in header_cols) if n_cols <= 2 else None
+        # Ilk sayfa header
+        latex.append(r'\toprule')
+        header_processed = [process_inline(c) for c in header_cols]
+        latex.append(' & '.join(header_processed) + r' \\')
+        latex.append(r'\midrule')
+        latex.append(r'\endfirsthead')
+        # Devam sayfalarinda header tekrar
+        latex.append(r'\toprule')
+        latex.append(' & '.join(header_processed) + r' \\')
+        latex.append(r'\midrule')
+        latex.append(r'\endhead')
+        # Devam sayfalarinin alti
+        latex.append(r'\midrule')
+        latex.append(r'\multicolumn{' + str(n_cols) + r'}{r}{Continued on next page} \\')
+        latex.append(r'\endfoot')
+        # Son sayfanin alti
+        latex.append(r'\bottomrule')
+        latex.append(r'\endlastfoot')
+        # Rows
+        for row in rows:
+            cols = parse_row(row)
+            while len(cols) < n_cols:
+                cols.append('')
+            cols = cols[:n_cols]
+            cols_processed = [process_inline(c) for c in cols]
+            latex.append(' & '.join(cols_processed) + r' \\')
+        latex.append(r'\end{longtable}')
+        latex.append(r'\endgroup')
     else:
-        font_cmd = r'\small'
-
-    # Landscape Tectonic'te çalışmıyor (pdflscape/lscape sorunu) — portrait kullan
-    use_landscape = False
-
-    if use_landscape:
-        width_unit = r'\textheight'
-        col_spec = ' '.join([f'p{{{w:.3f}{width_unit}}}' for w in weights])
+        # Dar tablo — table/tabular (tek sayfa)
         font_cmd = r'\small'
         latex = []
-        latex.append(r'\begin{landscape}')
-        latex.append(r'\thispagestyle{empty}')
         latex.append(r'\begin{table}[htbp]')
         latex.append(r'\centering')
         latex.append(font_cmd)
         latex.append(r'\begin{tabular}{' + col_spec + '}')
         latex.append(r'\toprule')
-    else:
-        # LaTeX tablo — 5+ kolonlarda table* (full-width float)
-        table_env = r'table*' if use_full_width else r'table'
-        latex = []
-        latex.append(r'\begin{' + table_env + r'}[htbp]')
-        latex.append(r'\centering')
-        latex.append(font_cmd)
-        if use_adjustbox:
-            latex.append(r'\begin{adjustbox}{max width=\textwidth}')
-        latex.append(r'\begin{tabular}{' + col_spec + '}')
-        latex.append(r'\toprule')
-    # Header
-    header_processed = [process_inline(c) for c in header_cols]
-    latex.append(' & '.join(header_processed) + r' \\')
-    latex.append(r'\midrule')
-    # Rows
-    for row in rows:
-        cols = parse_row(row)
-        # Eksik/fazla kolonlari hizala
-        while len(cols) < n_cols:
-            cols.append('')
-        cols = cols[:n_cols]
-        cols_processed = [process_inline(c) for c in cols]
-        latex.append(' & '.join(cols_processed) + r' \\')
-    latex.append(r'\bottomrule')
-    latex.append(r'\end{tabular}')
-    if use_landscape:
+        header_processed = [process_inline(c) for c in header_cols]
+        latex.append(' & '.join(header_processed) + r' \\')
+        latex.append(r'\midrule')
+        for row in rows:
+            cols = parse_row(row)
+            while len(cols) < n_cols:
+                cols.append('')
+            cols = cols[:n_cols]
+            cols_processed = [process_inline(c) for c in cols]
+            latex.append(' & '.join(cols_processed) + r' \\')
+        latex.append(r'\bottomrule')
+        latex.append(r'\end{tabular}')
         latex.append(r'\end{table}')
-        latex.append(r'\end{landscape}')
-    else:
-        if use_adjustbox:
-            latex.append(r'\end{adjustbox}')
-        latex.append(r'\end{' + table_env + '}')
 
     return end_idx, '\n'.join(latex)
 
@@ -716,6 +802,8 @@ def build_preamble(title, author, orcid, version, date):
 \usepackage{amssymb}
 \usepackage{booktabs}
 \usepackage{tabularx}
+\usepackage{longtable}  % Cok satirli tablolar icin sayfalar arasi bolunur
+\usepackage{array}
 \usepackage{enumitem}
 \usepackage{listings}
 \usepackage{tcolorbox}
@@ -736,7 +824,7 @@ def build_preamble(title, author, orcid, version, date):
     pdftitle={""" + title_escaped + r"""},
     pdfauthor={""" + author + r"""},
     pdfsubject={OSP Preprint},
-    pdfkeywords={software engineering, software metrics, conceptual spaces, BFT}
+    pdfkeywords={concept anchoring, requirements traceability, typestate, provenance, human-in-the-loop, AI coding agents}
 }
 
 \geometry{a4paper, top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm}
@@ -813,7 +901,7 @@ def main():
     elif 'paper3' in name:
         paper_num = 3
         title = "Concept Anchoring: From Human Sentences to Bound Project Work"
-        version = "OSP Paper 3, v1.2 (Preprint)"
+        version = "OSP Paper 3, v1.3 (Preprint)"
         date = "July 2026"
     else:
         paper_num = 0

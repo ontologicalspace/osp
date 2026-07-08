@@ -1,6 +1,6 @@
 # OSP — Proje Durumu (STATUS)
 
-> **Son güncelleme:** 2026-07-05 (Paper 3 v1.1 public manuscript — arXiv editorial pass tamam, Zenodo yolunda)
+> **Son güncelleme:** 2026-07-05 (Paper 3 v1.3 public manuscript — arXiv editorial pass tamam, Zenodo yolunda)
 > **Detaylı roadmap:** [`roadmap/paper2-roadmap.md`](roadmap/paper2-roadmap.md)
 > **Invariant spec:** [`spec/invariants.md`](spec/invariants.md)
 > **MCP tasarım:** [`spec/mcp-design.md`](spec/mcp-design.md)
@@ -10,7 +10,7 @@
 OSP (Ontological Space Protocol / Software Physics) — software architecture analysis +
 AI agent navigation. Üç makale stratejisi: **Paper 1** (statik uzay, kanıtlandı v2.6) +
 **Paper 2** (dinamik/agent, draft v1.2 yazıldı) + **Paper 3** (Genesis Layer/Concept
-Anchoring, **v1.1 public manuscript — arXiv adayı**).
+Anchoring, **v1.3 public manuscript — arXiv adayı**).
 
 ---
 
@@ -29,12 +29,12 @@ G2c corpus runner ✅ G2c-1→5 TAMAM (RQ9 kanıt + gerçek LLM + external corpu
 osp-sdk (H)       ⬜ — TypeScript/Python/Rust bindings (opsiyonel)
 osp-desktop/3D    ⬜ E opsiyonel — trajectory correction UI
 Paper 2           ✍️ DRAFT v1.2 yazıldı (docs/papers/paper2-agent-trajectory.md) — review sonrası arXiv adayı
-Paper 3           ✅ v1.1 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52cc9c9)
+Paper 3           ✅ v1.3 PUBLIC MANUSCRIPT — arXiv editorial pass tamam (52cc9c9)
 ```
 
 ## Paper 3 (Genesis Layer / Concept Anchoring) Durumu
 
-Paper 3 **v1.1 public manuscript** — first-complete draft + Faz 8a real promotion + threat/limitations
+Paper 3 **v1.3 public manuscript** — first-complete draft + Faz 8a real promotion + threat/limitations
 tightening + arXiv editorial pass tamam. **Zenodo evidence pack hazır** (README + MANIFEST), DOI'ler
 için draft deposit bekliyor. **764 workspace test (osp-desktop hariç), 0 development marker, 367 kelime abstract.**
 
@@ -162,14 +162,14 @@ Paper 2 yazımı için katman bazında hazırlık durumu (review 4):
 
 ## Sonraki Adım Önerisi
 
-**Paper 3 Zenodo → endorsement → arXiv.** Paper 3 v1.1 public manuscript hazır (`52cc9c9`).
-- v1.1 first-complete + Faz 8a real promotion + threat tightening + arXiv editorial TAMAM
+**Paper 3 Zenodo → endorsement → arXiv.** Paper 3 v1.3 public manuscript hazır (`52cc9c9`).
+- v1.3 first-complete + Faz 8a real promotion + threat tightening + arXiv editorial TAMAM
 - **Sıradaki:** Zenodo evidence pack + P1/P2 deposit → 3 DOI → References doldur → endorsement → arXiv
 - Evidence pack hazır: `docs/paper3-notes/evidence-pack/` (README + MANIFEST)
 - Detaylı handoff: [`paper3-notes/HANDOFF.md`](paper3-notes/HANDOFF.md)
 
 Paper 2 v1.2 review ile arXiv adayı (docs/papers/paper2-agent-trajectory.md).
-Paper 3 v1.1 public manuscript — Zenodo yolunda.
+Paper 3 v1.3 public manuscript — Zenodo yolunda.
 
 ## Test Durumu
 
