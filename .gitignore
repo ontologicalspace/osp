@@ -23,6 +23,10 @@ tmp/
 .playwright-mcp/
 space-browser-initial
 
+# Build artifacts — derive çıktı (md_to_latex.py + tectonic ile yeniden üretilebilir)
+docs/dist/
+nul
+
 # Internal design docs — çalışma notları, GitHub'da paylaşılmaz
 docs/agent-prompt-semantics.md
 docs/implementation-invariants.md
