@@ -279,13 +279,15 @@ mod tests {
         // Aliases preserved.
         assert_eq!(graph.rule_candidates[0].aliases, vec!["b".to_string()]);
         assert!(graph.concepts[0].aliases.is_empty());
-        // Node digest deterministik (canonical + aliases + kind + family).
+        // Node digest frozen values (canonical + aliases + kind + family — FNV-1a).
+        // P2: gerçek hash değerleri pinlendi (assert_ne yalnızca farklılık kanıtlardı;
+        // characterization amacı değer sabitliği). Refactor sonrası aynı değerler.
         let d1 = osp_core::anchoring::review::node_digest(&graph.concepts[0]);
         let d2 = osp_core::anchoring::review::node_digest(&graph.rule_candidates[0]);
         let d3 = osp_core::anchoring::review::node_digest(&graph.code_entities[0]);
-        assert_ne!(d1.get(), d2.get());
-        assert_ne!(d2.get(), d3.get());
-        assert_ne!(d1.get(), d3.get());
+        assert_eq!(d1.get(), 16897406824438811853, "Concept:Alpha digest frozen");
+        assert_eq!(d2.get(), 15636681671644259112, "RuleCandidate:Beta+[b] digest frozen");
+        assert_eq!(d3.get(), 16641907892218766788, "CodeEntity:Gamma digest frozen");
     }
 
     /// O6' legacy negatif: duplicate canonical → fail-closed (DuplicateCanonical).

@@ -176,13 +176,13 @@ Paper 3 v1.3 public manuscript — Zenodo yolunda.
 ```
 cargo test --workspace --exclude osp-desktop
 ```
-- osp-core: 524 lib unit (503 + 21 AnchorStoreSnapshot/restore validator/transition consistency) + 30 integration (anchoring_mvp/fixtures/evidence/heldout/typelevel) = 554; 24 type-level compile-fail (trybuild)
+- osp-core: 538 lib unit (503 + 21 AnchorStoreSnapshot/restore + 12 supersede-preview predicates + 2 misc) + 30 integration (anchoring_mvp/fixtures/evidence/heldout/typelevel) = 568; 24 type-level compile-fail (trybuild)
 - osp-analyzer: ~148 + 4 smoke
 - osp-llm-runtime: ~12
 - osp-cli: 92 unit (store_io/repository/seed_file/review_session/mapper/preview-builder/canonical-identity/analysis-bridge/graph-seed-builder) + 21 review_flow + 20 supersede_flow + 12 preview_flow + 8 analyze_bridge_flow integration
 - osp-mcp: 8 unit + 7 INV-T1 integration + 2 INV-C11 agent-surface regression
 - osp-spike: ~32
-- **Toplam: ~865 workspace test (osp-desktop hariç, CLI accept/reject + supersession)**, hepsi yeşil. Clippy pre-existing uyarılar mevcut (CI warning-only `|| true`); PR #50 değiştirdiği 5 anchoring src dosyasında 0 yeni uyarı.
+- **Toplam: ~950 workspace test (osp-desktop hariç)**, hepsi yeşil. CI warning-only clippy (`|| true`); bu PR 0 yeni uyarı.
 
 ## Önemli Commit'ler
 

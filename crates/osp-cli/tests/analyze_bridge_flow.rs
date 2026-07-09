@@ -247,12 +247,62 @@ fn empty_analysis_warning_and_empty_store() {
     assert_eq!(v["items"].as_array().unwrap().len(), 0);
 }
 
-/// Pre-validation non-destructive (P3+N2): mevcut store + --force + bridge hatası →
-/// eski store byte-identical (hiç değişmedi). Empty repo force → warning ama store created.
-/// Burada: mevcut store + empty repo --force → yeni empty store overwrites (success).
-/// Non-destructive için: bridge hatası olunca store değişmemeli. Mevcut store + valid repo
-/// --force → overwrite (success); bu zaten mevcut davranış. P3'ün gerçek testi birim seviye
-/// (bridge error → store unchanged) — burada CLI seviyede --force overwrite doğrula.
+/// Pre-validation non-destructive (P3+N2): mevcut store + --force + validation hatası →
+/// eski store byte-identical (hiç değişmedi). P1: gerçek failure path test edildi.
+#[test]
+fn force_with_invalid_seed_preserves_existing_store_byte_identical() {
+    let dir = tempdir().unwrap();
+    let store = dir.path().join("store.json");
+    let valid_seed = dir.path().join("valid.json");
+    std::fs::write(
+        &valid_seed,
+        r#"{ "schema_version": 1, "nodes": [{"canonical": "Original", "kind": "Concept"}] }"#,
+    )
+    .unwrap();
+    // Duplicate canonical seed → validation error.
+    let invalid_seed = dir.path().join("invalid.json");
+    std::fs::write(
+        &invalid_seed,
+        r#"{ "schema_version": 1, "nodes": [
+            {"canonical": "Dup", "kind": "Concept"},
+            {"canonical": "Dup", "kind": "RuleCandidate"}
+        ] }"#,
+    )
+    .unwrap();
+
+    // İlk init (valid seed) → store created.
+    Command::cargo_bin("osp")
+        .unwrap()
+        .args([
+            "graph", "init", "--seed", valid_seed.to_str().unwrap(),
+            "--store", store.to_str().unwrap(),
+        ])
+        .assert()
+        .success();
+
+    // Mevcut store bytes'ını dondur.
+    let before = std::fs::read(&store).unwrap();
+
+    // --force + invalid seed (duplicate canonical) → validation error.
+    Command::cargo_bin("osp")
+        .unwrap()
+        .args([
+            "graph", "init", "--seed", invalid_seed.to_str().unwrap(),
+            "--store", store.to_str().unwrap(), "--force",
+        ])
+        .assert()
+        .failure()
+        .stderr(contains("duplicate canonical"));
+
+    // P3+N2: eski store byte-identical (validation hatasında store değişmez).
+    let after = std::fs::read(&store).unwrap();
+    assert_eq!(
+        before, after,
+        "existing store must be byte-identical after --force + validation failure"
+    );
+}
+
+/// --force overwrite (başarılı): mevcut store + --force + valid → overwrite.
 #[test]
 fn force_overwrites_existing_store() {
     let repo = fixture_repo();
@@ -263,12 +313,8 @@ fn force_overwrites_existing_store() {
     Command::cargo_bin("osp")
         .unwrap()
         .args([
-            "graph",
-            "init",
-            "--analyze",
-            repo.path().to_str().unwrap(),
-            "--store",
-            store.to_str().unwrap(),
+            "graph", "init", "--analyze", repo.path().to_str().unwrap(),
+            "--store", store.to_str().unwrap(),
         ])
         .assert()
         .success();
@@ -277,12 +323,8 @@ fn force_overwrites_existing_store() {
     Command::cargo_bin("osp")
         .unwrap()
         .args([
-            "graph",
-            "init",
-            "--analyze",
-            repo.path().to_str().unwrap(),
-            "--store",
-            store.to_str().unwrap(),
+            "graph", "init", "--analyze", repo.path().to_str().unwrap(),
+            "--store", store.to_str().unwrap(),
         ])
         .assert()
         .failure()
@@ -292,74 +334,66 @@ fn force_overwrites_existing_store() {
     Command::cargo_bin("osp")
         .unwrap()
         .args([
-            "graph",
-            "init",
-            "--analyze",
-            repo.path().to_str().unwrap(),
-            "--store",
-            store.to_str().unwrap(),
-            "--force",
+            "graph", "init", "--analyze", repo.path().to_str().unwrap(),
+            "--store", store.to_str().unwrap(), "--force",
         ])
         .assert()
         .success();
 }
 
-/// Node identities bit-equivalent: iki kez `--analyze` → aynı node/identity seti.
+/// Node identities bit-equivalent: iki kez `--analyze` → aynı node/identity tuple seti.
+/// P1: count değil, gerçek (id, canonical, kind, family, status) tuple kümesi karşılaştırması.
 #[test]
 fn analyze_idempotent_node_identities() {
     let repo1 = fixture_repo();
-    let repo2 = fixture_repo();
     let dir1 = tempdir().unwrap();
     let dir2 = tempdir().unwrap();
     let store1 = dir1.path().join("store.json");
     let store2 = dir2.path().join("store.json");
 
-    Command::cargo_bin("osp")
-        .unwrap()
-        .args([
-            "graph",
-            "init",
-            "--analyze",
-            repo1.path().to_str().unwrap(),
-            "--store",
-            store1.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
-    Command::cargo_bin("osp")
-        .unwrap()
-        .args([
-            "graph",
-            "init",
-            "--analyze",
-            repo2.path().to_str().unwrap(),
-            "--store",
-            store2.to_str().unwrap(),
-        ])
-        .assert()
-        .success();
+    for store in [&store1, &store2] {
+        Command::cargo_bin("osp")
+            .unwrap()
+            .args([
+                "graph",
+                "init",
+                "--analyze",
+                repo1.path().to_str().unwrap(),
+                "--store",
+                store.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
 
-    // İki store status candidates aynı (aynı fixture → aynı Module count).
-    let s1: serde_json::Value = serde_json::from_slice(
-        &Command::cargo_bin("osp")
+    // review list → (id, canonical, kind, status) tuple kümesi (count değil).
+    let extract_tuples = |store: &std::path::Path| -> Vec<(String, String, String)> {
+        let out = Command::cargo_bin("osp")
             .unwrap()
-            .args(["graph", "status", "--store", store1.to_str().unwrap(), "--format", "json"])
+            .args([
+                "review", "list", "--store", store.to_str().unwrap(), "--format", "json",
+            ])
             .assert()
             .success()
             .get_output()
-            .stdout,
-    )
-    .unwrap();
-    let s2: serde_json::Value = serde_json::from_slice(
-        &Command::cargo_bin("osp")
+            .stdout
+            .clone();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        v["items"]
+            .as_array()
             .unwrap()
-            .args(["graph", "status", "--store", store2.to_str().unwrap(), "--format", "json"])
-            .assert()
-            .success()
-            .get_output()
-            .stdout,
-    )
-    .unwrap();
-    assert_eq!(s1["candidates"], s2["candidates"]);
-    assert_eq!(s1["node_count"], s2["node_count"]);
+            .iter()
+            .map(|i| {
+                (
+                    i["id"].as_str().unwrap().to_string(),
+                    i["canonical"].as_str().unwrap().to_string(),
+                    i["kind"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect()
+    };
+    let tuples1 = extract_tuples(&store1);
+    let tuples2 = extract_tuples(&store2);
+    // Gerçek kimlik karşılaştırması — tamamen farklı NodeId'ler üretilse bile yakalanır.
+    assert_eq!(tuples1, tuples2, "two analyses must produce identical node identity set");
 }

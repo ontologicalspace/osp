@@ -13,13 +13,12 @@
 //! (classification/role), ObservedEntityRefresh (incremental representation change).
 
 // commands/graph.rs integration tamamlanana kadar dead-code (test modülü kullanıyor).
-#![allow(dead_code)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use osp_analyzer::contract::AnalysisResult;
 use osp_core::anchoring::types::{ConceptNodeId, ConceptNodeKind};
-use osp_core::space::{NodeClassification, NodeKind, NodeRole};
+use osp_core::space::NodeKind;
 
 use crate::canonical_identity::{CanonicalCodeIdentity, CanonicalIdentityError, PathCasePolicy};
 use crate::graph_seed_builder::GraphSeedNodeDraft;
@@ -113,6 +112,8 @@ impl AnalysisCandidateSeed {
         Ok(Self { entities })
     }
 
+    /// Entity'lere read-only erişim (test + future downstream).
+    #[allow(dead_code)]
     pub fn entities(&self) -> &[CodeEntityCandidate] {
         &self.entities
     }
@@ -148,8 +149,8 @@ pub fn project_analysis(
     let mut entities: Vec<CodeEntityCandidate> = Vec::new();
     let mut projected_modules = 0usize;
     let mut skipped_non_module = 0usize;
-    let mut classifications_observed: HashMap<NodeClassification, usize> = HashMap::new();
-    let mut roles_observed: HashMap<NodeRole, usize> = HashMap::new();
+    let mut classifications_observed: BTreeMap<String, usize> = BTreeMap::new();
+    let mut roles_observed: BTreeMap<String, usize> = BTreeMap::new();
 
     // Deterministik node sırası (NodeId ascending — HashMap traversal random).
     let mut node_ids: Vec<u64> = analysis.space.nodes.keys().copied().collect();
@@ -173,8 +174,11 @@ pub fn project_analysis(
         let identity = CanonicalCodeIdentity::new(path, policy)?;
 
         // Metadata observable (BridgeRunReport) — graph'a DÖNÜŞMEZ (M1).
-        *classifications_observed.entry(node.classification).or_default() += 1;
-        *roles_observed.entry(node.role).or_default() += 1;
+        // String key (Debug) → deterministic serialization (NodeClassification Ord değil).
+        *classifications_observed
+            .entry(format!("{:?}", node.classification))
+            .or_default() += 1;
+        *roles_observed.entry(format!("{:?}", node.role)).or_default() += 1;
 
         entities.push(CodeEntityCandidate::new(identity));
         projected_modules += 1;
@@ -202,8 +206,11 @@ pub struct BridgeRunReport {
     pub repository_head: Option<String>,
     pub projected_modules: usize,
     pub skipped_non_module: usize,
-    pub classifications_observed: HashMap<NodeClassification, usize>,
-    pub roles_observed: HashMap<NodeRole, usize>,
+    // Metadata counts — Display'de yazılmaz ama observable (test + future structured output).
+    #[allow(dead_code)]
+    pub classifications_observed: BTreeMap<String, usize>,
+    #[allow(dead_code)]
+    pub roles_observed: BTreeMap<String, usize>,
 }
 
 impl std::fmt::Display for BridgeRunReport {
@@ -251,7 +258,7 @@ pub enum AnalysisSeedError {
 mod tests {
     use super::*;
     use osp_analyzer::contract::SemanticCoverage;
-    use osp_core::space::{Node, NodeId, Space};
+    use osp_core::space::{Node, NodeClassification, NodeId, NodeRole, Space};
     use std::collections::HashMap;
 
     /// Synthetic AnalysisResult builder — test fixture.
@@ -326,8 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn case_only_rename_same_node_id_different_canonical() {
-        // F-yeni: identity_key aynı → NodeId aynı; canonical farklı.
+    fn case_only_rename_same_node_id_different_canonical_and_digest() {
+        // F-yeni identity-durum sözleşmesi (üçlü assert): aynı NodeId, farklı canonical,
+        // farklı NodeDigest. INV-C12 muhafazakâr — operatöre sunulan basis değişti.
         let a = analysis_result(vec![
             (1, "src/Payment.cs", NodeClassification::Production, NodeRole::Core),
         ]);
@@ -340,8 +348,24 @@ mod tests {
             project_analysis(&b, PathCasePolicy::AsciiCaseInsensitive).unwrap();
         let drafts_a = seed_a.into_drafts(AnalysisIdentityScheme::PathV1);
         let drafts_b = seed_b.into_drafts(AnalysisIdentityScheme::PathV1);
-        // Aynı NodeId (identity_key aynı).
-        assert_eq!(drafts_a[0].id(), drafts_b[0].id());
+        // GraphSeed'e dönüştür (canonical + digest karşılaştırması için).
+        let graph_a = crate::graph_seed_builder::GraphSeedBuilder::build(drafts_a).unwrap();
+        let graph_b = crate::graph_seed_builder::GraphSeedBuilder::build(drafts_b).unwrap();
+        let node_a = &graph_a.code_entities[0];
+        let node_b = &graph_b.code_entities[0];
+        // (1) Aynı NodeId (identity_key aynı — case-folded).
+        assert_eq!(node_a.id, node_b.id, "case-only rename must preserve NodeId");
+        // (2) Farklı canonical (display_path — case korunur).
+        assert_ne!(
+            node_a.canonical, node_b.canonical,
+            "case-only rename must change canonical (observed spelling)"
+        );
+        // (3) Farklı NodeDigest (canonical digest'e girer — freshness değişti).
+        assert_ne!(
+            osp_core::anchoring::review::node_digest(node_a).get(),
+            osp_core::anchoring::review::node_digest(node_b).get(),
+            "case-only rename must change NodeDigest (canonical → freshness)"
+        );
     }
 
     #[test]

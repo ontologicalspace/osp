@@ -16,7 +16,6 @@
 //! birleştir → boş reddet → display dondur → identity_key case-fold.
 
 // analysis_bridge.rs + commands/graph.rs integration tamamlanana kadar dead-code.
-#![allow(dead_code)]
 
 use thiserror::Error;
 

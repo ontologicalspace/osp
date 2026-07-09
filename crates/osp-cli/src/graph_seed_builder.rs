@@ -13,7 +13,6 @@
 //! `build(drafts) -> Result<GraphSeed, _>` — ya tam GraphSeed, ya hata. Partial state dışarı sızamaz.
 
 // seed_file.rs + commands/graph.rs integration tamamlanana kadar dead-code.
-#![allow(dead_code)]
 
 use std::collections::HashMap;
 
@@ -139,12 +138,14 @@ impl GraphSeedBuilder {
     }
 }
 
-/// Material özeti — collision diagnostic.
+/// Material özeti — collision diagnostic (tüm karşılaştırma alanları).
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct MaterialSummary {
     pub canonical: String,
+    pub aliases: Vec<String>,
     pub kind: ConceptNodeKind,
+    pub status: DecisionStatus,
     pub family: PositionFamily,
 }
 
@@ -152,7 +153,9 @@ impl GraphSeedNodeDraft {
     fn material_summary(&self) -> MaterialSummary {
         MaterialSummary {
             canonical: self.canonical.clone(),
+            aliases: self.aliases.clone(),
             kind: self.kind,
+            status: self.status,
             family: self.family,
         }
     }
