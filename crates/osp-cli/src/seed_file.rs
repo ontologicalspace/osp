@@ -110,7 +110,7 @@ impl CandidateSeedFile {
 /// `store.rs`'teki `kind_from_id` ile simetrik (id → kind prefix → kind).
 /// `kind.as_prefix()` kullanılır — manuel mapping ID/kind uyumsuzluğu yaratır
 /// (örn. CodeEntityCandidate → "CodeEntity:" çakışması; Review 2.tur P1.2).
-fn derive_node_id(kind: ConceptNodeKind, canonical: &str) -> String {
+pub(crate) fn derive_node_id(kind: ConceptNodeKind, canonical: &str) -> String {
     format!("{}:{canonical}", kind.as_prefix())
 }
 
