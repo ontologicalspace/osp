@@ -1,8 +1,8 @@
-# Paper 3 — Handoff Notu (CLI accept/reject + supersession surface TAMAM)
+# Paper 3 — Handoff Notu (CLI accept/reject + supersession + rich preview TAMAM)
 
-> **Tarih:** 2026-07-09 (CLI supersession branch — commit öncesi)
-> **Dal:** `feat/cli-supersession-surface` (main `c897549` üstünde)
-> **Durum:** Faz 8b epistemik çekirdek (PR #48-51) + **CLI accept/reject** (PR #53) + **CLI supersession surface** (bu dal) TAMAM. İki session'ın yüzeyi kapandı: `OperatorReviewSession` (accept/reject) + `SupersedeSession` (supersede). `node_digest_hex` unconditional rename, named `SupersedeDigests`, endpoint-specific stale, store-level typed errors (E1 downcast), yön-açık confirmation. Paper 3 v1.3 Zenodo'da canlı; v1.4 derive adayı (accept/reject/supersede evaluated). Sırada: rich `SupersedePreview` (lineage/compatibility/cycle), analysis → candidate bridge.
+> **Tarih:** 2026-07-09 (main `f3dacd7` — PR #55 merged)
+> **Dal:** `main` (clean)
+> **Durum:** Faz 8b epistemik çekirdek (PR #48-51) + **CLI accept/reject** (PR #53) + **CLI supersession surface** (PR #54) + **Rich SupersedePreview query** (PR #55) TAMAM. Üç session yüzeyi kapandı: `OperatorReviewSession` (accept/reject) + `SupersedeSession` (supersede) + `supersede-preview` read-only rich query (lineage DAG + structural eligibility + fail-closed I/O). osp-core'a üç read-only domain accessor (incoming/compatibility/cycle) + currentness `is_current_mainline()` — apply_supersede delegasyonları 12-step precedence'i korur. Paper 3 v1.3 Zenodo'da canlı; v1.4 derive adayı (accept/reject/supersede/preview implemented and integration-tested). Sırada: analysis → candidate bridge, arXiv v1.4.
 
 ---
 
@@ -326,7 +326,8 @@ Plan 5 tur review gördü; her tur mimari/claim doğruluğunu sıkıştırdı:
 ### Diğer
 - **TUI v2:** dialoguer/rustyline, fuzzy, renk (v1 stdio yeterli).
 - **Snapshot content-digest** (v2): elle JSON düzenleme tahrifatı için.
-- **arXiv:** v1.3 epistemik çekirdek + CLI accept/reject/supersede surface tamam; v1.4 derive adayı.
+- **arXiv:** v1.3 epistemik çekirdek + CLI accept/reject/supersede/rich-preview surface tamam; v1.4 derive adayı.
+- **Preview↔production primary-sebep hizalaması** (v2, future work): `primary_structural_blocker` sırası `apply_supersede` structural steps 5–10'a dizilir ama production session path (compile precheck currentness) daha erken dönebilir; characterization production-path reddetme sırasına karşı future work.
 
 ## Model A (normatif sözleşme)
 
@@ -402,11 +403,10 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-✅ **Faz 8b epistemik çekirdek + CLI `osp review` vertical slice TAMAM.**
-- main: `5ed13c1` (PR #52 merged — stale cleanup + paper3 artifact üretim aracı).
-- `feat/cli-osp-review` dalı: CLI `osp review` (accept/reject + persistent AnchorStoreSnapshot).
-- Faz 8b PR #48-51 merged; CLI osp review bu dalda (commit öncesi).
-- **521 lib test** (503 → 521, +18 AnchorStoreSnapshot) + **24 compile-fail** + **osp-cli 17 unit + 11 integration** + **osp-mcp +2 INV-C11** yeşil.
+✅ **Faz 8b epistemik çekirdek + CLI `osp review` (accept/reject/supersede) + rich SupersedePreview TAMAM.**
+- main: `f3dacd7` (PR #55 merged — rich supersede-preview query; 3 review turu: P1/P2 + fail-closed I/O + content-aware test).
+- Faz 8b PR #48-51 merged (epistemik çekirdek); PR #52 (stale cleanup + paper3 artifact); PR #53 (CLI accept/reject); PR #54 (CLI supersession surface); PR #55 (rich SupersedePreview).
+- **538 lib test** (503 → 538: +18 AnchorStoreSnapshot + +12 supersede-preview domain accessor/predicate + 5 PR #50 SupersedeSession + 1 determinism) + **24 compile-fail** + **osp-cli 42 unit + 21 review_flow + 20 supersede_flow + 12 preview_flow** + **osp-mcp +2 INV-C11** yeşil.
 
 ## Yayın durumu (v1.3 → v1.4 adayı)
 
