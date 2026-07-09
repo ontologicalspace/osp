@@ -745,7 +745,7 @@ fn supersede_candidate_successor_confirmation_gate() {
         ])
         .assert()
         .success();
-    let new_d = show_digest(&store, "RuleCandidate:NewRule");
+    // Successor (NewRule) Candidate bırakıldı — accept edilmedi.
     // Interactive: successor Candidate → "remains current Accepted" gösterilmez, EndpointNotCurrent.
     Command::cargo_bin("osp")
         .unwrap()
