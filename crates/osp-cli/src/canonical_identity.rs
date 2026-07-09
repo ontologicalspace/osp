@@ -15,6 +15,9 @@
 //! son segment kontrol (trailing `/`/`.`→DirectoryLikePath) → `.`/boş iç segment kaldır →
 //! birleştir → boş reddet → display dondur → identity_key case-fold.
 
+// analysis_bridge.rs + commands/graph.rs integration tamamlanana kadar dead-code.
+#![allow(dead_code)]
+
 use thiserror::Error;
 
 /// Path case politikası — host OS'den türetilmez (cross-platform determinism).

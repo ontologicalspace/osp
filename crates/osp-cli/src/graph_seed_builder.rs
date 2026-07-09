@@ -12,6 +12,9 @@
 //! # One-shot (B1)
 //! `build(drafts) -> Result<GraphSeed, _>` — ya tam GraphSeed, ya hata. Partial state dışarı sızamaz.
 
+// seed_file.rs + commands/graph.rs integration tamamlanana kadar dead-code.
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 
 use osp_core::anchoring::types::{

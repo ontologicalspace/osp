@@ -11,6 +11,7 @@
 
 use clap::{Parser, Subcommand};
 
+mod analysis_bridge;
 mod application;
 mod canonical_identity;
 mod commands;
