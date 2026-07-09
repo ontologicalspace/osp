@@ -327,20 +327,15 @@ impl<R: ReviewStoreRepository> ReviewApplicationService<R> {
                     // Node freshness digest — tüm statülerde (Candidate/Accepted/SupersededAccepted/Rejected).
                     // Tek source of truth; Candidate review `--basis-digest`, supersede iki endpoint için.
                     let digest = node_digest(&n);
-                    // SupersededAccepted ise successor'u çöz (committed Supersedes edge: successor→superseded).
+                    // SupersededAccepted ise successor'u çöz — core accessor (tek source,
+                    // preview/mutation step 5 ile aynı incoming-edge policy).
                     let superseded_by = if n.decision_status
                         == osp_core::anchoring::DecisionStatus::SupersededAccepted
                     {
                         store
-                            .graph()
-                            .edges()
-                            .find(|e| {
-                                e.to == n.id
-                                    && e.kind == osp_core::anchoring::ConceptEdgeKind::Supersedes
-                                    && e.decision_status
-                                        == osp_core::anchoring::DecisionStatus::Accepted
-                            })
-                            .map(|e| e.from.0.clone())
+                            .committed_supersede_incoming_sources(&n.id)
+                            .ok()
+                            .and_then(|srcs| srcs.into_iter().next().map(|id| id.0))
                     } else {
                         None
                     };
@@ -573,7 +568,13 @@ fn build_supersede_preview(
     let successor_preview = endpoint_preview(suc_node);
 
     // Lineage HER ZAMAN (self dahil) successor'dan üretilir.
-    let lineage = build_successor_lineage(store, successor, &incoming);
+    let lineage = build_successor_lineage(
+        store,
+        successor,
+        &incoming,
+        MAX_PREVIEW_LINEAGE_DEPTH,
+        MAX_PREVIEW_LINEAGE_NODES,
+    );
 
     Ok(SupersedePreviewOutput {
         revision,
@@ -617,6 +618,8 @@ fn build_successor_lineage(
     store: &InMemoryAnchorStore,
     root: &ConceptNodeId,
     superseded_incoming_sources: &[ConceptNodeId],
+    max_depth: usize,
+    max_nodes: usize,
 ) -> SupersedeLineagePreview {
     use osp_core::anchoring::{ConceptEdgeKind, DecisionStatus};
     use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -644,7 +647,7 @@ fn build_successor_lineage(
     visited.insert(root.0.clone());
 
     while let Some((current, depth)) = queue.pop_front() {
-        if nodes.len() >= MAX_PREVIEW_LINEAGE_NODES {
+        if nodes.len() >= max_nodes {
             truncated_by_nodes = true;
             break;
         }
@@ -653,7 +656,7 @@ fn build_successor_lineage(
             depth,
         });
 
-        if depth >= MAX_PREVIEW_LINEAGE_DEPTH {
+        if depth >= max_depth {
             // Bu node'un outgoing edge'leri depth limit yüzünden dahil edilemedi.
             if adjacency.contains_key(&current) {
                 truncated_by_depth = true;
@@ -663,23 +666,27 @@ fn build_successor_lineage(
 
         if let Some(targets) = adjacency.get(&current) {
             for target in targets {
-                // Closed-output: edge'in her iki ucu output nodes'ta olmalı.
-                // current zaten eklendi (yukarıda). target ya eklenecek ya da zaten var.
+                // Closed-output invariant: edge ancak her iki ucu output nodes'ta olacaksa eklenir.
+                // target zaten visited (önceki BFS adımda output'a girdi) → edge güvenle ekle.
+                if visited.contains(target) {
+                    edges.push(SupersedeLineageEdge {
+                        from: current.clone(),
+                        to: target.clone(),
+                    });
+                    continue;
+                }
+                // Yeni target — ancak node kapasitesi varsa kabul et (visited + queue'ya).
+                // Kapasite yoksa target output'a girmez → edge de eklenmez (closed-output).
+                if nodes.len() + queue.len() >= max_nodes {
+                    truncated_by_nodes = true;
+                    continue;
+                }
+                visited.insert(target.clone());
+                queue.push_back((target.clone(), depth + 1));
                 edges.push(SupersedeLineageEdge {
                     from: current.clone(),
                     to: target.clone(),
                 });
-                if !visited.contains(target) {
-                    visited.insert(target.clone());
-                    if nodes.len() + queue.len() >= MAX_PREVIEW_LINEAGE_NODES {
-                        truncated_by_nodes = true;
-                        // Edge eklendi ama target node limit yüzünden dahil edilmedi → closed-output
-                        // ihlali. Bu edge'i geri al.
-                        edges.pop();
-                    } else {
-                        queue.push_back((target.clone(), depth + 1));
-                    }
-                }
             }
         }
     }
@@ -700,8 +707,8 @@ fn build_successor_lineage(
         nodes,
         edges,
         truncation,
-        max_depth: MAX_PREVIEW_LINEAGE_DEPTH,
-        max_nodes: MAX_PREVIEW_LINEAGE_NODES,
+        max_depth,
+        max_nodes,
         superseded_incoming: superseded_incoming_sources.first().map(|id| id.0.clone()),
     }
 }
@@ -1287,6 +1294,52 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ReviewError::NotFound(_)));
+    }
+
+    /// Node-limit closed-output regression (Review P2-a): node cap aşımında excluded target'a
+    /// edge kalmaz. Küçük max_nodes (3) ile 4-node chain — 4. node excluded, ona edge yok.
+    #[test]
+    fn preview_lineage_node_limit_excludes_target_edges() {
+        // Chain: N0 ← N1 ← N2 ← N3 (N1→N0, N2→N1, N3→N2 committed). Successor=N3.
+        // max_nodes=3 → N3@0, N2@1, N1@2 dahil; N0 excluded. N1→N0 edge'inin de çıkarılması gerek.
+        let mk = |id: &str| ConceptNode {
+            id: ConceptNodeId(id.into()),
+            canonical: id.split(':').nth(1).unwrap_or(id).into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: DecisionStatus::Accepted,
+            position_family: PositionFamily::ConceptualIntent,
+        };
+        let mut seed = GraphSeed::default();
+        seed.rule_candidates.push(mk("RuleCandidate:N0"));
+        seed.rule_candidates.push(mk("RuleCandidate:N1"));
+        seed.rule_candidates.push(mk("RuleCandidate:N2"));
+        seed.rule_candidates.push(mk("RuleCandidate:N3"));
+        let mut store = InMemoryAnchorStore::with_seed(seed);
+        supersede_in_place(&mut store, "RuleCandidate:N0", "RuleCandidate:N1"); // N1→N0
+        supersede_in_place(&mut store, "RuleCandidate:N1", "RuleCandidate:N2"); // N2→N1
+        supersede_in_place(&mut store, "RuleCandidate:N2", "RuleCandidate:N3"); // N3→N2
+        let lineage = build_successor_lineage(
+            &store,
+            &ConceptNodeId("RuleCandidate:N3".into()),
+            &[],
+            16,
+            3, // max_nodes — N0'u exclude etmek için
+        );
+        assert_eq!(lineage.nodes.len(), 3, "node cap = 3 → exactly 3 nodes");
+        assert_eq!(lineage.truncation, Some(LineageTruncation::NodeLimit));
+        // Closed-output: excluded N0'a hiçbir edge.
+        let node_ids: std::collections::BTreeSet<String> =
+            lineage.nodes.iter().map(|n| n.id.clone()).collect();
+        assert!(!node_ids.contains("RuleCandidate:N0"), "N0 must be excluded");
+        for e in &lineage.edges {
+            assert!(
+                node_ids.contains(&e.from) && node_ids.contains(&e.to),
+                "closed-output violation at node limit: edge {} → {} has excluded endpoint",
+                e.from,
+                e.to
+            );
+        }
     }
 
     /// Closed-output invariant: lineage DAG'deki her edge from/to nodes içinde.

@@ -409,3 +409,96 @@ fn wizard_supersede_ineligible_no_prompt() {
         "no prompt for ineligible: {out}"
     );
 }
+
+/// Ineligible preview state transition göstermez (Review P1-a). Successor Candidate →
+/// "currently blocked" var, "remains current Accepted" yok.
+#[test]
+fn supersede_preview_ineligible_hides_state_transition() {
+    let dir = tempdir().unwrap();
+    let seed = r#"{ "schema_version": 1, "nodes": [
+        {"canonical": "Old", "kind": "RuleCandidate"},
+        {"canonical": "New", "kind": "RuleCandidate"}
+    ]}"#;
+    let store = init_store(dir.path(), seed);
+    // Yalnız New'i accept et; Old Candidate kalır → ineligible (superseded_not_current).
+    let d = show_digest(&store, "RuleCandidate:New");
+    Command::cargo_bin("osp")
+        .unwrap()
+        .args([
+            "review", "accept", "RuleCandidate:New", "--store", store.to_str().unwrap(),
+            "--operator", "t", "--reason", "ok", "--yes", "--basis-digest", &d,
+        ])
+        .assert()
+        .success();
+    let out = Command::cargo_bin("osp")
+        .unwrap()
+        .args([
+            "review", "supersede-preview", "RuleCandidate:Old", "RuleCandidate:New",
+            "--store", store.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    // ineligible → blocked mesajı, state transition yok.
+    assert!(out.contains("currently blocked"), "expected blocked msg: {out}");
+    assert!(
+        !out.contains("remains current Accepted"),
+        "ineligible must not show state transition: {out}"
+    );
+}
+
+/// Consolidation lineage DAG — edge-list gösterimi (sahte chain yok). C→A, C→B branching
+/// korunur; "C → A → B" sahte chain'i üretilmez (Review P1-b).
+#[test]
+fn supersede_preview_consolidation_dag_not_fake_chain() {
+    let dir = tempdir().unwrap();
+    let seed = r#"{ "schema_version": 1, "nodes": [
+        {"canonical": "A", "kind": "RuleCandidate"},
+        {"canonical": "B", "kind": "RuleCandidate"},
+        {"canonical": "C", "kind": "RuleCandidate"}
+    ]}"#;
+    let store = init_store(dir.path(), seed);
+    for id in ["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"] {
+        let d = show_digest(&store, id);
+        Command::cargo_bin("osp")
+            .unwrap()
+            .args([
+                "review", "accept", id, "--store", store.to_str().unwrap(),
+                "--operator", "t", "--reason", "ok", "--yes", "--basis-digest", &d,
+            ])
+            .assert()
+            .success();
+    }
+    supersede(&store, "RuleCandidate:A", "RuleCandidate:C"); // C→A
+    supersede(&store, "RuleCandidate:B", "RuleCandidate:C"); // C→B
+    // Preview successor=C → consolidation DAG (C→A, C→B branching).
+    let out = Command::cargo_bin("osp")
+        .unwrap()
+        .args([
+            "review", "supersede-preview", "RuleCandidate:A", "RuleCandidate:C",
+            "--store", store.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    // Edge-list gösterimi — iki ayrı edge (branching korunur).
+    assert!(
+        out.contains("RuleCandidate:C --Supersedes--> RuleCandidate:A"),
+        "expected C→A edge in DAG view: {out}"
+    );
+    assert!(
+        out.contains("RuleCandidate:C --Supersedes--> RuleCandidate:B"),
+        "expected C→B edge in DAG view: {out}"
+    );
+    // Sahte chain üretilmemeli (C → A → B branching değil).
+    assert!(
+        !out.contains("RuleCandidate:C → RuleCandidate:A → RuleCandidate:B"),
+        "must not produce fake chain for consolidation: {out}"
+    );
+}

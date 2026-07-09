@@ -203,7 +203,9 @@ pub fn run_interactive<R: BufRead, W: Write>(
                         continue;
                     }
                 };
-                run_informed_supersede(&service, input, output, &old, &new, &operator);
+                if let Err(e) = run_informed_supersede(&service, input, output, &old, &new, &operator) {
+                    writeln!(output, "✗ preview render failed: {e}").ok();
+                }
             }
             other => {
                 writeln!(
@@ -340,7 +342,7 @@ fn run_informed_supersede<R: BufRead, W: Write>(
     old: &str,
     new: &str,
     operator: &OperatorId,
-) {
+) -> std::io::Result<()> {
     use crate::commands::supersede_preview_render::render_supersede_preview_text;
     use crate::errors::SupersedeCommand;
 
@@ -351,27 +353,29 @@ fn run_informed_supersede<R: BufRead, W: Write>(
         Ok(p) => p,
         Err(e) => {
             writeln!(output, "✗ {e}").ok();
-            return;
+            return Ok(());
         }
     };
 
     // (2) Canonical renderer (body only) — standalone ile aynı çıktı.
-    render_supersede_preview_text(output, &preview).ok();
+    // Render hatası informed-basis garantisini kırar (preview eksik → confirmation/mutation
+    // devam edemez) — .ok() ile yutma, ? ile yay (Review P1-c).
+    render_supersede_preview_text(output, &preview)?;
 
     // ineligible → confirmation prompt yok, session'a dön.
     if !preview.structurally_eligible {
-        return;
+        return Ok(());
     }
 
     write!(output, "  Apply this exact supersession? [y/N] ").ok();
     output.flush().ok();
     let mut confirm = String::new();
     if input.read_line(&mut confirm).unwrap_or(0) == 0 {
-        return;
+        return Ok(());
     }
     if confirm.trim().to_lowercase() != "y" && confirm.trim().to_lowercase() != "yes" {
         writeln!(output, "  aborted by operator").ok();
-        return;
+        return Ok(());
     }
 
     // (3) Reason.
@@ -379,12 +383,12 @@ fn run_informed_supersede<R: BufRead, W: Write>(
     output.flush().ok();
     let mut reason = String::new();
     if input.read_line(&mut reason).unwrap_or(0) == 0 {
-        return;
+        return Ok(());
     }
     let reason = reason.trim().to_string();
     if reason.is_empty() {
         writeln!(output, "✗ reason cannot be empty").ok();
-        return;
+        return Ok(());
     }
 
     // (4) Mutation — gösterilen preview'ın digest'leri ile (lock altında recheck).
@@ -424,6 +428,7 @@ fn run_informed_supersede<R: BufRead, W: Write>(
             writeln!(output, "✗ {e}").ok();
         }
     }
+    Ok(())
 }
 
 /// Node'un basis'ini göster ve (digest, canonical) döner (Candidate değilse None).
@@ -589,5 +594,74 @@ mod tests {
         assert_eq!(op, "prompted-op");
         let out = String::from_utf8(output).unwrap();
         assert!(out.contains("Operator identity:"), "prompt shown: {out}");
+    }
+
+    /// Failing-writer: render hatası informed-basis garantisini korur — confirmation/reason/
+    /// mutation adımlarına geçilmez (Review P1-c). run_informed_supersede Err döner.
+    use std::io::{self, Write};
+    /// Writer that fails after `limit` bytes (simulates broken pipe / full buffer).
+    struct FailingWriter {
+        written: usize,
+        limit: usize,
+    }
+    impl Write for FailingWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if self.written >= self.limit {
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer failed"));
+            }
+            let n = std::cmp::min(buf.len(), self.limit - self.written);
+            self.written += n;
+            Ok(n)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// İki Accepted node'lu store (supersede için) — review_session test yardımcısı.
+    fn setup_two_accepted_store(dir: &std::path::Path) -> std::path::PathBuf {
+        use crate::store_io::{write_persisted_store, PersistedStore};
+        use osp_core::anchoring::store::InMemoryAnchorStore;
+        use osp_core::anchoring::types::{ConceptNode, ConceptNodeId, ConceptNodeKind, GraphSeed};
+        use osp_core::anchoring::{DecisionStatus, PositionFamily};
+        let mk = |id: &str| ConceptNode {
+            id: ConceptNodeId(id.into()),
+            canonical: id.split(':').nth(1).unwrap_or(id).into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::RuleCandidate,
+            decision_status: DecisionStatus::Accepted,
+            position_family: PositionFamily::ConceptualIntent,
+        };
+        let mut seed = GraphSeed::default();
+        seed.rule_candidates.push(mk("RuleCandidate:Old"));
+        seed.rule_candidates.push(mk("RuleCandidate:New"));
+        let store = InMemoryAnchorStore::with_seed(seed);
+        let path = dir.join("store2.json");
+        write_persisted_store(&path, &PersistedStore::from_snapshot(store.export_snapshot()))
+            .unwrap();
+        path
+    }
+
+    #[test]
+    fn supersede_render_failure_aborts_mutation() {
+        let dir = tempdir().unwrap();
+        let path = setup_two_accepted_store(dir.path());
+        let repo = crate::application::repository::FileReviewStore::new(&path);
+        let service = ReviewApplicationService::new(repo);
+        let mut input = Cursor::new(b"y\nreason\n"); // confirmation + reason (asla okunmamalı)
+        let mut output = FailingWriter { written: 0, limit: 5 }; // render çok erken fail
+        let result = run_informed_supersede(
+            &service,
+            &mut input,
+            &mut output,
+            "RuleCandidate:Old",
+            "RuleCandidate:New",
+            &OperatorId::new("op"),
+        );
+        // Render hatası ? ile yayılır → Err döner; confirmation/reason/mutation yürümez.
+        assert!(result.is_err(), "render failure must propagate Err");
+        // Revision unchanged — mutation gerçekleşmedi.
+        let persisted = crate::store_io::read_persisted_store(&path).unwrap();
+        assert_eq!(persisted.revision, 0, "mutation must not run after render failure");
     }
 }

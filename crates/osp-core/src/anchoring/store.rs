@@ -2956,13 +2956,21 @@ mod tests {
         assert!(matches!(err, StoreError::NodeNotFound(_)));
     }
 
-    /// Multi-blocker structural precedence characterization (store'a karşı, osp-core içinde).
-    /// Vaka: superseded already-superseded (committed incoming) + non-current + incompatible.
-    /// Store ilk hatası: AlreadySuperseded (step 5 < 6 < 9). Production path (SupersedeSession)
-    /// ile — direct application ctor bypass yerine, snap_supersede helper pattern.
+    /// Accessor doğruluğu — already-superseded multi-blocker vaka.
+    ///
+    /// Bu vaka preview'ın AlreadySuperseded + SupersededNotCurrent multi-blocker'ını doğrular
+    /// (accessor'lar doğru değer döner). **Önemli nüans (Review 2):** `apply_supersede`'in
+    /// inline step 5<6 precedence'ı production path'te already-superseded için erişilemez —
+    /// `PresentedSupersedeBasis::compile` currentness'ı step 5'ten önce kontrol eder ve
+    /// `SupersededNotCurrent` döner. Yani store'un "step 5 < step 6" inline precedence'ı bu
+    /// vakada ölü; preview `AlreadySuperseded`'i primary seçer (apply inline sırasına göre)
+    /// ama production mutation `SupersededNotCurrent`/compile hatası döner. Bu, structurally_eligible=false
+    /// her iki sırada da doğru olduğu için fonksiyonel olarak zararsız; sadece *primary blocker*
+    /// etiketi farklılaşabilir. Bu test inline precedence'i kilitlemez — accessor doğruluğunu
+    /// sabitler. Preview↔production primary-sebep hizalaması future work (production-path
+    /// reddetme sırasına karşı characterization).
     #[test]
-    fn apply_supersede_precedence_already_superseded_before_status_and_compat() {
-        use crate::anchoring::review::PresentedSupersedeBasis;
+    fn accessor_facts_observe_already_superseded_and_non_current() {
         let mut store = snap_store_with_candidates(&[
             "RuleCandidate:Old",
             "RuleCandidate:New",
@@ -2972,21 +2980,19 @@ mod tests {
         snap_accept(&mut store, "RuleCandidate:New");
         snap_accept(&mut store, "RuleCandidate:Newer");
         snap_supersede(&mut store, "RuleCandidate:Old", "RuleCandidate:New"); // committed New→Old
-        // Şimdi Old=SupersededAccepted (incoming var, non-current). Tekrar supersede dene.
         let sup = ConceptNodeId("RuleCandidate:Old".into());
         let suc = ConceptNodeId("RuleCandidate:Newer".into());
-        let basis = PresentedSupersedeBasis::compile(&store, &sup, &suc);
-        // Old non-current (SupersededAccepted) → compile SupersededNotCurrent döner
-        // (session precheck, step 5'ten önce). Bu expected: production path store step 5'e
-        // ulaşmadan currentness precheck ile reddeder. Karakterizasyon: accessor doğruluğu.
-        assert!(basis.is_err(), "Old non-current → basis compile must reject");
-        // Store accessor doğruluğu (multi-blocker kaynağı):
+        // Production path: compile currentness precheck (SupersededNotCurrent) — step 5'e ulaşmaz.
+        use crate::anchoring::review::PresentedSupersedeBasis;
+        assert!(
+            PresentedSupersedeBasis::compile(&store, &sup, &suc).is_err(),
+            "Old non-current → basis compile rejects (currentness precheck, not step 5)"
+        );
+        // Accessor doğruluğu (preview multi-blocker kaynağı):
         let incoming = store.committed_supersede_incoming_sources(&sup).unwrap();
         assert_eq!(incoming, vec![ConceptNodeId("RuleCandidate:New".into())]);
-        // Old artık non-current (SupersededAccepted) — is_current_mainline false.
         let old_node = store.graph().node(&sup).unwrap();
         assert!(!old_node.decision_status.is_current_mainline());
-        // Compatibility (aynı kind+family → compatible; bu vaka compat ile çelişmiyor).
         let compat = store.inspect_supersede_compatibility(&sup, &suc).unwrap();
         assert!(compat.is_compatible(), "same kind+family → compatible");
     }

@@ -62,32 +62,89 @@ pub(crate) fn render_supersede_preview_text<W: Write>(
         "Proposed committed edge:  {} --{}--> {}",
         preview.proposed_edge.from, preview.proposed_edge.kind, preview.proposed_edge.to
     )?;
-    writeln!(
-        output,
-    "  {} → SupersededAccepted (retains provenance, no longer current)",
-        preview.superseded.id
-    )?;
-    writeln!(
-        output,
-    "  {} remains current Accepted",
-        preview.successor.id
-    )?;
+    // State transition sonuçları yalnız structurally eligible durumda gösterilir.
+    // ineligible'da gerçekleşmeyecek geçişi kesin sonuç gibi gösterme (Review P1).
+    if preview.structurally_eligible {
+        writeln!(output, "If successfully committed:")?;
+        writeln!(
+            output,
+            "  {} → SupersededAccepted (retains provenance, no longer current)",
+            preview.superseded.id
+        )?;
+        writeln!(
+            output,
+            "  {} remains current Accepted",
+            preview.successor.id
+        )?;
+    } else {
+        writeln!(
+            output,
+            "Requested transition is currently blocked; no state change will be applied."
+        )?;
+    }
     writeln!(output)?;
 
-    // Lineage (successor outgoing chain + superseded incoming).
-    if preview.lineage.nodes.len() <= 1 && preview.lineage.edges.is_empty() {
-        writeln!(output, "Lineage:  {} has no committed supersession history", preview.lineage.root)?;
+    // Lineage (successor outgoing committed DAG + superseded incoming).
+    // Edge-list gösterimi — consolidation'da branching korunur (chain.join sahte chain üretmez).
+    if preview.lineage.edges.is_empty() {
+        writeln!(
+            output,
+            "Lineage:  {} has no committed supersession history",
+            preview.lineage.root
+        )?;
     } else {
-        writeln!(output, "Lineage (successor outgoing committed chain):")?;
-        let chain: Vec<String> = preview
+        writeln!(
+            output,
+            "Lineage (successor outgoing committed DAG):"
+        )?;
+        // Sade chain tespiti: her node ≤1 outgoing ve ≤1 incoming → compact chain göster.
+        use std::collections::BTreeMap;
+        let mut out_count: BTreeMap<&str, usize> = BTreeMap::new();
+        for e in &preview.lineage.edges {
+            *out_count.entry(e.from.as_str()).or_default() += 1;
+        }
+        let is_simple_chain = preview
             .lineage
-            .nodes
+            .edges
             .iter()
-            .map(|n| n.id.clone())
-            .collect();
-        writeln!(output, "  {}", chain.join(" → "))?;
+            .all(|e| *out_count.get(e.from.as_str()).unwrap_or(&0) == 1)
+            && preview.lineage.edges.len() + 1 == preview.lineage.nodes.len();
+        if is_simple_chain {
+            // Compact chain: root → ... → leaf (edges sıralı).
+            let mut chain: Vec<String> = Vec::new();
+            // root = from olan ama to olmayan node (veya ilk edge'in from'u).
+            let tos: std::collections::BTreeSet<&str> =
+                preview.lineage.edges.iter().map(|e| e.to.as_str()).collect();
+            let root = preview
+                .lineage
+                .nodes
+                .iter()
+                .find(|n| !tos.contains(n.id.as_str()))
+                .map(|n| n.id.clone())
+                .unwrap_or_else(|| preview.lineage.root.clone());
+            let mut adj: BTreeMap<String, String> = BTreeMap::new();
+            for e in &preview.lineage.edges {
+                adj.insert(e.from.clone(), e.to.clone());
+            }
+            let mut cur = root;
+            chain.push(cur.clone());
+            while let Some(next) = adj.get(&cur) {
+                chain.push(next.clone());
+                cur = next.clone();
+            }
+            writeln!(output, "  {}", chain.join(" → "))?;
+        } else {
+            // DAG — edge-list (branching korunur).
+            for e in &preview.lineage.edges {
+                writeln!(
+                    output,
+                    "  {} --Supersedes--> {}",
+                    e.from, e.to
+                )?;
+            }
+        }
         if let Some(t) = preview.lineage.truncation {
-            writeln!(output, "  (truncated: {:?} — chain may be longer)", t)?;
+            writeln!(output, "  (truncated: {:?} — DAG may be larger)", t)?;
         }
     }
     if let Some(incoming) = &preview.lineage.superseded_incoming {
