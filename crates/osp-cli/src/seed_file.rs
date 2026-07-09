@@ -12,8 +12,9 @@
 //! - **duplicate canonical kontrolü:** `insert_node` HashMap sessiz overwrite eder;
 //!   post-init restore-validasyon yakalar ama hata kaynağı bulanıklaşır → DTO'da erken yakala.
 
-use osp_core::anchoring::types::{ConceptNode, ConceptNodeKind, GraphSeed};
-use osp_core::anchoring::{DecisionStatus, PositionFamily};
+use osp_core::anchoring::types::{ConceptNodeKind, ConceptNodeId, GraphSeed};
+
+use crate::graph_seed_builder::{GraphSeedBuilder, GraphSeedBuilderError, GraphSeedNodeDraft};
 
 /// Seed parse hatası.
 #[derive(Debug, thiserror::Error)]
@@ -67,11 +68,12 @@ impl CandidateSeedFile {
         Ok(seed)
     }
 
-    /// Trusted `GraphSeed`'e dönüştür (Candidate-only). Duplicate canonical + empty kontrolü.
-    pub fn to_graph_seed(&self) -> Result<GraphSeed, SeedError> {
+    /// Legacy `GraphSeedNodeDraft` üretir — F1 semantics (ConceptualIntent, Candidate, aliases).
+    /// Canonical dedup + empty kontrolü burada; NodeId collision GraphSeedBuilder'da.
+    pub(crate) fn into_drafts(&self) -> Result<Vec<GraphSeedNodeDraft>, SeedError> {
         use std::collections::BTreeSet;
         let mut seen: BTreeSet<String> = BTreeSet::new();
-        let mut seed = GraphSeed::default();
+        let mut drafts: Vec<GraphSeedNodeDraft> = Vec::new();
         for (idx, node) in self.nodes.iter().enumerate() {
             let canonical = node.canonical.trim();
             if canonical.is_empty() {
@@ -81,28 +83,39 @@ impl CandidateSeedFile {
                 return Err(SeedError::DuplicateCanonical(canonical.to_string()));
             }
             // id türet: kind prefix + canonical (ConceptNodeKind konvansiyonu).
-            let id = derive_node_id(node.kind, canonical);
-            let concept_node = ConceptNode {
-                id: osp_core::anchoring::types::ConceptNodeId(id),
-                canonical: canonical.to_string(),
-                aliases: node.aliases.clone(),
-                node_kind: node.kind,
-                decision_status: DecisionStatus::Candidate, // hard-code — illegal state unrepresentable
-                position_family: PositionFamily::ConceptualIntent,
-            };
-            // kind'a göre uygun bucket'a koy (GraphSeed 6 bucket).
-            match node.kind {
-                ConceptNodeKind::Concept => seed.concepts.push(concept_node),
-                ConceptNodeKind::Decision => seed.decisions.push(concept_node),
-                ConceptNodeKind::CodeEntity => seed.code_entities.push(concept_node),
-                ConceptNodeKind::RuleCandidate => seed.rule_candidates.push(concept_node),
-                ConceptNodeKind::TaskCandidate => seed.task_candidates.push(concept_node),
-                ConceptNodeKind::RiskCandidate => seed.risk_candidates.push(concept_node),
-                ConceptNodeKind::Risk => seed.risk_candidates.push(concept_node),
-                ConceptNodeKind::CodeEntityCandidate => seed.code_entities.push(concept_node),
-            }
+            let id = ConceptNodeId(derive_node_id(node.kind, canonical));
+            drafts.push(GraphSeedNodeDraft::legacy_candidate(
+                id,
+                canonical.to_string(),
+                node.aliases.clone(),
+                node.kind,
+            ));
         }
-        Ok(seed)
+        Ok(drafts)
+    }
+
+    /// Trusted `GraphSeed`'e dönüştür (Candidate-only). Duplicate canonical + empty kontrolü.
+    /// F1 legacy compat wrapper: `into_drafts() + GraphSeedBuilder::build()`.
+    /// Production `commands/graph.rs` into_drafts+GraphSeedBuilder direkt kullanır;
+    /// bu metot test characterization + downstream convenience için.
+    #[allow(dead_code)]
+    pub fn to_graph_seed(&self) -> Result<GraphSeed, SeedError> {
+        let drafts = self.into_drafts()?;
+        GraphSeedBuilder::build(drafts).map_err(map_builder_error)
+    }
+}
+
+/// GraphSeedBuilder hatası → SeedError (F1 legacy compat — DuplicateCanonical mapping).
+fn map_builder_error(e: GraphSeedBuilderError) -> SeedError {
+    match e {
+        GraphSeedBuilderError::DuplicateNode { canonical, .. } => {
+            SeedError::DuplicateCanonical(canonical)
+        }
+        // NodeIdCollision mevcut davranışta unreachable (canonical dedup önce yakalar).
+        // Hardening: DuplicateCanonical'a map (canonical dedup zaten NodeId collision'ı önler).
+        GraphSeedBuilderError::NodeIdCollision { .. } => {
+            SeedError::DuplicateCanonical("(node-id collision)".into())
+        }
     }
 }
 
@@ -110,14 +123,14 @@ impl CandidateSeedFile {
 /// `store.rs`'teki `kind_from_id` ile simetrik (id → kind prefix → kind).
 /// `kind.as_prefix()` kullanılır — manuel mapping ID/kind uyumsuzluğu yaratır
 /// (örn. CodeEntityCandidate → "CodeEntity:" çakışması; Review 2.tur P1.2).
-fn derive_node_id(kind: ConceptNodeKind, canonical: &str) -> String {
+pub(crate) fn derive_node_id(kind: ConceptNodeKind, canonical: &str) -> String {
     format!("{}:{canonical}", kind.as_prefix())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osp_core::anchoring::DecisionStatus;
+    use osp_core::anchoring::{DecisionStatus, PositionFamily};
 
     /// Happy path: valid seed → GraphSeed (Candidate-only).
     #[test]
@@ -225,5 +238,110 @@ mod tests {
             graph.code_entities[0].node_kind,
             ConceptNodeKind::CodeEntityCandidate
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Frozen characterization (O6') — refactor öncesi baseline davranış pinleme.
+    // Bu testler to_graph_seed() → into_drafts()+GraphSeedBuilder refactor'undan ÖNCE
+    // yazıldı. Refactor sonrası aynı davranış (mutlu yol + negatif) korunmalı.
+    // Reviewer: bu testlerin yeni implementation'a göre sonradan uydurulmadığınet görünür.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// F1 frozen mutlu yol: 3 node farklı kind → GraphSeed node ID/digest/aliases/kind/family/order.
+    /// Refactor sonrası (into_drafts + GraphSeedBuilder) aynı frozen values üretmeli.
+    #[test]
+    fn frozen_characterization_happy_path_semantics() {
+        let json = r#"{
+            "schema_version": 1,
+            "nodes": [
+                {"canonical": "Alpha", "kind": "Concept"},
+                {"canonical": "Beta", "kind": "RuleCandidate", "aliases": ["b"]},
+                {"canonical": "Gamma", "kind": "CodeEntity"}
+            ]
+        }"#;
+        let seed = CandidateSeedFile::from_json(json).unwrap();
+        let graph = seed.to_graph_seed().unwrap();
+        // Bucket placement (kind bazlı).
+        assert_eq!(graph.concepts.len(), 1);
+        assert_eq!(graph.rule_candidates.len(), 1);
+        assert_eq!(graph.code_entities.len(), 1);
+        // Node ID derivation (kind prefix + canonical).
+        assert_eq!(graph.concepts[0].id.0, "Concept:Alpha");
+        assert_eq!(graph.rule_candidates[0].id.0, "RuleCandidate:Beta");
+        assert_eq!(graph.code_entities[0].id.0, "CodeEntity:Gamma");
+        // Family hardcoded ConceptualIntent (F1 legacy compat).
+        assert_eq!(graph.concepts[0].position_family, PositionFamily::ConceptualIntent);
+        assert_eq!(graph.rule_candidates[0].position_family, PositionFamily::ConceptualIntent);
+        assert_eq!(graph.code_entities[0].position_family, PositionFamily::ConceptualIntent);
+        // Status Candidate (INV-C5 — illegal state unrepresentable).
+        assert_eq!(graph.concepts[0].decision_status, DecisionStatus::Candidate);
+        assert_eq!(graph.rule_candidates[0].decision_status, DecisionStatus::Candidate);
+        // Aliases preserved.
+        assert_eq!(graph.rule_candidates[0].aliases, vec!["b".to_string()]);
+        assert!(graph.concepts[0].aliases.is_empty());
+        // Node digest frozen values (canonical + aliases + kind + family — FNV-1a).
+        // P2: gerçek hash değerleri pinlendi (assert_ne yalnızca farklılık kanıtlardı;
+        // characterization amacı değer sabitliği). Refactor sonrası aynı değerler.
+        let d1 = osp_core::anchoring::review::node_digest(&graph.concepts[0]);
+        let d2 = osp_core::anchoring::review::node_digest(&graph.rule_candidates[0]);
+        let d3 = osp_core::anchoring::review::node_digest(&graph.code_entities[0]);
+        assert_eq!(d1.get(), 16897406824438811853, "Concept:Alpha digest frozen");
+        assert_eq!(d2.get(), 15636681671644259112, "RuleCandidate:Beta+[b] digest frozen");
+        assert_eq!(d3.get(), 16641907892218766788, "CodeEntity:Gamma digest frozen");
+    }
+
+    /// O6' legacy negatif: duplicate canonical → fail-closed (DuplicateCanonical).
+    /// Mevcut davranış: canonical string bazında dedup, ilk tekrar hata.
+    #[test]
+    fn frozen_characterization_duplicate_canonical_rejected() {
+        let json = r#"{
+            "schema_version": 1,
+            "nodes": [
+                {"canonical": "Dup", "kind": "Concept"},
+                {"canonical": "Dup", "kind": "RuleCandidate"}
+            ]
+        }"#;
+        let seed = CandidateSeedFile::from_json(json).unwrap();
+        let err = seed.to_graph_seed().unwrap_err();
+        assert!(
+            matches!(err, SeedError::DuplicateCanonical(ref s) if s == "Dup"),
+            "duplicate canonical must fail-closed, got {err:?}"
+        );
+    }
+
+    /// O6' legacy negatif: empty seed → Ok (GraphSeed::default, tüm bucket boş).
+    /// Mevcut davranış: boş node listesi → boş GraphSeed (kabul).
+    #[test]
+    fn frozen_characterization_empty_seed_accepted() {
+        let json = r#"{ "schema_version": 1, "nodes": [] }"#;
+        let seed = CandidateSeedFile::from_json(json).unwrap();
+        let graph = seed.to_graph_seed().unwrap();
+        assert!(graph.concepts.is_empty());
+        assert!(graph.decisions.is_empty());
+        assert!(graph.code_entities.is_empty());
+        assert!(graph.rule_candidates.is_empty());
+        assert!(graph.task_candidates.is_empty());
+        assert!(graph.risk_candidates.is_empty());
+    }
+
+    /// O6' legacy negatif: insertion-order preserved (bucket push sırası).
+    /// Mevcut davranış: JSON node sırası korunur (her bucket kendi içinde insertion-order).
+    #[test]
+    fn frozen_characterization_insertion_order_preserved() {
+        let json = r#"{
+            "schema_version": 1,
+            "nodes": [
+                {"canonical": "Zebra", "kind": "Concept"},
+                {"canonical": "Apple", "kind": "Concept"},
+                {"canonical": "Mango", "kind": "Concept"}
+            ]
+        }"#;
+        let seed = CandidateSeedFile::from_json(json).unwrap();
+        let graph = seed.to_graph_seed().unwrap();
+        // Insertion-order (Zebra, Apple, Mango) — sort edilmez.
+        assert_eq!(graph.concepts.len(), 3);
+        assert_eq!(graph.concepts[0].canonical, "Zebra");
+        assert_eq!(graph.concepts[1].canonical, "Apple");
+        assert_eq!(graph.concepts[2].canonical, "Mango");
     }
 }

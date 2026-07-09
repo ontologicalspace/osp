@@ -1,8 +1,8 @@
-# Paper 3 — Handoff Notu (CLI accept/reject + supersession surface TAMAM)
+# Paper 3 — Handoff Notu (CLI accept/reject + supersession + rich preview TAMAM)
 
-> **Tarih:** 2026-07-09 (CLI supersession branch — commit öncesi)
-> **Dal:** `feat/cli-supersession-surface` (main `c897549` üstünde)
-> **Durum:** Faz 8b epistemik çekirdek (PR #48-51) + **CLI accept/reject** (PR #53) + **CLI supersession surface** (bu dal) TAMAM. İki session'ın yüzeyi kapandı: `OperatorReviewSession` (accept/reject) + `SupersedeSession` (supersede). `node_digest_hex` unconditional rename, named `SupersedeDigests`, endpoint-specific stale, store-level typed errors (E1 downcast), yön-açık confirmation. Paper 3 v1.3 Zenodo'da canlı; v1.4 derive adayı (accept/reject/supersede evaluated). Sırada: rich `SupersedePreview` (lineage/compatibility/cycle), analysis → candidate bridge.
+> **Tarih:** 2026-07-09 (main `f3dacd7` — PR #55 merged)
+> **Dal:** `main` (clean)
+> **Durum:** Faz 8b epistemik çekirdek (PR #48-51) + **CLI accept/reject** (PR #53) + **CLI supersession surface** (PR #54) + **Rich SupersedePreview query** (PR #55) TAMAM. Üç session yüzeyi kapandı: `OperatorReviewSession` (accept/reject) + `SupersedeSession` (supersede) + `supersede-preview` read-only rich query (lineage DAG + structural eligibility + fail-closed I/O). osp-core'a üç read-only domain accessor (incoming/compatibility/cycle) + currentness `is_current_mainline()` — apply_supersede delegasyonları 12-step precedence'i korur. Paper 3 v1.3 Zenodo'da canlı; v1.4 derive adayı (accept/reject/supersede/preview implemented and integration-tested). Sırada: analysis → candidate bridge, arXiv v1.4.
 
 ---
 
@@ -319,14 +319,92 @@ Plan 5 tur review gördü; her tur mimari/claim doğruluğunu sıkıştırdı:
 
 ## Sıradaki işler
 
-### Analysis → candidate bridge (sonraki milestone)
-- `AnalysisResult → CandidateBatch → GraphSeed` projection protocol. Acceptance kriterleri
-  (persistent review lifecycle) geçti; şimdi candidate üretim kaynağı.
+### Analysis evidence projection (PR B — sonraki milestone)
+- `ObservedCodeEvidence` projection (INV-C6): coupling/cohesion/instability MetricValue,
+  metric_source Scip/TreeSitter. Codebase'te "future osp-analyzer bridge" için public
+  constructor zaten hazır (code_evidence.rs). Ayrı epistemik sözleşme.
+
+### Structural relation projection (PR C)
+- `Imports → ConceptEdge` — ama önce physical relation vs conceptual edge ontolojik
+  sözleşme tasarımı. ConceptEdgeKind mapping, INV-C7 explanation, Candidate lane.
+
+### ConceptNode attribute expansion (PR D)
+- classification/role typed attribute (ConceptNode taşımıyor şu an). Analysis bridge
+  metadata şu an BridgeRunReport observable (graph'a DÖNÜŞMEZ).
+
+### ObservedEntityRefresh (PR E — F-yeni future)
+- Incremental store'da representation change audit transition (case-only rename →
+  aynı NodeId, farklı canonical/digest). Supersede değil; `ObservedEntityRefresh`.
+
+## CLI `osp graph init --analyze` — ne yapıldı (bu dalda)
+
+Analysis → candidate bridge (PR A) — HANDOFF "Sıradaki işler" milestone kapandı.
+Analysis `Module` node'ları → `CodeEntityCandidate` ConceptNode (Candidate lane, INV-C5/INV-C2).
+
+### Mimari (6 tur plan review sonucu)
+- **İki ayrı source modeli + ortak GraphSeedBuilder:** analysis identity-only
+  `AnalysisCandidateSeed`, legacy JSON mevcut semantics; ortak builder graph invariant.
+- **Identity-durum sözleşmesi (F-yeni):** NodeId(identity_key)=kalıcı kimlik,
+  canonical(display_path)=gözlemlenen yazım, NodeDigest=freshness özeti.
+  Case-only rename → aynı NodeId, farklı canonical/digest (INV-C12 muhafazakâr).
+- **Typed AnalysisIdentityScheme::PathV1 (O2'):** NodeId derivation scheme üzerinden.
+- **One-shot GraphSeedBuilder::build (B1):** partial GraphSeed imkânsız.
+- **Builder source-order preservation (O1):** ordering source modellerinin sorumluluğu.
+- **GraphSeedNodeDraft private constructors (O3):** INV-C5 constructor sınırında.
+
+### Yeni dosyalar (`crates/osp-cli/src/`)
+- **`canonical_identity.rs`** — CanonicalCodeIdentity (display_path/identity_key ayrımı),
+  PathCasePolicy (CaseSensitive/AsciiCaseInsensitive), lexical normalizasyon (absolute/
+  UNC/drive/trailing-dot reject). 27 unit test.
+- **`analysis_bridge.rs`** — AnalysisIdentityScheme, CodeEntityCandidate (identity-only),
+  AnalysisCandidateSeed (try_new dedup/collision), project_analysis, BridgeRunReport
+  (semantic seed DIŞI, stderr, deterministik). 12 unit test.
+- **`graph_seed_builder.rs`** — GraphSeedNodeDraft (private constructors), one-shot
+  GraphSeedBuilder (DuplicateNode/NodeIdCollision). 8 unit test.
+- **`seed_file.rs`** — `to_graph_seed()` → `into_drafts() + GraphSeedBuilder::build()`
+  refactor (F1 legacy compat, frozen characterization yeşil).
+- **`commands/graph.rs`** — iki-source init (`--seed`/`--analyze`), Clap ArgGroup,
+  typed PathCaseArg ValueEnum, `--path-case`/`--scip` analyze-only, empty warning,
+  pre-validation non-destructive.
+
+### Identity-durum sözleşmesi (F-yeni invariant)
+`ConceptNodeId` (identity_key, AnalysisIdentityScheme+policy'ye bağlı) = kalıcı entity
+kimliği. `canonical` (display_path) = gözlemlenen mevcut repository spelling. `NodeDigest`
+= canonical dahil mevcut temsil/freshness özeti. Case-only rename → aynı NodeId, farklı
+canonical/digest = INV-C12 muhafazakâr (StaleBasis doğru). Supersession değil representation
+refresh (aynı NodeId kendini supersede edemez).
+
+**AnalysisIdentityScheme identity şemasının parçası (O2'):** PathV2 gelirse NodeId algoritması
+görünür değişir. Bu PR store'da saklamaz; BridgeRunReport'ta görünür. Future debt: incremental
+analysis store metadata'nda scheme+policy saklamalı.
+
+### Kabul kriterleri (21)
+INV-C5 (Candidate only), INV-C2 (PhysicalCode analysis, ConceptualIntent legacy F1),
+identity-only projection (classification/role graph'a sızmaz — M1), MissingNodePath typed
+error (I3), Windows drive-relative/trailing-dot reject (I4/O4'), empty analysis (I7 — library
+kabul, CLI warning), DuplicateCanonical vs CaseCollision (O5), bit-equivalent determinism,
+INV-C5 negatif test (Accepted üretilemez), NodeId identity_keyden (F-yeni), one-shot builder
+(B1), source-order preservation (O1), legacy semantics-identical (F1 frozen characterization).
+
+### Testler (0 regression)
+- **osp-cli unit:** 42 → 92 (+50: 27 canonical_identity + 12 analysis_bridge +
+  8 graph_seed_builder + 4 characterization).
+- **osp-cli integration:** analyze_bridge_flow 8 (yeni) + review_flow 21 + supersede_flow 20
+  + preview_flow 12 (değişmedi).
+- **osp-core lib:** 538 (değişmedi).
+
+### Future debt
+- **O6' hardening:** mevcut `to_graph_seed()` zaten fail-closed (duplicate canonical).
+  GraphSeedBuilder NodeIdCollision ek hardening getirir ama mevcut davranışla çelişmiyor
+  (canonical dedup önce yakalar).
+- **Tek-repository store invariant (I5):** bu PR'da analysis-generated store tek repository
+  kapsamı; cross-repository birleştirme desteklenmez (NodeId = kind+identity_key, namespace yok).
 
 ### Diğer
 - **TUI v2:** dialoguer/rustyline, fuzzy, renk (v1 stdio yeterli).
 - **Snapshot content-digest** (v2): elle JSON düzenleme tahrifatı için.
-- **arXiv:** v1.3 epistemik çekirdek + CLI accept/reject/supersede surface tamam; v1.4 derive adayı.
+- **arXiv:** v1.3 epistemik çekirdek + CLI accept/reject/supersede/rich-preview surface + analysis bridge tamam; v1.4 derive adayı.
+- **Preview↔production primary-sebep hizalaması** (v2, future work): `primary_structural_blocker` sırası `apply_supersede` structural steps 5–10'a dizilir ama production session path (compile precheck currentness) daha erken dönebilir; characterization production-path reddetme sırasına karşı future work.
 
 ## Model A (normatif sözleşme)
 
@@ -402,11 +480,10 @@ en değerli çıktı bu oldu.
 
 ## Commit durumu
 
-✅ **Faz 8b epistemik çekirdek + CLI `osp review` vertical slice TAMAM.**
-- main: `5ed13c1` (PR #52 merged — stale cleanup + paper3 artifact üretim aracı).
-- `feat/cli-osp-review` dalı: CLI `osp review` (accept/reject + persistent AnchorStoreSnapshot).
-- Faz 8b PR #48-51 merged; CLI osp review bu dalda (commit öncesi).
-- **521 lib test** (503 → 521, +18 AnchorStoreSnapshot) + **24 compile-fail** + **osp-cli 17 unit + 11 integration** + **osp-mcp +2 INV-C11** yeşil.
+✅ **Faz 8b epistemik çekirdek + CLI `osp review` (accept/reject/supersede) + rich SupersedePreview + Analysis → candidate bridge TAMAM.**
+- main: `f3dacd7` (PR #55 merged). Bu dal: `feat/cli-analysis-bridge` (PR #56 adayı).
+- Faz 8b PR #48-51 merged (epistemik çekirdek); PR #52 (stale cleanup + paper3 artifact); PR #53 (CLI accept/reject); PR #54 (CLI supersession surface); PR #55 (rich SupersedePreview); PR #56 adayı (analysis bridge).
+- **538 lib test** + **24 compile-fail** + **osp-cli 92 unit + 21 review_flow + 20 supersede_flow + 12 preview_flow + 8 analyze_bridge_flow** + **osp-mcp +2 INV-C11** yeşil.
 
 ## Yayın durumu (v1.3 → v1.4 adayı)
 

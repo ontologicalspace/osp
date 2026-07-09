@@ -11,8 +11,11 @@
 
 use clap::{Parser, Subcommand};
 
+mod analysis_bridge;
 mod application;
+mod canonical_identity;
 mod commands;
+mod graph_seed_builder;
 mod errors;
 mod mock_llm;
 mod review_session;
