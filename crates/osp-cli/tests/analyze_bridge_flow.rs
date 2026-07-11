@@ -48,7 +48,8 @@ fn analyze_init_creates_candidate_store() {
         .success()
         .stdout(contains("Graph initialized"))
         .stderr(contains("Code metrics projected (not yet evidence)"))
-        .stderr(contains("Evidence construction: deferred"))
+        .stderr(contains("Evidence construction: completed"))
+        .stderr(contains("Evidence runtime consumer: none in graph init"))
         .stderr(contains("Evidence persistence: disabled"));
 
     // `osp graph status` → candidates: 3.
