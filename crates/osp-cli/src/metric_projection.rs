@@ -418,3 +418,382 @@ pub(crate) fn project_code_metrics(
 
     Ok(AnalysisMetricProjection { metrics, report })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::analysis_bridge::AnalysisProjectionIndex;
+    use osp_analyzer::contract::{AnalysisResult, ModuleMetrics, RepoMetrics, SemanticCoverage};
+    use osp_core::anchoring::types::ConceptNodeId;
+    use osp_core::coords::MetricValue;
+    use osp_core::space::{Node, NodeClassification, NodeKind, NodeRole, Space};
+    use std::collections::HashMap;
+
+    /// Synthetic analysis with module_metrics — test fixture.
+    fn analysis_with_metrics(
+        nodes: Vec<(
+            u64,
+            &str,
+            ModuleMetrics,
+        )>,
+    ) -> (AnalysisResult, AnalysisProjectionIndex) {
+        let mut space = Space::default();
+        let mut node_paths = HashMap::new();
+        let mut module_metrics = HashMap::new();
+        let mut index_entries: Vec<(NodeId, ConceptNodeId)> = Vec::new();
+        for (id, path, metrics) in nodes {
+            space.nodes.insert(
+                id,
+                Node {
+                    id,
+                    kind: NodeKind::Module,
+                    mass: 10.0,
+                    classification: NodeClassification::Production,
+                    role: NodeRole::Core,
+                    ..Default::default()
+                },
+            );
+            node_paths.insert(id, path.to_string());
+            let concept_id = ConceptNodeId(format!("CodeEntityCandidate:{path}"));
+            index_entries.push((id, concept_id));
+            module_metrics.insert(id, metrics);
+        }
+        let analysis = AnalysisResult {
+            space,
+            module_metrics,
+            node_paths,
+            node_semantics: HashMap::new(),
+            node_witnesses: HashMap::new(),
+            repo_metrics: RepoMetrics {
+                abstractness: MetricValue::placeholder(0.0),
+                main_sequence_distance: MetricValue::placeholder(0.0),
+                abstractness_by_package: None,
+            },
+            semantic_coverage: SemanticCoverage::none("testhead".into()),
+            diagnostics: vec![],
+        };
+        let index = AnalysisProjectionIndex::for_tests(index_entries).unwrap();
+        (analysis, index)
+    }
+
+    fn ts(value: f64) -> MetricValue {
+        MetricValue::tree_sitter(value, 1.0)
+    }
+    fn scip(value: f64) -> MetricValue {
+        MetricValue::scip(value, 1.0, false)
+    }
+    fn placeholder(value: f64) -> MetricValue {
+        MetricValue::placeholder(value)
+    }
+    fn heuristic(value: f64, conf: f64) -> MetricValue {
+        MetricValue::heuristic(value, conf)
+    }
+
+    // ── Mutlu yol ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn happy_path_3_modules_9_axis_metrics() {
+        let metrics = ModuleMetrics {
+            coupling: ts(0.5),
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![
+            (1, "src/a.rs", metrics.clone()),
+            (2, "src/b.rs", metrics.clone()),
+            (3, "src/c.rs", metrics),
+        ]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        // N6 invariant: input_axis_values == module_nodes_seen × 3.
+        assert_eq!(proj.report.module_nodes_seen, 3);
+        assert_eq!(proj.report.input_axis_values, 9);
+        assert_eq!(proj.report.projected_axis_values, 9);
+        assert_eq!(proj.metrics.len(), 9);
+        // No skips.
+        assert_eq!(proj.report.skipped_placeholder, 0);
+        assert_eq!(proj.report.skipped_heuristic, 0);
+        assert_eq!(proj.report.skipped_zero_confidence, 0);
+    }
+
+    // ── AxisSet capability ───────────────────────────────────────────────────
+
+    #[test]
+    fn axis_set_provided_union_unavailable_all_5() {
+        let metrics = ModuleMetrics {
+            coupling: ts(0.5),
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        let all = proj.report.analyzer_provided_axes.union(proj.report.analyzer_unavailable_axes);
+        assert!(all.contains(PhysicalCodeAxis::Coupling));
+        assert!(all.contains(PhysicalCodeAxis::Cohesion));
+        assert!(all.contains(PhysicalCodeAxis::Instability));
+        assert!(all.contains(PhysicalCodeAxis::Entropy));
+        assert!(all.contains(PhysicalCodeAxis::WitnessDepth));
+        // No overlap.
+        assert!(!proj.report.analyzer_provided_axes.contains(PhysicalCodeAxis::Entropy));
+        assert!(!proj.report.analyzer_provided_axes.contains(PhysicalCodeAxis::WitnessDepth));
+    }
+
+    // ── Source admission skip (N4: Heuristic defensive policy) ────────────────
+
+    #[test]
+    fn placeholder_source_skipped() {
+        let metrics = ModuleMetrics {
+            coupling: ts(0.5),
+            cohesion: placeholder(0.5), // Placeholder → skip
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        assert_eq!(proj.report.skipped_placeholder, 1);
+        assert_eq!(proj.report.projected_axis_values, 2); // coupling + instability
+    }
+
+    #[test]
+    fn heuristic_source_skipped() {
+        // N4: Heuristic analyzer doğal akıştan üretmez — defensive policy testi.
+        let metrics = ModuleMetrics {
+            coupling: ts(0.5),
+            cohesion: heuristic(0.7, 0.5), // Heuristic → skip
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        assert_eq!(proj.report.skipped_heuristic, 1);
+        assert_eq!(proj.report.projected_axis_values, 2);
+    }
+
+    #[test]
+    fn scip_source_admitted() {
+        let metrics = ModuleMetrics {
+            coupling: scip(0.5),
+            cohesion: scip(0.7),
+            instability: scip(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        assert_eq!(proj.report.projected_axis_values, 3);
+        assert_eq!(proj.metrics[0].provenance().source(), ObservedCodeMetricSource::Scip);
+    }
+
+    // ── Zero-confidence skip ─────────────────────────────────────────────────
+
+    #[test]
+    fn zero_confidence_skipped() {
+        // TreeSitter ama confidence=0 → ZeroConfidence skip.
+        let metrics = ModuleMetrics {
+            coupling: MetricValue::tree_sitter(0.5, 0.0), // coverage=0 → conf=0
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        assert_eq!(proj.report.skipped_zero_confidence, 1);
+        assert_eq!(proj.report.projected_axis_values, 2);
+    }
+
+    // ── C1: doğrulama source admission'dan ÖNCE ──────────────────────────────
+
+    #[test]
+    fn c1_placeholder_with_nan_value_is_error_not_skip() {
+        let metrics = ModuleMetrics {
+            coupling: MetricValue {
+                value: f64::NAN,
+                source: MetricSource::Placeholder,
+                confidence: 0.0,
+                coverage: 1.0,
+            },
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let err = project_code_metrics(&analysis, &index).unwrap_err();
+        assert!(matches!(
+            err,
+            MetricProjectionError::InvalidMetric {
+                field: InvalidMetricField::Value,
+                violation: MetricScalarViolation::NonFinite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn c1_placeholder_with_nan_confidence_is_error() {
+        let metrics = ModuleMetrics {
+            coupling: MetricValue {
+                value: 0.5,
+                source: MetricSource::Placeholder,
+                confidence: f64::NAN,
+                coverage: 1.0,
+            },
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let err = project_code_metrics(&analysis, &index).unwrap_err();
+        assert!(matches!(
+            err,
+            MetricProjectionError::InvalidMetric {
+                field: InvalidMetricField::Confidence,
+                violation: MetricScalarViolation::NonFinite,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn c1_placeholder_with_coverage_above_one_is_error() {
+        let metrics = ModuleMetrics {
+            coupling: MetricValue {
+                value: 0.5,
+                source: MetricSource::Placeholder,
+                confidence: 0.0,
+                coverage: 2.0,
+            },
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let err = project_code_metrics(&analysis, &index).unwrap_err();
+        assert!(matches!(
+            err,
+            MetricProjectionError::InvalidMetric {
+                field: InvalidMetricField::Coverage,
+                violation: MetricScalarViolation::AboveMaximum,
+                ..
+            }
+        ));
+    }
+
+    // ── Invalid metric ────────────────────────────────────────────────────────
+
+    #[test]
+    fn nan_value_is_error() {
+        let metrics = ModuleMetrics {
+            coupling: MetricValue {
+                value: f64::NAN,
+                source: MetricSource::TreeSitter,
+                confidence: 0.75,
+                coverage: 1.0,
+            },
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        assert!(project_code_metrics(&analysis, &index).is_err());
+    }
+
+    #[test]
+    fn value_above_one_is_error() {
+        let metrics = ModuleMetrics {
+            coupling: MetricValue {
+                value: 1.5,
+                source: MetricSource::TreeSitter,
+                confidence: 0.75,
+                coverage: 1.0,
+            },
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let err = project_code_metrics(&analysis, &index).unwrap_err();
+        assert!(matches!(
+            err,
+            MetricProjectionError::InvalidMetric {
+                field: InvalidMetricField::Value,
+                violation: MetricScalarViolation::AboveMaximum,
+                ..
+            }
+        ));
+    }
+
+    // ── Missing identity / metrics ────────────────────────────────────────────
+
+    #[test]
+    fn missing_projected_identity_is_error() {
+        let metrics = ModuleMetrics {
+            coupling: ts(0.5),
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, _) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        // Boş index → node 1 için identity yok.
+        let empty_index = AnalysisProjectionIndex::for_tests(vec![]).unwrap();
+        let err = project_code_metrics(&analysis, &empty_index).unwrap_err();
+        assert!(matches!(err, MetricProjectionError::MissingProjectedIdentity { .. }));
+    }
+
+    #[test]
+    fn missing_module_metrics_is_error() {
+        let mut space = Space::default();
+        space.nodes.insert(
+            1,
+            Node {
+                id: 1,
+                kind: NodeKind::Module,
+                mass: 10.0,
+                ..Default::default()
+            },
+        );
+        let analysis = AnalysisResult {
+            space,
+            module_metrics: HashMap::new(), // boş
+            node_paths: HashMap::new(),
+            node_semantics: HashMap::new(),
+            node_witnesses: HashMap::new(),
+            repo_metrics: RepoMetrics {
+                abstractness: MetricValue::placeholder(0.0),
+                main_sequence_distance: MetricValue::placeholder(0.0),
+                abstractness_by_package: None,
+            },
+            semantic_coverage: SemanticCoverage::none("testhead".into()),
+            diagnostics: vec![],
+        };
+        let index = AnalysisProjectionIndex::for_tests(vec![(
+            1,
+            ConceptNodeId("CodeEntityCandidate:src/a.rs".into()),
+        )])
+        .unwrap();
+        let err = project_code_metrics(&analysis, &index).unwrap_err();
+        assert!(matches!(err, MetricProjectionError::MissingModuleMetrics { .. }));
+    }
+
+    // ── C5: pass-through (confidence/coverage değiştirilmeden taşınır) ───────
+
+    #[test]
+    fn c5_pass_through_preserves_confidence_and_coverage() {
+        let metrics = ModuleMetrics {
+            coupling: MetricValue::tree_sitter(0.4, 0.82), // conf=0.75×0.82≈0.615
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        let coupling_metric = proj.metrics.iter().find(|m| m.axis() == PhysicalCodeAxis::Coupling).unwrap();
+        // Pass-through: analyzer confidence/coverage değiştirilmeden taşınır (formül kopyalanmaz).
+        let expected_conf = 0.75 * 0.82;
+        assert!((coupling_metric.provenance().confidence().get() - expected_conf).abs() < 1e-9);
+        assert!((coupling_metric.provenance().coverage().get() - 0.82).abs() < 1e-9);
+    }
+
+    // ── N6 invariant: input_axis_values == module_nodes_seen × 3 ─────────────
+
+    #[test]
+    fn n6_input_axis_values_equals_module_nodes_times_3() {
+        let metrics = ModuleMetrics {
+            coupling: ts(0.5),
+            cohesion: ts(0.7),
+            instability: ts(0.3),
+        };
+        let (analysis, index) = analysis_with_metrics(vec![
+            (1, "src/a.rs", metrics.clone()),
+            (2, "src/b.rs", metrics),
+        ]);
+        let proj = project_code_metrics(&analysis, &index).unwrap();
+        assert_eq!(proj.report.input_axis_values, proj.report.module_nodes_seen * 3);
+    }
+}
