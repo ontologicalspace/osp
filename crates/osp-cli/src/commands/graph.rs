@@ -152,7 +152,7 @@ pub fn run_graph_init(args: GraphInitArgs) -> anyhow::Result<()> {
         // Metric projection özeti (stderr — draft admission counts).
         let mp = &bridge_output.metric_projection;
         eprintln!(
-            "Code metrics projected (not yet evidence): {}",
+            "Code metric drafts admitted: {}",
             mp.report.projected_axis_values
         );
         eprintln!(

@@ -480,20 +480,32 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // In-crate compatibility proof (tur 4 — scorer + gate branch)
+    // In-crate compatibility proof (tur 4 — ExpectedImplementation scorer seam)
     // ═══════════════════════════════════════════════════════════════════════════
+    //
+    // P1 (review tur 5 düzeltme): production bridge `CodeEntityCandidate:<path>` namespace
+    // üretir (derive_node_id(CodeEntityCandidate, identity_key)). `ImplementedBy` gate ise
+    // `CodeEntity:<name>` (operator-promoted) identity arar — production'da henüz oluşmaz.
+    // Bu yüzden compatibility proof `ExpectedImplementation` scorer seam'ini kanıtlar
+    // (CodeEntityCandidate: + ExpectedImplementation → code_evidence_score > 0).
+    // `ImplementedBy` gate evidence presence entity-promotion/identity milestone'una kalır
+    // (CodeEntityCandidate → CodeEntity identity transition gerekiyor; prefix değişikliği
+    // R1 tek-kimlik yaklaşımını deler).
 
-    /// Compatibility proof: evidence → provider → pipeline scorer + gate ImplementedBy branch.
+    /// Compatibility proof: production `CodeEntityCandidate:` ID + ExpectedImplementation scorer seam.
     ///
-    /// Candidate'i public `AnchorPipeline` extractor üretir (typed `CodeEntity:AuthService` +
-    /// "implements" lemması → `ImplementedBy`, extractor.rs:80-81). Dış CLI candidate construct etmez.
-    /// Tur 4 genişletme: test gerçek zinciri kanıtlar (projected evidence → provider → scorer
-    /// strength → gate object-presence → accepted AnchorPlan).
+    /// Production bridge `CodeEntityCandidate:<path>` üretir. Extractor `CodeEntityCandidate:Foo`
+    /// ref → `ExpectedImplementation` (extractor.rs:64). Scorer `ExpectedImplementation` code-related
+    /// edge → `code_evidence_strength` provider'a sorar (scorer.rs:179). Bu test gerçek production
+    /// ID namespace ile evidence → provider → scorer → code_evidence_score > 0 zincirini kanıtlar.
     #[test]
-    fn evidence_projection_feeds_pipeline_scorer_and_gate() {
-        // 1. Evidence projection — 3-axis partial evidence for CodeEntity:AuthService.
+    fn evidence_projection_feeds_expected_implementation_scorer_seam() {
+        // Production namespace: CodeEntityCandidate:<path> (derive_node_id ile).
+        let candidate_node = node("CodeEntityCandidate:payment.py");
+
+        // 1. Evidence projection — production ID namespace.
         let metrics = vec![projected_metric_for_tests(
-            node("CodeEntity:AuthService"),
+            candidate_node.clone(),
             PhysicalCodeAxis::Coupling,
             0.42,
             scip(),
@@ -502,72 +514,75 @@ mod tests {
         )];
         let out = project_observed_evidence(&metrics, ctx()).unwrap();
 
-        // 2. Provider'a yükle.
+        // 2. Provider'a yükle — production ID altında lookup.
         let provider = InMemoryCodeEvidenceProvider::from_evidence(out.evidence.clone());
-
-        // Provider lookup → Some, minimum strength > 0.
         let lookup = provider
-            .find_evidence(&node("CodeEntity:AuthService"))
+            .find_evidence(&candidate_node)
             .unwrap()
-            .expect("evidence mevcut");
+            .expect("evidence mevcut (production CodeEntityCandidate: ID)");
         assert!(lookup.observations().minimum_observed_strength().get() > 0.0);
 
-        // 3. AnchorGateContext with evidence provider.
-        let gate_ctx = AnchorGateContext::with_code_evidence(None, &provider);
+        // 3. evidence_strength — scorer'ın çağırdığı provider method.
+        let strength = provider
+            .evidence_strength(&candidate_node)
+            .unwrap()
+            .get();
+        assert!(strength > 0.0);
 
-        // 4. AnchorPipeline — "implement" lemması → ImplementedBy candidate.
-        //    typed CodeEntity:AuthService ref + "implements" → ImplementedBy (extractor.rs:80-81).
+        // 4. AnchorPipeline — CodeEntityCandidate: ref → ExpectedImplementation (extractor.rs:64).
+        let gate_ctx = AnchorGateContext::with_code_evidence(None, &provider);
         let pipeline = AnchorPipeline::default_pipeline();
-        let text = "CodeEntity:AuthService implements authentication";
+        let text = "CodeEntityCandidate:payment.py implements authentication";
         let plan = pipeline
             .run_with_source(text, "en", &ConceptGraph::new(), PacketSource::Operator, &gate_ctx)
-            .expect("evidence + provider → ImplementedBy kabul");
+            .expect("ExpectedImplementation candidate üretilmeli");
 
-        // 5. Assert: ImplementedBy candidate accepted, code_evidence_score > 0.
-        let implemented_by = plan
+        // 5. Assert: ExpectedImplementation candidate, code_evidence_score > 0 (scorer seam).
+        let expected_impl = plan
             .candidates()
             .iter()
-            .find(|c| c.edge_kind() == ConceptEdgeKind::ImplementedBy)
-            .expect("ImplementedBy candidate üretilmeli");
+            .find(|c| c.edge_kind() == ConceptEdgeKind::ExpectedImplementation)
+            .expect("ExpectedImplementation candidate üretilmeli (CodeEntityCandidate: ref)");
         assert_eq!(
-            implemented_by.target_node_id(),
-            &node("CodeEntity:AuthService")
+            expected_impl.target_node_id(),
+            &candidate_node,
+            "target = production CodeEntityCandidate: ID"
         );
-        assert!(implemented_by.score().code_evidence_score > 0.0);
+        assert!(
+            expected_impl.score().code_evidence_score > 0.0,
+            "ExpectedImplementation scorer seam → code_evidence_score > 0"
+        );
     }
 
-    /// Negatif karşı-test: provider yok → ImplementedBy reject.
+    /// Negatif karşı-test: provider yok → ExpectedImplementation code_evidence_score = 0.
+    ///
+    /// Provider yokken ExpectedImplementation candidate hala üretilir (gate find_evidence
+    /// çağırmaz) ama code_evidence_score = 0 olur (scorer provider None → 0.0).
     #[test]
-    fn pipeline_without_provider_rejects_implemented_by() {
-        // Provider yok → ImplementedBy evidence-gate reject.
+    fn expected_implementation_score_zero_without_provider() {
         let gate_ctx = AnchorGateContext::no_authority();
         let pipeline = AnchorPipeline::default_pipeline();
-        let text = "CodeEntity:AuthService implements authentication";
-        let plan = pipeline.run_with_source(
-            text,
-            "en",
-            &ConceptGraph::new(),
-            PacketSource::Operator,
-            &gate_ctx,
-        );
+        let text = "CodeEntityCandidate:payment.py implements authentication";
+        let plan = pipeline
+            .run_with_source(
+                text,
+                "en",
+                &ConceptGraph::new(),
+                PacketSource::Operator,
+                &gate_ctx,
+            )
+            .expect("ExpectedImplementation candidate provider'sız da üretilir");
 
-        // ImplementedBy candidate reject edilir (gate GateError veya candidate düştü).
-        // Pipeline reject edebilir (ImplementedByRequiresCodeEvidence) veya candidate olmadan plan döner.
-        match plan {
-            Ok(plan) => {
-                // Plan döndüyse ImplementedBy candidate OLMAMALI.
-                assert!(
-                    !plan
-                        .candidates()
-                        .iter()
-                        .any(|c| c.edge_kind() == ConceptEdgeKind::ImplementedBy),
-                    "provider yokken ImplementedBy reject edilmeli"
-                );
-            }
-            Err(_) => {
-                // Gate reject etti — bu da geçerli.
-            }
-        }
+        let expected_impl = plan
+            .candidates()
+            .iter()
+            .find(|c| c.edge_kind() == ConceptEdgeKind::ExpectedImplementation)
+            .expect("ExpectedImplementation candidate mevcut");
+        assert_eq!(
+            expected_impl.score().code_evidence_score,
+            0.0,
+            "provider yok → code_evidence_score = 0"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
