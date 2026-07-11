@@ -411,9 +411,7 @@ pub(crate) fn project_code_metrics(
             });
             report.projected_axis_values += 1;
             // projected_axes: actually emitted axes after admission (distinct from declared).
-            let mut pa = report.projected_axes;
-            pa = pa.union(AxisSet::from_axes(&[axis]));
-            report.projected_axes = pa;
+            report.projected_axes = report.projected_axes.union(AxisSet::from_axes(&[axis]));
         }
     }
 
@@ -517,6 +515,8 @@ mod tests {
         assert_eq!(proj.report.skipped_placeholder, 0);
         assert_eq!(proj.report.skipped_heuristic, 0);
         assert_eq!(proj.report.skipped_zero_confidence, 0);
+        // Happy path: projected_axes == declared (all admitted).
+        assert_eq!(proj.report.projected_axes, proj.report.analyzer_declared_axes);
     }
 
     // ── AxisSet capability ───────────────────────────────────────────────────
@@ -554,6 +554,11 @@ mod tests {
         let proj = project_code_metrics(&analysis, &index).unwrap();
         assert_eq!(proj.report.skipped_placeholder, 1);
         assert_eq!(proj.report.projected_axis_values, 2); // coupling + instability
+        // Declared vs projected: Cohesion declared ama projected değil (Placeholder).
+        assert!(proj.report.analyzer_declared_axes.contains(PhysicalCodeAxis::Cohesion));
+        assert!(!proj.report.projected_axes.contains(PhysicalCodeAxis::Cohesion));
+        assert!(proj.report.projected_axes.contains(PhysicalCodeAxis::Coupling));
+        assert!(proj.report.projected_axes.contains(PhysicalCodeAxis::Instability));
     }
 
     #[test]

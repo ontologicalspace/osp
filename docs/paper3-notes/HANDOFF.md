@@ -359,7 +359,7 @@ bağıdır (tutarlılık > kullanılabilirlik).
 ### Yeni dosyalar
 - **`metric_projection.rs`** — PhysicalCodeAxis + AxisSet + MetricAxisValue/Confidence/Coverage
   newtype + ProjectedCodeMetric (private) + project_code_metrics (C1 doğrulama sırası).
-  15 unit test.
+  16 unit test.
 - **`tests/architecture_guards.rs`** — metric_projection.rs'te tam evidence/vector adları
   yorumda bile yok (C2+N1 source-scan).
 
@@ -373,7 +373,7 @@ PR A many-to-one identity collision, PR B'de metric aggregation'a dönüştürü
 aynı (ConceptNodeId, axis) → DuplicateProjectedAxis error.
 
 ### Testler (0 regression)
-- osp-cli unit: 92 → 107 (+15 metric_projection)
+- osp-cli unit: 92 → 108 (+16 metric_projection)
 - architecture_guards: 1 (yeni); analyze_bridge_flow: 9 (metric summary assertions)
 
 ## CLI `osp graph init --analyze` — ne yapıldı (PR A dalında)

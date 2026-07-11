@@ -62,7 +62,10 @@ pub struct CodeEntityCandidate {
 }
 
 impl CodeEntityCandidate {
-    pub fn new(identity: CanonicalCodeIdentity, concept_node_id: ConceptNodeId) -> Self {
+    /// Private constructor — R1 structural invariant: yalnız `project_candidate_nodes`
+    /// (aynı modül) üretici. identity + concept_node_id tutarlılığı caller convention değil
+    /// type boundary ile korunur. Test modülü aynı modül olduğu için erişebilir.
+    fn new(identity: CanonicalCodeIdentity, concept_node_id: ConceptNodeId) -> Self {
         Self { identity, concept_node_id }
     }
 
