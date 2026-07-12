@@ -51,7 +51,9 @@
 
 > **Taksonomi notu (Review PR #48/#49):** P1-P3 lowering invariant'ları da type-enforced'dur
 > (trybuild katmanında, strata tablosu (1) ile tutarlı). "13 type-enforced = 10 genesis + 3 lowering";
-> INV-C14 (projection) ve INV-C15 (transition) runtime-asserted. Toplam 15 = 13 type-enforced + 2 runtime.
+> INV-C14 (projection), INV-C15 (supersession transition) ve INV-C16 (entity-resolution transition) runtime-asserted.
+> Toplam 16 = 13 type-enforced + 3 runtime. INV-C16'nın iki compile-fail testi yalnız
+> `ResolutionApplication` construction-opacity boundary'sini kanıtlar (type-enforced invariant sayısını artırmaz).
 
 ## Evidence strata (5 katman)
 

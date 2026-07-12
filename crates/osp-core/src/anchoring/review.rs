@@ -3710,4 +3710,73 @@ mod tests {
             "ResolvesTo missing explanation reject — got {err:?}"
         );
     }
+
+    /// P1 (review tur 6): Reused→Created imkânsız kronoloji reject.
+    /// seq 1: Candidate A → Entity X (Reused — entity zaten mevcut).
+    /// seq 2: Candidate B → Entity X (Created — entity bu anda oluşturuldu — imkânsız).
+    #[test]
+    fn snapshot_reused_then_created_same_entity_rejected() {
+        // Önce normal Created resolution → entity oluşur.
+        let mut store = store_with_resolvable_candidate("src/auth.rs");
+        let candidate_a = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+        let mut session = CodeEntityResolutionSession::open_for_operator(OperatorId::new("op"));
+        let basis = PresentedResolutionBasis::compile(&store, &candidate_a).unwrap();
+        let record_a = session
+            .resolve(
+                &mut store,
+                &candidate_a,
+                basis,
+                NonEmptyExplanation::new("first").unwrap(),
+            )
+            .unwrap();
+        let entity_x = record_a.entity_id.clone();
+        // İkinci candidate reuse path (aynı key).
+        let candidate_b = accepted_code_entity_candidate("src/Auth.rs");
+        let mut seed_b = GraphSeed::default();
+        seed_b.code_entities.push(candidate_b);
+        store.seed_trusted(&seed_b).unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[crate::anchoring::types::CodeIdentityBinding {
+                node_id: ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into()),
+                identity_key: insensitive_key("src/auth.rs"),
+            }])
+            .unwrap();
+        let candidate_b_id = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
+        let basis_b = PresentedResolutionBasis::compile(&store, &candidate_b_id).unwrap();
+        let record_b = session
+            .resolve(
+                &mut store,
+                &candidate_b_id,
+                basis_b,
+                NonEmptyExplanation::new("second").unwrap(),
+            )
+            .unwrap();
+        // record_b Reused olmalı (entity zaten mevcut).
+        assert!(
+            matches!(
+                record_b.outcome,
+                crate::anchoring::review::ResolutionOutcome::Reused { .. }
+            ),
+            "ikinci resolution Reused olmalı"
+        );
+        // Forge: record_b'nin outcome'ını Created'a çevir (imkânsız kronoloji).
+        let mut snap = store.export_snapshot();
+        let forged_idx = snap
+            .resolution_records
+            .iter()
+            .position(|r| r.seq == record_b.seq)
+            .unwrap();
+        snap.resolution_records[forged_idx].outcome =
+            crate::anchoring::review::ResolutionOutcome::Created {
+                entity_id: entity_x.clone(),
+            };
+        let err = InMemoryAnchorStore::restore_snapshot(snap).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::anchoring::store::SnapshotError::ResolutionRecordOutcomeInconsistent { .. }
+            ),
+            "Reused→Created imkânsız kronoloji reject — got {err:?}"
+        );
+    }
 }

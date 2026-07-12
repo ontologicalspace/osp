@@ -2184,8 +2184,10 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
     // (9) Resolution record → node existence + status forward integrity + R2 key equality.
     let _ = &binding_keys;
     // (9) Resolution record → node existence + status forward integrity + R2 key equality.
-    // P2-1 (review tur 5): Created outcome duplicate reject — aynı entity'ye iki Created olamaz.
-    let mut created_entities: BTreeSet<String> = BTreeSet::new();
+    // P1 (review tur 6): seen_resolution_entities — Created + Reused her ikisi de ekler.
+    // Kronoloji: Created→Reused geçerli; Reused→Created imkânsız (entity zaten mevcut).
+    // Created→Created zaten duplicate; yalnız Reused geçerli (trusted bootstrap entity).
+    let mut seen_resolution_entities: BTreeSet<String> = BTreeSet::new();
     // Records seq sırasıyla değerlendirilir (sort — export canonical seq sırasında).
     let mut sorted_records: Vec<_> = snapshot.resolution_records.iter().collect();
     sorted_records.sort_by_key(|r| r.seq);
@@ -2286,25 +2288,32 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
         }
         // P2-1 (review tur 5): Created outcome → entity deterministic material doğrulaması.
         // canonical = key.canonical_key(), aliases = [] (tur 3 P2-C ile tutarlı).
-        if matches!(
-            record.outcome,
-            crate::anchoring::review::ResolutionOutcome::Created { .. }
-        ) {
-            if entity.canonical != record.identity_key.canonical_key() {
-                return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                    seq: record.seq,
-                });
+        // P1 (review tur 6): kronoloji — Created seen'de varsa reject (Reused→Created imkânsız).
+        match &record.outcome {
+            crate::anchoring::review::ResolutionOutcome::Created { .. } => {
+                if entity.canonical != record.identity_key.canonical_key() {
+                    return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                        seq: record.seq,
+                    });
+                }
+                if !entity.aliases.is_empty() {
+                    return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                        seq: record.seq,
+                    });
+                }
+                // Created için entity daha önce görülmemiş olmalı (Created→Created veya
+                // Reused→Created imkânsız — entity zaten mevcut).
+                if seen_resolution_entities.contains(&record.entity_id.0) {
+                    return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                        seq: record.seq,
+                    });
+                }
+                seen_resolution_entities.insert(record.entity_id.0.clone());
             }
-            if !entity.aliases.is_empty() {
-                return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                    seq: record.seq,
-                });
-            }
-            // P2-1: duplicate Created reject — aynı entity'ye iki Created olamaz.
-            if !created_entities.insert(record.entity_id.0.clone()) {
-                return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                    seq: record.seq,
-                });
+            crate::anchoring::review::ResolutionOutcome::Reused { .. } => {
+                // Reused entity'yi görülmüş olarak işaretle (sonraki Created imkânsız).
+                // Trusted bootstrap entity olabilir → seen'de olmaması geçerli.
+                seen_resolution_entities.insert(record.entity_id.0.clone());
             }
         }
         // P1-3: record digests == current node digests (freshness at restore time).
