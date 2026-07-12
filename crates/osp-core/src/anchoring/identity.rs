@@ -29,7 +29,7 @@ use crate::anchoring::types::ConceptNodeId;
 ///
 /// Scheme'in parçasıdır (tur 2 P1-B) — iki farklı case policy farklı identity domain üretir.
 /// `CodeIdentityKey` equality'si scheme'i (dolayısıyla case policy'yi) kapsar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum CodePathCasePolicy {
     /// Key case duyarlı (olduğu gibi).
@@ -56,7 +56,7 @@ impl CodePathCasePolicy {
 ///
 /// Kendi smart-constructor invariant'ı yok; derive `serde::Deserialize` uygundur
 /// ([`CodeIdentityKey`] custom deserializer DTO'dan scheme'i deserialize eder).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "variant", content = "params")]
 pub enum CodeIdentityScheme {
     /// Analysis path-based identity (CLI `CanonicalCodeIdentity` + path case policy).
@@ -100,7 +100,11 @@ impl CodeIdentityScheme {
 ///
 /// # Canonicalization (tur 3 P2-A)
 /// Constructor scheme içindeki case policy'yi uygular. Path structural normalization YAPMAZ.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+///
+/// # Ord (tur 4 P2-1)
+/// `Ord`/`PartialOrd` eklendi — snapshot validator R7 live entity uniqueness hesabında
+/// tam key (scheme + case policy + canonical key) kullanılır; canonical_key string değil.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct CodeIdentityKey {
     scheme: CodeIdentityScheme,
     key: String, // canonicalized

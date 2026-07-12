@@ -264,10 +264,8 @@ pub struct AnchorStoreSnapshot {
     /// INV-C15 append-only supersede ledger. `decision_records` ile global `audit_seq` paylaşır.
     pub supersede_records: Vec<SupersedeRecord>,
     /// PR E (INV-C16) append-only resolution ledger. Üç ledger global `audit_seq` paylaşır.
-    #[serde(default)]
     pub resolution_records: Vec<ResolutionRecord>,
     /// PR E (tur 3 P1-A) — store-owned identity bindings (PhysicalCode node ↔ CodeIdentityKey).
-    #[serde(default)]
     pub code_identity_bindings: Vec<CodeIdentityBinding>,
     /// Global audit sequence — üç ledger paylaşımlı (cross-ledger total order).
     pub audit_sequence: u64,
@@ -388,6 +386,13 @@ pub enum SnapshotError {
     },
     #[error("two live entities for same identity key (R7): {key}")]
     ResolutionDuplicateLiveEntity { key: String },
+    /// P1-3 (review tur 4): duplicate (candidate, entity) pair — occurrence > 1.
+    #[error("duplicate resolution pair: candidate={candidate}, entity={entity}, count={count} (expected exactly 1)")]
+    ResolutionDuplicatePair {
+        candidate: String,
+        entity: String,
+        count: u32,
+    },
 }
 
 /// `PresentedBasis`'in deterministic fingerprint'i → `[u8; 32]`.
@@ -783,31 +788,47 @@ impl InMemoryAnchorStore {
         &self.graph
     }
 
-    /// PR E — Recompute resolution target from current state (tur 3 step 9).
+    /// PR E — Recompute resolution target from current state (tur 3 step 9 + tur 4 P2-2).
     ///
-    /// Aynı identity key için live entity var → Reuse; yok → Create (deterministic ID).
-    /// Duplicate live entity → `DuplicateLiveCodeEntityIdentity` (tur 3 P2-F fail-closed).
+    /// Aynı identity key için entity lookup (live + inactive):
+    ///   1 live → Reuse; 1 inactive → `EntityNotLiveForResolution`; 0 → Create; >1 → corruption.
+    /// Tur 4 P2-2: inactive entity Create'a düşmez; `EntityNotLiveForResolution` policy uygulanır.
     fn compute_resolution_target(
         &self,
         identity_key: &crate::anchoring::identity::CodeIdentityKey,
         _candidate_id: &ConceptNodeId,
     ) -> Result<ResolutionTargetView, StoreError> {
-        let live_entities: Vec<ConceptNode> = self
-            .code_identity_bindings
-            .iter()
-            .filter(|(_, k)| *k == identity_key)
-            .filter_map(|(nid, _)| self.graph.node(nid))
-            .filter(|n| {
-                n.node_kind == ConceptNodeKind::CodeEntity && n.decision_status.is_live_code_identity()
-            })
-            .cloned()
-            .collect();
-        match live_entities.len() {
-            0 => Ok(ResolutionTargetView::Create {
+        let mut live_entities: Vec<ConceptNode> = Vec::new();
+        let mut inactive_entities: Vec<ConceptNode> = Vec::new();
+        for (nid, key) in &self.code_identity_bindings {
+            if key != identity_key {
+                continue;
+            }
+            if let Some(n) = self.graph.node(nid) {
+                if n.node_kind != ConceptNodeKind::CodeEntity {
+                    continue;
+                }
+                if n.decision_status.is_live_code_identity() {
+                    live_entities.push(n.clone());
+                } else {
+                    inactive_entities.push(n.clone());
+                }
+            }
+        }
+        match (live_entities.len(), inactive_entities.len()) {
+            (0, 0) => Ok(ResolutionTargetView::Create {
                 proposed_entity_id: identity_key.derive_entity_id(),
             }),
-            1 => Ok(ResolutionTargetView::Reuse {
+            (1, _) => Ok(ResolutionTargetView::Reuse {
                 entity: live_entities[0].clone(),
+            }),
+            (0, 1) => Err(StoreError::EntityNotLiveForResolution {
+                entity_id: inactive_entities[0].id.clone(),
+                status: inactive_entities[0].decision_status,
+            }),
+            (0, _) => Err(StoreError::EntityNotLiveForResolution {
+                entity_id: inactive_entities[0].id.clone(),
+                status: inactive_entities[0].decision_status,
             }),
             _ => Err(StoreError::DuplicateLiveCodeEntityIdentity),
         }
@@ -840,10 +861,19 @@ impl InMemoryAnchorStore {
                 })
             }
             (
-                PresentedResolutionTarget::Reuse { entity_id, .. },
+                PresentedResolutionTarget::Reuse {
+                    entity_id,
+                    entity_digest: basis_entity_digest,
+                },
                 ResolutionTargetView::Reuse { entity },
             ) => {
                 if entity_id != &entity.id {
+                    return Err(StoreError::StaleResolutionTarget);
+                }
+                // P1-1 (review tur 4): basis entity digest freshness — TOCTOU koruması.
+                // Entity canonical/aliases değişirse ID aynı kalır ama digest değişir → reject.
+                let current_digest = crate::anchoring::review::node_digest(entity);
+                if basis_entity_digest != &current_digest {
                     return Err(StoreError::StaleResolutionTarget);
                 }
                 Ok(ResolutionOutcome::Reused {
@@ -1389,11 +1419,17 @@ impl AnchorStore for InMemoryAnchorStore {
     // PR E — Resolution (INV-C16 atomic; 14-step precedence)
     // ═══════════════════════════════════════════════════════════════════════════
 
-    /// PR E (tur 3 P1-2) — Trusted bootstrap: identity binding ingress.
+    /// PR E (tur 3 P1-2 + tur 4 P1-2 staged) — Trusted bootstrap: identity binding ingress.
+    ///
+    /// Staged validation: mevcut map clone'lanır, tüm batch staged state üzerinde doğrulanır
+    /// (duplicate node + conflicting key + duplicate live entity), validation geçince assign edilir.
+    /// Aynı batch'teki iki binding birbirini görür (tur 4 P1-2 düzeltme).
     fn seed_code_identity_bindings_trusted(
         &mut self,
         bindings: &[crate::anchoring::types::CodeIdentityBinding],
     ) -> Result<(), Self::Error> {
+        // Staged map — tüm validation bunun üzerinde; validation geçince assign.
+        let mut staged = self.code_identity_bindings.clone();
         for binding in bindings {
             // (1) node existence
             let node = self
@@ -1416,41 +1452,34 @@ impl AnchorStore for InMemoryAnchorStore {
                     family: node.position_family,
                 });
             }
-            // (4) duplicate binding for same node
-            if self.code_identity_bindings.contains_key(&binding.node_id) {
+            // (4) duplicate binding for same node (staged — batch içindeki çakışma dahil)
+            if staged.contains_key(&binding.node_id) {
                 return Err(StoreError::DuplicateBinding(binding.node_id.clone()));
             }
-        }
-        // (5) R7: entity tarafında duplicate live entity check (entity bindings için)
-        for binding in bindings {
-            if let Some(node) = self.graph.node(&binding.node_id) {
-                if node.node_kind == ConceptNodeKind::CodeEntity
-                    && node.decision_status.is_live_code_identity()
-                {
-                    // Aynı key için başka live entity var mı?
-                    let existing_live = self.code_identity_bindings.iter().any(|(nid, key)| {
-                        *nid != binding.node_id
-                            && key == &binding.identity_key
-                            && self
-                                .graph
-                                .node(nid)
-                                .map(|n| {
-                                    n.node_kind == ConceptNodeKind::CodeEntity
-                                        && n.decision_status.is_live_code_identity()
-                                })
-                                .unwrap_or(false)
-                    });
-                    if existing_live {
-                        return Err(StoreError::DuplicateLiveCodeEntityIdentity);
-                    }
+            // (5) R7: duplicate live entity for same key (staged — batch içindeki çakışma dahil).
+            // Sadece binding'in node'u live CodeEntity ise kontrol gerekli.
+            if node.node_kind == ConceptNodeKind::CodeEntity && node.decision_status.is_live_code_identity() {
+                let duplicate_live = staged.iter().any(|(nid, key)| {
+                    *nid != binding.node_id
+                        && key == &binding.identity_key
+                        && self
+                            .graph
+                            .node(nid)
+                            .map(|n| {
+                                n.node_kind == ConceptNodeKind::CodeEntity
+                                    && n.decision_status.is_live_code_identity()
+                            })
+                            .unwrap_or(false)
+                });
+                if duplicate_live {
+                    return Err(StoreError::DuplicateLiveCodeEntityIdentity);
                 }
             }
+            // Staged'a ekle (batch içindeki sonraki binding'ler bunu görsün).
+            staged.insert(binding.node_id.clone(), binding.identity_key.clone());
         }
-        // Mutation: tüm validation geçti, bindings ekle.
-        for binding in bindings {
-            self.code_identity_bindings
-                .insert(binding.node_id.clone(), binding.identity_key.clone());
-        }
+        // Tüm validation geçti — staged → store assign (atomic).
+        self.code_identity_bindings = staged;
         Ok(())
     }
 
@@ -2156,6 +2185,33 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
                 node_id: record.entity_id.clone(),
             });
         }
+        // P1-3 (review tur 4): outcome.entity_id == record.entity_id.
+        let outcome_entity_id = match &record.outcome {
+            crate::anchoring::review::ResolutionOutcome::Created { entity_id }
+            | crate::anchoring::review::ResolutionOutcome::Reused { entity_id } => entity_id,
+        };
+        if outcome_entity_id != &record.entity_id {
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                seq: record.seq,
+            });
+        }
+        // P1-3: record.entity_id == identity_key.derive_entity_id() (deterministic derivation).
+        if record.entity_id != record.identity_key.derive_entity_id() {
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                seq: record.seq,
+            });
+        }
+        // P1-3: record digests == current node digests (freshness at restore time).
+        if record.candidate_digest != crate::anchoring::review::node_digest(candidate).get() {
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                seq: record.seq,
+            });
+        }
+        if record.entity_digest != crate::anchoring::review::node_digest(entity).get() {
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
+                seq: record.seq,
+            });
+        }
     }
 
     // (10) R6: candidate başına ≤1 outgoing committed ResolvesTo.
@@ -2173,15 +2229,16 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
         }
     }
 
-    // (11) R7: same key için ≤1 live CodeEntity.
-    let mut live_entity_keys: BTreeMap<String, u32> = BTreeMap::new();
+    // (11) R7: same key için ≤1 live CodeEntity (tur 4 P2-1 — tam CodeIdentityKey, canonical_key DEĞIL).
+    let mut live_entity_keys: BTreeMap<crate::anchoring::identity::CodeIdentityKey, u32> =
+        BTreeMap::new();
     for binding in &snapshot.code_identity_bindings {
         if let Some(node) = snapshot.graph.nodes.iter().find(|n| n.id == binding.node_id) {
             if node.node_kind == ConceptNodeKind::CodeEntity
                 && node.decision_status.is_live_code_identity()
             {
                 *live_entity_keys
-                    .entry(binding.identity_key.canonical_key().to_string())
+                    .entry(binding.identity_key.clone())
                     .or_default() += 1;
             }
         }
@@ -2189,13 +2246,14 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
     for (key, count) in &live_entity_keys {
         if *count > 1 {
             return Err(SnapshotError::ResolutionDuplicateLiveEntity {
-                key: key.clone(),
+                key: format!("{:?}", key),
             });
         }
     }
 
     // (12) Three-way triangulation: committed ResolvesTo edge ↔ record ↔ binding key.
-    let mut edge_pairs: BTreeSet<(String, String)> = BTreeSet::new();
+    // P1-3 (review tur 4): occurrence map (BTreeSet DEĞIL) — duplicate pair detection.
+    let mut edge_pairs: BTreeMap<(String, String), u32> = BTreeMap::new();
     for e in &snapshot.graph.edges {
         if e.kind == ConceptEdgeKind::ResolvesTo && e.decision_status == DecisionStatus::Accepted {
             // INV-C7: explanation non-empty
@@ -2205,14 +2263,27 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
                     to: e.to.clone(),
                 });
             }
-            edge_pairs.insert((e.from.0.clone(), e.to.0.clone()));
+            *edge_pairs
+                .entry((e.from.0.clone(), e.to.0.clone()))
+                .or_default() += 1;
         }
     }
-    let record_pairs: BTreeSet<(String, String)> = snapshot
-        .resolution_records
-        .iter()
-        .map(|r| (r.candidate_id.0.clone(), r.entity_id.0.clone()))
-        .collect();
+    let mut record_pairs: BTreeMap<(String, String), u32> = BTreeMap::new();
+    for r in &snapshot.resolution_records {
+        *record_pairs
+            .entry((r.candidate_id.0.clone(), r.entity_id.0.clone()))
+            .or_default() += 1;
+    }
+    // Her pair tam bir kez bulunmalı (duplicate reject).
+    for (pair, count) in &edge_pairs {
+        if *count > 1 {
+            return Err(SnapshotError::ResolutionDuplicatePair {
+                candidate: pair.0.clone(),
+                entity: pair.1.clone(),
+                count: *count,
+            });
+        }
+    }
     if edge_pairs != record_pairs {
         return Err(SnapshotError::ResolutionTriangulationMismatch);
     }

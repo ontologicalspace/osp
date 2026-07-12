@@ -354,7 +354,7 @@ impl Drop for TmpCleanup {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osp_core::anchoring::store::InMemoryAnchorStore;
+    use osp_core::anchoring::store::{AnchorStore, InMemoryAnchorStore};
     use tempfile::tempdir;
 
     fn empty_persisted() -> PersistedStore {
@@ -408,12 +408,12 @@ mod tests {
         assert_eq!(back, p);
     }
 
-    /// PR E (tur 3 P1-1) — v1 store migrates to v2 (empty resolution ledger; revision preserved).
+    /// PR E (tur 3 P1-1 + tur 4 P2-3) — v1 store migrates to v2 + restore_snapshot validation.
     #[test]
-    fn v1_store_migrates_to_v2_empty_resolution_ledger() {
+    fn v1_store_migrates_to_v2_and_restores() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("store.json");
-        // Legacy v1 store (revision=42, audit_sequence=7) yaz.
+        // Legacy v1 store (revision=42, audit_sequence=0 — boş ledger geçerli density).
         let v1 = PersistedStoreV1 {
             store_schema_version: 1,
             revision: 42,
@@ -425,7 +425,7 @@ mod tests {
                 },
                 decision_records: vec![],
                 supersede_records: vec![],
-                audit_sequence: 7,
+                audit_sequence: 0,
             },
         };
         let v1_json = serde_json::to_vec_pretty(&v1).unwrap();
@@ -434,7 +434,7 @@ mod tests {
         let migrated = read_persisted_store(&path).unwrap();
         assert_eq!(migrated.store_schema_version, 2);
         assert_eq!(migrated.revision, 42, "revision preserved (tur 3 P1-1)");
-        assert_eq!(migrated.snapshot.audit_sequence, 7, "audit_sequence preserved");
+        assert_eq!(migrated.snapshot.audit_sequence, 0, "audit_sequence preserved");
         assert!(
             migrated.snapshot.resolution_records.is_empty(),
             "v1 → v2 boş resolution ledger"
@@ -443,6 +443,14 @@ mod tests {
             migrated.snapshot.code_identity_bindings.is_empty(),
             "v1 → v2 boş identity bindings"
         );
+        // tur 4 P2-3: migrated snapshot core restore validation geçmeli.
+        let restored = InMemoryAnchorStore::restore_snapshot(migrated.snapshot.clone())
+            .expect("migrated v2 snapshot restore validation geçerli");
+        assert_eq!(restored.resolution_ledger().len(), 0);
+        // Export v2 → round-trip restore success.
+        let re_exported = restored.export_snapshot();
+        let _re_restored = InMemoryAnchorStore::restore_snapshot(re_exported)
+            .expect("v2 round-trip restore success");
     }
 
     /// PR E (tur 3 P1-1) — header dispatch rejects unknown version.

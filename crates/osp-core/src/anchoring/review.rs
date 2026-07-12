@@ -3342,4 +3342,249 @@ mod tests {
         sorted.sort();
         assert_eq!(binding_ids, sorted, "bindings sorted by node_id");
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PR E review tur 4 — P1/P2 düzeltme testleri
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// P1-1: Reuse target digest freshness — entity mutate after basis → reject.
+    #[test]
+    fn reuse_target_mutated_after_basis_rejects_and_leaves_store_unchanged() {
+        // İlk candidate resolve → Created entity.
+        let mut store = store_with_resolvable_candidate("src/auth.rs");
+        let candidate1 = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+        let mut session = CodeEntityResolutionSession::open_for_operator(OperatorId::new("op"));
+        let basis1 = PresentedResolutionBasis::compile(&store, &candidate1).unwrap();
+        session
+            .resolve(
+                &mut store,
+                &candidate1,
+                basis1,
+                NonEmptyExplanation::new("first").unwrap(),
+            )
+            .unwrap();
+        let entity_id = store
+            .graph()
+            .edges()
+            .find(|e| e.kind == crate::anchoring::ConceptEdgeKind::ResolvesTo)
+            .map(|e| e.to.clone())
+            .unwrap();
+
+        // İkinci candidate (reuse hedefi entity) — basis compile.
+        let candidate2 = accepted_code_entity_candidate("src/Auth.rs");
+        let mut seed2 = GraphSeed::default();
+        seed2.code_entities.push(candidate2);
+        store.seed_trusted(&seed2).unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[crate::anchoring::types::CodeIdentityBinding {
+                node_id: ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into()),
+                identity_key: insensitive_key("src/auth.rs"),
+            }])
+            .unwrap();
+        let candidate2_id = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
+        let basis2 = PresentedResolutionBasis::compile(&store, &candidate2_id).unwrap();
+
+        // Entity canonical mutate → digest değişir → basis stale.
+        store.graph_mut().node_mut(&entity_id).unwrap().canonical = "mutated.rs".into();
+        let binding_count_before = store
+            .export_snapshot()
+            .code_identity_bindings
+            .len();
+        let err = session
+            .resolve(
+                &mut store,
+                &candidate2_id,
+                basis2,
+                NonEmptyExplanation::new("second").unwrap(),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, ResolutionError::Store(_)),
+            "stale reuse target digest reject — got {err:?}"
+        );
+        // Store unchanged (yeni binding YOK — candidate2 resolve olmadı).
+        let binding_count_after = store
+            .export_snapshot()
+            .code_identity_bindings
+            .len();
+        assert_eq!(binding_count_before, binding_count_after, "store unchanged on error");
+    }
+
+    /// P1-2: Batch validation — duplicate node aynı batch'te.
+    #[test]
+    fn trusted_binding_batch_rejects_duplicate_node() {
+        let mut store = InMemoryAnchorStore::new();
+        let node = accepted_code_entity_candidate("src/auth.rs");
+        let mut seed = GraphSeed::default();
+        seed.code_entities.push(node);
+        store.seed_trusted(&seed).unwrap();
+        // Aynı batch'te aynı node'a iki binding (farklı key).
+        let err = store
+            .seed_code_identity_bindings_trusted(&[
+                crate::anchoring::types::CodeIdentityBinding {
+                    node_id: ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()),
+                    identity_key: insensitive_key("src/auth.rs"),
+                },
+                crate::anchoring::types::CodeIdentityBinding {
+                    node_id: ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()),
+                    identity_key: insensitive_key("src/other.rs"),
+                },
+            ])
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::anchoring::store::StoreError::DuplicateBinding(_)),
+            "batch duplicate node reject — got {err:?}"
+        );
+    }
+
+    /// P1-2: Batch validation — iki live entity aynı key aynı batch'te.
+    #[test]
+    fn trusted_binding_batch_rejects_two_live_entities_same_key() {
+        let mut store = InMemoryAnchorStore::new();
+        // İki Accepted CodeEntity node (farklı ID, aynı identity key).
+        let entity_a = ConceptNode {
+            id: ConceptNodeId("CodeEntity:a".into()),
+            canonical: "src/auth.rs".into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::CodeEntity,
+            decision_status: DecisionStatus::Accepted,
+            position_family: PositionFamily::PhysicalCode,
+        };
+        let entity_b = ConceptNode {
+            id: ConceptNodeId("CodeEntity:b".into()),
+            canonical: "src/auth.rs".into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::CodeEntity,
+            decision_status: DecisionStatus::Accepted,
+            position_family: PositionFamily::PhysicalCode,
+        };
+        let mut seed = GraphSeed::default();
+        seed.code_entities.push(entity_a);
+        seed.code_entities.push(entity_b);
+        store.seed_trusted(&seed).unwrap();
+        // Aynı batch'te iki live entity aynı key → R7 violation.
+        let err = store
+            .seed_code_identity_bindings_trusted(&[
+                crate::anchoring::types::CodeIdentityBinding {
+                    node_id: ConceptNodeId("CodeEntity:a".into()),
+                    identity_key: insensitive_key("src/auth.rs"),
+                },
+                crate::anchoring::types::CodeIdentityBinding {
+                    node_id: ConceptNodeId("CodeEntity:b".into()),
+                    identity_key: insensitive_key("src/auth.rs"),
+                },
+            ])
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::anchoring::store::StoreError::DuplicateLiveCodeEntityIdentity
+            ),
+            "batch duplicate live entity reject — got {err:?}"
+        );
+    }
+
+    /// P1-2: Batch error leaves bindings unchanged.
+    #[test]
+    fn trusted_binding_batch_error_leaves_bindings_unchanged() {
+        let mut store = store_with_resolvable_candidate("src/auth.rs");
+        let binding_count_before = store
+            .export_snapshot()
+            .code_identity_bindings
+            .len();
+        // Hatalı batch (Concept node — wrong kind).
+        let err = store
+            .seed_code_identity_bindings_trusted(&[crate::anchoring::types::CodeIdentityBinding {
+                node_id: ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()), // duplicate
+                identity_key: insensitive_key("src/auth.rs"),
+            }])
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::anchoring::store::StoreError::DuplicateBinding(_)),
+            "batch error (duplicate) — got {err:?}"
+        );
+        let binding_count_after = store
+            .export_snapshot()
+            .code_identity_bindings
+            .len();
+        assert_eq!(
+            binding_count_before, binding_count_after,
+            "batch error leaves bindings unchanged"
+        );
+    }
+
+    /// P1-3: Snapshot — duplicate resolution record single edge reject.
+    #[test]
+    fn duplicate_resolution_record_single_edge_rejects() {
+        let mut store = store_with_resolvable_candidate("src/auth.rs");
+        let candidate_id = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+        let mut session = CodeEntityResolutionSession::open_for_operator(OperatorId::new("op"));
+        let basis = PresentedResolutionBasis::compile(&store, &candidate_id).unwrap();
+        session
+            .resolve(
+                &mut store,
+                &candidate_id,
+                basis,
+                NonEmptyExplanation::new("test").unwrap(),
+            )
+            .unwrap();
+        // Forge: aynı record'u ledger'a bir daha ekle (duplicate pair).
+        let mut snap = store.export_snapshot();
+        let dup_record = snap.resolution_records[0].clone();
+        snap.resolution_records.push(dup_record);
+        let err = InMemoryAnchorStore::restore_snapshot(snap).unwrap_err();
+        // Duplicate pair veya audit_seq density hatası beklenir.
+        assert!(
+            matches!(
+                err,
+                crate::anchoring::store::SnapshotError::ResolutionDuplicatePair { .. }
+                    | crate::anchoring::store::SnapshotError::AuditSequenceDuplicate(_)
+            ),
+            "duplicate record reject — got {err:?}"
+        );
+    }
+
+    /// P2-2: Inactive entity target selection — EntityNotLiveForResolution.
+    #[test]
+    fn inactive_entity_target_rejects_at_compile() {
+        // Accepted CodeEntityCandidate resolve → Created entity (Candidate status).
+        let mut store = store_with_resolvable_candidate("src/auth.rs");
+        let candidate1 = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+        let mut session = CodeEntityResolutionSession::open_for_operator(OperatorId::new("op"));
+        let basis1 = PresentedResolutionBasis::compile(&store, &candidate1).unwrap();
+        session
+            .resolve(
+                &mut store,
+                &candidate1,
+                basis1,
+                NonEmptyExplanation::new("first").unwrap(),
+            )
+            .unwrap();
+        let entity_id = store
+            .graph()
+            .edges()
+            .find(|e| e.kind == crate::anchoring::ConceptEdgeKind::ResolvesTo)
+            .map(|e| e.to.clone())
+            .unwrap();
+        // Entity'yi Rejected yap (inactive). graph_mut ile status değiştir.
+        store.graph_mut().node_mut(&entity_id).unwrap().decision_status =
+            DecisionStatus::Rejected;
+        // İkinci candidate aynı key → compile inactive entity görür → EntityNotLiveForResolution.
+        let candidate2 = accepted_code_entity_candidate("src/Auth.rs");
+        let mut seed2 = GraphSeed::default();
+        seed2.code_entities.push(candidate2);
+        store.seed_trusted(&seed2).unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[crate::anchoring::types::CodeIdentityBinding {
+                node_id: ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into()),
+                identity_key: insensitive_key("src/auth.rs"),
+            }])
+            .unwrap();
+        let candidate2_id = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
+        let err = PresentedResolutionBasis::compile(&store, &candidate2_id).unwrap_err();
+        assert!(
+            matches!(err, ResolutionError::Store(_)),
+            "inactive entity target reject — got {err:?}"
+        );
+    }
 }
