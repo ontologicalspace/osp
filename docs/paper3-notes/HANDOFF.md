@@ -14,10 +14,10 @@ PR #50 (`SupersedeSession` + crate-private authority issuer, INV-C15 production 
 (`mainline_query` deterministic ordering) tamam. Faz 8b'in dört PR'lık kemeri (varyant → atomik mekanizma →
 güvenilir sınır → deterministik projeksiyon) kapandı.
 
-**osp-core lib: 595 test** (PR F: 588→595 +7: ResolvedCodeIdentity + InMemoryCodeEvidenceSource builders + ResolvedCodeEvidenceProvider adapter + EI5-b footgun guard);
-**osp-cli: 150 unit** (PR F migration: evidence_projection test'leri adapter pattern'e geçti, sayı korundu);
+**osp-core lib: 603 test** (PR F: 588→603 +15: ResolvedCodeIdentity + source builders + adapter + EI5-b footgun guard + N:1 resolution/evidence identity integration tests EI1-b/EI2/EI3-b/EI4-c/EI6/EI7/EI8-V1 + Patch 6 restore);
+**osp-cli: 155 unit** (PR F: 150→155 +5: identity-key aggregation + N:1 emit + conflicting reject + DuplicateBindingNode/UnboundNode reject);
 **30 compile-fail** (PR F: 28→30 +2: cF1_resolved_code_identity_literal + cF1_code_identity_key_literal);
-**workspace total 1087** (osp-desktop hariç); **0 regression**; `RUSTFLAGS="-D warnings"` temiz.
+**workspace total 1100** (osp-desktop hariç); **0 regression**; `RUSTFLAGS="-D warnings"` temiz.
 Zenodo DOI'leri canlı (P1/P2/P3/pack). arXiv — Faz 8b epistemik çekirdek kapandığı için dondurma gerek yok artık.
 
 ## PR E2 — CLI scheme adoption (bu oturumda)
@@ -177,10 +177,10 @@ storage **oluşturulmaz** (EI1 mimari garanti).
 - `anchoring_typelevel.rs` orchestration +2 fixture.
 
 ### Testler (0 regression; `RUSTFLAGS="-D warnings"` temiz)
-- **osp-core lib:** 588 → 595 (+7: ResolvedCodeIdentity ×2, source builders ×5, adapter delegation ×4, error propagation ×1, footgun guard ×1 — mevcut test'lerin yerine geçenlerle net +7)
-- **osp-cli unit:** 150 (korundu — evidence_projection test'leri adapter pattern'e migration edildi)
+- **osp-core lib:** 588 → 603 (+15: ResolvedCodeIdentity ×2, source builders ×5, adapter delegation ×4, error propagation ×1, footgun guard ×1, N:1 resolution/evidence identity integration tests ×7 [EI1-b/EI2/EI3-b/EI4-c/EI6/EI7/EI8-V1], Patch 6 restore ×1 — review P1-2 runtime invariant coverage)
+- **osp-cli unit:** 150 → 155 (+5: identity-key aggregation emit + conflict reject + dedup + DuplicateBindingNode/UnboundNode reject — review P1-1)
 - **compile-fail:** 28 → 30 (+2)
-- **workspace total:** 1087 (osp-desktop hariç); 0 regression.
+- **workspace total:** 1100 (osp-desktop hariç); 0 regression.
 
 ### 3 tur plan review'ün metodolojik dersi
 Plan 3 tur review gördü; her tur mimari/claim doğruluğunu sıkıştırdı:
@@ -597,11 +597,11 @@ PR C + PR D + PR E tamamlandı (main `f68b2c6`). Bu bölüm tüm pending işleri
 - `Imports → ConceptEdge` — ama önce physical relation vs conceptual edge ontolojik sözleşme tasarımı.
 
 ### Test envanteri (current protocol — PR F sonrası)
-- osp-core lib: 595 test
-- osp-cli unit: 150 test
+- osp-core lib: 603 test
+- osp-cli unit: 155 test
 - compile-fail (trybuild): 30 (osp-core)
-- workspace total: 1087 (osp-desktop hariç)
-- 0 regression; `RUSTFLAGS="-D warnings)"` temiz.
+- workspace total: 1100 (osp-desktop hariç)
+- 0 regression; `RUSTFLAGS="-D warnings"` temiz.
 
 ---
 

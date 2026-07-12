@@ -125,6 +125,19 @@ pub(crate) enum EvidenceProjectionError {
     UnboundNode {
         node_id: ConceptNodeId,
     },
+    /// PR F review P1-1 — Aynı identity key'e bağlı birden fazla candidate node aynı axis
+    /// için conflicting (value/provenance/strength/coverage) metric taşıyorsa reject.
+    ///
+    /// EI4-c N:1 convergence: birden fazla candidate aynı key'e paylaşabilir ve tek evidence'ya
+    /// converge olur — ama aynı axis için farklı ölçümler conflict'tir (data integrity). Aynı
+    /// değer+provenance+strength+coverage birebir aynıysa deduplicate (idempotent replay).
+    #[error("conflicting {axis:?} observation for identity {identity_key:?} (node {first_node} vs {second_node})")]
+    ConflictingIdentityObservation {
+        identity_key: osp_core::anchoring::identity::CodeIdentityKey,
+        axis: PhysicalCodeAxis,
+        first_node: ConceptNodeId,
+        second_node: ConceptNodeId,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -206,15 +219,20 @@ fn convert_metric_to_observation(
 ///
 /// **PR F migration:** Artık `bindings: &[CodeIdentityBinding]` ayrı parametre alır
 /// (R1a P0-2 — `EvidenceProjectionContext`'e KOYULMAZ, cycle yaratır). Bindings candidate
-/// projection'dan co-derived gelir (`project_analysis` içinde). Her metric node'u için
-/// matching `CodeIdentityKey` lookup edilir; bulunamazsa `UnboundNode` reject (fail-fast).
+/// projection'dan co-derived gelir (`project_analysis` içinde).
 ///
-/// Input yüzeyi: `metrics` yalnız **emit edilmiş** (admitted) metric'leri içerir. Her grouped
-/// node'un en az bir metric'i vardır (`ObservedPhysicalMetricsError::Empty` unreachable).
+/// **PR F review P1-1 — identity-key aggregation:** Metric'ler `ConceptNodeId`'ye göre değil,
+/// `CodeIdentityKey`'ye göre gruplanır. Birden fazla candidate node aynı identity key'e
+/// bağlıysa (EI4-c N:1 convergence) tek `ObservedCodeEvidence` üretir. Aynı key+axis için
+/// conflicting metric (value/provenance/strength/coverage farklı) → `ConflictingIdentityObservation`
+/// reject; birebir aynı → deduplicate (idempotent replay).
+///
+/// Input yüzeyi: `metrics` yalnız **emit edilmiş** (admitted) metric'leri içerir.
 ///
 /// # Determinizm
-/// Node sırası `ConceptNodeId.0` lexicographic sort ile deterministik. Her node'un observation'ları
-/// `ObservedPhysicalMetrics::try_new` içinde `PhysicalCodeMetricAxis::sort_order()` ile sıralanır.
+/// Identity key sırası `CodeIdentityKey` `Ord` (scheme + case policy + canonical key) ile
+/// deterministik. Her identity'nin observation'ları `ObservedPhysicalMetrics::try_new` içinde
+/// `PhysicalCodeMetricAxis::sort_order()` ile sıralanır.
 ///
 /// # Binding lookup (R1a P2-1 — O(log n))
 /// Projection başında `BTreeMap<&ConceptNodeId, &CodeIdentityKey>` kurulur (explicit
@@ -224,8 +242,10 @@ pub(crate) fn project_observed_evidence(
     bindings: &[osp_core::anchoring::types::CodeIdentityBinding],
     context: EvidenceProjectionContext,
 ) -> Result<EvidenceProjectionOutput, EvidenceProjectionError> {
+    use osp_core::anchoring::identity::CodeIdentityKey;
+
     // PR F — binding index kurulur (explicit insertion, duplicate fail-fast).
-    let mut bindings_by_node: std::collections::BTreeMap<&ConceptNodeId, &osp_core::anchoring::identity::CodeIdentityKey> =
+    let mut bindings_by_node: std::collections::BTreeMap<&ConceptNodeId, &CodeIdentityKey> =
         std::collections::BTreeMap::new();
     for binding in bindings {
         if bindings_by_node
@@ -238,50 +258,83 @@ pub(crate) fn project_observed_evidence(
         }
     }
 
-    // 1. ConceptNodeId bazında group (deterministik sıra için önceden sort).
-    let mut by_node: std::collections::BTreeMap<String, (ConceptNodeId, Vec<&ProjectedCodeMetric>)> =
-        std::collections::BTreeMap::new();
+    // 1. Identity-key aggregation (PR F review P1-1). Her metric node'u → identity key;
+    //    metric'ler identity key altında toplanır (ConceptNodeId değil).
+    //
+    //    Draft yapısı: (axis → (metric, source_node)) map. Aynı key+axis için:
+    //    - birebir aynı value/provenance/strength/coverage → deduplicate (idempotent replay).
+    //    - farklı → ConflictingIdentityObservation reject (data integrity).
+    //
+    //    BTreeMap key ordering: CodeIdentityKey Ord → deterministik identity sırası.
+    //    İç map: PhysicalCodeAxis (Ord) → deterministik axis sırası.
+    let mut by_identity: std::collections::BTreeMap<
+        CodeIdentityKey,
+        std::collections::BTreeMap<PhysicalCodeAxis, (&ProjectedCodeMetric, ConceptNodeId)>,
+    > = std::collections::BTreeMap::new();
+
     for metric in metrics {
-        let entry = by_node
-            .entry(metric.node_id().0.clone())
-            .or_insert_with(|| (metric.node_id().clone(), Vec::new()));
-        entry.1.push(metric);
-    }
-
-    let mut evidence: Vec<ObservedCodeEvidence> = Vec::with_capacity(by_node.len());
-    let mut partial_count = 0usize;
-
-    for (_, (node_id, node_metrics)) in by_node {
-        // PR F — binding lookup (O(log n)). Metric node'u için binding bulunamazsa reject.
-        // bindings_by_node değeri `&CodeIdentityKey`; get() `Option<&&CodeIdentityKey>` döner.
-        let identity_key = *bindings_by_node.get(&node_id).ok_or_else(|| {
+        let node_id = metric.node_id();
+        let identity_key = bindings_by_node.get(node_id).ok_or_else(|| {
             EvidenceProjectionError::UnboundNode {
                 node_id: node_id.clone(),
             }
         })?;
+        let draft_axis = metric.axis();
 
-        // 2. Her metric'i observation'a dönüştür.
-        let mut observations: Vec<ObservedPhysicalMetric> = Vec::with_capacity(node_metrics.len());
-        for metric in &node_metrics {
+        let identity_entry = by_identity
+            .entry((*identity_key).clone())
+            .or_default();
+
+        match identity_entry.get(&draft_axis) {
+            // Bu key+axis için zaten metric var — conflict veya dedup karar ver.
+            Some((existing, existing_node)) => {
+                if metrics_conflict(existing, metric) {
+                    return Err(EvidenceProjectionError::ConflictingIdentityObservation {
+                        identity_key: (*identity_key).clone(),
+                        axis: draft_axis,
+                        first_node: existing_node.clone(),
+                        second_node: node_id.clone(),
+                    });
+                }
+                // Birebir aynı → deduplicate (idempotent replay). Yeni metric'i ekleme.
+            }
+            None => {
+                identity_entry.insert(draft_axis, (metric, node_id.clone()));
+            }
+        }
+    }
+
+    // 2. Her identity için tek ObservedCodeEvidence üret.
+    let mut evidence: Vec<ObservedCodeEvidence> = Vec::with_capacity(by_identity.len());
+    let mut partial_count = 0usize;
+
+    for (identity_key, axis_map) in by_identity {
+        // axis_map deterministik sıralı (PhysicalCodeAxis Ord); values() aynı sırayla verir.
+        let mut observations: Vec<ObservedPhysicalMetric> = Vec::with_capacity(axis_map.len());
+        for (metric, _node_id) in axis_map.values() {
             observations.push(convert_metric_to_observation(metric)?);
         }
 
-        // 3. Collection validation (non-empty input yüzeyi garantisidir; DuplicateAxis defensive).
+        // Collection validation (non-empty input yüzeyi garantisidir; DuplicateAxis defensive).
         let collection = ObservedPhysicalMetrics::try_new(observations).map_err(|source| {
             EvidenceProjectionError::InvalidCollection {
-                node_id: node_id.clone(),
+                // identity-key aggregation'da node_id context'i tek node değil; identity key
+                // context olarak carry edilir. ConceptNodeId alanıInvalidCollection için
+                // identity-key'nin derive_entity_id()'sini kullan (lookup için değil, sadece
+                // hata context'i — operator hangi identity'nin patladığını görmeli).
+                node_id: identity_key.derive_entity_id(),
                 source,
             }
         })?;
 
-        // 4. Partial check — PhysicalCodeVector üretmeden missing_axes ile.
+        // Partial check — PhysicalCodeVector üretmeden missing_axes ile.
         if !collection.missing_axes().is_empty() {
             partial_count += 1;
         }
 
-        // 5. Evidence construct — PR F: CodeIdentityKey (ConceptNodeId değil).
+        // Evidence construct — PR F: CodeIdentityKey (ConceptNodeId değil).
         evidence.push(ObservedCodeEvidence::new(
-            identity_key.clone(),
+            identity_key,
             collection,
             context.measured_at,
         ));
@@ -295,6 +348,18 @@ pub(crate) fn project_observed_evidence(
         },
         evidence,
     })
+}
+
+/// İki projected metric'in conflict edip etmediğini kontrol et (PR F review P1-1).
+///
+/// Conflict = value, provenance source, strength, coverage'dan herhangi biri farklı.
+/// Birebir aynı (idempotent replay) → false (deduplicate). Bu karşılaştırma projection
+/// boundary'sinde; core validation `convert_metric_to_observation`'da ayrıca yapılır.
+fn metrics_conflict(a: &ProjectedCodeMetric, b: &ProjectedCodeMetric) -> bool {
+    a.value().get() != b.value().get()
+        || a.provenance().source() != b.provenance().source()
+        || a.provenance().confidence().get() != b.provenance().confidence().get()
+        || a.provenance().coverage().get() != b.provenance().coverage().get()
 }
 
 #[cfg(test)]
@@ -783,8 +848,11 @@ mod tests {
 
     #[test]
     fn rejects_duplicate_axis_per_node_with_context() {
-        // İki aynı axis (Coupling) aynı node'da → DuplicateAxis.
-        // (project_code_metrics dedup yapar ama forged input bypass eder — defensive boundary.)
+        // PR F review P1-1: aynı node + aynı axis + farklı değer → artık identity aggregation'da
+        // ConflictingIdentityObservation (InvalidCollection DuplicateAxis DEĞİL — aggregation
+        // önce axis dedup/conflict yapıyor, InvalidCollection unreachable for single-identity).
+        //
+        // Tek node, tek identity, aynı axis'te iki FARKLI metric (value 0.4 vs 0.5) → conflict.
         let metrics = vec![
             projected_metric_for_tests(
                 node("CodeEntity:X"),
@@ -806,12 +874,165 @@ mod tests {
         let err = project_observed_evidence(&metrics, &bindings_for_metrics(&metrics), ctx()).unwrap_err();
         assert!(matches!(
             err,
-            EvidenceProjectionError::InvalidCollection {
-                source: ObservedPhysicalMetricsError::DuplicateAxis {
-                    axis: PhysicalCodeMetricAxis::Coupling
-                },
+            EvidenceProjectionError::ConflictingIdentityObservation {
+                axis: PhysicalCodeAxis::Coupling,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn same_identity_same_axis_identical_metrics_deduplicates() {
+        // PR F review P1-1: aynı identity + aynı axis + BİREBİR AYNI metric → deduplicate
+        // (idempotent replay). İki metric → tek observation → tek evidence.
+        let metrics = vec![
+            projected_metric_for_tests(
+                node("CodeEntity:X"),
+                PhysicalCodeAxis::Coupling,
+                0.4,
+                ts(),
+                0.8,
+                1.0,
+            ),
+            projected_metric_for_tests(
+                node("CodeEntity:X"),
+                PhysicalCodeAxis::Coupling,
+                0.4, // birebir aynı
+                ts(),
+                0.8,
+                1.0,
+            ),
+        ];
+        let out = project_observed_evidence(&metrics, &bindings_for_metrics(&metrics), ctx()).unwrap();
+        assert_eq!(out.evidence.len(), 1, "deduplicate → tek evidence");
+        assert_eq!(out.evidence[0].observations().values().len(), 1, "tek Coupling observation");
+    }
+
+    #[test]
+    fn two_candidate_nodes_same_identity_key_emit_one_evidence() {
+        // PR F review P1-1 / EI4-c: iki candidate node aynı CodeIdentityKey'e bağlı →
+        // tek ObservedCodeEvidence (N:1 convergence). Farklı axis'ler birleşir.
+        let candidate_a = node("CodeEntityCandidate:a.py");
+        let candidate_b = node("CodeEntityCandidate:b.py");
+        let shared_key = identity_key("shared-identity");
+
+        let metrics = vec![
+            projected_metric_for_tests(
+                candidate_a.clone(),
+                PhysicalCodeAxis::Coupling,
+                0.4,
+                ts(),
+                0.8,
+                1.0,
+            ),
+            projected_metric_for_tests(
+                candidate_b.clone(),
+                PhysicalCodeAxis::Cohesion,
+                0.5,
+                ts(),
+                0.9,
+                1.0,
+            ),
+        ];
+        // İki candidate aynı identity key'e bound.
+        let bindings = vec![
+            binding(&candidate_a, &shared_key),
+            binding(&candidate_b, &shared_key),
+        ];
+        let out = project_observed_evidence(&metrics, &bindings, ctx()).unwrap();
+        assert_eq!(
+            out.evidence.len(),
+            1,
+            "EI4-c: iki candidate aynı key → tek evidence (N:1 convergence)"
+        );
+        assert_eq!(
+            out.evidence[0].code_identity_key(),
+            &shared_key,
+            "evidence shared key taşıyor"
+        );
+        // İki farklı axis birleşti → 2 observation.
+        assert_eq!(out.evidence[0].observations().values().len(), 2);
+    }
+
+    #[test]
+    fn two_candidate_nodes_same_identity_key_conflicting_axis_rejects() {
+        // PR F review P1-1: iki candidate aynı key + AYNI axis + FARKLI değer → conflict.
+        let candidate_a = node("CodeEntityCandidate:a.py");
+        let candidate_b = node("CodeEntityCandidate:b.py");
+        let shared_key = identity_key("shared-identity");
+
+        let metrics = vec![
+            projected_metric_for_tests(
+                candidate_a.clone(),
+                PhysicalCodeAxis::Coupling,
+                0.4,
+                ts(),
+                0.8,
+                1.0,
+            ),
+            projected_metric_for_tests(
+                candidate_b.clone(),
+                PhysicalCodeAxis::Coupling, // aynı axis
+                0.6,                         // farklı değer → conflict
+                ts(),
+                0.9,
+                1.0,
+            ),
+        ];
+        let bindings = vec![
+            binding(&candidate_a, &shared_key),
+            binding(&candidate_b, &shared_key),
+        ];
+        let err = project_observed_evidence(&metrics, &bindings, ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            EvidenceProjectionError::ConflictingIdentityObservation {
+                axis: PhysicalCodeAxis::Coupling,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn projection_rejects_duplicate_binding_node() {
+        // PR F review P1-2: aynı node için iki farklı binding → DuplicateBindingNode.
+        let n = node("CodeEntity:X");
+        let metrics = vec![projected_metric_for_tests(
+            n.clone(),
+            PhysicalCodeAxis::Coupling,
+            0.4,
+            ts(),
+            0.8,
+            1.0,
+        )];
+        let bindings = vec![
+            binding(&n, &identity_key("key-a")),
+            binding(&n, &identity_key("key-b")),
+        ];
+        let err = project_observed_evidence(&metrics, &bindings, ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            EvidenceProjectionError::DuplicateBindingNode { node_id } if node_id == n
+        ));
+    }
+
+    #[test]
+    fn projection_rejects_unbound_node() {
+        // PR F review P1-2: metric node'u için binding yok → UnboundNode.
+        let n = node("CodeEntity:X");
+        let metrics = vec![projected_metric_for_tests(
+            n.clone(),
+            PhysicalCodeAxis::Coupling,
+            0.4,
+            ts(),
+            0.8,
+            1.0,
+        )];
+        // Boş binding listesi → node'un binding'i yok.
+        let err = project_observed_evidence(&metrics, &[], ctx()).unwrap_err();
+        assert!(matches!(
+            err,
+            EvidenceProjectionError::UnboundNode { node_id } if node_id == n
         ));
     }
 

@@ -526,6 +526,24 @@ mod tests {
         assert!(source.load(&key).unwrap().is_none());
     }
 
+    /// Patch 6 (restore — PR F review P2-3): GraphSeed.code_entities varlığı evidence üretmez.
+    ///
+    /// INV-C6 boundary: bir CodeEntity/CodeEntityCandidate node'unun graph'ta seed edilmiş
+    /// olması kanıt sayılmaz. Explicit `ObservedCodeEvidence` seed gerekir. Source'a explicit
+    /// evidence yüklenmedikçe lookup her zaman None döner — graph presence ≠ evidence.
+    #[test]
+    fn graphseed_code_entities_presence_does_not_produce_evidence() {
+        // Source boş — graph'ta node var ama explicit evidence yok.
+        let source = InMemoryCodeEvidenceSource::empty();
+        let key = identity_key("CodeEntity:PaymentModule");
+        assert!(
+            source.load(&key).unwrap().is_none(),
+            "INV-C6 Patch 6: GraphSeed.code_entities varlığı evidence sayılmaz \
+             (explicit ObservedCodeEvidence seed gerekir)"
+        );
+        assert_eq!(source.evidence_count(), 0);
+    }
+
     #[test]
     fn try_from_evidence_loads_by_identity_key() {
         let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![auth_service_evidence()])
@@ -780,5 +798,411 @@ mod tests {
             ev.observations().minimum_observed_strength().get(),
             0.85
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PR F review P1-2 — N:1 resolution + evidence identity integration tests.
+//
+// Bu modül gerçek `InMemoryAnchorStore` kullanır (StubLookup DEĞİL). EI1-b, EI2, EI3-b,
+// EI4-c, EI6, EI7 invariant'larını tek bir resolution + evidence zincirinde kanıtlar.
+// Setup helper'lar review.rs `store_with_resolvable_candidate` (line 2903-2938) mirror.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod resolution_identity_integration_tests {
+    use super::*;
+    use crate::anchoring::identity::{CodeIdentityKey, CodeIdentityScheme, CodePathCasePolicy};
+    use crate::anchoring::review::{
+        CodeEntityResolutionSession, OperatorId, PresentedResolutionBasis, ResolutionOutcome,
+    };
+    use crate::anchoring::store::{AnchorStore, InMemoryAnchorStore};
+    use crate::anchoring::types::{
+        CodeIdentityBinding, ConceptNode, ConceptNodeKind, ConceptNodeId, EvidenceCoverage,
+        EvidenceStrength, GraphSeed, ObservedCodeMetricSource, ObservedPhysicalMetric,
+        ObservedPhysicalMetrics,
+    };
+    use crate::anchoring::{DecisionStatus, NonEmptyExplanation, PhysicalCodeMetricAxis, PositionFamily};
+
+    /// Accepted CodeEntityCandidate node (PhysicalCode family).
+    fn accepted_candidate(path: &str) -> ConceptNode {
+        ConceptNode {
+            id: ConceptNodeId(format!("CodeEntityCandidate:{path}")),
+            canonical: path.into(),
+            aliases: vec![],
+            node_kind: ConceptNodeKind::CodeEntityCandidate,
+            decision_status: DecisionStatus::Accepted,
+            position_family: PositionFamily::PhysicalCode,
+        }
+    }
+
+    /// Store with Accepted CodeEntityCandidate + identity binding seed'li.
+    fn store_with_candidate(path: &str, case_policy: CodePathCasePolicy) -> InMemoryAnchorStore {
+        let mut seed = GraphSeed::default();
+        seed.code_entities.push(accepted_candidate(path));
+        let mut store = InMemoryAnchorStore::with_seed(seed);
+        let key = CodeIdentityKey::new(
+            CodeIdentityScheme::AnalysisPathV1 { case_policy },
+            path,
+        )
+        .unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[CodeIdentityBinding {
+                node_id: ConceptNodeId(format!("CodeEntityCandidate:{path}")),
+                identity_key: key,
+            }])
+            .unwrap();
+        store
+    }
+
+    /// 5-axis observation helper (uniform strength).
+    fn full_observations(strength_val: f64) -> ObservedPhysicalMetrics {
+        let strength = EvidenceStrength::new(strength_val).unwrap();
+        let coverage = EvidenceCoverage::new(1.0).unwrap();
+        let scip = ObservedCodeMetricSource::Scip;
+        ObservedPhysicalMetrics::try_new(vec![
+            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Coupling, 0.4, scip, strength, coverage).unwrap(),
+            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Cohesion, 0.5, scip, strength, coverage).unwrap(),
+            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Instability, 0.3, scip, strength, coverage).unwrap(),
+            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Entropy, 0.5, scip, strength, coverage).unwrap(),
+            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::WitnessDepth, 0.6, scip, strength, coverage).unwrap(),
+        ])
+        .unwrap()
+    }
+
+    /// Test identity key üret.
+    fn identity_key(key: &str) -> CodeIdentityKey {
+        CodeIdentityKey::new(
+            CodeIdentityScheme::AnalysisPathV1 {
+                case_policy: CodePathCasePolicy::CaseSensitive,
+            },
+            key,
+        )
+        .unwrap()
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EI1-b: gerçek store binding lookup ile çözülür
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn real_store_resolves_bound_identity_key() {
+        // EI1-b: InMemoryAnchorStore::resolve_code_identity gerçek binding döner.
+        let store = store_with_candidate("src/auth.rs", CodePathCasePolicy::CaseSensitive);
+        let node_id = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+
+        let resolved = store.resolve_code_identity(&node_id).unwrap();
+        assert_eq!(resolved.node_id(), &node_id);
+        assert_eq!(
+            resolved.identity_key().canonical_key(),
+            "src/auth.rs",
+            "identity key binding'den resolve edildi"
+        );
+    }
+
+    #[test]
+    fn real_store_unbound_node_returns_unbound_error() {
+        // EI1-b negatif: node mevcut ama binding yok → Unbound.
+        let mut seed = GraphSeed::default();
+        seed.code_entities.push(accepted_candidate("src/bound.rs"));
+        // binding seed'leme → Unbound beklenir.
+        let store = InMemoryAnchorStore::with_seed(seed);
+        let node_id = ConceptNodeId("CodeEntityCandidate:src/bound.rs".into());
+        let err = store.resolve_code_identity(&node_id).unwrap_err();
+        assert!(matches!(err, CodeIdentityLookupError::Unbound(_)));
+    }
+
+    #[test]
+    fn real_store_missing_node_returns_node_not_found() {
+        // EI1-b negatif: node grafta yok → NodeNotFound.
+        let store = InMemoryAnchorStore::new();
+        let ghost = ConceptNodeId("CodeEntityCandidate:ghost.rs".into());
+        let err = store.resolve_code_identity(&ghost).unwrap_err();
+        assert!(matches!(err, CodeIdentityLookupError::NodeNotFound(_)));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EI2 + EI4-c + EI7: N:1 resolution + evidence identity triangulation
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn n1_resolution_two_candidates_same_key_share_evidence() {
+        // EI4-c + EI2 + EI7: iki Accepted candidate aynı identity key'e bağlı →
+        // resolve sonrası her ikisi de aynı entity'ye converge ve aynı evidence görür.
+        //
+        // Setup: candidate-a + candidate-b aynı key (AsciiCaseInsensitive: src/auth.rs == src/Auth.rs).
+        let mut store = store_with_candidate("src/auth.rs", CodePathCasePolicy::AsciiCaseInsensitive);
+
+        // İkinci candidate ekle (aynı identity key, farklı path spelling).
+        let candidate_b_path = "src/Auth.rs";
+        let mut seed2 = GraphSeed::default();
+        seed2.code_entities.push(accepted_candidate(candidate_b_path));
+        store.seed_trusted(&seed2).unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[CodeIdentityBinding {
+                node_id: ConceptNodeId(format!("CodeEntityCandidate:{candidate_b_path}")),
+                identity_key: CodeIdentityKey::new(
+                    CodeIdentityScheme::AnalysisPathV1 {
+                        case_policy: CodePathCasePolicy::AsciiCaseInsensitive,
+                    },
+                    "src/auth.rs", // canonical lowercase — aynı key
+                )
+                .unwrap(),
+            }])
+            .unwrap();
+
+        // Shared identity key (canonical lowercase).
+        let shared_key = CodeIdentityKey::new(
+            CodeIdentityScheme::AnalysisPathV1 {
+                case_policy: CodePathCasePolicy::AsciiCaseInsensitive,
+            },
+            "src/auth.rs",
+        )
+        .unwrap();
+
+        // Evidence source: tek evidence (shared key).
+        let evidence = ObservedCodeEvidence::new(
+            shared_key.clone(),
+            full_observations(0.85),
+            1_700_000_000,
+        );
+        let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
+
+        // Adapter: store lookup + source → CodeEvidenceProvider.
+        let adapter = ResolvedCodeEvidenceProvider::new(&store, &source);
+
+        let candidate_a = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+        let candidate_b = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
+
+        // EI2: candidate-a ve candidate-b aynı evidence object görür (identity-owned).
+        let ev_a = adapter.find_evidence(&candidate_a).unwrap().expect("evidence a");
+        let ev_b = adapter.find_evidence(&candidate_b).unwrap().expect("evidence b");
+        assert_eq!(
+            ev_a.code_identity_key(),
+            ev_b.code_identity_key(),
+            "EI2: iki candidate aynı identity-owned evidence görür"
+        );
+        assert_eq!(ev_a, ev_b, "EI2: evidence object birebir aynı");
+
+        // EI7: strength eşit (shared key ownership).
+        let strength_a = adapter.evidence_strength(&candidate_a).unwrap();
+        let strength_b = adapter.evidence_strength(&candidate_b).unwrap();
+        assert_eq!(
+            strength_a, strength_b,
+            "EI7: candidate/entity strength eşit (shared key ownership)"
+        );
+        assert_eq!(strength_a.get(), 0.85);
+    }
+
+    #[test]
+    fn n1_resolution_creates_then_reuses_same_entity_and_evidence() {
+        // EI4-c: resolve candidate-a → Created entity; resolve candidate-b → Reused same entity.
+        // Resolution sonrası entity node da aynı identity key'e bound → aynı evidence.
+        let mut store = store_with_candidate("src/auth.rs", CodePathCasePolicy::AsciiCaseInsensitive);
+
+        // İkinci candidate (aynı key).
+        let candidate_b_path = "src/Auth.rs";
+        let mut seed2 = GraphSeed::default();
+        seed2.code_entities.push(accepted_candidate(candidate_b_path));
+        store.seed_trusted(&seed2).unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[CodeIdentityBinding {
+                node_id: ConceptNodeId(format!("CodeEntityCandidate:{candidate_b_path}")),
+                identity_key: CodeIdentityKey::new(
+                    CodeIdentityScheme::AnalysisPathV1 {
+                        case_policy: CodePathCasePolicy::AsciiCaseInsensitive,
+                    },
+                    "src/auth.rs",
+                )
+                .unwrap(),
+            }])
+            .unwrap();
+
+        // Shared key.
+        let shared_key = CodeIdentityKey::new(
+            CodeIdentityScheme::AnalysisPathV1 {
+                case_policy: CodePathCasePolicy::AsciiCaseInsensitive,
+            },
+            "src/auth.rs",
+        )
+        .unwrap();
+
+        // Evidence source.
+        let evidence = ObservedCodeEvidence::new(
+            shared_key.clone(),
+            full_observations(0.85),
+            1_700_000_000,
+        );
+        let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
+
+        let candidate_a = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+        let candidate_b = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
+
+        // EI3-b: evidence_count before resolution.
+        let count_before = source.evidence_count();
+
+        // Resolve candidate-a → Created entity.
+        let mut session = CodeEntityResolutionSession::open_for_operator(OperatorId::new("op"));
+        let basis_a = PresentedResolutionBasis::compile(&store, &candidate_a).unwrap();
+        let record_a = session
+            .resolve(
+                &mut store,
+                &candidate_a,
+                basis_a,
+                NonEmptyExplanation::new("first").unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(record_a.outcome, ResolutionOutcome::Created { .. }));
+        let entity_id = record_a.entity_id.clone();
+
+        // Resolve candidate-b → Reused same entity.
+        let basis_b = PresentedResolutionBasis::compile(&store, &candidate_b).unwrap();
+        let record_b = session
+            .resolve(
+                &mut store,
+                &candidate_b,
+                basis_b,
+                NonEmptyExplanation::new("second").unwrap(),
+            )
+            .unwrap();
+        assert!(
+            matches!(record_b.outcome, ResolutionOutcome::Reused { .. }),
+            "EI4-c: ikinci candidate reuse ile aynı entity'ye converge"
+        );
+        assert_eq!(record_b.entity_id, entity_id, "N:1 → same entity ID");
+
+        // EI3-b: evidence_count unchanged — resolution source'a erişmedi.
+        let adapter = ResolvedCodeEvidenceProvider::new(&store, &source);
+        let count_after = source.evidence_count();
+        assert_eq!(
+            count_before, count_after,
+            "EI3-b: resolution source cardinality değiştirmez"
+        );
+
+        // EI2: candidate-a, candidate-b, ve resolved entity aynı evidence görür.
+        let ev_candidate_a = adapter.find_evidence(&candidate_a).unwrap().unwrap();
+        let ev_candidate_b = adapter.find_evidence(&candidate_b).unwrap().unwrap();
+        let ev_entity = adapter.find_evidence(&entity_id).unwrap().unwrap();
+        assert_eq!(
+            ev_candidate_a.code_identity_key(),
+            ev_entity.code_identity_key(),
+            "EI2: candidate-a ve entity aynı identity-owned evidence"
+        );
+        assert_eq!(
+            ev_candidate_b.code_identity_key(),
+            ev_entity.code_identity_key(),
+            "EI2: candidate-b ve entity aynı identity-owned evidence"
+        );
+        assert_eq!(ev_candidate_a, ev_entity);
+        assert_eq!(ev_candidate_b, ev_entity);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EI6: snapshot restore sonrası candidate/entity/gate/scorer eşitliği
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn snapshot_restore_preserves_identity_lookup_and_evidence() {
+        // EI6: snapshot export → restore sonrası binding lookup + evidence aynı kalır.
+        let mut store = store_with_candidate("src/auth.rs", CodePathCasePolicy::CaseSensitive);
+        let candidate_id = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
+
+        // Resolve → entity materialize.
+        let mut session = CodeEntityResolutionSession::open_for_operator(OperatorId::new("op"));
+        let basis = PresentedResolutionBasis::compile(&store, &candidate_id).unwrap();
+        let record = session
+            .resolve(
+                &mut store,
+                &candidate_id,
+                basis,
+                NonEmptyExplanation::new("resolve").unwrap(),
+            )
+            .unwrap();
+        let entity_id = record.entity_id.clone();
+
+        // Snapshot export → restore.
+        let snapshot = store.export_snapshot();
+        let restored = InMemoryAnchorStore::restore_snapshot(snapshot).expect("restore valid");
+
+        // Shared key + evidence.
+        let key = identity_key("src/auth.rs");
+        let evidence = ObservedCodeEvidence::new(key.clone(), full_observations(0.85), 1_700_000_000);
+        let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
+
+        // Original store adapter.
+        let adapter_orig = ResolvedCodeEvidenceProvider::new(&store, &source);
+        // Restored store adapter.
+        let adapter_restored = ResolvedCodeEvidenceProvider::new(&restored, &source);
+
+        // EI6: candidate lookup aynı.
+        let resolved_orig = adapter_orig
+            .find_evidence(&candidate_id)
+            .unwrap()
+            .unwrap();
+        let resolved_restored = adapter_restored
+            .find_evidence(&candidate_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            resolved_orig, resolved_restored,
+            "EI6: candidate lookup restore sonrası aynı"
+        );
+
+        // EI6: entity lookup aynı.
+        let entity_orig = adapter_orig.find_evidence(&entity_id).unwrap().unwrap();
+        let entity_restored = adapter_restored.find_evidence(&entity_id).unwrap().unwrap();
+        assert_eq!(
+            entity_orig, entity_restored,
+            "EI6: entity lookup restore sonrası aynı"
+        );
+
+        // EI6: binding resolve aynı identity key döner.
+        let binding_orig = store.resolve_code_identity(&entity_id).unwrap();
+        let binding_restored = restored.resolve_code_identity(&entity_id).unwrap();
+        assert_eq!(
+            binding_orig.identity_key(),
+            binding_restored.identity_key(),
+            "EI6: binding identity key restore sonrası aynı"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // EI8-V1: graph absence/unbound → key-owned evidence mutasyonu YOK
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn graph_absence_does_not_mutate_key_owned_evidence() {
+        // EI8-V1: graph'ta olmayan node + unbound node lookup'ları source içeriğini değiştirmez.
+        let store = store_with_candidate("src/auth.rs", CodePathCasePolicy::CaseSensitive);
+        let key = identity_key("src/auth.rs");
+        let evidence = ObservedCodeEvidence::new(key.clone(), full_observations(0.85), 1_700_000_000);
+        let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
+        let adapter = ResolvedCodeEvidenceProvider::new(&store, &source);
+
+        let count_before = source.evidence_count();
+
+        // Ghost node (grafta yok) → NodeNotFound → IdentityLookup error.
+        let ghost = ConceptNodeId("CodeEntityCandidate:ghost.rs".into());
+        let _ = adapter.find_evidence(&ghost);
+
+        // Unbound node (grafta var, binding yok).
+        let mut seed_unbound = GraphSeed::default();
+        seed_unbound.code_entities.push(accepted_candidate("src/unbound.rs"));
+        let store2 = InMemoryAnchorStore::with_seed(seed_unbound);
+        // Binding seed'leme → unbound.
+        let unbound = ConceptNodeId("CodeEntityCandidate:src/unbound.rs".into());
+        let adapter2 = ResolvedCodeEvidenceProvider::new(&store2, &source);
+        let _ = adapter2.find_evidence(&unbound);
+
+        // EI8-V1: source içeriği değişmedi.
+        assert_eq!(
+            source.evidence_count(),
+            count_before,
+            "EI8-V1: graph absence/unbound lookup'ları key-owned evidence'ı mutasyona uğratmaz"
+        );
+
+        // Source hâlâ key ile lookup edilebilir.
+        let ev = source.load(&key).unwrap();
+        assert!(ev.is_some(), "key-owned evidence hâlâ mevcut");
     }
 }
