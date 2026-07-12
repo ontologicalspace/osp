@@ -415,9 +415,10 @@ fn target_drift_repository_revision_snapshot_unchanged() {
         before_audit,
         "target drift must not bump audit_sequence"
     );
-    // Tam snapshot JSON eşitliği (PartialEq'nin JSON karşılığı — alan-bazlı karşılaştırma).
+    // Tam snapshot JSON eşitliği (semantic equality — alan-bazlı karşılaştırma; raw byte-level
+    // değil; whitespace/object key serialization sırası kanıtlanmaz, ama tüm alan değerleri aynı).
     assert_eq!(
         after["snapshot"], before_snapshot,
-        "target drift must leave persisted snapshot byte-identical"
+        "target drift must leave persisted snapshot semantically identical"
     );
 }

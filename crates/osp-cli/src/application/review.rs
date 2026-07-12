@@ -2304,7 +2304,7 @@ mod tests {
         let after = store.export_snapshot();
         assert_eq!(
             before, after,
-            "target drift must leave in-memory snapshot byte-identical"
+            "target drift must leave in-memory snapshot value-identical (PartialEq field equality)"
         );
     }
 
