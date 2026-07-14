@@ -7,7 +7,7 @@
     "rust_test": "cargo test -p <package> [--lib | --test <target>] <test_name> -- --exact; parsed: exactly 1 selected, 1 passed, 0 ignored, 0 filtered",
     "trybuild_fixture": "fixture file exists + orchestrator contains compile_fail(\"<fixture>\") + orchestration test passes",
     "architecture_guard": "treated as rust_test with target_kind=integration",
-    "type_shape": "no executable test — enforcement is the type system itself; validated by absence of compile-fail fixture and doc reference",
+    "type_shape": "no executable behavioral test — enforcement is the type system itself (sealed module / unconditional write path / non-empty newtype). Validator checks path + symbol presence; result category 'manually_asserted' — enforcement semantics requires manual inspection (no compile-fail fixture).",
     "gap": "invariant claimed in manuscript but no test currently verifies it — flagged for resolution before v1.4 freeze"
   },
   "evidence_entries": [

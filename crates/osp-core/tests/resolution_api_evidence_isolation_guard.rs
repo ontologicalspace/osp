@@ -78,6 +78,11 @@ fn type_mentions_forbidden(ty: &syn::Type) -> Vec<&'static str> {
         .collect()
 }
 
+/// `syn::Path` → string (örn. `std::collections::HashMap` veya `CodeEvidenceProvider`).
+fn path_to_string(path: &syn::Path) -> String {
+    path.to_token_stream().to_string().replace(' ', "")
+}
+
 /// Bir isim resolution-API yüzeyine mi ait?
 fn is_resolution_item(ident: &str) -> bool {
     RESOLUTION_API_FRAGMENTS.iter().any(|frag| ident.contains(frag))
@@ -100,13 +105,33 @@ impl ViolationCollector {
     }
 }
 
-/// Bir `Signature` üzerinde (parametreler + dönüş tipi) forbidden token ara.
+/// Bir `TypeParamBound` listesinden (inline generic bound `T: Trait` veya where-clause
+/// bound `T: Trait`) forbidden token çıkar. `Punctuated<TypeParamBound>` üzerinden TraitBound
+/// path'lerini string'e çevirip forbidden token ara.
+fn bounds_mention_forbidden(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>) -> Vec<&'static str> {
+    let mut hits = Vec::new();
+    for bound in bounds {
+        if let syn::TypeParamBound::Trait(trait_bound) = bound {
+            let s = path_to_string(&trait_bound.path);
+            for tok in FORBIDDEN_TOKENS.iter().copied() {
+                if s.contains(tok) {
+                    hits.push(tok);
+                }
+            }
+        }
+    }
+    hits
+}
+
+/// Bir `Signature` üzerinde forbidden token ara: parametreler + dönüş tipi + generic
+/// parametre bound'ları (inline `<P: Trait>`) + where clause (`where P: Trait`).
 fn check_fn_signature(
     collector: &mut ViolationCollector,
     name: &str,
     sig: &syn::Signature,
     context: &str,
 ) {
+    // (1) Typed parametreler
     for arg in &sig.inputs {
         if let syn::FnArg::Typed(pat_type) = arg {
             for tok in type_mentions_forbidden(&pat_type.ty) {
@@ -117,12 +142,42 @@ fn check_fn_signature(
             }
         }
     }
+    // (2) Dönüş tipi
     if let syn::ReturnType::Type(_, ret_ty) = &sig.output {
         for tok in type_mentions_forbidden(ret_ty) {
             collector.violations.push(format!(
                 "{context}: fn `{name}` dönüş tipi forbidden token `{tok}` taşıyor: `{}`",
                 type_to_tokens_string(ret_ty)
             ));
+        }
+    }
+    // (3) Generic parametre inline bound'ları: <P: CodeEvidenceProvider>
+    for param in &sig.generics.params {
+        if let syn::GenericParam::Type(type_param) = param {
+            let hits = bounds_mention_forbidden(&type_param.bounds);
+            for tok in hits {
+                collector.violations.push(format!(
+                    "{context}: fn `{name}` generic param `{}` inline bound forbidden token `{tok}` taşıyor",
+                    type_param.ident
+                ));
+            }
+        }
+    }
+    // (4) Where clause: where P: CodeEvidenceProvider
+    if let Some(where_clause) = &sig.generics.where_clause {
+        for pred in &where_clause.predicates {
+            if let syn::WherePredicate::Type(type_pred) = pred {
+                let hits = bounds_mention_forbidden(&type_pred.bounds);
+                if !hits.is_empty() {
+                    let bounded_ty = type_to_tokens_string(&type_pred.bounded_ty);
+                    for tok in hits {
+                        collector.violations.push(format!(
+                            "{context}: fn `{name}` where clause bound `{}` forbidden token `{tok}` taşıyor",
+                            bounded_ty
+                        ));
+                    }
+                }
+            }
         }
     }
 }
@@ -311,6 +366,24 @@ pub trait AnchorStore {
         provider: &mut dyn CodeEvidenceProvider,
     ) -> Result<ResolutionRecord, ()>;
 
+    // FORBIDDEN (generic inline bound): <P: CodeEvidenceProvider> atlatma girişimi.
+    // Parametre tipi yalnız P, ama generic bound capability taşıyor.
+    fn apply_resolution_generic_inline<P: CodeEvidenceProvider>(
+        &mut self,
+        app: ResolutionApplication,
+        provider: P,
+    ) -> Result<ResolutionRecord, ()>;
+
+    // FORBIDDEN (where clause): where P: CodeEvidenceProvider atlatma girişimi.
+    // Parametre tipi yalnız P, where clause capability taşıyor.
+    fn apply_resolution_generic_where<P>(
+        &mut self,
+        app: ResolutionApplication,
+        provider: P,
+    ) -> Result<ResolutionRecord, ()>
+    where
+        P: CodeEvidenceProvider;
+
     // Resolution-API fragment'ı içermeyen ama forbidden token taşıyan metot —
     // bu yakalanMAMALI (resolution context dışında), guard'ın scoping'i doğruysa.
     fn unrelated_method(&self, e: CodeEvidenceSource) -> bool {
@@ -334,14 +407,17 @@ impl ResolutionApplication {
     let mut collector = ViolationCollector::new();
     collector.visit_file(&file);
 
-    // En az 3 violation beklenir:
+    // En az 5 violation beklenir:
     // 1. ResolutionApplication.evidence field (ObservedCodeEvidence)
     // 2. AnchorStore::apply_resolution_with_evidence parametresi (CodeEvidenceProvider)
-    // 3. ResolutionApplication::evidence_source dönüş tipi (CodeEvidenceSource)
+    // 3. AnchorStore::apply_resolution_generic_inline generic inline bound (CodeEvidenceProvider)
+    // 4. AnchorStore::apply_resolution_generic_where where clause bound (CodeEvidenceProvider)
+    // 5. ResolutionApplication::evidence_source dönüş tipi (CodeEvidenceSource)
     // NOT: unrelated_method yakalanmamalı (resolution context dışında).
     assert!(
-        collector.violations.len() >= 3,
-        "guard en az 3 violation yakalamalıydı (struct field + trait method param + impl accessor), {} buldu:\n{}",
+        collector.violations.len() >= 5,
+        "guard en az 5 violation yakalamalıydı (struct field + trait method param + \
+         generic inline bound + where clause bound + impl accessor), {} buldu:\n{}",
         collector.violations.len(),
         collector.violations.join("\n")
     );
@@ -350,6 +426,15 @@ impl ResolutionApplication {
     assert!(joined.contains("ObservedCodeEvidence"), "ObservedCodeEvidence violation yakalanmadı");
     assert!(joined.contains("CodeEvidenceProvider"), "CodeEvidenceProvider violation yakalanmadı");
     assert!(joined.contains("CodeEvidenceSource"), "CodeEvidenceSource violation yakalanmadı");
+    // Generic bound vakaları: inline + where clause. Review 2 P1 — bu ikisi eskiden kaçılıyordu.
+    assert!(
+        joined.contains("inline bound") || joined.contains("apply_resolution_generic_inline"),
+        "generic inline bound violation yakalanmadı (review 2 P1)"
+    );
+    assert!(
+        joined.contains("where clause") || joined.contains("apply_resolution_generic_where"),
+        "where clause bound violation yakalanmadı (review 2 P1)"
+    );
     assert!(
         !joined.contains("unrelated_method"),
         "guard yanlışlıkla unrelated_method'u yakaladı — scoping hatası"
