@@ -17,7 +17,7 @@ navigable conceptual spaces with physics-like rules and BFT-inspired witnessing.
 All three are published on Zenodo:
 - Paper 1: [10.5281/zenodo.21206545](https://doi.org/10.5281/zenodo.21206545)
 - Paper 2: [10.5281/zenodo.21207704](https://doi.org/10.5281/zenodo.21207704)
-- Paper 3 (latest): [10.5281/zenodo.21220992](https://doi.org/10.5281/zenodo.21220992) (concept DOI, resolves to v1.2)
+- Paper 3 (latest): [10.5281/zenodo.21220992](https://doi.org/10.5281/zenodo.21220992) (concept DOI; resolves to the latest public version)
 - Evidence Pack: [10.5281/zenodo.21207762](https://doi.org/10.5281/zenodo.21207762)
 
 ### `spec/` — Formal specifications

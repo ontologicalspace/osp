@@ -1,0 +1,522 @@
+{
+  "schema_version": "invariant-evidence-matrix.v1",
+  "title": "Paper 3 — Invariant Evidence Matrix",
+  "description": "Machine-readable source of truth mapping each Paper 3 invariant clause to its exact verification target. Manuscript Table EI / Table RP / Table 1 'Evidence' columns reference evidence_id labels; this file binds them to exact module::test_name paths that scripts/verify_invariant_evidence.py validates via `cargo test -- --exact`.",
+  "validator": "scripts/verify_invariant_evidence.py",
+  "validation_method": {
+    "rust_test": "cargo test -p <package> [--lib | --test <target>] <test_name> -- --exact; parsed: exactly 1 selected, 1 passed, 0 ignored, 0 filtered",
+    "trybuild_fixture": "fixture file exists + orchestrator contains compile_fail(\"<fixture>\") + orchestration test passes",
+    "architecture_guard": "treated as rust_test with target_kind=integration",
+    "type_shape": "no executable test — enforcement is the type system itself; validated by absence of compile-fail fixture and doc reference",
+    "gap": "invariant claimed in manuscript but no test currently verifies it — flagged for resolution before v1.4 freeze"
+  },
+  "evidence_entries": [
+    {
+      "invariant": "INV-C1",
+      "evidence_id": "E-C1",
+      "evidence_kind": "type_shape",
+      "enforcement": "Sealed embedding module; AnchorScorer takes ScalarSimilarity(f64) newtype, never a vector. Structurally impossible — no dedicated trybuild.",
+      "implementation_ref": "crates/osp-core/src/anchoring/types.rs ScalarSimilarity newtype"
+    },
+    {
+      "invariant": "INV-C2",
+      "evidence_id": "E-C2",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": ["tests/compile_fail/c2_family_incompatible.rs"],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-C3",
+      "evidence_id": "E-C3",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/c3_operator_acceptance_construct.rs",
+        "tests/compile_fail/c3_graph_private.rs",
+        "tests/compile_fail/c3_conceptgraph_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-C4",
+      "evidence_id": "E-C4",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": ["tests/compile_fail/c4_supersede_authority_construct.rs"],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-C5",
+      "evidence_id": "E-C5",
+      "evidence_kind": "type_shape",
+      "enforcement": "apply_plan is the only untrusted write path and unconditionally writes DecisionStatus::Candidate. Structurally enforced for the untrusted path; no dedicated trybuild.",
+      "implementation_ref": "crates/osp-core/src/anchoring/types.rs Candidate default newtypes"
+    },
+    {
+      "invariant": "INV-C6",
+      "evidence_id": "E-C6",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/c6_observed_evidence_literal.rs",
+        "tests/compile_fail/c6_observed_evidence_deserialize.rs",
+        "tests/compile_fail/c6_intent_cannot_form_observed_code_evidence.rs",
+        "tests/compile_fail/c6_observed_physical_metrics_literal.rs",
+        "tests/compile_fail/c6_observed_physical_metrics_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail",
+      "note": "Manuscript Table 1 C6 row currently lists stale name c6_intent_carries_physical_vector (PR C rename) and omits the two c6_observed_physical_metrics_* PR-C fixtures; A4 corrects."
+    },
+    {
+      "invariant": "INV-C7",
+      "evidence_id": "E-C7",
+      "evidence_kind": "type_shape",
+      "enforcement": "NonEmptyExplanation newtype whose fallible new() rejects empty/whitespace; runtime gate covers high-stake edge subset. Structurally impossible at construction; no dedicated trybuild.",
+      "implementation_ref": "crates/osp-core/src/anchoring/types.rs NonEmptyExplanation"
+    },
+    {
+      "invariant": "INV-C8",
+      "evidence_id": "E-C8",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/c8_anchorplan_literal.rs",
+        "tests/compile_fail/c8_anchorplan_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-C12",
+      "evidence_id": "E-C12",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/c12_presented_basis_literal.rs",
+        "tests/compile_fail/c12_presented_basis_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-C13",
+      "evidence_id": "E-C13",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/c13_decision_application_literal.rs",
+        "tests/compile_fail/c13_decision_application_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-C14",
+      "evidence_id": "E-C14",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::review::tests::superseded_accepted_excluded_from_mainline_query_in_history",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::store::tests::mainline_query_empty_when_all_candidate",
+        "anchoring::store::tests::mainline_history_contains_exactly_accepted_provenance_statuses",
+        "anchoring::store::tests::mainline_query_is_subset_of_mainline_history",
+        "anchoring::store::tests::mainline_history_is_deterministically_ordered",
+        "anchoring::store::tests::mainline_query_is_deterministically_ordered"
+      ],
+      "note": "mainline_query (current projection) ∩ {SupersededAccepted} = ∅; mainline_history preserves acceptance provenance. Projection-matrix + exact-set store test."
+    },
+    {
+      "invariant": "INV-C15",
+      "evidence_id": "E-C15",
+      "evidence_kind": "rust_test_matrix",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "primary_test": "anchoring::review::tests::second_committed_successor_rejected_already_superseded",
+      "expected_selected": 1,
+      "error_path_tests": [
+        "anchoring::review::tests::second_committed_successor_rejected_already_superseded",
+        "anchoring::review::tests::stale_superseded_basis_rejected",
+        "anchoring::review::tests::stale_successor_basis_rejected",
+        "anchoring::review::tests::non_accepted_superseded_rejected",
+        "anchoring::review::tests::non_accepted_successor_rejected",
+        "anchoring::review::tests::self_supersede_rejected",
+        "anchoring::review::tests::missing_superseded_node_rejected",
+        "anchoring::review::tests::missing_successor_node_rejected",
+        "anchoring::review::tests::supersede_basis_endpoint_mismatch_rejected",
+        "anchoring::review::tests::supersede_cycle_rejected",
+        "anchoring::review::tests::incompatible_endpoints_rejected"
+      ],
+      "atomicity_helper": "anchoring::review::tests::assert_store_unchanged_by_supersede_error",
+      "note": "apply_supersede 12-step error-precedence; 11 StoreError variants (NodeNotFound ×2). Atomicity asserted on every error path. Step 11 AuditSequenceExhausted characterized at store.rs layer (checked_add before mutation); not a standalone review.rs test."
+    },
+    {
+      "invariant": "INV-C16-opacity",
+      "evidence_id": "E-C16-OPACITY",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/c16_resolution_application_literal.rs",
+        "tests/compile_fail/c16_resolution_application_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail",
+      "note": "Construction-opacity boundary only (private fields, no Deserialize). INV-C16 atomicity and triangulation semantics are runtime-asserted, not compile-fail."
+    },
+    {
+      "invariant": "INV-C16-transition",
+      "evidence_id": "E-C16-TRANSITION",
+      "evidence_kind": "rust_test_matrix",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "primary_test": "anchoring::review::tests::already_resolved_candidate_rejects",
+      "expected_selected": 1,
+      "error_path_tests": [
+        "anchoring::review::tests::accepted_candidate_resolves_to_newly_created_entity",
+        "anchoring::review::tests::second_candidate_same_key_resolves_to_existing_entity",
+        "anchoring::review::tests::no_duplicate_entity_created_on_reuse",
+        "anchoring::review::tests::already_resolved_candidate_rejects",
+        "anchoring::review::tests::every_failure_leaves_store_unchanged",
+        "anchoring::review::tests::reuse_target_mutated_after_basis_rejects_and_leaves_store_unchanged",
+        "anchoring::review::tests::trusted_binding_batch_rejects_noncanonical_entity",
+        "anchoring::review::tests::snapshot_restore_validates_resolution_triangulation",
+        "anchoring::review::tests::duplicate_resolution_record_single_edge_rejects",
+        "anchoring::review::tests::non_accepted_resolves_to_edge_rejected",
+        "anchoring::review::tests::resolves_to_edge_missing_explanation_rejected",
+        "anchoring::review::tests::snapshot_reused_then_created_same_entity_rejected",
+        "anchoring::review::tests::snapshot_duplicate_binding_same_key_rejected",
+        "anchoring::review::tests::snapshot_duplicate_binding_conflicting_key_rejected",
+        "anchoring::review::tests::inactive_entity_target_rejects_at_compile",
+        "anchoring::review::tests::successful_resolution_must_be_restorable",
+        "anchoring::review::tests::seed_bindings_rejects_wrong_kind",
+        "anchoring::review::tests::seed_bindings_rejects_duplicate_binding",
+        "anchoring::review::tests::trusted_binding_batch_rejects_duplicate_node",
+        "anchoring::review::tests::trusted_binding_batch_error_leaves_bindings_unchanged"
+      ],
+      "note": "apply_resolution error-precedence and atomicity tests spanning the evaluated fourteen-step transition + R6 outgoing / N:1 convergence / R7 live entity cardinality + three-way edge↔record↔binding snapshot triangulation. Primary test already_resolved_candidate_rejects covers R6 step 8 + store-unchanged atomicity."
+    },
+    {
+      "invariant": "INV-P1",
+      "evidence_id": "E-P1",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/cP1_predicate_stub_literal.rs",
+        "tests/compile_fail/cP1_predicate_stub_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-P2",
+      "evidence_id": "E-P2",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/cP2_executable_predicate_set_literal.rs",
+        "tests/compile_fail/cP2_executable_predicate_set_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-P3",
+      "evidence_id": "E-P3",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/cP3_cross_family_hint_literal.rs",
+        "tests/compile_fail/cP3_cross_family_hint_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail"
+    },
+    {
+      "invariant": "INV-T2",
+      "evidence_id": "E-T2",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/t2_operator_capability_issue_external.rs",
+        "tests/compile_fail/t2_operator_capability_literal.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail",
+      "note": "Paper 2 inherited task-genesis boundary; counted in the 2 non-Paper-3-specific compile-fail fixtures (30 cumulative = 28 Paper-3-specific + 2 INV-T2)."
+    },
+    {
+      "invariant": "supersede-opacity",
+      "evidence_id": "E-SUPERSEDE-OPACITY",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/supersede_application_opacity_literal.rs",
+        "tests/compile_fail/supersede_application_opacity_deserialize.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail",
+      "note": "Construction-opacity boundary parallel to INV-C13; Faz 8b supersede vocabulary."
+    },
+    {
+      "invariant": "EI1-a",
+      "evidence_id": "E-EI-01A",
+      "evidence_kind": "trybuild_fixture",
+      "fixtures": [
+        "tests/compile_fail/cF1_resolved_code_identity_literal.rs",
+        "tests/compile_fail/cF1_code_identity_key_literal.rs"
+      ],
+      "orchestrator": "tests/anchoring_typelevel.rs",
+      "orchestrator_test": "type_level_invariants_compile_fail",
+      "clause": "Resolved evidence value carries exactly one identity key; private fields + fixed struct shape make literal construction impossible."
+    },
+    {
+      "invariant": "EI1-b",
+      "evidence_id": "E-EI-01B",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::real_store_resolves_bound_identity_key",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::code_evidence::resolution_identity_integration_tests::real_store_unbound_node_returns_unbound_error",
+        "anchoring::code_evidence::resolution_identity_integration_tests::real_store_missing_node_returns_node_not_found"
+      ],
+      "clause": "Bound node resolves to a single binding in the store."
+    },
+    {
+      "invariant": "EI2",
+      "evidence_id": "E-EI-02",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::n1_resolution_creates_then_reuses_same_entity_and_evidence",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::code_evidence::resolution_identity_integration_tests::n1_resolution_two_candidates_same_key_share_evidence"
+      ],
+      "clause": "Candidate and entity share the same evidence (runtime triangulation)."
+    },
+    {
+      "invariant": "EI3-a",
+      "evidence_id": "E-EI-03A",
+      "evidence_kind": "architecture_guard",
+      "package": "osp-core",
+      "target_kind": "integration",
+      "target_name": "resolution_api_evidence_isolation_guard",
+      "test_name": "resolution_api_has_no_evidence_capability",
+      "expected_selected": 1,
+      "enforcement_class": "ARCH-GUARD",
+      "clause": "The evaluated public resolution API signatures do not accept or expose evidence-source or evidence-mutation capability types.",
+      "forbidden_tokens": [
+        "CodeEvidenceProvider",
+        "ResolvedCodeEvidenceProvider",
+        "CodeEvidenceSource",
+        "ObservedCodeEvidence",
+        "InMemoryCodeEvidenceSource"
+      ],
+      "implementation_ref": "crates/osp-core/tests/resolution_api_evidence_isolation_guard.rs"
+    },
+    {
+      "invariant": "EI3-b",
+      "evidence_id": "E-EI-03B",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::n1_resolution_creates_then_reuses_same_entity_and_evidence",
+      "expected_selected": 1,
+      "clause": "Resolution does not change the resolution source cardinality (regression witness)."
+    },
+    {
+      "invariant": "EI4-a",
+      "evidence_id": "E-EI-04A",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::review::tests::seed_bindings_rejects_duplicate_binding",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::review::tests::snapshot_duplicate_binding_conflicting_key_rejected"
+      ],
+      "clause": "One node → conflicting keys reject (constructor/store boundary)."
+    },
+    {
+      "invariant": "EI4-b",
+      "evidence_id": "E-EI-04B",
+      "evidence_kind": "gap",
+      "status": "gap",
+      "clause": "Materialization: one identity key → multiple live CodeEntity reject (DuplicateLiveCodeEntityIdentity).",
+      "finding": "DuplicateLiveCodeEntityIdentity variant is defined at store.rs:144 and produced via R7 check in seed_code_identity_bindings_trusted (store.rs:1537) and apply_resolution reuse path (store.rs:1774-1788), but NO test in the codebase asserts this variant via matches! or similar. HANDOFF attributes this to PR E (entity-resolution), not PR F.",
+      "resolution_options": [
+        "Add a regression test asserting DuplicateLiveCodeEntityIdentity in A-stage or a focused follow-up",
+        "Narrow manuscript Table EI row EI4-b to 'seed-time R7 enforcement (production site); runtime characterization test future'"
+      ],
+      "manuscript_decision_pending": true
+    },
+    {
+      "invariant": "EI4-c",
+      "evidence_id": "E-EI-04C",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::n1_resolution_creates_then_reuses_same_entity_and_evidence",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::review::tests::second_candidate_same_key_resolves_to_existing_entity",
+        "anchoring::review::tests::no_duplicate_entity_created_on_reuse"
+      ],
+      "clause": "Resolution: multiple candidates same key converge (N:1 reuse positive)."
+    },
+    {
+      "invariant": "EI5-a",
+      "evidence_id": "E-EI-05A",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::real_store_unbound_node_returns_unbound_error",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::code_evidence::resolution_identity_integration_tests::real_store_missing_node_returns_node_not_found"
+      ],
+      "clause": "Resolver typed NodeNotFound/Unbound separation (CodeIdentityLookupError)."
+    },
+    {
+      "invariant": "EI5-b",
+      "evidence_id": "E-EI-05B",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::tests::adapter_unbound_maps_to_none",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::code_evidence::tests::adapter_node_not_found_maps_to_identity_lookup_error",
+        "anchoring::code_evidence::tests::identity_lookup_error_converts_via_from"
+      ],
+      "clause": "Adapter explicit semantic mapping (Unbound→Ok(None), NodeNotFound→IdentityLookup) + unbound_maps_to_none footgun guard pin."
+    },
+    {
+      "invariant": "EI6",
+      "evidence_id": "E-EI-06",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::snapshot_restore_preserves_identity_lookup_and_evidence",
+      "expected_selected": 1,
+      "clause": "Same snapshot → consumer-bazlı eşitlikler (candidate/entity evidence equality + binding key equality + evidence_strength equality across snapshot export/restore)."
+    },
+    {
+      "invariant": "EI7",
+      "evidence_id": "E-EI-07",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::n1_resolution_two_candidates_same_key_share_evidence",
+      "expected_selected": 1,
+      "clause": "Candidate/entity strength equality across shared key ownership."
+    },
+    {
+      "invariant": "EI8",
+      "evidence_id": "E-EI-08",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::code_evidence::resolution_identity_integration_tests::graph_absence_does_not_mutate_key_owned_evidence",
+      "expected_selected": 1,
+      "clause": "Graph absence/unbound → key-owned evidence mutasyonu YOK (V1: graph absence)."
+    },
+    {
+      "invariant": "RP1",
+      "evidence_id": "E-RP-01",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::resolved_implementation::lineage_fold_tests::project_happy_path_single_lineage",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::resolved_implementation::lineage_fold_tests::project_n1_two_candidates_same_entity_one_relation_two_lineages"
+      ],
+      "clause": "Sound and complete correspondence over admitted live resolved lineages (canonical bijection over the admitted domain).",
+      "deliberate_exclusions": "Unresolved lineage; non-live lineage; duplicate expected triple occurrences (dedup)."
+    },
+    {
+      "invariant": "RP2",
+      "evidence_id": "E-RP-02",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::resolved_implementation::tests::lineage_try_new_happy_path",
+      "expected_selected": 1,
+      "supporting_tests": [
+        "anchoring::resolved_implementation::tests::lineage_try_new_rejects_wrong_expected_kind",
+        "anchoring::resolved_implementation::tests::lineage_try_new_rejects_wrong_resolution_kind",
+        "anchoring::resolved_implementation::tests::lineage_try_new_rejects_expected_target_mismatch",
+        "anchoring::resolved_implementation::tests::lineage_try_new_rejects_resolution_source_mismatch"
+      ],
+      "clause": "Nested endpoint consistency (fallible ctor: kind + candidate endpoint)."
+    },
+    {
+      "invariant": "RP3",
+      "evidence_id": "E-RP-03",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::resolved_implementation::lineage_fold_tests::rp3_no_explanation_in_serialized_output",
+      "expected_selected": 1,
+      "clause": "Derived output explanation taşımaz (serde assertion — no explanation field in serialized projection)."
+    },
+    {
+      "invariant": "RP4-a",
+      "evidence_id": "E-RP-04A",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::resolved_implementation::store_integration_tests::store_query_rpsnapshot_unchanged",
+      "expected_selected": 1,
+      "clause": "Read-only fold (state mutation yok). Structural enforcement via &self trait signature; RP4-b runtime snapshot equality in the same test body.",
+      "note": "RP4-a (TYPE/API structural &self signature) and RP4-b (RUNTIME snapshot equality) are verified by the same test. There is no separate RP4-a runtime test — the structural guarantee is the AnchorStore trait &self signature."
+    },
+    {
+      "invariant": "RP4-b",
+      "evidence_id": "E-RP-04B",
+      "evidence_kind": "rust_test",
+      "package": "osp-core",
+      "target_kind": "lib",
+      "target_name": null,
+      "test_name": "anchoring::resolved_implementation::store_integration_tests::store_query_rpsnapshot_unchanged",
+      "expected_selected": 1,
+      "clause": "Snapshot unchanged after projection (export_snapshot before == export_snapshot after)."
+    }
+  ],
+  "gaps": [
+    {
+      "invariant": "EI4-b",
+      "severity": "manuscript-blocking",
+      "finding": "DuplicateLiveCodeEntityIdentity is produced by production code but not asserted by any test.",
+      "resolution_required_before": "B-stage Table EI finalization",
+      "options": [
+        "Add regression test asserting DuplicateLiveCodeEntityIdentity (preferred — closes the gap, keeps manuscript claim)",
+        "Narrow manuscript Table EI row EI4-b to 'seed-time R7 enforcement (production site); runtime characterization test future'"
+      ]
+    }
+  ],
+  "summary": {
+    "total_evidence_entries": 34,
+    "trybuild_fixtures": 30,
+    "rust_tests_canonical": 15,
+    "type_shape_enforced": 3,
+    "architecture_guards": 1,
+    "gaps": 1,
+    "paper3_specific_compile_fail": 28,
+    "paper2_inherited_inv_t2_compile_fail": 2,
+    "cumulative_workspace_compile_fail": 30
+  }
+}
