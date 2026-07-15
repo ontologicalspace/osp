@@ -42,15 +42,15 @@
 | ↳ runtime atomic transition invariant (INV-C16, PR E entity-resolution transition) | 1 |
 | **Toplam type-enforced** (genesis + lowering) | **13** |
 | **Toplam runtime-asserted** | **3** (C14 projection + C15 supersession transition + C16 entity-resolution transition) |
-| **PR F evidence identity invariantları (EI1-EI8)** | **8 clause-bazlı** (EI1-a TYPE, EI1-b RUNTIME, EI2 RUNTIME, EI3-a TYPE/API, EI3-b RUNTIME, EI4-a/b/c RUNTIME, EI5-a/b TYPE, EI6 RUNTIME, EI7 RUNTIME, EI8-V1 RUNTIME) — ayrı invariant ailesi; INV-Cx sayımına eklenmez (evidence identity layer, concept anchoring layer ile paralel) |
+| **PR F evidence identity invariantları (EI1-EI8)** | **8 clause-bazlı** (EI1-a TYPE, EI1-b RUNTIME, EI2 RUNTIME, EI3-a **ARCH-GUARD** (API-shape policy + static architecture guard `resolution_api_evidence_isolation_guard.rs`, AST-tabanlı syn tarama + red-kanıt testi), EI3-b RUNTIME, EI4-a/b/c RUNTIME (EI4-b defense-in-depth regression test), EI5-a/b TYPE, EI6 RUNTIME, EI7 RUNTIME, EI8-V1 RUNTIME) — ayrı invariant ailesi; INV-Cx sayımına eklenmez (evidence identity layer, concept anchoring layer ile paralel) |
 | **PR G projection invariantları (RP1-RP4)** | **5 clause-bazlı** (RP1 soundness RUNTIME, RP2 TYPE/API+RUNTIME/TRUST, RP3 TYPE+serde, RP4-a TYPE/API structural, RP4-b RUNTIME snapshot equality) — ayrı invariant ailesi; INV-Cx/EI sayımına eklenmez (lineage projection layer) |
-| Compile-fail test count | 30 (PR F: cF1_resolved_code_identity_literal + cF1_code_identity_key_literal eklendi) |
+| Compile-fail test count | 30 cumulative workspace (28 Paper-3-specific + 2 INV-T2 Paper 2 inherited; PR F: cF1_resolved_code_identity_literal + cF1_code_identity_key_literal eklendi) |
 | `DecisionStatus` variants | 5 (Candidate, Accepted, Deprecated, Rejected, SupersededAccepted) |
 | INV-C15 production invocation | `SupersedeSession` (PR #50) — crate-private authority issuer + parametresiz `supersede()` + token içeride mint |
 | **PR F evidence identity layer** | `CodeIdentityBindingLookup` (dar public capability) + `CodeEvidenceSource` (key-facing) + `ResolvedCodeEvidenceProvider` adapter + `InMemoryCodeEvidenceSource` (fail-closed builders) + `ResolvedCodeIdentity` (pub ctor) — anti-corruption boundary: graph dünyası ↔ identity dünyası ayrı; tek truth source `HashMap<CodeIdentityKey, ObservedCodeEvidence>` |
 | **Restore-validated persistence (CLI)** | `AnchorStoreSnapshot::restore_snapshot` — graph schema + node uniqueness + edge endpoints + record→node/status forward integrity + dense audit_seq (union unique + {1..N} + ==N) + INV-C15 üç yönlü triangulation. paper3 "known gap" cümlesi evaluated path için kapatıldı. |
 | **INV-C11 surface classification (CLI)** | MCP = agent-facing (review/supersede authority yok, static regression test); `osp review` CLI = operator-facing (session expose eder — INV-T2 attribution, auth deployment boundary). |
-| **Operator review testleri** | osp-core lib 653 (PR G: 604→653 +49: ConceptPacketId Ord/round-trip + DerivedEdgeReference/Lineage/Expectation nested public ctor + ResolvedImplementationBasis + project_resolved_implementations pure projector fail-closed + RP1-RP4 lineage fold + review tur 1: ResolutionRecord triangulation + ExpectedImplementation fail-closed + error dalı fixture + store integration RP4-b); osp-cli 155 unit (PR G untouched) + 21 review_flow + 20 supersede_flow + 12 preview_flow + 13 analyze_bridge_flow + 9 resolution_flow + 2 architecture_guards integration; osp-mcp +2 INV-C11 |
+| **Operator review testleri** | osp-core lib 654 (PR G 604→653 +49; v1.4 Aşama A +1 EI4-b duplicate-live-identity regression); osp-cli 155 unit (PR G untouched) + 21 review_flow + 20 supersede_flow + 12 preview_flow + 13 analyze_bridge_flow + 9 resolution_flow + 2 architecture_guards integration + EI3-a architecture guard (osp-core integration); osp-mcp +2 INV-C11 |
 
 > **Taksonomi notu (Review PR #48/#49 + PR F):** P1-P3 lowering invariant'ları da type-enforced'dur
 > (trybuild katmanında, strata tablosu (1) ile tutarlı). "13 type-enforced = 10 genesis + 3 lowering";
@@ -72,11 +72,16 @@
 
 ## Evidence JSON dosyaları + sha256
 
+> Artifact hash authority: `evidence-pack/MANIFEST.json` (canonical). Aşağıdaki sha256 değerleri
+> MANIFEST'ten gelir; `scripts/verify_invariant_evidence.py` bunları git blob üzerinden doğrular
+> (working-tree CRLF/encoding farkı MANIFEST'i etkilemez).
+
 | Dosya | sha256 |
 |---|---|
 | `e2e-binding-chain-replay.json` | `be733f384a2d443d81243042b6f58362bfc6e847296d74c10e01a3336ebd62f3` |
 | `e2e-rejected-paths-replay.json` | `66a9a892e5d67e4a0d5d1fbbd80a99c901616a6396532b0bfc369879a08d334e` |
 | `held-out-adversarial-fixtures.json` | `12babf65966e89d99d4d98460369695a3a54a4e52f2deceacbbb40d43fad7a41` |
+| `conformance-results.json` | `ffadf793ec562af069701411362ec7904518ca266016433b376d2b252980fb63` |
 
 ## Üretim komutları
 

@@ -1,64 +1,128 @@
 {
-  "schema_version": "run-metadata.v1",
+  "schema_version": "run-metadata.v2",
   "title": "Paper 3 — Run Metadata (Evidence Freeze)",
-  "note": "Tek ev of volatile kanıt bilgileri. Evidence JSON'lar saf deterministik builder çıktısıdır — volatile alan içermez (snapshot drift imkânsız).",
-  "frozen_evidence_commit": "481690d (Aşama 1 freeze, PR #37) — Faz 8a evidence bu commit üstüne",
-  "frozen_evidence_commit_short": "481690d (base); PR #40 head",
-  "branch": "feat/paper3-faz8a-operator-review",
-  "frozen_date": "2026-07-05",
-  "rust_toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
-  "osp_core_test_count": 494,
-  "evidence_strata": [
-    {
-      "stratum": 1,
-      "name": "type-level trybuild",
-      "purpose": "INV-C1..C8, INV-C12, INV-C13, INV-P1..P3 compile-time enforcement",
-      "evidence": "13 Paper 3'e özgü invariant (22 cumulative compile-fail test workspace geneli)",
-      "test": "tests/anchoring_typelevel.rs"
+  "note": "İki zaman katmanını ayırır: (1) frozen_evidence_snapshot — evidence üretildiği an, immutable provenance; (2) current_protocol — güncel protokol envanteri, protokolle birlikte evrilir. Artifact hash authority: evidence-pack/MANIFEST.json (canonical). Çift-authority önlenir: Markdown sibling (run-metadata.md) bu dosyanın human-readable projection'ıdır; validator (scripts/verify_invariant_evidence.py) kritik alanlar cross-check eder.",
+  "frozen_evidence_snapshot": {
+    "generation_commit": "ef022a9",
+    "baseline_commit": "481690d",
+    "branch": "feat/paper3-faz8a-operator-review",
+    "date": "2026-07-05",
+    "rust_toolchain": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "osp_core_tests_at_generation": 494,
+    "core_invariants_at_generation": 13,
+    "cumulative_compile_fail_at_generation": 22,
+    "golden_fixtures": 13,
+    "held_out_fixtures": 5,
+    "rejected_paths": 6,
+    "e2e_step6": "REAL promotion via OperatorReviewSession (Faz 8a)",
+    "strata": [
+      {
+        "stratum": 1,
+        "name": "type-level trybuild",
+        "purpose": "INV-C1..C8, INV-C12, INV-C13, INV-P1..P3 compile-time enforcement",
+        "evidence": "13 Paper 3'e özgü invariant (22 cumulative compile-fail test workspace geneli — üretim anı)",
+        "test": "tests/anchoring_typelevel.rs"
+      },
+      {
+        "stratum": 2,
+        "name": "golden fixture conformance",
+        "purpose": "13 fixture pipeline davranışı",
+        "evidence": "anchoring_mvp.rs + anchoring_fixtures.rs",
+        "test": "cargo test -p osp-core --test anchoring_mvp"
+      },
+      {
+        "stratum": 3,
+        "name": "held-out adversarial",
+        "purpose": "5 cümle totoloji-olmayan RQ1",
+        "evidence": "held-out-adversarial-fixtures.json",
+        "test": "paper3_heldout.rs"
+      },
+      {
+        "stratum": 4,
+        "name": "e2e binding chain replay",
+        "purpose": "uçtan uca zincir (lowering→task segment); Step 6 REAL promotion via OperatorReviewSession (Faz 8a)",
+        "evidence": "e2e-binding-chain-replay.json",
+        "test": "paper3_evidence.rs"
+      },
+      {
+        "stratum": 5,
+        "name": "e2e rejected paths replay",
+        "purpose": "6 reddedilen kapı (AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted, NotFound/StaleBasis, NotPromotableFrom)",
+        "evidence": "e2e-rejected-paths-replay.json",
+        "test": "paper3_evidence.rs + review.rs unit (StaleBasis, NotPromotableFrom)"
+      }
+    ],
+    "evidence_json_sha256_ref": "evidence-pack/MANIFEST.json (canonical hash authority; working-tree CRLF/encoding farkı MANIFEST'i etkilemez — validator git blob üzerinden doğrular)"
+  },
+  "current_protocol": {
+    "core_binding_invariants": 16,
+    "core_binding_invariants_breakdown": {
+      "type_enforced": 13,
+      "type_enforced_breakdown": "10 genesis (INV-C1..C8, C12, C13) + 3 lowering/translation (INV-P1..P3)",
+      "runtime_asserted": 3,
+      "runtime_asserted_breakdown": "INV-C14 (acceptance-provenance projection) + INV-C15 (atomic supersession transition) + INV-C16 (atomic and triangulated entity-resolution integrity)"
     },
-    {
-      "stratum": 2,
-      "name": "golden fixture conformance",
-      "purpose": "13 fixture pipeline davranışı",
-      "evidence": "anchoring_mvp.rs + anchoring_fixtures.rs",
-      "test": "cargo test -p osp-core --test anchoring_mvp"
+    "parallel_invariant_families": {
+      "evidence_identity": {
+        "invariants": 8,
+        "clauses": 13,
+        "scope": "observed evidence ↔ code identity attachment (anti-corruption boundary); §3.5",
+        "note": "INV-Cx sayımına eklenmez — concept anchoring layer ile paralel ayrı katman"
+      },
+      "derived_projection": {
+        "invariants": 4,
+        "clauses": 5,
+        "scope": "packet-level derived read-only projection (read-only fold); §3.6",
+        "note": "INV-Cx sayımına eklenmez — derived read-model layer; committed graph fact üretmez"
+      }
     },
-    {
-      "stratum": 3,
-      "name": "held-out adversarial",
-      "purpose": "5 cümle totoloji-olmayan RQ1",
-      "evidence": "held-out-adversarial-fixtures.json",
-      "test": "paper3_heldout.rs"
+    "compile_fail": {
+      "cumulative_workspace": 30,
+      "paper3_specific": 28,
+      "paper2_inherited_inv_t2": 2,
+      "note": "30 cumulative = 28 Paper-3-specific + 2 INV-T2 (Paper 2 task-genesis boundary)"
     },
-    {
-      "stratum": 4,
-      "name": "e2e binding chain replay",
-      "purpose": "uçtan uca zincir (lowering→task segment); Step 6 REAL promotion via OperatorReviewSession (Faz 8a)",
-      "evidence": "e2e-binding-chain-replay.json",
-      "test": "paper3_evidence.rs"
-    },
-    {
-      "stratum": 5,
-      "name": "e2e rejected paths replay",
-      "purpose": "6 reddedilen kapı (AxisMismatch, AxisNotInCandidates, TemplateNotSuggested, NotAccepted, NotFound/StaleBasis, NotPromotableFrom)",
-      "evidence": "e2e-rejected-paths-replay.json",
-      "test": "paper3_evidence.rs + review.rs unit (StaleBasis, NotPromotableFrom)"
-    }
-  ],
-  "evidence_json_sha256": {
-    "e2e-binding-chain-replay.json": "be733f384a2d443d81243042b6f58362bfc6e847296d74c10e01a3336ebd62f3",
-    "e2e-rejected-paths-replay.json": "66a9a892e5d67e4a0d5d1fbbd80a99c901616a6396532b0bfc369879a08d334e",
-    "held-out-adversarial-fixtures.json": "12babf65966e89d99d4d98460369695a3a54a4e52f2deceacbbb40d43fad7a41"
+    "osp_core_tests": 654,
+    "decision_status_variants": 5,
+    "verification_surfaces": [
+      {
+        "name": "supersession projection and transition verification",
+        "kind": "runtime_test_matrix",
+        "frozen_artifact": false,
+        "invariants": ["INV-C14", "INV-C15"],
+        "note": "INV-C14 = projection (acceptance-provenance); INV-C15 = transition (atomic supersession)"
+      },
+      {
+        "name": "entity-resolution transition matrix",
+        "kind": "runtime_test_matrix",
+        "frozen_artifact": false,
+        "invariants": ["INV-C16"],
+        "note": "error-precedence and atomicity tests spanning the evaluated fourteen-step apply_resolution transition + R6/N:1/R7 cardinality + snapshot triangulation"
+      },
+      {
+        "name": "evidence-identity adapter/source coverage",
+        "kind": "runtime_test_matrix",
+        "frozen_artifact": false,
+        "invariants": ["EI1", "EI2", "EI3", "EI4", "EI5", "EI6", "EI7", "EI8"],
+        "note": "adapter fail-closed semantic mapping + source fail-closed builders + N:1 resolution coverage + unbound_maps_to_none footgun guard + EI3-a resolution API isolation architecture guard"
+      },
+      {
+        "name": "derived projection fold + snapshot equality",
+        "kind": "runtime_test_matrix",
+        "frozen_artifact": false,
+        "invariants": ["RP1", "RP2", "RP3", "RP4-a", "RP4-b"],
+        "note": "pure-projector fold + endpoint consistency fail-closed construction + RP4-b snapshot-unchanged export equality"
+      }
+    ]
   },
   "snapshot_discipline": {
     "drift_detection": "cargo test -p osp-core --test paper3_evidence (--test paper3_heldout)",
     "regeneration": "PAPER3_FREEZE=1 cargo test -p osp-core --test {target} -- --ignored --nocapture",
-    "principle": "Test altına alınmayan invariant ihlal edilir."
+    "principle": "Test altına alınmayan invariant ihlal edilir.",
+    "hash_verification": "scripts/verify_invariant_evidence.py — git cat-file -p HEAD:<path> üzerinden canonical blob hash doğrular (working-tree CRLF/encoding farkı önlemi)"
   },
-  "golden_fixtures": 13,
-  "held_out_fixtures": 5,
-  "paper3_specific_trybuild": 13,
-  "cumulative_trybuild_context": 26,
-  "rejected_paths": 6,
-  "e2e_step6": "REAL promotion via OperatorReviewSession (Faz 8a)"
+  "migration_notes": {
+    "v1_to_v2": "v1 iki zaman katmanını karıştırıyordu (frozen test count 494 + stale current alanlar 13/26 aynı şemada). v2 frozen_evidence_snapshot (immutable) + current_protocol (güncel) ayrımı. Kaldırılan v1 alanlar: paper3_specific_trybuild (semantik hatası — INV count ile compile-fail count karıştı), cumulative_trybuild_context (v2 compile_fail altında). Eski v1 yapısı git geçmişinde.",
+    "v1_deprecated_fields": "frozen_evidence_commit, frozen_evidence_commit_short, osp_core_test_count, evidence_strata, evidence_json_sha256, golden_fixtures, held_out_fixtures, paper3_specific_trybuild, cumulative_trybuild_context, rejected_paths, e2e_step6 — hepsi frozen_evidence_snapshot veya current_protocol altına taşındı/yeniden yapılandırıldı."
+  }
 }
