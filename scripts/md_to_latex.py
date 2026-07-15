@@ -516,24 +516,20 @@ def process_table(lines, start_idx):
     use_full_width = n_cols >= 4 or (n_cols >= 3 and max_cell_len > 30)
     width_unit = r'\textwidth' if use_full_width else r'\columnwidth'
 
-    # 6+ kolonlu tablolar için Manuel dengeli ağırlıklar (otomatik hesaplama yerine)
-    # Otomatik hesaplama bazen görsel olarak dengesiz sonuç veriyor
-    # (örn: uzun Sentence kolonu diğerlerini daraltıyor)
-    # 6 kolon: Appendix A için optimal denge
-    # Toplam = 0.95 (ufak margin)
-    # Sentence (0.24) — uzun cümleler "Coupling must not exceed module threshold."
-    # Canonical (0.16) — ModüllerArasıBağımlılık (20 char)
-    # Normalized (0.15) — modullerarasibagimlilik (23 char)
-    # Rule signal (0.10) — "true (must not)"
-    # Ambiguity (0.15) — MultipleCandidates (18 char)
-    # Axes (0.15) — [Coupling] (WRONG — physical pipe) (34 char, çok satır)
-    if n_cols == 6:
-        weights = [0.24, 0.16, 0.15, 0.10, 0.15, 0.15]
-    else:
-        total_len = sum(col_max_lens) or 1
-        weights = [max(0.08, l / total_len) for l in col_max_lens]
-        w_sum = sum(weights)
-        weights = [w * 0.95 / w_sum for w in weights]
+    # Kolon agirliklari: col_max_lens'e dayali ama sqrt-yumusatmali.
+    # Onceki hardcoded 6-kolon degerleri ([0.24,0.16,...]) Appendix A icin iyi ama
+    # Table 2 (Gate: ilk kolon 1-3 char, Takes kolonu 83 char) icin bozuktu — Gate'e
+    # 0.24 vermek israf, Takes'e 0.15 vermek yetmezdi (tasma). sqrt(len) yumusatmasi:
+    # uzun kolon baskin olmasin (linear yerine karekok), ama kisa kolonlar da
+    # gereksiz genislik almasin. Her kolona min taban (floor) + sqrt(len) orantisal.
+    import math
+    MIN_WEIGHT = 0.05  # en kisa kolon bile sayfa genisliginin %5'inden az almasin
+    raw = [math.sqrt(max(l, 1)) for l in col_max_lens]
+    raw_sum = sum(raw) or 1
+    weights = [max(MIN_WEIGHT, r / raw_sum) for r in raw]
+    # 0.95'e normalize (ufak margin)
+    w_sum = sum(weights)
+    weights = [w * 0.95 / w_sum for w in weights]
 
     if n_cols <= 2:
         col_spec = ' '.join([f'p{{0.45{width_unit}}}'] * n_cols)

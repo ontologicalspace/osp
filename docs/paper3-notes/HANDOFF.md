@@ -684,12 +684,15 @@ PR C + PR D + PR E tamamlandı (main `f68b2c6`). Bu bölüm tüm pending işleri
   tuzağı fix), structural row-key (Table EI 8 + RP 5) + golden column-spec pattern.
 - **Overfull baseline karşılaştırması (v1.3 → v1.4):**
   - Overfull baseline: 60 warnings (v1.3)
-  - v1.4 count: 136 warnings (2 yeni section + Table EI/RP eklendi; beklenen artış)
-  - >50pt: v1.3 = 6, v1.4 = 12; tepe değer aynı (75.91pt her ikisinde de)
+  - v1.4 count: 112 warnings (2 yeni section + Table EI/RP eklendi; beklenen artış)
+  - >50pt: v1.3 = 6, v1.4 = 8; tepe değer yakın (v1.3 75.91pt, v1.4 76.82pt)
   - Missing character: 0 (her ikisinde); Undefined reference: 0 (her ikisinde)
   - Disposition: görsel + programatik margin kontrolü yapıldı; görünür kesilme/margin-aşımı/
     kolon-çakışması yok — ~2pt micro-typography taşmaları v1.3 baseline ile aynı nitelikte
-    (`\hfuzz=2pt` setting). Non-fatal.
+    (`\hfuzz=2pt` setting). Non-fatal. (Not: Table 2/Appendix A kolon genişlikleri sqrt-yumuşatılmış
+    `col_max_lens` formülüyle düzeltildi — eski hardcoded 6-kolon ağırlığı Table 2'de Gate kolonuna
+    0.24 verip Takes kolonunu 0.15'te sıkıştırıyordu; yeni formül `[0.054, 0.158, 0.244, ...]` ile
+    v1.3 golden `[0.045, 0.185, 0.180, ...]` değerine yakın, dengeli dağılım.)
 - **Pending (D5/D7/D8):** Zenodo DOI reserve → manuscript DOI güncelle → arXiv upload → publish → receipt commit.
 
 ### PR G sonrası future-work (kapsam dışı bırakılan)
