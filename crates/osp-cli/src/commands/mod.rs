@@ -318,6 +318,25 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             println!("✗ Maneuver limit exceeded after {attempts} attempts");
         }
+        NavigatorResult::AwaitingWitnesses {
+            task_id,
+            claim_id,
+            hold_reason,
+            attempts_used,
+        } => {
+            println!("⏸ Awaiting witnesses (INV-T9) — task {task_id}, claim {claim_id}");
+            println!("  Witness hold reason: {}", hold_reason.as_reason_str());
+            println!("  Attempts used: {attempts_used} (no additional budget consumed)");
+            println!("  Next action: await external evidence");
+        }
+        NavigatorResult::RequiresRevision {
+            task_id,
+            claim_id,
+            attempts_used,
+        } => {
+            println!("↻ Requires revision (explicit witness rejection) — task {task_id}, claim {claim_id}");
+            println!("  Attempts used: {attempts_used}");
+        }
         NavigatorResult::TaskNotFound => {
             println!("✗ Task {} not found", args.task_id);
         }

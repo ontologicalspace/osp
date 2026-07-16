@@ -30,7 +30,48 @@ use crate::space::{EdgeKind, NodeId, Space};
 use crate::time::{TimeFSM, TimeMachine};
 use crate::vision::{compute_derived, CosineDeviation, DeviationMetric, VisionVector};
 use crate::vision_config::VisionConfig;
-use crate::witness::{Claim, ClaimId, Reason, WitnessResult, WitnessSet};
+use crate::witness::{Claim, ClaimId, Reason, WitnessDisposition, WitnessHoldReason, WitnessSet};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 — Legacy conversion helpers (WitnessHoldReason/NonEmptyRejections → Reason)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// commit_task_claim() EngineCommitResult döndürür (INV-T9 conformance). Legacy
+// commit() (standalone/Paper 1) EngineCommitError döndürmeye devam eder ve Held/Rejected
+// durumlarını Reason'a map'lemesi gerekir. Bu helper'lar o legacy dönüşümü yapar.
+
+fn legacy_hold_reason(reason: &WitnessHoldReason) -> Reason {
+    match reason {
+        WitnessHoldReason::MinApproversNotMet { distinct, required } => {
+            Reason::MinApproversNotMet {
+                distinct: *distinct,
+                required: *required,
+            }
+        }
+        WitnessHoldReason::QuorumInsufficient { support, threshold } => {
+            Reason::QuorumInsufficient {
+                support: *support,
+                threshold: *threshold,
+            }
+        }
+        WitnessHoldReason::EvidenceNotLocallyObservable { hint } => {
+            Reason::UnobservableLocally {
+                hint: hint.clone(),
+            }
+        }
+    }
+}
+
+fn legacy_reject_reason(reasons: &crate::witness::NonEmptyWitnessRejections) -> Reason {
+    // İlk rejection'ı HonestReject'e map'le (legacy single-Reason semantic).
+    let first = reasons
+        .as_slice()
+        .first()
+        .expect("NonEmptyWitnessRejections invariant — en az bir rejection");
+    Reason::HonestReject {
+        witness: first.witness,
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // EngineConfig
@@ -120,8 +161,9 @@ pub struct TaskCommitResult {
     pub apply_target: crate::trajectory::ApplyTarget,
     /// Hesaplanan loss_after (preferred_vector'e distance, INV-T6 quantitative).
     pub loss_after: f64,
-    /// Witness Q1-Q3 sonucu (AcceptAsCompleted/AcceptAsProgress ise). Reject ise None.
-    pub witness: Option<crate::witness::WitnessResult>,
+    /// Witness Q1-Q3 disposition'ı (Satisfied ise Some). Held/Rejected artık
+    /// `EngineCommitResult::Held`/`Rejected` üzerinden gelir (INV-T9).
+    pub witness: Option<crate::witness::WitnessDisposition>,
 }
 
 /// Post-mutation: neighbor θ > bound (commit geçerli, komşu degrade — WARNING, §4.1).
@@ -191,6 +233,10 @@ impl std::fmt::Display for VisionViolation {
 /// (osp-core-design.md §3.4). Witness Reject/Hold `evaluate()` → `WitnessResult` üzerinden
 /// gelir, `Reason` wrap edilir (space-engine-design.md §6.1).
 ///
+/// **INV-T9 notu:** `Witness(Reason)` varyantı legacy `commit()` (standalone/Paper 1)
+/// yolunda korunur. `commit_task_claim()` (Paper 2) artık `EngineCommitResult` döndürür
+/// — `Held`/`Rejected` expected domain outcome olarak `Err` DEĞİL `Ok` kanalında gelir.
+///
 /// Variant tasarımı: violation struct'lar tek kaynak (single-source-of-truth). theta/detail/
 /// rule_id gibi field'lar variant'ta TEKRAR EDİLMEZ — `Display` impl ile erişilir (drift risk yok).
 #[derive(Debug, thiserror::Error)]
@@ -212,6 +258,30 @@ pub enum EngineCommitError {
     NoPersistence,
     #[error("persistence hatası: {0}")]
     Persistence(#[from] PersistenceError),
+}
+
+/// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
+///
+/// `Applied` = AcceptAsCompleted (Mainline) VE AcceptAsProgress (TrajectoryCheckpoint)
+/// uygulandı. `Held` = expected authorization bekleme (INV-T9 suspended state).
+/// `Rejected` = explicit witness rejection (non-empty).
+///
+/// Operational fault'lar (Syntax/Vision/Rule/Permission/Persistence/Internal +
+/// InvalidWitnessEvidence) `EngineCommitError`'da kalır.
+#[derive(Debug, Clone)]
+pub enum EngineCommitResult {
+    /// Mainline veya checkpoint'e uygulandı. TaskCommitResult tam witness + outcome taşır.
+    Applied(TaskCommitResult),
+    /// INV-T9 — expected authorization bekleme. Navigator AwaitingWitnesses'ye map'ler.
+    Held {
+        reason: crate::witness::WitnessHoldReason,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+    },
+    /// Explicit witness rejection (Q3 honest-reject). Navigator RequiresRevision'a map'ler.
+    Rejected {
+        reasons: crate::witness::NonEmptyWitnessRejections,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -322,13 +392,20 @@ impl SpaceEngine {
         // Phase 1: WITNESS-BASED GATES (Q1-Q3) + TIME ADVANCE (apply_delta mutasyon)
         let result = self.time.advance(&mut self.space, claim, omega);
         let (delta, safety_weakened) = match result {
-            WitnessResult::Commit {
+            WitnessDisposition::Satisfied {
                 delta,
                 safety_weakened,
                 ..
             } => (delta, safety_weakened),
-            WitnessResult::Hold(reason) => return Err(EngineCommitError::Witness(reason)),
-            WitnessResult::Reject(reason) => return Err(EngineCommitError::Witness(reason)),
+            // INV-T9: Held/Rejected artık EngineCommitResult üzerinden gelir (commit_task_claim).
+            // Legacy commit() standalone yolu için bu durumlar hala Err olarak işlenir
+            // (Paper 1 uyumluluk — Held/Rejected Reason'a geri map'lenir).
+            WitnessDisposition::Held { reason, .. } => {
+                return Err(EngineCommitError::Witness(legacy_hold_reason(&reason)))
+            }
+            WitnessDisposition::Rejected { reasons, .. } => {
+                return Err(EngineCommitError::Witness(legacy_reject_reason(&reasons)))
+            }
         };
 
         self.t_c += 1;
@@ -390,8 +467,9 @@ impl SpaceEngine {
     pub fn commit_task_claim(
         &mut self,
         input: TaskCommitInput<'_>,
-    ) -> Result<TaskCommitResult, EngineCommitError> {
+    ) -> Result<EngineCommitResult, EngineCommitError> {
         use crate::trajectory::{ApplyTarget, MutationDecision, PredicateGate, PredicateGateInput};
+        use crate::witness::WitnessDisposition;
 
         // Phase 0a: Q4 Syntax (claim-based, deterministik).
         self.check_claim_syntax(input.claim)?;
@@ -435,32 +513,36 @@ impl SpaceEngine {
         // Phase 0f: MutationDecision → ApplyTarget kontrolü (INV-T8).
         // Reject → NotApplied (commit yok, witness yok). Sadece evidence kaydı navigator'da.
         if matches!(apply_target, ApplyTarget::NotApplied) {
-            return Ok(TaskCommitResult {
+            return Ok(EngineCommitResult::Applied(TaskCommitResult {
                 outcome,
                 apply_target,
                 loss_after,
                 witness: None,
-            });
+            }));
         }
 
         // Phase 1: Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress/OperatorApproval).
         // apply_delta mutation — mevcut commit() gibi time.advance.
-        let witness = self.time.advance(&mut self.space, input.claim, input.omega);
-        match &witness {
-            crate::witness::WitnessResult::Commit { .. } => {
+        //
+        // **INV-T9:** WitnessDisposition::Held expected authorization bekleme, Rejected
+        // explicit witness ret — ikisi de domain outcome, HATA DEĞİL. EngineCommitResult::Held/
+        // Rejected olarak döner; navigator AwaitingWitnesses/RequiresRevision'a map'ler.
+        let disposition = self.time.advance(&mut self.space, input.claim, input.omega);
+        match disposition {
+            WitnessDisposition::Satisfied { .. } => {
                 self.t_c += 1;
-                Ok(TaskCommitResult {
+                Ok(EngineCommitResult::Applied(TaskCommitResult {
                     outcome,
                     apply_target,
                     loss_after,
-                    witness: Some(witness.clone()),
-                })
+                    witness: Some(disposition),
+                }))
             }
-            crate::witness::WitnessResult::Hold(reason) => {
-                Err(EngineCommitError::Witness(reason.clone()))
+            WitnessDisposition::Held { reason, snapshot } => {
+                Ok(EngineCommitResult::Held { reason, snapshot })
             }
-            crate::witness::WitnessResult::Reject(reason) => {
-                Err(EngineCommitError::Witness(reason.clone()))
+            WitnessDisposition::Rejected { reasons, snapshot } => {
+                Ok(EngineCommitResult::Rejected { reasons, snapshot })
             }
         }
     }
@@ -784,25 +866,25 @@ impl SpaceEngine {
 
         // Q1-Q3 Witness
         match crate::witness::evaluate(claim, omega) {
-            crate::witness::WitnessResult::Commit { .. } => {
-                results.push(GateResult::passed("Q1-Q3 Witness", "Quorum met — Commit"));
+            crate::witness::WitnessDisposition::Satisfied { .. } => {
+                results.push(GateResult::passed("Q1-Q3 Witness", "Quorum met — Satisfied"));
             }
-            crate::witness::WitnessResult::Hold(reason) => {
+            crate::witness::WitnessDisposition::Held { reason, .. } => {
                 let h = Some(crate::agent::HallucinationType::Undersupported {
                     support: 0.0,
                     threshold: 1.5,
                 });
                 results.push(GateResult::failed(
                     "Q1-Q3 Witness",
-                    &format!("Hold: {:?}", reason),
+                    &format!("Held: {:?}", reason),
                     h,
                 ));
             }
-            crate::witness::WitnessResult::Reject(reason) => {
+            crate::witness::WitnessDisposition::Rejected { reasons, .. } => {
                 let h = Some(crate::agent::HallucinationType::Witness { witness: 0 });
                 results.push(GateResult::failed(
                     "Q1-Q3 Witness",
-                    &format!("Reject: {:?}", reason),
+                    &format!("Rejected: {:?}", reasons),
                     h,
                 ));
             }

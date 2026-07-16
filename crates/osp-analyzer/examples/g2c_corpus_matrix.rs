@@ -560,6 +560,12 @@ fn run_one_experiment(
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             ("ExceededManeuverLimit".to_string(), *attempts)
         }
+        NavigatorResult::AwaitingWitnesses { attempts_used, .. } => {
+            ("AwaitingWitnesses".to_string(), *attempts_used as usize)
+        }
+        NavigatorResult::RequiresRevision { attempts_used, .. } => {
+            ("RequiresRevision".to_string(), *attempts_used as usize)
+        }
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
             ("RequiresOperatorApproval".to_string(), *attempts)
         }
@@ -847,6 +853,12 @@ fn run_synthetic_rq9(
         NavigatorResult::Completed { attempts, .. } => ("Completed".to_string(), *attempts),
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             ("ExceededManeuverLimit".to_string(), *attempts)
+        }
+        NavigatorResult::AwaitingWitnesses { attempts_used, .. } => {
+            ("AwaitingWitnesses".to_string(), *attempts_used as usize)
+        }
+        NavigatorResult::RequiresRevision { attempts_used, .. } => {
+            ("RequiresRevision".to_string(), *attempts_used as usize)
         }
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
             ("RequiresOperatorApproval".to_string(), *attempts)

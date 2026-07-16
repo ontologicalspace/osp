@@ -294,6 +294,22 @@ pub enum NavigatorResult {
         attempts: usize,
         total_tokens: TokenCost,
     },
+    /// **INV-T9** — expected witness authorization bekleme. Agent retry DEĞİL.
+    /// Budget tüketmez, LLM reinvocation YOK. Commit 4: pending authorization record
+    /// + persistence receipt bu varyantı genişletir.
+    AwaitingWitnesses {
+        task_id: crate::trajectory::TaskId,
+        claim_id: crate::witness::ClaimId,
+        hold_reason: crate::witness::WitnessHoldReason,
+        attempts_used: u32,
+    },
+    /// Explicit witness rejection — agent proposal revises. Budget tüketmez.
+    /// Commit 4: RevisionRequired (evidence-preserving) bu varyantı genişletir.
+    RequiresRevision {
+        task_id: crate::trajectory::TaskId,
+        claim_id: crate::witness::ClaimId,
+        attempts_used: u32,
+    },
     /// INV-T7 — maneuver limit aşıldı (ardışık reject/improved).
     ExceededManeuverLimit {
         attempts: usize,
@@ -639,14 +655,38 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     loss_before,
                     measured: measured.clone(),
                 }) {
-                Ok(r) => r,
+                Ok(crate::engine::EngineCommitResult::Applied(result)) => result,
+                Ok(crate::engine::EngineCommitResult::Held { reason, snapshot: _ }) => {
+                    // **INV-T9** — expected authorization bekleme. Agent retry DEĞİL.
+                    // Budget tüketmez (continue YOK), LLM reinvocation YOK.
+                    // Commit 4: PendingAuthorization + store persist burada gelir.
+                    // Şimdilik basit AwaitingWitnesses varyantı (pending record Commit 4'te genişletilecek).
+                    return NavigatorResult::AwaitingWitnesses {
+                        task_id,
+                        claim_id: claim.id,
+                        hold_reason: reason,
+                        attempts_used: attempt_num as u32,
+                    };
+                }
+                Ok(crate::engine::EngineCommitResult::Rejected { reasons: _, snapshot: _ }) => {
+                    // Explicit witness rejection — RequiresRevision (agent revises proposal).
+                    // Budget tüketmez, LLM reinvocation YOK. Commit 4: RevisionRequired genişletilecek.
+                    return NavigatorResult::RequiresRevision {
+                        task_id,
+                        claim_id: claim.id,
+                        attempts_used: attempt_num as u32,
+                    };
+                }
                 Err(crate::engine::EngineCommitError::PermissionDenied(msg)) => {
-                    // Binding hatası (task not found / standalone).
+                    // Binding hatası (task not found / standalone). Terminal — retry YOK.
                     let _ = msg;
                     return NavigatorResult::TaskNotFound;
                 }
                 Err(e) => {
-                    // Q4/Q5/Q6/witness reject — evidence kaydet, retry.
+                    // Q4/Q5/Q6 (Syntax/Vision/Rule) — agent-correctable retryable.
+                    // EngineCommitError::Witness artık commit_task_claim'den gelmez
+                    // (EngineCommitResult::Held/Rejected üzerinden gelir). Buraya sadece
+                    // deterministic gate failure'ları ulaşır.
                     // G2c-1b: gerçek gate_decision helper'dan (elle match değil).
                     let gd = gate_decision_from_engine_error(&e);
                     last_outcome = Some(crate::trajectory::AttemptOutcome {
@@ -1188,19 +1228,22 @@ mod tests {
             measured,
         });
         // Q5.b çalıştı — Reject (witness yok) veya Ok (predicate reject NotApplied).
-        // İkisi de Q5.b'nin çalıştığını gösterir. Witness boş → reject beklenir (D2 limitation).
+        // İkisi de Q5.b'nin çalıştığını gösterir. Witness boş → INV-T9 Held beklenir.
         match result {
-            Ok(r) => {
+            Ok(crate::engine::EngineCommitResult::Applied(r)) => {
                 assert!(
                     r.outcome.predicate_completion == PredicateCompletion::Completed
                         || r.outcome.predicate_completion == PredicateCompletion::NotCompleted
                 );
             }
-            Err(crate::engine::EngineCommitError::Witness(_)) => {
-                // Witness Q1 fail (MinApproversNotMet) — predicate çalıştı, witness aşamasında reject.
-                // D2'de beklenen — gerçek witness navigator'da (D3).
+            Ok(crate::engine::EngineCommitResult::Held { .. }) => {
+                // **INV-T9** — Witness Q1 fail (MinApproversNotMet) → Held (expected authorization
+                // bekleme). Artık Err DEĞİL Ok kanalında. Predicate çalıştı, witness aşamasında hold.
             }
-            Err(e) => panic!("unexpected error (not witness): {e:?}"),
+            Ok(crate::engine::EngineCommitResult::Rejected { .. }) => {
+                // Explicit witness rejection (Q3 honest-reject).
+            }
+            Err(e) => panic!("unexpected error: {e:?}"),
         }
     }
 

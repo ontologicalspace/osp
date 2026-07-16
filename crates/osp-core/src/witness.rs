@@ -212,23 +212,16 @@ pub enum WitnessStatus {
 
 /// W(C, Ω) sonucu. Sadece witness-based Q1-Q3 karar.
 ///
+/// **Deprecated:** INV-T9 conformance fix'i ile `WitnessDisposition`'a migrate edildi.
+/// `WitnessResult` artık `WitnessDisposition`'ın type alias'ıdır. Yeni kod
+/// `WitnessDisposition` kullanmalıdır; eski `WitnessResult::Commit/Hold/Reject`
+/// varyantları artık yoktur — `Satisfied`/`Held`/`Rejected` kullanın.
+///
 /// Claim-based Q4-Q6 gate'ler `SpaceEngine::commit()` Phase 0'da evaluate()'den ÖNCE koşar
 /// (space-engine-design.md §4, osp-core-design.md §3.2). Bu yüzden evaluate() yalnızca
 /// Q1-Q3'ü kontrol eder — Claim'in Q4-Q6'yı geçtiği varsayılır.
-#[derive(Debug, Clone, PartialEq)]
-pub enum WitnessResult {
-    /// Quorum + vision-bound sağlandı → uzay genişler (§6).
-    Commit {
-        delta: crate::bigbang::Delta,
-        /// inv #7 — admin override kullanıldıysa true (asla sessiz).
-        safety_weakened: bool,
-        override_reason: Option<String>,
-    },
-    /// Q3: honest-reject (witness-based).
-    Reject(Reason),
-    /// Q1/Q2 yetersiz — beklemeye alınır.
-    Hold(Reason),
-}
+#[deprecated(note = "use WitnessDisposition (INV-T9 conformance fix)")]
+pub type WitnessResult = WitnessDisposition;
 
 /// Sadece witness-based gate failure'ları (Q1-Q3). Claim-based Q4-Q6 failure'ları
 /// `EngineCommitError`'da (engine.rs §6.1) — burada tekrar tanımlanmaz
@@ -481,24 +474,41 @@ pub struct Claim {
 ///
 /// Faz 1.5: Q1 (min_approvers) + Q2 (quorum) uygular. Q3 (honest-reject) Faz 1.7+'te
 /// explicit sinyallerle gelir; o zamana kadar Q1+Q2 geçer → Commit.
-pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessResult {
+///
+/// **INV-T9:** `Held` expected authorization bekleme durumudur (agent-correctable
+/// failure DEĞİL). Engine bunu `EngineCommitResult::Held`'e map'ler, navigator
+/// `AwaitingWitnesses` ile suspend eder — retry loop'a girmez, budget tüketmez.
+pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessDisposition {
     let canon = omega.canonicalize_for(claim.author);
+
+    // Snapshot — her disposition'da tam witness kanıtı taşır.
+    let snapshot = WitnessQuorumSnapshot {
+        approvers: canon.approver_count(),
+        required_approvers: canon.min_approvers(),
+        support: canon.support(),
+        required_support: canon.quorum_threshold(),
+    };
 
     // Q1: distinct non-author approvers
     if canon.approver_count() < canon.min_approvers() {
-        return WitnessResult::Hold(Reason::MinApproversNotMet {
-            distinct: canon.approver_count(),
-            required: canon.min_approvers(),
-        });
+        return WitnessDisposition::Held {
+            reason: WitnessHoldReason::MinApproversNotMet {
+                distinct: canon.approver_count(),
+                required: canon.min_approvers(),
+            },
+            snapshot,
+        };
     }
 
     // Q2: support >= quorum
-    let support = canon.support();
-    if support < canon.quorum_threshold() {
-        return WitnessResult::Hold(Reason::QuorumInsufficient {
-            support,
-            threshold: canon.quorum_threshold(),
-        });
+    if canon.support() < canon.quorum_threshold() {
+        return WitnessDisposition::Held {
+            reason: WitnessHoldReason::QuorumInsufficient {
+                support: canon.support(),
+                threshold: canon.quorum_threshold(),
+            },
+            snapshot,
+        };
     }
 
     // Q3 (honest-reject): Faz 1.7+ — sinyal yok, skip.
@@ -512,10 +522,11 @@ pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessResult {
         repositioned: vec![],                       // Faz 1.8: ΔV ∪ N₁(ΔV) hesaplar
     };
 
-    WitnessResult::Commit {
+    WitnessDisposition::Satisfied {
         delta,
         safety_weakened: false,
         override_reason: None,
+        snapshot,
     }
 }
 
@@ -589,7 +600,10 @@ mod tests {
         let result = evaluate(&claim, &omega);
         assert!(matches!(
             result,
-            WitnessResult::Hold(Reason::MinApproversNotMet { distinct: 0, .. })
+            WitnessDisposition::Held {
+                reason: WitnessHoldReason::MinApproversNotMet { distinct: 0, .. },
+                ..
+            }
         ));
     }
 
@@ -646,11 +660,11 @@ mod tests {
             ev(1, "PR#1", WitnessKind::MergeCommit, 200),
             ev(2, "PR#2", WitnessKind::MergeCommit, 300),
         ]);
-        // support = 2.0 ≥ 1.5, 2 distinct ≥ 2 → Commit
+        // support = 2.0 ≥ 1.5, 2 distinct ≥ 2 → Satisfied
         let result = evaluate(&claim, &omega);
         assert!(matches!(
             result,
-            WitnessResult::Commit {
+            WitnessDisposition::Satisfied {
                 safety_weakened: false,
                 ..
             }
@@ -659,7 +673,7 @@ mod tests {
 
     #[test]
     fn evaluate_three_weak_witnesses_commit() {
-        // 3 × TrailerReviewed = 2.1 ≥ 1.5, 3 distinct ≥ 2 → Commit
+        // 3 × TrailerReviewed = 2.1 ≥ 1.5, 3 distinct ≥ 2 → Satisfied
         let claim = claim_with_author(100);
         let omega = WitnessSet::new(vec![
             ev(1, "t1", WitnessKind::TrailerReviewed, 200),
@@ -667,27 +681,30 @@ mod tests {
             ev(3, "t3", WitnessKind::TrailerReviewed, 400),
         ]);
         let result = evaluate(&claim, &omega);
-        assert!(matches!(result, WitnessResult::Commit { .. }));
+        assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
     }
 
     #[test]
     fn evaluate_single_strong_witness_holds_on_min_approvers() {
-        // 1 MergeCommit: support=1.0 ama distinct=1 < 2 → Hold (Q1 önce)
+        // 1 MergeCommit: support=1.0 ama distinct=1 < 2 → Held (Q1 önce)
         let claim = claim_with_author(100);
         let omega = WitnessSet::new(vec![ev(1, "PR#1", WitnessKind::MergeCommit, 200)]);
         let result = evaluate(&claim, &omega);
         assert!(matches!(
             result,
-            WitnessResult::Hold(Reason::MinApproversNotMet {
-                distinct: 1,
-                required: 2
-            })
+            WitnessDisposition::Held {
+                reason: WitnessHoldReason::MinApproversNotMet {
+                    distinct: 1,
+                    required: 2
+                },
+                ..
+            }
         ));
     }
 
     #[test]
     fn evaluate_quorum_insufficient_hold() {
-        // 2 CoAuthored = 0.8 < 1.5 → Hold (Q2). distinct=2 ≥ 2 (Q1 geçer).
+        // 2 CoAuthored = 0.8 < 1.5 → Held (Q2). distinct=2 ≥ 2 (Q1 geçer).
         let claim = claim_with_author(100);
         let omega = WitnessSet::new(vec![
             ev(1, "c1", WitnessKind::CoAuthored, 200),
@@ -696,7 +713,10 @@ mod tests {
         let result = evaluate(&claim, &omega);
         assert!(matches!(
             result,
-            WitnessResult::Hold(Reason::QuorumInsufficient { support, threshold })
+            WitnessDisposition::Held {
+                reason: WitnessHoldReason::QuorumInsufficient { support, threshold },
+                ..
+            }
             if (support - 0.8).abs() < 1e-9 && (threshold - 1.5).abs() < 1e-9
         ));
     }
@@ -706,19 +726,19 @@ mod tests {
         let claim = claim_with_author(100);
         let omega = WitnessSet::new(vec![]);
         let result = evaluate(&claim, &omega);
-        assert!(matches!(result, WitnessResult::Hold(_)));
+        assert!(matches!(result, WitnessDisposition::Held { .. }));
     }
 
     // --- custom quorum (kalibrasyon) ---
 
     #[test]
     fn evaluate_custom_quorum() {
-        // min_approvers=1, quorum=1.0 → tek MergeCommit Commit eder
+        // min_approvers=1, quorum=1.0 → tek MergeCommit Satisfied eder
         let claim = claim_with_author(100);
         let omega =
             WitnessSet::new(vec![ev(1, "PR#1", WitnessKind::MergeCommit, 200)]).with_quorum(1, 1.0);
         let result = evaluate(&claim, &omega);
-        assert!(matches!(result, WitnessResult::Commit { .. }));
+        assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
     }
 
     // --- commit delta prospective ---
@@ -734,11 +754,11 @@ mod tests {
             ev(1, "PR#1", WitnessKind::MergeCommit, 200),
             ev(2, "PR#2", WitnessKind::MergeCommit, 300),
         ]);
-        if let WitnessResult::Commit { delta, .. } = evaluate(&claim, &omega) {
+        if let WitnessDisposition::Satisfied { delta, .. } = evaluate(&claim, &omega) {
             assert_eq!(delta.new_nodes.len(), 1);
             assert_eq!(delta.new_nodes[0].id, 42);
         } else {
-            panic!("Commit bekleniyordu");
+            panic!("Satisfied bekleniyordu");
         }
     }
 

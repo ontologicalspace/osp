@@ -656,6 +656,33 @@ fn serialize_navigator_result(result: &osp_core::navigator::NavigatorResult) -> 
             "last_mutation_decision": format!("{:?}", last_outcome.mutation_decision),
             "last_predicate_completion": format!("{:?}", last_outcome.predicate_completion),
         }),
+        NavigatorResult::AwaitingWitnesses {
+            task_id,
+            claim_id,
+            hold_reason,
+            attempts_used,
+        } => serde_json::json!({
+            "outcome": "AwaitingWitnesses",
+            "task_id": task_id,
+            "claim_id": claim_id,
+            "witness_hold_reason": hold_reason.as_reason_str(),
+            "attempts_used": attempts_used,
+            "commit_state": "awaiting_witnesses",
+            "mainline_mutation": "not_applied",
+            "next_action": "await_external_evidence",
+        }),
+        NavigatorResult::RequiresRevision {
+            task_id,
+            claim_id,
+            attempts_used,
+        } => serde_json::json!({
+            "outcome": "RequiresRevision",
+            "task_id": task_id,
+            "claim_id": claim_id,
+            "attempts_used": attempts_used,
+            "commit_state": "rejected_by_witness",
+            "next_action": "requires_revision",
+        }),
         NavigatorResult::TaskNotFound => serde_json::json!({ "outcome": "TaskNotFound" }),
         NavigatorResult::RequiresOperatorApproval {
             attempts,
@@ -841,7 +868,42 @@ impl Workspace {
                 loss_before,
                 measured: measured.clone(),
             }) {
-            Ok(r) => r,
+            Ok(osp_core::engine::EngineCommitResult::Applied(r)) => r,
+            Ok(osp_core::engine::EngineCommitResult::Held { reason, snapshot }) => {
+                // **INV-T9** — expected authorization bekleme. Agent failure DEĞİL.
+                return Ok(serde_json::json!({
+                    "commit_result": "Held",
+                    "witness_hold_reason": reason.as_reason_str(),
+                    "witness_snapshot": {
+                        "approvers": snapshot.approvers,
+                        "required_approvers": snapshot.required_approvers,
+                        "support": snapshot.support,
+                        "required_support": snapshot.required_support,
+                    },
+                    "commit_state": "awaiting_witnesses",
+                    "mainline_mutation": "not_applied",
+                    "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+                    "next_action": "await_external_evidence",
+                }));
+            }
+            Ok(osp_core::engine::EngineCommitResult::Rejected { reasons, snapshot }) => {
+                // Explicit witness rejection — RequiresRevision.
+                let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
+                return Ok(serde_json::json!({
+                    "commit_result": "Rejected",
+                    "rejecting_witnesses": witness_ids,
+                    "witness_snapshot": {
+                        "approvers": snapshot.approvers,
+                        "required_approvers": snapshot.required_approvers,
+                        "support": snapshot.support,
+                        "required_support": snapshot.required_support,
+                    },
+                    "commit_state": "rejected_by_witness",
+                    "mainline_mutation": "not_applied",
+                    "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+                    "next_action": "requires_revision",
+                }));
+            }
             Err(e) => {
                 return Ok(serde_json::json!({
                     "attempt_outcome": {
@@ -858,7 +920,7 @@ impl Workspace {
             }
         };
 
-        // 4. Serialize outcome.
+        // 4. Serialize outcome (Applied path).
         let gate_str = match result.outcome.gate_decision {
             osp_core::trajectory::GateDecision::PassedAll => "PassedAll",
             osp_core::trajectory::GateDecision::RejectedBySyntax => "RejectedBySyntax",
