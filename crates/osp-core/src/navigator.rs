@@ -924,9 +924,10 @@ mod tests {
     use crate::engine::{EngineConfig, SpaceEngine};
     use crate::space::{NodeKind, Space};
     use crate::trajectory::{
-        ComparisonOp, InMemoryTaskRegistry, MetricPredicate, OpKind, PredicateAxis,
-        PredicateFailurePolicy, PredicateMode, PredicateScope, PredicateSet, Task, TaskId,
-        TaskPolicy, TaskStatus, WeightedPredicate,
+        ApplyTarget, CommitLane, ComparisonOp, InMemoryTaskRegistry, MetricPredicate,
+        MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy, PredicateGate,
+        PredicateGateInput, PredicateMode, PredicateScope, PredicateSet, Task, TaskBoundClaim,
+        TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
     };
     use crate::vision::VisionVector;
 
@@ -1403,6 +1404,175 @@ mod tests {
             }
             Err(e) => panic!("unexpected error: {e:?}"),
         }
+    }
+
+    // **reviewer P0-2 (closure test):** AcceptAsProgress yolu — authorization basis,
+    // gate output ile aynı improvement_policy'yi paylaşır ve gate kararını açıklar.
+    //
+    // Fixture: predicate NotCompleted, AcceptImprovement + allow_progress_checkpoint,
+    // loss_after < loss_before - min_improvement_delta, hard caps geçer, witness yetersiz → Held.
+    #[test]
+    fn authorization_basis_explains_accept_as_progress_gate_decision() {
+        use crate::authorization::EffectiveImprovementPolicy;
+
+        let mut engine = make_real_engine();
+        let mut resolver = InMemoryTaskRegistry::new();
+        // AcceptImprovement + progress checkpoint izinli, min_delta küçük.
+        let policy = TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            min_improvement_delta: 0.05,
+            max_axis_regression: 0.15,
+            maneuver_limit: 5,
+            allow_progress_checkpoint: true,
+        };
+        // Threshold yüksek (0.80) → measured coupling 0.40 < 0.80 ama source Scip →
+        // completion: NotCompleted (0.40 ≤ 0.80 geçer AMA biz NotCompleted yolunu
+        // zorlamak için threshold'u measured'ın geçemeyeceği yönde seçmeliyiz).
+        // Coupling Le 0.80 + measured 0.40 → Satisfied → Completed olur. Bu yüzden
+        // predicate'ı coupling > 0.20 (Gt) yapıp measured 0.40 > 0.20 → Satisfied'i
+        // engellemek için threshold yüksek tutmak yerine, completion NotCompleted için
+        // measured'ı threshold'un dışına koyalım. En temizi: coupling Le 0.10,
+        // measured 0.40 > 0.10 → Unsatisfied → NotCompleted.
+        let task = coupling_task(1, 0.10, policy);
+        resolver.insert(task);
+        let claim = test_claim_with_task(1, Some(1), 0.40);
+        let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
+        let omega = crate::witness::WitnessSet::new(Vec::new()); // boş → Held
+        let target = RawPosition {
+            x: 0.10,
+            y: 0.6,
+            z: 0.4,
+            w: 0.5,
+            v: 0.3,
+        };
+        // loss_before yüksek → loss_after (measured target'a yakın değil) düşük değil;
+        // ama improved için loss_after < loss_before - 0.05. measured 0.40, target 0.10
+        // → loss = |0.40-0.10| benzeri. loss_before=1.0 verip improved sağlayalım.
+        let space_node_count_before = engine.space().node_count();
+        let result = engine.commit_task_claim(TaskCommitInput {
+            claim: &claim,
+            omega: &omega,
+            task_resolver: &resolver as &dyn TaskResolver,
+            target,
+            loss_before: 1.0,
+            measured: measured.clone(),
+        });
+
+        // Ayrı olarak aynı girdilerle PredicateGate.evaluate → gate_out.
+        let resolved_task = resolver.resolve(TaskId::from(1u64)).expect("task exists");
+        let bound = TaskBoundClaim {
+            claim: &claim,
+            task: resolved_task,
+        };
+        let gate_out = PredicateGate.evaluate(PredicateGateInput {
+            bound,
+            measured: &measured,
+            loss_before: 1.0,
+            target: &target,
+        });
+
+        // Gate AcceptAsProgress üretmeli (NotCompleted + improved + AcceptImprovement + checkpoint).
+        assert_eq!(
+            gate_out.outcome.mutation_decision,
+            MutationDecision::AcceptAsProgress,
+            "fixture must reach AcceptAsProgress path"
+        );
+
+        // Held beklenir (boş witness → MinApproversNotMet).
+        let auth = match result {
+            Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
+            other => panic!("expected Held, got {other:?}"),
+        };
+        let basis = &auth.basis;
+
+        // **reviewer P0-1:** improvement_policy tek nesne — gate ve basis paylaşır.
+        assert_eq!(
+            basis.predicate_evaluation.improvement_policy, gate_out.improvement_policy,
+            "basis must share the SAME improvement policy object as the gate output"
+        );
+        assert_eq!(
+            basis.predicate_evaluation.improvement_policy,
+            EffectiveImprovementPolicy::current_semantics()
+        );
+        // **reviewer P0-2:** basis gate kararını açıklar.
+        assert_eq!(basis.mutation_decision, MutationDecision::AcceptAsProgress);
+        assert_eq!(
+            basis.intended_apply_target,
+            ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint)
+        );
+        assert_eq!(basis.predicate_evaluation.loss_after, gate_out.loss_after);
+        assert_eq!(
+            basis.predicate_completion,
+            gate_out.outcome.predicate_completion
+        );
+        assert_eq!(
+            basis.predicate_evaluation.min_improvement_delta,
+            resolved_task.policy.min_improvement_delta
+        );
+        // target_vector = input.target (preferred_vector DEĞİL).
+        assert_eq!(basis.predicate_evaluation.target_vector.x, target.x);
+
+        // **reviewer P0-2 (space dokunulmazlık):** Held → time.advance Satisfied DEĞİL
+        // → space mutasyonu yok (time.rs:61 other => other).
+        assert_eq!(
+            space_node_count_before,
+            engine.space().node_count(),
+            "Held must not mutate engine space"
+        );
+    }
+
+    // **reviewer P0-1 (single construction):** gate output ve authorization basis aynı
+    // improvement_policy nesnesini paylaşır — iki ayrı construction site oluşmadı.
+    // (AcceptAsProgress testi bunu assert ediyor; bu ayrı test semantik vurgu yapar.)
+    #[test]
+    fn gate_output_and_authorization_basis_share_same_improvement_policy() {
+        let mut engine = make_real_engine();
+        let mut resolver = InMemoryTaskRegistry::new();
+        let policy = TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            min_improvement_delta: 0.05,
+            max_axis_regression: 0.15,
+            maneuver_limit: 5,
+            allow_progress_checkpoint: true,
+        };
+        resolver.insert(coupling_task(1, 0.10, policy));
+        let claim = test_claim_with_task(1, Some(1), 0.40);
+        let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
+        let omega = crate::witness::WitnessSet::new(Vec::new());
+        let target = RawPosition {
+            x: 0.10,
+            y: 0.6,
+            z: 0.4,
+            w: 0.5,
+            v: 0.3,
+        };
+        let result = engine.commit_task_claim(TaskCommitInput {
+            claim: &claim,
+            omega: &omega,
+            task_resolver: &resolver as &dyn TaskResolver,
+            target,
+            loss_before: 1.0,
+            measured: measured.clone(),
+        });
+        let resolved_task = resolver.resolve(TaskId::from(1u64)).unwrap();
+        let gate_out = PredicateGate.evaluate(PredicateGateInput {
+            bound: TaskBoundClaim {
+                claim: &claim,
+                task: resolved_task,
+            },
+            measured: &measured,
+            loss_before: 1.0,
+            target: &target,
+        });
+        let auth = match result {
+            Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
+            other => panic!("expected Held, got {other:?}"),
+        };
+        // Tek construction site sözleşmesi: iki ayrı current_semantics() üretimi yok.
+        assert_eq!(
+            auth.basis.predicate_evaluation.improvement_policy,
+            gate_out.improvement_policy
+        );
     }
 
     // 6. commit_standalone_unchanged (mevcut commit() hâlâ standalone çalışır)

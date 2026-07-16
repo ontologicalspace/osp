@@ -495,6 +495,52 @@ impl Default for TaskPolicy {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// EffectiveImprovementPolicy (reviewer P0-1 — single source of truth)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **reviewer P0-1:** Effective improvement policy — `is_improved_loss` hard-cap threshold'ları.
+///
+/// Bu struct **tek source of truth**'tur: `PredicateGate::evaluate` onu BİR KEZ üretir,
+/// karar verir, ve `PredicateGateOutput` içinde döndürür. Engine aynı nesneyi
+/// `build_authorization_context`'e geçirir; authorization basis **yeniden üretmez**
+/// — evaluator'ın kullandığı policy'yi paylaşır. İki ayrı hardcoded truth source
+/// (önceden `is_improved_loss` literal'ları vs basis builder `current_semantics()`)
+/// arasındaki drift riski kapanır.
+///
+/// **Tasarım kararı (reviewer P0-1):** Bu turda minimum değişiklik tercih edildi —
+/// struct adı `EffectiveImprovementPolicy` korundu, task-specific alanlar
+/// (`min_improvement_delta`, `allow_progress_checkpoint`) `TaskPolicy`'de kaldı.
+/// "Tek construction" şartı kesin uygulandı.
+///
+/// `authorization.rs` bu tipi `crate::trajectory`'den re-export eder (canonical layer'da
+/// `EffectiveImprovementPolicy` adıyla görünür).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveImprovementPolicy {
+    pub max_coupling: f64,
+    pub max_instability: f64,
+    pub min_cohesion: f64,
+    pub semantics_version: u32,
+}
+
+/// Mevcut `is_improved_loss` sabit-bound semantiği version'u.
+/// Threshold değişirse bu version artırılmalı — golden test enforcement.
+pub const IMPROVEMENT_SEMANTICS_VERSION: u32 = 1;
+
+impl EffectiveImprovementPolicy {
+    /// Mevcut evaluator semantiği (`is_improved_loss`: coupling<0.85, instability<0.85, cohesion>0.15).
+    /// **Tek construction site:** sadece `PredicateGate::evaluate` burayı çağırır.
+    /// Gerçek before/after axis regression uygulandığında semantics_version → 2.
+    pub fn current_semantics() -> Self {
+        Self {
+            max_coupling: 0.85,
+            max_instability: 0.85,
+            min_cohesion: 0.15,
+            semantics_version: IMPROVEMENT_SEMANTICS_VERSION,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PredicateFailurePolicy {
     /// Default — basit task, predicate fail = reject.
@@ -967,18 +1013,30 @@ pub struct PredicateGateInput<'a> {
     pub target: &'a RawPosition,
 }
 
-/// Q5.b çıktısı — AttemptOutcome + hesaplanan loss_after.
+/// Q5.b çıktısı — AttemptOutcome + hesaplanan loss_after + karar verirken kullanılan
+/// improvement policy.
+///
+/// **reviewer P0-1:** `improvement_policy` gate içinde BİR KEZ üretilir ve output ile
+/// döndürülür. Engine bu nesneyi `build_authorization_context`'e geçirir; authorization
+/// basis aynı policy'yi kaydeder (yeniden üretmez). Tek construction site şartı.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PredicateGateOutput {
     pub outcome: AttemptOutcome,
     pub loss_after: f64,
+    /// Karar üretirken kullanılan improvement policy — basis builder ile paylaşılır.
+    pub improvement_policy: EffectiveImprovementPolicy,
 }
 
 impl PredicateGate {
     /// Q5.b — soft gate. Hard gates (Q4/Q5/Q6) zaten geçti (gate_decision: PassedAll).
+    ///
+    /// **reviewer P0-1:** `improvement_policy` burada BİR KEZ üretilir — `is_improved_loss`
+    /// kararını verir ve `PredicateGateOutput` ile döndürülür. Engine output'tan alıp
+    /// authorization basis'e taşır; basis builder yeniden üretmez (tek source of truth).
     pub fn evaluate(&self, input: PredicateGateInput<'_>) -> PredicateGateOutput {
         let policy = &input.bound.task.policy;
         let loss_after = trajectory_loss(input.measured, input.target);
+        let improvement_policy = EffectiveImprovementPolicy::current_semantics();
 
         // 1. PredicateSet completion (INV-T4 source check dahil).
         let (predicate_completion, mutation_decision) = match input
@@ -997,8 +1055,13 @@ impl PredicateGate {
             }
             PredicateSetResult::NotCompleted => {
                 // 2. INV-T6 — policy'ye göre: improved mı, regressed mi?
-                let improved =
-                    is_improved_loss(input.loss_before, loss_after, input.measured, policy);
+                let improved = is_improved_loss(
+                    input.loss_before,
+                    loss_after,
+                    input.measured,
+                    policy,
+                    &improvement_policy,
+                );
                 let completion = PredicateCompletion::NotCompleted;
                 let decision = match policy.predicate_failure_policy {
                     PredicateFailurePolicy::StrictReject => MutationDecision::Reject,
@@ -1025,28 +1088,33 @@ impl PredicateGate {
                 witness_status: None,
             },
             loss_after,
+            improvement_policy,
         }
     }
 }
 
 /// INV-T6 — loss-based improved kontrolü. `loss_after < loss_before - min_delta`
-/// AND max_axis_regression aşılmadı. (Aşama A'daki `is_improved`'un loss-input versiyonu.)
+/// AND hard caps aşılmadı. (Aşama A'daki `is_improved`'un loss-input versiyonu.)
+///
+/// **reviewer P0-1:** Hard-cap threshold'ları (`max_coupling`, `max_instability`,
+/// `min_cohesion`) artık hardcoded literal DEĞİL — `EffectiveImprovementPolicy`'den
+/// okunur. Bu policy `PredicateGate::evaluate`'de bir kez üretilir ve buraya geçirilir;
+/// aynı nesne authorization basis'e de taşınır. Tek truth source.
 fn is_improved_loss(
     loss_before: f64,
     loss_after: f64,
     measured: &ProvenancedRawPosition,
     policy: &TaskPolicy,
+    improvement: &EffectiveImprovementPolicy,
 ) -> bool {
     if loss_after >= loss_before - policy.min_improvement_delta {
         return false;
     }
-    // max_axis_regression: kritik eksenlerde regresyon kontrolü.
-    // measured'da her axis 0..1; regresyon = değerin threshold'u aşması (basit Aşama B;
-    // Aşama C'de before/after karşılaştırması + WeightedPredicate loss).
-    // Şimdilik: hiçbir axis 0.85'i aşmasın (hard cap, refine Aşama C).
-    measured.coupling.value < 0.85
-        && measured.instability.value < 0.85
-        && measured.cohesion.value > 0.15
+    // Hard caps — measured her axis 0..1. Regresyon = değerin threshold'u aşması
+    // (basit Aşama B; Aşama C'de before/after karşılaştırması + WeightedPredicate loss).
+    measured.coupling.value < improvement.max_coupling
+        && measured.instability.value < improvement.max_instability
+        && measured.cohesion.value > improvement.min_cohesion
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

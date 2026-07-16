@@ -34,16 +34,22 @@ macro_rules! canonical_tag_newtype {
     ) => {
         $(#[$meta])*
         #[derive(
-            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash,
-            serde::Serialize, serde::Deserialize,
+            Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize,
         )]
-        #[serde(transparent)]
         pub struct $name(u8);
 
         impl $name {
             /// Stable numeric tag (canonical encoding için).
             pub fn as_u8(&self) -> u8 {
                 self.0
+            }
+
+            /// Valid tag set'i — deserialize validation için.
+            const VALID_TAGS: &'static [u8] = &[ $($tag),* ];
+
+            /// Tag bu newtype için geçerli mi?
+            fn is_valid_tag(tag: u8) -> bool {
+                Self::VALID_TAGS.contains(&tag)
             }
         }
 
@@ -57,6 +63,35 @@ macro_rules! canonical_tag_newtype {
                     $( $(#[$vmeta])* <$domain>::$variant => $tag, )*
                 };
                 Ok(Self(tag))
+            }
+        }
+
+        /// **reviewer P1-1:** `TryFrom<u8>` — deserialize validation.
+        /// Geçersiz tag (örn 255) reddedilir. Diskten yüklenen artifact korunur.
+        impl TryFrom<u8> for $name {
+            type Error = $crate::authorization::CanonicalizationError;
+
+            fn try_from(tag: u8) -> Result<Self, Self::Error> {
+                if Self::is_valid_tag(tag) {
+                    Ok(Self(tag))
+                } else {
+                    Err($crate::authorization::CanonicalizationError::InvalidCanonicalTag {
+                        type_name: stringify!($name),
+                        tag,
+                    })
+                }
+            }
+        }
+
+        /// **reviewer P1-1:** Custom Deserialize — `TryFrom<u8>` üzerinden.
+        /// Derived `#[serde(transparent)]` geçersiz tag'lere izin veriyordu.
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let tag = u8::deserialize(deserializer)?;
+                $name::try_from(tag).map_err(serde::de::Error::custom)
             }
         }
 
@@ -190,10 +225,7 @@ canonical_tag_newtype! {
 ///
 /// **Not:** Bu enum yeni — omega (WitnessSet) henüz independence taşımıyor.
 /// `CanonicalWitnessPolicy::try_from(omega)` Strict varsayılan kullanır.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct WitnessIndependencePolicyTag(u8);
 
 impl WitnessIndependencePolicyTag {
@@ -204,6 +236,9 @@ impl WitnessIndependencePolicyTag {
     /// None — dedup yok (test/kalibrasyon).
     pub const NONE: Self = Self(2);
 
+    /// Valid tag set'i — deserialize validation için.
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2];
+
     /// Stable numeric tag.
     pub fn as_u8(&self) -> u8 {
         self.0
@@ -213,6 +248,33 @@ impl WitnessIndependencePolicyTag {
 impl Default for WitnessIndependencePolicyTag {
     fn default() -> Self {
         Self::STRICT
+    }
+}
+
+/// **reviewer P1-1:** `TryFrom<u8>` — WitnessIndependencePolicyTag için deserialize validation.
+impl TryFrom<u8> for WitnessIndependencePolicyTag {
+    type Error = crate::authorization::CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(crate::authorization::CanonicalizationError::InvalidCanonicalTag {
+                type_name: "WitnessIndependencePolicyTag",
+                tag,
+            })
+        }
+    }
+}
+
+/// **reviewer P1-1:** Custom Deserialize — `TryFrom<u8>` üzerinden (makro dışı newtype).
+impl<'de> serde::Deserialize<'de> for WitnessIndependencePolicyTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let tag = u8::deserialize(deserializer)?;
+        Self::try_from(tag).map_err(serde::de::Error::custom)
     }
 }
 

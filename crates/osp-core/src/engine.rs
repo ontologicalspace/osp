@@ -524,6 +524,7 @@ impl SpaceEngine {
                 &input,
                 input.loss_before,
                 loss_after,
+                &gate_out.improvement_policy,
                 input.omega,
             )
             .map_err(EngineCommitError::AuthorizationContextFailed)?;
@@ -579,6 +580,7 @@ impl SpaceEngine {
         input: &TaskCommitInput<'_>,
         loss_before: f64,
         loss_after: f64,
+        improvement_policy: &crate::authorization::EffectiveImprovementPolicy,
         omega: &crate::witness::WitnessSet,
     ) -> Result<crate::authorization::AuthorizationContext, String> {
         use crate::authorization::{
@@ -656,8 +658,8 @@ impl SpaceEngine {
                     )
                     .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?,
                     threshold: wp.predicate.threshold,
-                    scope: canonicalize_scope(&wp.predicate.scope),
-                    required_source: canonicalize_source_req(&wp.predicate.required_source),
+                    scope: canonicalize_scope(&wp.predicate.scope)?,
+                    required_source: canonicalize_source_req(&wp.predicate.required_source)?,
                     effective_weight: wp.weight.unwrap_or(1.0),
                     effective_tolerance: wp.predicate.tolerance,
                 })
@@ -668,18 +670,17 @@ impl SpaceEngine {
             predicates,
         };
 
-        // Predicate evaluation basis — gerçek task policy + loss değerleri.
-        let target_vector = task
-            .target_predicate_set
-            .preferred_vector
-            .unwrap_or(input.target);
+        // Predicate evaluation basis — gerçek PredicateGate girdileri (reviewer P1-2).
+        // target_vector = input.target (preferred_vector DEĞİL — evaluator input.target kullanır).
+        // min_improvement_delta = gerçek is_improved_loss girdisi.
+        // improvement_policy = mevcut sabit 0.85/0.15 threshold'ları explicit.
         let predicate_evaluation = PredicateEvaluationBasis {
             target_vector: CanonicalRawPosition {
-                x: target_vector.x,
-                y: target_vector.y,
-                z: target_vector.z,
-                w: target_vector.w,
-                v: target_vector.v,
+                x: input.target.x,
+                y: input.target.y,
+                z: input.target.z,
+                w: input.target.w,
+                v: input.target.v,
             },
             loss_before: loss_before as CanonicalF64,
             loss_after: loss_after as CanonicalF64,
@@ -687,15 +688,27 @@ impl SpaceEngine {
                 &task.policy.predicate_failure_policy,
             )
             .map_err(|e| e.to_string())?,
+            min_improvement_delta: task.policy.min_improvement_delta as CanonicalF64,
             allow_progress_checkpoint: task.policy.allow_progress_checkpoint,
-            tolerance: task.policy.max_axis_regression as CanonicalF64,
+            improvement_policy: *improvement_policy,
         };
 
-        // Measured result — gerçek engine-measured position + metric source.
-        let measured = input.measured.to_raw();
+        // Measured result — 5 eksen value + source (INV-T4 per-axis provenance).
+        // Her eksenin MetricSource'u ayrı bağlanır — INV-T4 source-requirement kararının
+        // evidence basis'i tam (placeholder source ile task kapatma engeli reconstructible).
+        let mk_axis = |am: &crate::trajectory::AxisMetric| -> Result<_, String> {
+            Ok(crate::authorization::CanonicalAxisMeasurement {
+                value: am.value,
+                source: crate::canonical_tags::CanonicalMetricSourceTag::try_from(&am.source)
+                    .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?,
+            })
+        };
         let measured_result = ProvenancedMeasuredResult {
-            raw: measured,
-            metric_source: input.measured.coupling.source.to_string(),
+            coupling: mk_axis(&input.measured.coupling)?,
+            cohesion: mk_axis(&input.measured.cohesion)?,
+            instability: mk_axis(&input.measured.instability)?,
+            entropy: mk_axis(&input.measured.entropy)?,
+            witness_depth: mk_axis(&input.measured.witness_depth)?,
         };
 
         // Witness policy — gerçek omega'dan (plan-review #1).
@@ -1261,46 +1274,42 @@ fn current_time_ms() -> u64 {
 // Authorization context helpers — domain → canonical dönüşüm (free functions)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// PredicateScope → CanonicalPredicateScope (scope_tag + identity_bytes).
+/// PredicateScope → CanonicalPredicateScope (typed enum).
+///
+/// **reviewer P1-1:** `Subgraph` arm'ı validated constructor (`CanonicalSubgraphScope::try_new`)
+/// üzerinden geçer — duplicate id reddedilir. İmza `Result` döner; caller `?` ile yayar.
 fn canonicalize_scope(
     scope: &crate::trajectory::PredicateScope,
-) -> crate::authorization::CanonicalPredicateScope {
+) -> Result<crate::authorization::CanonicalPredicateScope, String> {
     use crate::trajectory::PredicateScope;
     match scope {
-        PredicateScope::Node(id) => crate::authorization::CanonicalPredicateScope {
-            scope_tag: 0,
-            identity_bytes: id.to_le_bytes().to_vec(),
-        },
-        PredicateScope::Module(name) => crate::authorization::CanonicalPredicateScope {
-            scope_tag: 1,
-            identity_bytes: name.as_bytes().to_vec(),
-        },
+        PredicateScope::Node(id) => Ok(crate::authorization::CanonicalPredicateScope::Node(*id)),
+        PredicateScope::Module(name) => Ok(crate::authorization::CanonicalPredicateScope::Module(
+            name.clone(),
+        )),
         PredicateScope::Subgraph(ids) => {
-            let mut bytes: Vec<u8> = Vec::with_capacity(ids.len() * 8);
-            let mut sorted = ids.clone();
-            sorted.sort_unstable();
-            for id in &sorted {
-                bytes.extend_from_slice(&id.to_le_bytes());
-            }
-            crate::authorization::CanonicalPredicateScope {
-                scope_tag: 2,
-                identity_bytes: bytes,
-            }
+            let sub = crate::authorization::CanonicalSubgraphScope::try_new(ids.clone())
+                .map_err(|e| e.to_string())?;
+            Ok(crate::authorization::CanonicalPredicateScope::Subgraph(sub))
         }
     }
 }
 
 /// Option<MetricSource> → EffectiveSourceRequirement (source_tag).
+/// **reviewer P1-1b (P0):** Option<MetricSource> → EffectiveSourceRequirement.
+/// `unwrap_or` KALDIRILDI — None/TreeSitter collision fix. `None → Any`,
+/// `Some(src) → Exact(tag)`. Geçersiz MetricSource fail-closed.
 fn canonicalize_source_req(
     required: &Option<crate::coords::MetricSource>,
-) -> crate::authorization::EffectiveSourceRequirement {
-    let source_tag = match required {
-        None => 0u8, // No requirement
-        Some(src) => crate::canonical_tags::CanonicalMetricSourceTag::try_from(src)
-            .map(|t| t.as_u8())
-            .unwrap_or(0),
-    };
-    crate::authorization::EffectiveSourceRequirement { source_tag }
+) -> Result<crate::authorization::EffectiveSourceRequirement, String> {
+    match required {
+        None => Ok(crate::authorization::EffectiveSourceRequirement::Any),
+        Some(src) => {
+            let tag = crate::canonical_tags::CanonicalMetricSourceTag::try_from(src)
+                .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?;
+            Ok(crate::authorization::EffectiveSourceRequirement::Exact(tag))
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

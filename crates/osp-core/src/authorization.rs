@@ -12,7 +12,6 @@
 //! (Commit 4) hem digest hem full [`AuthorizationBasis`] taşır — load sırasında
 //! digest tekrar hesaplanıp doğrulanır.
 
-use crate::coords::RawPosition;
 use crate::space::NodeId;
 use crate::trajectory::{
     ApplyTarget, AttemptOutcome, GateDecision, MutationDecision, PredicateCompletion,
@@ -193,18 +192,123 @@ pub struct EffectiveMetricPredicate {
     pub effective_tolerance: CanonicalF64,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CanonicalPredicateScope {
-    /// Scope type tag + identity bytes.
-    pub scope_tag: u8,
-    pub identity_bytes: Vec<u8>,
+/// **reviewer P1-1 (subgraph invariant):** Validated canonical subgraph scope.
+///
+/// **Type-level invariant:** sorted + deduplicated node ids. Bu newtype constructor
+/// (`try_new`) ve custom Deserialize üzerinden üretilir; geçersiz yapı (duplicate id)
+/// runtime'da DEĞİL, giriş noktasında reddedilir. Böylece iki ayrı canonical representation
+/// (`[1,1,2]` vs `[1,2]`) oluşamaz.
+///
+/// **Empty subgraph semantiği:** `CanonicalSubgraphScope(vec![])` geçerli bir canonical
+/// scope'tur — explicitly empty target set. Evaluation semantiği runtime
+/// `PredicateScope::Subgraph([])` ile aynıdır. Boş subgraph runtime'da üretiliyor
+/// (trajectory.rs decomposition fallback), bu yüzden reddedilmez.
+///
+/// **Serde wire format:** opaque newtype olduğu için `Vec<u64>` olarak serileşir
+/// (serde(transparent)). Disk formatı değişmez; backward-compatible.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CanonicalSubgraphScope(Vec<u64>);
+
+impl CanonicalSubgraphScope {
+    /// **reviewer P1-1:** Validated constructor — sort + duplicate kontrolü.
+    /// `[1,1,2]` → `Err(DuplicateScopeNode(1))`.
+    pub fn try_new(mut ids: Vec<u64>) -> Result<Self, CanonicalizationError> {
+        ids.sort_unstable();
+        for pair in ids.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(CanonicalizationError::DuplicateScopeNode(pair[0]));
+            }
+        }
+        Ok(Self(ids))
+    }
+
+    /// Sorted, unique node ids (invariant korunduğu için canonical sıra).
+    pub fn as_sorted_ids(&self) -> &[u64] {
+        &self.0
+    }
 }
 
-/// Effective source requirement — evaluator-derived (None ↔ Some(default) yalnız
-/// evaluator aynı yorumluyorsa).
+/// **reviewer P1-1:** Custom Deserialize — `try_new` üzerinden. Diskten `[1,1,2]`
+/// gibi duplicate içeren artifact yüklenemez; invariant deserialize sırasında zorlanır.
+impl<'de> serde::Deserialize<'de> for CanonicalSubgraphScope {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let ids = Vec::<u64>::deserialize(deserializer)?;
+        Self::try_new(ids).map_err(serde::de::Error::custom)
+    }
+}
+
+/// **reviewer P1 (raw u8 scope_tag fix):** Predicate scope — typed enum, çıplak u8 DEĞİL.
+///
+/// Önceki `{ scope_tag: u8, identity_bytes: Vec<u8> }` tasarımı diskten `scope_tag = 255`
+/// gibi geçersiz varyantların deserialize edilmesine izin veriyordu. Bu enum geçersiz
+/// varyantları compile-time'da reddeder; custom Deserialize enum dışı değerleri reddeder.
+///
+/// **reviewer P1-1:** `Subgraph` artık validated newtype (`CanonicalSubgraphScope`)
+/// taşıyor — duplicate id ve canonical sıra type seviyesinde korunur.
+///
+/// Canonical encoding stable numeric tag kullanır: `Node → 0`, `Module → 1`, `Subgraph → 2`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct EffectiveSourceRequirement {
-    pub source_tag: u8,
+pub enum CanonicalPredicateScope {
+    /// Tek node scope — identity = node id (u64 LE bytes).
+    Node(u64),
+    /// Module scope — identity = module name string bytes.
+    Module(String),
+    /// Subgraph scope — validated newtype (sorted + deduplicated node ids).
+    Subgraph(CanonicalSubgraphScope),
+}
+
+impl CanonicalPredicateScope {
+    /// Stable numeric scope tag (canonical encoding için).
+    pub fn scope_tag(&self) -> u8 {
+        match self {
+            Self::Node(_) => 0,
+            Self::Module(_) => 1,
+            Self::Subgraph(_) => 2,
+        }
+    }
+
+    /// Identity bytes (canonical encoding için — tag'e ek olarak).
+    ///
+    /// **reviewer P1-1:** `Subgraph` armı tekrar sort ETMEZ — `CanonicalSubgraphScope`
+    /// invariant'ı (sorted + unique) zaten type seviyesinde korunduğu için. Encoder'ın
+    /// invalid yapıyı sessizce normalize etmesi invariant ihmalini gizler; bunun yerine
+    /// mevcut canonical sıra encode edilir, `debug_assert!` defensive koruma sağlar.
+    pub fn identity_bytes(&self) -> Vec<u8> {
+        match self {
+            Self::Node(id) => id.to_le_bytes().to_vec(),
+            Self::Module(name) => name.as_bytes().to_vec(),
+            Self::Subgraph(s) => {
+                let ids = s.as_sorted_ids();
+                debug_assert!(
+                    ids.windows(2).all(|w| w[0] < w[1]),
+                    "CanonicalSubgraphScope invariant violated: not sorted/unique"
+                );
+                let mut bytes = Vec::with_capacity(ids.len() * 8);
+                for id in ids {
+                    bytes.extend_from_slice(&id.to_le_bytes());
+                }
+                bytes
+            }
+        }
+    }
+}
+
+/// **reviewer P1-1b (P0):** Effective source requirement — None/TreeSitter collision fix.
+///
+/// Önceki `{ source_tag: u8 }` tasarımında `None → 0` ve `Some(TreeSitter) → 0`
+/// (TreeSitter=0) aynı byte dizisini üretiyordu. Bu enum ayrımı çakışmayı ortadan
+/// kaldırır: `Any` ve `Exact(src)` farklı canonical encoding'e sahiptir.
+///
+/// Encoding: `Any → [0]`, `Exact(src) → [1, src_tag]`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum EffectiveSourceRequirement {
+    /// Herhangi bir source kabul edilir (required_source = None).
+    Any,
+    /// Belirli bir source zorunlu (INV-T4 — placeholder ölçümle task kapatma engeli).
+    Exact(crate::canonical_tags::CanonicalMetricSourceTag),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -379,21 +483,36 @@ impl MeasurementInputDigest {
 // PredicateEvaluationBasis (reviewer P0-1 — mutation decision girdileri)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Mutation decision'ı üreten girdiler (reviewer P0-1).
+/// **reviewer P1-2 (P0):** Mutation decision'ı üreten gerçek PredicateGate girdileri.
 ///
-/// `AcceptAsProgress` kararı target vector, loss_before/after, failure policy,
-/// allow_progress_checkpoint, tolerance'dan etkilenir. Bunlar basis'e bağlanmazsa
-/// aynı claim + aynı predicate farklı task policy altında farklı mutation decision
-/// üretebilir ama authorization basis bunu açıklayamaz.
+/// Teyif edilen uyumsuzluklar düzeltildi:
+/// - `target_vector`: doğrudan `input.target` (preferred_vector DEĞİL — evaluator input.target kullanır)
+/// - `min_improvement_delta`: gerçek `is_improved_loss` girdisi (önceki basis taşımıyordu)
+/// - `tolerance` (max_axis_regression yanlış adla) KALDIRILDI — evaluator kullanmıyor
+/// - `improvement_policy`: mevcut sabit 0.85/0.15 threshold'ları explicit taşınır
+///
+/// Bu basis olmadan aynı claim + aynı predicate farklı task policy altında farklı mutation
+/// decision üretebilir ama authorization basis bunu açıklayamaz.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PredicateEvaluationBasis {
+    /// Gerçek evaluator target'ı — `input.target` (preferred_vector DEĞİL).
     pub target_vector: CanonicalRawPosition,
     pub loss_before: CanonicalF64,
     pub loss_after: CanonicalF64,
     pub failure_policy: PredicateFailurePolicyTag,
+    /// Gerçek `is_improved_loss` girdisi: `loss_after < loss_before - min_improvement_delta`.
+    pub min_improvement_delta: CanonicalF64,
     pub allow_progress_checkpoint: bool,
-    pub tolerance: CanonicalF64,
+    /// Explicit improvement thresholds (mevcut sabit 0.85/0.15 semantiği).
+    pub improvement_policy: EffectiveImprovementPolicy,
 }
+
+/// **reviewer P0-1:** Effective improvement policy — `trajectory` layer'ında tek source
+/// of truth. `PredicateGate::evaluate` onu üretir, `PredicateGateOutput` ile döndürür,
+/// engine authorization basis'e taşır (basis builder yeniden üretmez).
+///
+/// Detaylı dokümantasyon ve `current_semantics()` impl'i: [`crate::trajectory::EffectiveImprovementPolicy`].
+pub use crate::trajectory::{EffectiveImprovementPolicy, IMPROVEMENT_SEMANTICS_VERSION};
 
 /// Canonical raw position — 5-axis, NaN reject, -0.0 normalize.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -717,12 +836,29 @@ pub struct AuthorizationBasis {
     pub base_space_view_revision: SpaceViewRevision,
 }
 
-/// Measured result + provenance (MetricSource dahil — INV-T4).
+/// **reviewer P0-1 (bloklayıcı):** Tek eksen ölçümü — value + source.
+///
+/// INV-T4 kararının evidence basis'i için her eksenin provenance'ı ayrı bağlanır.
+/// Önceki tasarım yalnız coupling source'unu kaydediyordu; iki ölçüm aynı coupling
+/// source ama farklı entropy source ile aynı basis'i üretebiliyordu.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalAxisMeasurement {
+    pub value: CanonicalF64,
+    pub source: crate::canonical_tags::CanonicalMetricSourceTag,
+}
+
+/// Measured result — 5 eksenin her biri value + source (INV-T4 per-axis provenance).
+///
+/// INV-T4 source-requirement kararının evidence basis'i tamamlanır: bir predicate
+/// entropy eksenini hedefliyorsa ve required_source = Scip ise, measured.entropy.source
+/// basis'e bağlıdır — placeholder source ile task kapatma engeli reconstructible.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProvenancedMeasuredResult {
-    pub raw: RawPosition,
-    /// Metric source — "scip" | "treesitter" | "placeholder" | "heuristic".
-    pub metric_source: String,
+    pub coupling: CanonicalAxisMeasurement,
+    pub cohesion: CanonicalAxisMeasurement,
+    pub instability: CanonicalAxisMeasurement,
+    pub entropy: CanonicalAxisMeasurement,
+    pub witness_depth: CanonicalAxisMeasurement,
 }
 
 /// BLAKE3 tabanlı authorization basis digest.
@@ -814,24 +950,37 @@ impl AuthorizationBasisDigest {
             basis.predicate_evaluation.failure_policy,
             "failure_policy",
         );
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.min_improvement_delta,
+            "min_improvement_delta",
+        )?;
         encode_u8(
             &mut hasher,
             basis.predicate_evaluation.allow_progress_checkpoint as u8,
             "allow_progress",
         );
-        encode_f64(
-            &mut hasher,
-            basis.predicate_evaluation.tolerance,
-            "eval_tolerance",
-        )?;
+        // Effective improvement policy — explicit thresholds (mevcut sabit 0.85/0.15).
+        let ip = &basis.predicate_evaluation.improvement_policy;
+        encode_f64(&mut hasher, ip.max_coupling, "max_coupling")?;
+        encode_f64(&mut hasher, ip.max_instability, "max_instability")?;
+        encode_f64(&mut hasher, ip.min_cohesion, "min_cohesion")?;
+        encode_u32(&mut hasher, ip.semantics_version, "improvement_semver");
 
-        // Measured result.
-        encode_f64(&mut hasher, basis.measured_result.raw.x, "measured_x")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.y, "measured_y")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.z, "measured_z")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.w, "measured_w")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.v, "measured_v")?;
-        encode_bytes(&mut hasher, basis.measured_result.metric_source.as_bytes())?;
+        // Measured result — 5 eksen value + source (INV-T4 per-axis provenance).
+        encode_axis_measurement(&mut hasher, &basis.measured_result.coupling, "coupling")?;
+        encode_axis_measurement(&mut hasher, &basis.measured_result.cohesion, "cohesion")?;
+        encode_axis_measurement(
+            &mut hasher,
+            &basis.measured_result.instability,
+            "instability",
+        )?;
+        encode_axis_measurement(&mut hasher, &basis.measured_result.entropy, "entropy")?;
+        encode_axis_measurement(
+            &mut hasher,
+            &basis.measured_result.witness_depth,
+            "witness_depth",
+        )?;
 
         // Outcome tags.
         encode_u8(
@@ -1033,6 +1182,17 @@ fn encode_optional_f64(
     }
 }
 
+/// **reviewer P0-1:** Per-axis measurement encoder — value + source tag.
+fn encode_axis_measurement(
+    hasher: &mut blake3::Hasher,
+    m: &CanonicalAxisMeasurement,
+    field: &str,
+) -> Result<(), AuthorizationBasisDigestError> {
+    encode_f64(hasher, m.value, field)?;
+    encode_tag(hasher, m.source, field);
+    Ok(())
+}
+
 fn encode_canonical_node(
     hasher: &mut blake3::Hasher,
     node: &CanonicalNode,
@@ -1073,12 +1233,24 @@ fn encode_effective_predicate_to_vec(
     push_tag(&mut buf, pred.axis);
     push_tag(&mut buf, pred.operator);
     push_f64(&mut buf, pred.threshold)?;
-    push_u8(&mut buf, pred.scope.scope_tag);
-    push_bytes(&mut buf, &pred.scope.identity_bytes);
-    push_u8(&mut buf, pred.required_source.source_tag);
+    push_u8(&mut buf, pred.scope.scope_tag());
+    push_bytes(&mut buf, &pred.scope.identity_bytes());
+    push_effective_source(&mut buf, &pred.required_source);
     push_f64(&mut buf, pred.effective_weight)?;
     push_f64(&mut buf, pred.effective_tolerance)?;
     Ok(buf)
+}
+
+/// **reviewer P1-1b (P0):** EffectiveSourceRequirement canonical encoding.
+/// `Any → [0]`, `Exact(src) → [1, src_tag]` — None/TreeSitter collision fix.
+fn push_effective_source(buf: &mut Vec<u8>, req: &EffectiveSourceRequirement) {
+    match req {
+        EffectiveSourceRequirement::Any => push_u8(buf, 0),
+        EffectiveSourceRequirement::Exact(src) => {
+            push_u8(buf, 1);
+            push_tag(buf, *src);
+        }
+    }
 }
 
 /// Predicate set'i canonical byte dizilerine çevirip sıralayıp hash'e length-prefix
@@ -1217,6 +1389,17 @@ pub enum CanonicalizationError {
     CrossListEdgeConflict,
     #[error("non-finite node field (mass or cohesion) for node id {0}")]
     NonFiniteNodeField(u64),
+    /// **reviewer P1-1:** deserialize sırasında geçersiz canonical tag (örn 255).
+    /// Diskten yüklenen artifact valide edilmeden kullanılamaz.
+    #[error("invalid canonical tag for {type_name}: {tag}")]
+    InvalidCanonicalTag { type_name: &'static str, tag: u8 },
+    /// **reviewer P0-2:** duplicate axis/rule identifier.
+    #[error("duplicate identifier {0}")]
+    DuplicateIdentifier(String),
+    /// **reviewer P1-1:** duplicate node id in subgraph scope (canonical invariant).
+    /// `[1,1,2]` iki ayrı canonical representation doğurur; reddedilir.
+    #[error("duplicate scope node {0} in subgraph predicate scope")]
+    DuplicateScopeNode(u64),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1769,17 +1952,25 @@ mod tests {
                 )
                 .unwrap(),
                 allow_progress_checkpoint: false,
-                tolerance: 0.02,
+                min_improvement_delta: 0.1,
+                improvement_policy: EffectiveImprovementPolicy::current_semantics(),
             },
-            measured_result: ProvenancedMeasuredResult {
-                raw: RawPosition {
-                    x: 0.5,
-                    y: 0.6,
-                    z: 0.4,
-                    w: 0.5,
-                    v: 0.3,
-                },
-                metric_source: "scip".to_string(),
+            measured_result: {
+                let scip = crate::canonical_tags::CanonicalMetricSourceTag::try_from(
+                    &crate::coords::MetricSource::Scip,
+                )
+                .unwrap();
+                let mk = |v: f64| CanonicalAxisMeasurement {
+                    value: v,
+                    source: scip,
+                };
+                ProvenancedMeasuredResult {
+                    coupling: mk(0.5),
+                    cohesion: mk(0.6),
+                    instability: mk(0.4),
+                    entropy: mk(0.5),
+                    witness_depth: mk(0.3),
+                }
             },
             deterministic_gate_result: GateDecision::PassedAll,
             predicate_completion: PredicateCompletion::Completed,
@@ -1843,11 +2034,8 @@ mod tests {
                     .unwrap(),
                 operator: ComparisonOpTag::try_from(&crate::trajectory::ComparisonOp::Lt).unwrap(),
                 threshold: 0.6,
-                scope: CanonicalPredicateScope {
-                    scope_tag: 0,
-                    identity_bytes: vec![],
-                },
-                required_source: EffectiveSourceRequirement { source_tag: 0 },
+                scope: CanonicalPredicateScope::Node(0),
+                required_source: EffectiveSourceRequirement::Any,
                 effective_weight: 1.0,
                 effective_tolerance: 0.0,
             });
@@ -1893,9 +2081,170 @@ mod tests {
     fn authorization_basis_digest_rejects_nan_in_measured_result() {
         let basis = sample_basis();
         let mut basis2 = basis.clone();
-        basis2.measured_result.raw.x = f64::NAN;
+        basis2.measured_result.coupling.value = f64::NAN;
         let err = AuthorizationBasisDigest::compute(&basis2).unwrap_err();
         assert_eq!(err, AuthorizationBasisDigestError::NonFiniteRejected);
+    }
+
+    // **reviewer P0-1 (per-axis non-finite):** 5 eksenin HER BİRİ NaN/±Infinity
+    // reddetmeli — bir eksen predicate tarafından kullanılmıyor olsa bile basis'in
+    // parçasıysa non-finite geçmemeli. Fixed axis sırası: coupling, cohesion,
+    // instability, entropy, witness_depth.
+    fn set_axis(basis: &mut AuthorizationBasis, axis: &str, v: f64) {
+        match axis {
+            "coupling" => basis.measured_result.coupling.value = v,
+            "cohesion" => basis.measured_result.cohesion.value = v,
+            "instability" => basis.measured_result.instability.value = v,
+            "entropy" => basis.measured_result.entropy.value = v,
+            "witness_depth" => basis.measured_result.witness_depth.value = v,
+            _ => unreachable!("unknown axis {axis}"),
+        }
+    }
+
+    #[test]
+    fn measured_result_rejects_non_finite_value_on_every_axis() {
+        for axis in [
+            "coupling",
+            "cohesion",
+            "instability",
+            "entropy",
+            "witness_depth",
+        ] {
+            for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let mut basis = sample_basis();
+                set_axis(&mut basis, axis, non_finite);
+                let err = AuthorizationBasisDigest::compute(&basis).unwrap_err();
+                assert_eq!(
+                    err,
+                    AuthorizationBasisDigestError::NonFiniteRejected,
+                    "axis {axis} with {non_finite} must be rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn authorization_basis_normalizes_negative_zero_on_every_axis() {
+        // **reviewer P0-1:** 5 eksenin HER BİRİ -0.0 ve +0.0'ı aynı digest'e normalize etmeli.
+        for axis in [
+            "coupling",
+            "cohesion",
+            "instability",
+            "entropy",
+            "witness_depth",
+        ] {
+            let mut basis_pos = sample_basis();
+            set_axis(&mut basis_pos, axis, 0.0f64);
+            let mut basis_neg = sample_basis();
+            set_axis(&mut basis_neg, axis, -0.0f64);
+            let d_pos = AuthorizationBasisDigest::compute(&basis_pos).unwrap();
+            let d_neg = AuthorizationBasisDigest::compute(&basis_neg).unwrap();
+            assert_eq!(
+                d_pos, d_neg,
+                "axis {axis}: -0.0 and +0.0 must normalize to same digest"
+            );
+        }
+    }
+
+    #[test]
+    fn authorization_basis_changes_when_only_entropy_source_changes() {
+        // **reviewer P0-1 (per-axis provenance):** yalnızca entropy ekseninin source'u
+        // değişince basis digest değişmeli — INV-T4 source-requirement evidence basis.
+        let scip = crate::canonical_tags::CanonicalMetricSourceTag::try_from(
+            &crate::coords::MetricSource::Scip,
+        )
+        .unwrap();
+        let treesitter = crate::canonical_tags::CanonicalMetricSourceTag::try_from(
+            &crate::coords::MetricSource::TreeSitter,
+        )
+        .unwrap();
+        let basis1 = sample_basis();
+        let mut basis2 = basis1.clone();
+        // measured.entropy.source Scip → TreeSitter (value sabit).
+        basis2.measured_result.entropy.source = treesitter;
+        // sample_basis tüm eksenleri Scip ile kuruyor; basis1 ile karşılaştır.
+        assert_ne!(scip, treesitter, "test fixture: sources must differ");
+        let d1 = AuthorizationBasisDigest::compute(&basis1).unwrap();
+        let d2 = AuthorizationBasisDigest::compute(&basis2).unwrap();
+        assert_ne!(d1, d2, "entropy source change must change digest");
+    }
+
+    #[test]
+    fn authorization_basis_changes_when_only_witness_depth_source_changes() {
+        // **reviewer P0-1 (per-axis provenance):** yalnızca witness_depth ekseninin
+        // source'u değişince basis digest değişmeli.
+        let treesitter = crate::canonical_tags::CanonicalMetricSourceTag::try_from(
+            &crate::coords::MetricSource::TreeSitter,
+        )
+        .unwrap();
+        let heuristic = crate::canonical_tags::CanonicalMetricSourceTag::try_from(
+            &crate::coords::MetricSource::Heuristic,
+        )
+        .unwrap();
+        let mut basis1 = sample_basis();
+        let mut basis2 = sample_basis();
+        basis1.measured_result.witness_depth.source = treesitter;
+        basis2.measured_result.witness_depth.source = heuristic;
+        let d1 = AuthorizationBasisDigest::compute(&basis1).unwrap();
+        let d2 = AuthorizationBasisDigest::compute(&basis2).unwrap();
+        assert_ne!(d1, d2, "witness_depth source change must change digest");
+    }
+
+    #[test]
+    fn canonical_subgraph_scope_rejects_duplicate_node() {
+        // **reviewer P1-1:** [1,1,2] → Err(DuplicateScopeNode(1)).
+        let err = CanonicalSubgraphScope::try_new(vec![1, 1, 2]).unwrap_err();
+        assert_eq!(err, CanonicalizationError::DuplicateScopeNode(1));
+    }
+
+    #[test]
+    fn canonical_subgraph_scope_normalizes_order() {
+        // **reviewer P1-1:** constructor sort eder — [3,1,2] → [1,2,3].
+        let s = CanonicalSubgraphScope::try_new(vec![3, 1, 2]).unwrap();
+        assert_eq!(s.as_sorted_ids(), &[1, 2, 3]);
+    }
+
+    #[test]
+    fn canonical_scope_deserialization_rejects_duplicate_subgraph_node() {
+        // **reviewer P1-1:** diskten [1,1,2] yüklenemez — custom Deserialize try_new üzerinden.
+        let json = serde_json::to_string(&vec![1u64, 1, 2]).unwrap();
+        let err = serde_json::from_str::<CanonicalSubgraphScope>(&json).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate scope node"),
+            "deserialize must reject duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_subgraph_has_one_canonical_representation() {
+        // **reviewer P1-2:** empty subgraph geçerli, tek canonical rep.
+        let empty_a = CanonicalSubgraphScope::try_new(vec![]).unwrap();
+        let empty_b = CanonicalSubgraphScope::try_new(vec![]).unwrap();
+        assert_eq!(empty_a, empty_b, "two empty subgraphs must be equal");
+        assert!(empty_a.as_sorted_ids().is_empty());
+
+        // Boş ile dolu farklı scope'lar.
+        let non_empty = CanonicalSubgraphScope::try_new(vec![5]).unwrap();
+        assert_ne!(
+            CanonicalPredicateScope::Subgraph(empty_a),
+            CanonicalPredicateScope::Subgraph(non_empty),
+            "empty vs non-empty subgraph must differ"
+        );
+    }
+
+    #[test]
+    fn subgraph_identity_bytes_sorted_and_unique() {
+        // **reviewer P1-1:** identity_bytes canonical (sorted) sıra encode eder —
+        // tekrar sort ETMEZ (invariant type seviyesinde korundu).
+        let s = CanonicalSubgraphScope::try_new(vec![3, 1, 2]).unwrap();
+        let scope = CanonicalPredicateScope::Subgraph(s);
+        let bytes = scope.identity_bytes();
+        // [1,2,3] sorted → LE bytes concat.
+        let mut expected = Vec::new();
+        for id in [1u64, 2, 3] {
+            expected.extend_from_slice(&id.to_le_bytes());
+        }
+        assert_eq!(bytes, expected);
     }
 
     #[test]
@@ -1903,13 +2252,13 @@ mod tests {
         // -0.0 ve +0.0 aynı digest vermeli (canonical normalization).
         let basis_pos = sample_basis();
         let mut basis_neg = basis_pos.clone();
-        basis_neg.measured_result.raw.x = -0.0f64;
+        basis_neg.measured_result.coupling.value = -0.0f64;
         // basis_pos.x = 0.5, basis_neg.x = -0.0 → farklı. İkisini de 0.0 yap.
         let mut basis_zero = basis_pos.clone();
-        basis_zero.measured_result.raw.x = 0.0f64;
+        basis_zero.measured_result.coupling.value = 0.0f64;
 
         let mut basis_neg_zero = basis_pos.clone();
-        basis_neg_zero.measured_result.raw.x = -0.0f64;
+        basis_neg_zero.measured_result.coupling.value = -0.0f64;
 
         let d1 = AuthorizationBasisDigest::compute(&basis_zero).unwrap();
         let d2 = AuthorizationBasisDigest::compute(&basis_neg_zero).unwrap();
@@ -2322,7 +2671,7 @@ mod tests {
         // **reviewer P0-2a:** ±Infinity reddedilmeli (yalnız NaN değil).
         let basis = sample_basis();
         let mut basis2 = basis.clone();
-        basis2.measured_result.raw.x = f64::INFINITY;
+        basis2.measured_result.coupling.value = f64::INFINITY;
         let err = AuthorizationBasisDigest::compute(&basis2).unwrap_err();
         assert_eq!(err, AuthorizationBasisDigestError::NonFiniteRejected);
     }
@@ -2331,7 +2680,7 @@ mod tests {
     fn authorization_basis_rejects_negative_infinity() {
         let basis = sample_basis();
         let mut basis2 = basis.clone();
-        basis2.measured_result.raw.y = f64::NEG_INFINITY;
+        basis2.measured_result.cohesion.value = f64::NEG_INFINITY;
         let err = AuthorizationBasisDigest::compute(&basis2).unwrap_err();
         assert_eq!(err, AuthorizationBasisDigestError::NonFiniteRejected);
     }
@@ -2349,11 +2698,8 @@ mod tests {
                     .unwrap(),
                 operator: ComparisonOpTag::try_from(&crate::trajectory::ComparisonOp::Lt).unwrap(),
                 threshold: -0.0f64, // negative zero
-                scope: CanonicalPredicateScope {
-                    scope_tag: 0,
-                    identity_bytes: vec![],
-                },
-                required_source: EffectiveSourceRequirement { source_tag: 0 },
+                scope: CanonicalPredicateScope::Node(0),
+                required_source: EffectiveSourceRequirement::Any,
                 effective_weight: 1.0,
                 effective_tolerance: 0.0,
             });
@@ -2366,11 +2712,8 @@ mod tests {
                     .unwrap(),
                 operator: ComparisonOpTag::try_from(&crate::trajectory::ComparisonOp::Lt).unwrap(),
                 threshold: 0.0f64, // positive zero
-                scope: CanonicalPredicateScope {
-                    scope_tag: 0,
-                    identity_bytes: vec![],
-                },
-                required_source: EffectiveSourceRequirement { source_tag: 0 },
+                scope: CanonicalPredicateScope::Node(0),
+                required_source: EffectiveSourceRequirement::Any,
                 effective_weight: 1.0,
                 effective_tolerance: 0.0,
             });
