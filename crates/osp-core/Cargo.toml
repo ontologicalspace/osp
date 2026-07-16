@@ -20,6 +20,9 @@ unicode-normalization = "0.1"  # Faz 5.1: normalize_for_axis_match gerçek NFC (
 # INV-T9: authorization basis digest — cryptographic, collision-resistant, domain-separated.
 # evidence integrity için FNV-1a yetersiz; BLAKE3 hızlı + güvenli.
 blake3 = "1"
+# INV-T9: PersistedSpaceViewId için operating-system CSPRNG. Transitive (tempfile) yoluyla
+# zaten 0.4.3 mevcut; runtime sözleşmesi olarak doğrudan bağlanır. Fail-closed — fallback yok.
+getrandom = "0.4.3"
 
 # INV-T9: parent-directory fsync (crash consistency) — Unix-only.
 [target.'cfg(unix)'.dependencies]

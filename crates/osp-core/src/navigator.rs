@@ -210,6 +210,8 @@ pub fn gate_decision_from_engine_error(err: &crate::engine::EngineCommitError) -
         }
         // Internal = system failure — gate değil.
         EngineCommitError::Internal(_) => GateDecision::Unknown,
+        // AuthorizationContextFailed = system failure (fail-closed) — gate değil.
+        EngineCommitError::AuthorizationContextFailed(_) => GateDecision::Unknown,
     }
 }
 
@@ -396,144 +398,65 @@ impl Default for NavigatorWitnessPolicy {
 }
 
 impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
-    /// **INV-T9** — AuthorizationBasis digest'i navigator verilerinden inşa et.
-    ///
-    /// Engine'in evaluation_context_digest + base_space_view_revision expose ettiği
-    /// metodları kullanır. Structural delta claim'den türetilir (placeholder — P1'de
-    /// tam canonical structural delta engine'den gelir).
-    fn build_authorization_basis_digest(
-        &self,
-        task_id: TaskId,
-        claim_id: ClaimId,
-        claim_author: AgentId,
-        claim: &crate::witness::Claim,
-        measured: &ProvenancedRawPosition,
-        gate_result: crate::trajectory::GateDecision,
-        predicate_completion: crate::trajectory::PredicateCompletion,
-        mutation_decision: crate::trajectory::MutationDecision,
-    ) -> Result<crate::authorization::AuthorizationBasisDigest, String> {
-        use crate::authorization::*;
-
-        let intended_apply_target = mutation_decision.apply_target();
-        let basis = AuthorizationBasis {
-            schema_version: 1,
-            task_id,
-            claim_identity: ClaimIdentity { claim_id, task_id },
-            claim_author,
-            structural_delta: CanonicalStructuralDelta {
-                new_node_ids: claim.delta_nodes.iter().map(|n| n.id).collect(),
-                new_edges: claim
-                    .delta_edges
-                    .iter()
-                    .map(|e| (e.from, e.to, format!("{:?}", e.kind)))
-                    .collect(),
-                removed_edges: claim
-                    .removed_edges
-                    .iter()
-                    .map(|e| (e.from, e.to, format!("{:?}", e.kind)))
-                    .collect(),
-            },
-            predicate_content: CanonicalPredicateContent {
-                predicate_bytes: b"placeholder-predicate-content".to_vec(),
-            },
-            measured_result: ProvenancedMeasuredResult {
-                raw: measured.to_raw(),
-                metric_source: "scip".to_string(),
-            },
-            deterministic_gate_result: gate_result,
-            predicate_completion,
-            mutation_decision,
-            intended_apply_target,
-            evaluation_context_digest: self.engine.current_evaluation_context_digest(),
-            base_space_view_revision: self.engine.current_space_view_revision(),
-        };
-        AuthorizationBasisDigest::compute(&basis).map_err(|e| e.to_string())
-    }
-
-    /// **INV-T9** — Held durumunda pending authorization oluştur, persist, AwaitingWitnesses dön.
+    /// **INV-T9 (reviewer P0-4)** — Held durumunda pending authorization oluştur, persist,
+    /// AwaitingWitnesses dön. Engine-owned `AuthorizationContext` kullanılır — navigator
+    /// basis'i yeniden ÜRETMEZ, fail-open fallback YOK.
     ///
     /// P1-1 persist-before-return: store.persist() başarısız olursa AwaitingWitnesses DÖNMEZ.
     /// PendingAuthorizationPersistenceFailure döner (çökme penceresi yok).
-    #[allow(clippy::too_many_arguments)]
+    ///
+    /// **plan-review #2 (D3):** Ephemeral identity + CrossProcess store → SystemFailure.
+    /// Production CLI yalnız Persisted + Filesystem kabul eder; Commit 1'de engine hala
+    /// Ephemeral üretir, bu yüzden ProcessLocal store (test) ile çalışır.
     fn suspend_for_witness(
         &mut self,
-        task_id: TaskId,
-        claim_id: ClaimId,
-        claim: &crate::witness::Claim,
-        measured: &ProvenancedRawPosition,
+        authorization: crate::authorization::AuthorizationContext,
         hold_reason: crate::witness::WitnessHoldReason,
         witness_snapshot: crate::witness::WitnessQuorumSnapshot,
         attempt_evidence_id: u64,
-        outcome: crate::trajectory::AttemptOutcome,
-        _token_cost: TokenCost,
     ) -> NavigatorResult {
-        use crate::authorization::*;
+        use crate::authorization::{
+            AuthorizationBasisDigest, PendingAuthorization, PendingAuthorizationEnvelope,
+            SpaceViewId, SuspensionDurability,
+        };
 
-        let basis_digest = match self.build_authorization_basis_digest(
-            task_id,
-            claim_id,
-            claim.author,
-            claim,
-            measured,
-            outcome.gate_decision,
-            outcome.predicate_completion,
-            outcome.mutation_decision,
+        // D3 — durability enforcement: Ephemeral + CrossProcess → fail-closed.
+        if matches!(
+            &authorization.basis.base_space_view_revision.view_id,
+            SpaceViewId::Ephemeral(_)
+        ) && matches!(
+            self.pending_authorization_store.durability(),
+            SuspensionDurability::CrossProcess
         ) {
+            return NavigatorResult::SystemFailure(
+                "cross-process suspension requires persisted space identity (ephemeral identity cannot survive process restart)"
+                    .into(),
+            );
+        }
+
+        // Basis digest — tek kaynak. Engine'in basis'inden hesaplanır, sıfır digest YOK.
+        let basis_digest = match AuthorizationBasisDigest::compute(&authorization.basis) {
             Ok(d) => d,
-            Err(msg) => return NavigatorResult::SystemFailure(msg),
+            Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
         };
 
         let pending = PendingAuthorization {
-            task_id,
-            claim_id,
-            predicate_completion: outcome.predicate_completion,
-            mutation_decision: outcome.mutation_decision,
-            intended_apply_target: outcome.mutation_decision.apply_target(),
-            authorization_basis_digest: basis_digest.clone(),
-            base_space_view_revision: self.engine.current_space_view_revision(),
-            evaluation_context_digest: self.engine.current_evaluation_context_digest(),
-            witness_requirement: WitnessRequirement {
-                min_approvers: 2,
-                quorum_threshold: 1.5,
-            },
+            task_id: authorization.basis.task_id,
+            claim_id: authorization.basis.claim_identity.claim_id,
+            predicate_completion: authorization.outcome.predicate_completion,
+            mutation_decision: authorization.outcome.mutation_decision,
+            intended_apply_target: authorization.apply_target,
+            authorization_basis_digest: basis_digest,
+            base_space_view_revision: authorization.basis.base_space_view_revision.clone(),
+            evaluation_context_digest: authorization.basis.evaluation_context_digest.clone(),
+            witness_requirement: authorization.witness_requirement,
             witness_hold_reason: hold_reason,
             witness_snapshot,
             attempt_evidence_id,
             created_at: self.clock.unix_seconds(),
         };
 
-        // Engine authorization basis'i de envelope'a göm (Sabitleme 3 — self-contained).
-        // Şimdilik basis'i pending'den reconstruct edemiyoruz (digest tek yönlü);
-        // P1'de engine full AuthorizationBasis expose edecek. Şimdilik digest-only envelope.
-        // Bu, envelope.verify()'nin basis mismatch üretmesini engellemek için digest'i
-        // envelope içine de koymamız gerektiği anlamına gelir — PendingAuthorizationEnvelope::new
-        // basis ister. Geçici: minimal basis construct et.
-        let basis = AuthorizationBasis {
-            schema_version: 1,
-            task_id,
-            claim_identity: ClaimIdentity { claim_id, task_id },
-            claim_author: claim.author,
-            structural_delta: CanonicalStructuralDelta {
-                new_node_ids: claim.delta_nodes.iter().map(|n| n.id).collect(),
-                new_edges: vec![],
-                removed_edges: vec![],
-            },
-            predicate_content: CanonicalPredicateContent {
-                predicate_bytes: b"placeholder".to_vec(),
-            },
-            measured_result: ProvenancedMeasuredResult {
-                raw: measured.to_raw(),
-                metric_source: "scip".to_string(),
-            },
-            deterministic_gate_result: outcome.gate_decision,
-            predicate_completion: outcome.predicate_completion,
-            mutation_decision: outcome.mutation_decision,
-            intended_apply_target: outcome.mutation_decision.apply_target(),
-            evaluation_context_digest: self.engine.current_evaluation_context_digest(),
-            base_space_view_revision: self.engine.current_space_view_revision(),
-        };
-
-        let envelope = match PendingAuthorizationEnvelope::new(pending.clone(), basis) {
+        let envelope = match PendingAuthorizationEnvelope::new(pending, authorization.basis) {
             Ok(env) => env,
             Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
         };
@@ -823,50 +746,40 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     loss_before,
                     measured: measured.clone(),
                 }) {
-                Ok(crate::engine::EngineCommitResult::Evaluated(result)) => result,
-                Ok(crate::engine::EngineCommitResult::Held { reason, snapshot }) => {
-                    // **INV-T9** — expected authorization bekleme. Agent retry DEĞİL.
-                    // Budget tüketmez (continue YOK), LLM reinvocation YOK.
-                    // P1-1: AuthorizationBasis oluştur → Envelope persist → receipt → AwaitingWitnesses.
-                    let outcome_for_basis = crate::trajectory::AttemptOutcome {
-                        gate_decision: crate::trajectory::GateDecision::PassedAll,
-                        predicate_completion: crate::trajectory::PredicateCompletion::Completed,
-                        mutation_decision: crate::trajectory::MutationDecision::AcceptAsCompleted,
-                        witness_status: None,
-                    };
+                Ok(crate::engine::EngineCommitResult::Evaluated { result, .. }) => result,
+                Ok(crate::engine::EngineCommitResult::Held {
+                    authorization,
+                    reason,
+                    snapshot,
+                }) => {
+                    // **INV-T9 (reviewer P0-4)** — expected authorization bekleme. Agent
+                    // retry DEĞİL. Budget tüketmez (continue YOK), LLM reinvocation YOK.
+                    // Engine-owned AuthorizationContext kullanılır — placeholder YOK.
                     return self.suspend_for_witness(
-                        task_id,
-                        claim.id,
-                        &claim,
-                        &measured,
+                        authorization,
                         reason,
                         snapshot,
                         attempt_num as u64,
-                        outcome_for_basis,
-                        token_cost,
                     );
                 }
-                Ok(crate::engine::EngineCommitResult::Rejected { reasons, snapshot }) => {
+                Ok(crate::engine::EngineCommitResult::Rejected {
+                    authorization,
+                    reasons,
+                    snapshot,
+                }) => {
                     // Explicit witness rejection — RequiresRevision (agent revises proposal).
                     // Budget tüketmez, LLM reinvocation YOK. Evidence-preserving.
-                    let basis_digest = self.build_authorization_basis_digest(
-                        task_id,
-                        claim.id,
-                        claim.author,
-                        &claim,
-                        &measured,
-                        crate::trajectory::GateDecision::PassedAll,
-                        crate::trajectory::PredicateCompletion::Completed,
-                        crate::trajectory::MutationDecision::AcceptAsCompleted,
-                    );
-                    let basis_digest = match basis_digest {
+                    // Engine-owned AuthorizationContext kullanılır — placeholder YOK.
+                    let basis_digest = match crate::authorization::AuthorizationBasisDigest::compute(
+                        &authorization.basis,
+                    ) {
                         Ok(d) => d,
-                        Err(msg) => return NavigatorResult::SystemFailure(msg),
+                        Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
                     };
                     return NavigatorResult::RequiresRevision(
                         crate::authorization::RevisionRequired {
-                            task_id,
-                            claim_id: claim.id,
+                            task_id: authorization.basis.task_id,
+                            claim_id: authorization.basis.claim_identity.claim_id,
                             authorization_basis_digest: basis_digest,
                             reasons,
                             witness_snapshot: snapshot,
@@ -935,6 +848,11 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                             return NavigatorResult::SystemFailure(
                                 "engine system failure (persistence/internal)".to_string(),
                             );
+                        }
+                        // AuthorizationContextFailed = fail-closed system failure —
+                        // basis üretilemedi, sıfır digest'e düşülmedi, terminal.
+                        EngineCommitError::AuthorizationContextFailed(msg) => {
+                            return NavigatorResult::SystemFailure(msg);
                         }
                     }
                 }
@@ -1165,7 +1083,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let result = nav.run_task(999, 7);
@@ -1206,7 +1126,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let result = nav.run_task(1, 7);
@@ -1250,7 +1172,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let _ = nav.run_task(1, 7);
@@ -1296,7 +1220,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let result = nav.run_task(1, 7);
@@ -1348,7 +1274,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let result = nav.run_task(1, 7);
@@ -1460,7 +1388,7 @@ mod tests {
         // Q5.b çalıştı — Reject (witness yok) veya Ok (predicate reject NotApplied).
         // İkisi de Q5.b'nin çalıştığını gösterir. Witness boş → INV-T9 Held beklenir.
         match result {
-            Ok(crate::engine::EngineCommitResult::Evaluated(r)) => {
+            Ok(crate::engine::EngineCommitResult::Evaluated { result: r, .. }) => {
                 assert!(
                     r.outcome.predicate_completion == PredicateCompletion::Completed
                         || r.outcome.predicate_completion == PredicateCompletion::NotCompleted
@@ -1612,7 +1540,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let result = nav.run_task(1, 7);
@@ -1663,7 +1593,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let _ = nav.run_task(1, 7);
@@ -1704,7 +1636,9 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let _ = nav.run_task(1, 7);
@@ -1841,7 +1775,9 @@ mod tests {
             current_measured: measured_pos(0.5),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
         let _ = nav.run_task(1, 7);
@@ -2044,7 +1980,9 @@ mod tests {
             output_contract: OutputContract::strict(),
             // G2c-3: harness auto-approve (controlled experiment — production değil).
             witness_policy: NavigatorWitnessPolicy::HarnessAutoApprove,
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         }
     }
@@ -2172,7 +2110,9 @@ mod tests {
             output_contract: OutputContract::strict(),
             // Production witness policy — boş set → Held (INV-T9).
             witness_policy: NavigatorWitnessPolicy::Production,
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
 
@@ -2252,7 +2192,9 @@ mod tests {
             current_measured: measured_pos(0.80),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::Production,
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
 
@@ -2310,7 +2252,9 @@ mod tests {
             current_measured: measured_pos(0.80),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::Production,
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
 
@@ -2376,7 +2320,9 @@ mod tests {
             current_measured: measured_pos(0.5),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::HarnessAutoApprove, // witness'i bypass et
-            pending_authorization_store: Box::new(crate::authorization::NullPendingAuthorizationStore),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
         };
 
@@ -2456,7 +2402,10 @@ mod tests {
 
         // INV-T9 exact assertions — sadece AwaitingWitnesses kabul (diğerleri panic).
         match result {
-            NavigatorResult::AwaitingWitnesses { pending, persistence } => {
+            NavigatorResult::AwaitingWitnesses {
+                pending,
+                persistence,
+            } => {
                 // Exact: LLM sadece proposal üretimi için çağrıldı (1-3 kez).
                 // Held terminal olduğu için witness bekleme için tekrar çağrılmaz.
                 let calls = mock.call_count();

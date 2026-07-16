@@ -661,7 +661,10 @@ fn serialize_navigator_result(result: &osp_core::navigator::NavigatorResult) -> 
             "last_mutation_decision": format!("{:?}", last_outcome.mutation_decision),
             "last_predicate_completion": format!("{:?}", last_outcome.predicate_completion),
         }),
-        NavigatorResult::AwaitingWitnesses { pending, persistence } => serde_json::json!({
+        NavigatorResult::AwaitingWitnesses {
+            pending,
+            persistence,
+        } => serde_json::json!({
             "outcome": "AwaitingWitnesses",
             "task_id": pending.task_id,
             "claim_id": pending.claim_id,
@@ -679,12 +682,14 @@ fn serialize_navigator_result(result: &osp_core::navigator::NavigatorResult) -> 
             "commit_state": "rejected_by_witness",
             "next_action": "requires_revision",
         }),
-        NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => serde_json::json!({
-            "outcome": "PendingAuthorizationPersistenceFailure",
-            "task_id": pending.task_id,
-            "claim_id": pending.claim_id,
-            "error": error.to_string(),
-        }),
+        NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
+            serde_json::json!({
+                "outcome": "PendingAuthorizationPersistenceFailure",
+                "task_id": pending.task_id,
+                "claim_id": pending.claim_id,
+                "error": error.to_string(),
+            })
+        }
         NavigatorResult::WitnessEvaluationError(msg) => serde_json::json!({
             "outcome": "WitnessEvaluationError",
             "message": msg,
@@ -878,8 +883,10 @@ impl Workspace {
                 loss_before,
                 measured: measured.clone(),
             }) {
-            Ok(osp_core::engine::EngineCommitResult::Evaluated(r)) => r,
-            Ok(osp_core::engine::EngineCommitResult::Held { reason, snapshot }) => {
+            Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,
+            Ok(osp_core::engine::EngineCommitResult::Held {
+                reason, snapshot, ..
+            }) => {
                 // **INV-T9** — expected authorization bekleme. Agent failure DEĞİL.
                 return Ok(serde_json::json!({
                     "commit_result": "Held",
@@ -896,7 +903,9 @@ impl Workspace {
                     "next_action": "await_external_evidence",
                 }));
             }
-            Ok(osp_core::engine::EngineCommitResult::Rejected { reasons, snapshot }) => {
+            Ok(osp_core::engine::EngineCommitResult::Rejected {
+                reasons, snapshot, ..
+            }) => {
                 // Explicit witness rejection — RequiresRevision.
                 let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
                 return Ok(serde_json::json!({

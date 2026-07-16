@@ -222,6 +222,10 @@ pub enum EngineCommitError {
     /// Internal engine hatası — terminal system failure.
     #[error("internal engine error: {0}")]
     Internal(String),
+    /// **INV-T9 (reviewer P0-4):** AuthorizationContext üretilemedi — fail-closed.
+    /// Sıfır digest'e düşüş YOK. Navigator SystemFailure'a map'ler.
+    #[error("authorization context construction failed (fail-closed): {0}")]
+    AuthorizationContextFailed(String),
 }
 
 /// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
@@ -231,19 +235,32 @@ pub enum EngineCommitError {
 /// `Held` = expected authorization bekleme (INV-T9 suspended state). `Rejected` = explicit
 /// witness rejection (non-empty).
 ///
+/// **reviewer P0-4 + plan-review #1:** Held/Rejected artık gerçek engine-owned
+/// `AuthorizationContext` taşır. Navigator basis'i yeniden ÜRETMEZ. `Evaluated`'da
+/// `authorization: Option<AuthorizationContext>` — Reject→NotApplied ve
+/// RequireOperatorApproval terminal'lerde `None` (witness değerlendirilmedi).
+///
 /// Operational fault'lar (Syntax/Vision/Rule/Permission/Persistence/Internal +
 /// InvalidWitnessEvidence) `EngineCommitError`'da kalır.
 #[derive(Debug, Clone)]
 pub enum EngineCommitResult {
     /// Pipeline evaluated — apply_target NotApplied (Reject) veya Lane (Mainline/Checkpoint).
-    Evaluated(TaskCommitResult),
+    /// `authorization`: Satisfied witness varsa `Some` (audit için); Reject→NotApplied'da `None`.
+    Evaluated {
+        result: TaskCommitResult,
+        authorization: Option<crate::authorization::AuthorizationContext>,
+    },
     /// INV-T9 — expected authorization bekleme. Navigator AwaitingWitnesses'ye map'ler.
+    /// Context witness'tan ÖNCE üretildi — navigator direkt kullanır.
     Held {
+        authorization: crate::authorization::AuthorizationContext,
         reason: crate::witness::WitnessHoldReason,
         snapshot: crate::witness::WitnessQuorumSnapshot,
     },
     /// Explicit witness rejection (Q3 honest-reject). Navigator RequiresRevision'a map'ler.
+    /// Context witness'tan ÖNCE üretildi.
     Rejected {
+        authorization: crate::authorization::AuthorizationContext,
         reasons: crate::witness::NonEmptyWitnessRejections,
         snapshot: crate::witness::WitnessQuorumSnapshot,
     },
@@ -482,15 +499,34 @@ impl SpaceEngine {
         }
 
         // Phase 0f: MutationDecision → ApplyTarget kontrolü (INV-T8).
-        // Reject → NotApplied (commit yok, witness yok). Sadece evidence kaydı navigator'da.
+        // Reject → NotApplied (commit yok, witness yok). authorization: None — witness
+        // değerlendirilmedi, mutation uygulanmadı.
         if matches!(apply_target, ApplyTarget::NotApplied) {
-            return Ok(EngineCommitResult::Evaluated(TaskCommitResult {
-                outcome,
-                apply_target,
-                loss_after,
-                witness: None,
-            }));
+            return Ok(EngineCommitResult::Evaluated {
+                result: TaskCommitResult {
+                    outcome,
+                    apply_target,
+                    loss_after,
+                    witness: None,
+                },
+                authorization: None,
+            });
         }
+
+        // **reviewer P0-4 + plan-review #1:** AuthorizationContext tam bir kez üretilir —
+        // bütün deterministik gate'ler (Q4/Q5/Q5.b/Q6) geçtikten sonra, witness
+        // (`time.advance`) çağrısından hemen önce. Satisfied/Held/Rejected aynı context'i
+        // kullanır. witness_requirement gerçek `input.omega`'dan (engine config DEĞİL).
+        let authorization = self
+            .build_authorization_context(
+                &outcome,
+                apply_target,
+                &input,
+                input.loss_before,
+                loss_after,
+                input.omega,
+            )
+            .map_err(EngineCommitError::AuthorizationContextFailed)?;
 
         // Phase 1: Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress/OperatorApproval).
         // apply_delta mutation — mevcut commit() gibi time.advance.
@@ -502,20 +538,225 @@ impl SpaceEngine {
         match disposition {
             WitnessDisposition::Satisfied { .. } => {
                 self.t_c += 1;
-                Ok(EngineCommitResult::Evaluated(TaskCommitResult {
-                    outcome,
-                    apply_target,
-                    loss_after,
-                    witness: Some(disposition),
-                }))
+                Ok(EngineCommitResult::Evaluated {
+                    result: TaskCommitResult {
+                        outcome,
+                        apply_target,
+                        loss_after,
+                        witness: Some(disposition),
+                    },
+                    authorization: Some(authorization),
+                })
             }
-            WitnessDisposition::Held { reason, snapshot } => {
-                Ok(EngineCommitResult::Held { reason, snapshot })
-            }
+            WitnessDisposition::Held { reason, snapshot } => Ok(EngineCommitResult::Held {
+                authorization,
+                reason,
+                snapshot,
+            }),
             WitnessDisposition::Rejected { reasons, snapshot } => {
-                Ok(EngineCommitResult::Rejected { reasons, snapshot })
+                Ok(EngineCommitResult::Rejected {
+                    authorization,
+                    reasons,
+                    snapshot,
+                })
             }
         }
+    }
+
+    /// **reviewer P0-4 + plan-review #1:** Engine-owned AuthorizationContext üretimi.
+    ///
+    /// Witness'tan ÖNCE, bütün deterministik gate'ler geçtikten sonra çağrılır.
+    /// Engine'in elindeki TÜM gerçek verilerden basis inşa eder — navigator placeholder
+    /// DEĞİL. Hata durumunda fail-closed (SystemFailure) — sıfır digest'e düşüş YOK.
+    ///
+    /// **plan-review #1:** `witness_requirement` ve `basis.witness_policy` gerçek
+    /// `input.omega`'dan türetilir (engine config DEĞİL).
+    #[allow(clippy::too_many_arguments)]
+    fn build_authorization_context(
+        &self,
+        outcome: &crate::trajectory::AttemptOutcome,
+        apply_target: crate::trajectory::ApplyTarget,
+        input: &TaskCommitInput<'_>,
+        loss_before: f64,
+        loss_after: f64,
+        omega: &crate::witness::WitnessSet,
+    ) -> Result<crate::authorization::AuthorizationContext, String> {
+        use crate::authorization::{
+            canonicalize_node, AuthorizationBasis, CanonicalAxisNormalization,
+            CanonicalCoordinateConfig, CanonicalEdge, CanonicalEdgeKind, CanonicalF64,
+            CanonicalMetricSourceConfig, CanonicalPredicateContent, CanonicalRawPosition,
+            CanonicalStructuralDelta, CanonicalWitnessPolicy, ClaimAuthor, ClaimIdentity,
+            MeasurementInputContext, MeasurementInputDigest, PredicateEvaluationBasis,
+            ProvenancedMeasuredResult, WitnessRequirement,
+        };
+        use crate::canonical_tags::{PredicateAxisTag, PredicateModeTag};
+        let claim = input.claim;
+        let task_id = claim
+            .task_id
+            .ok_or_else(|| "claim has no task_id for authorization context".to_string())?;
+
+        // Structural delta — claim'in delta_nodes/delta_edges'ından canonical'a çevir.
+        let mut new_nodes: Vec<_> = claim
+            .delta_nodes
+            .iter()
+            .map(canonicalize_node)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        let new_edges: Vec<CanonicalEdge> = claim
+            .delta_edges
+            .iter()
+            .map(|e| {
+                Ok(CanonicalEdge {
+                    from: e.from,
+                    to: e.to,
+                    kind: CanonicalEdgeKind::try_from(&e.kind).map_err(
+                        |err: crate::authorization::CanonicalizationError| err.to_string(),
+                    )?,
+                    is_type_only: e.is_type_only,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let removed_edges: Vec<CanonicalEdge> = claim
+            .removed_edges
+            .iter()
+            .map(|e| {
+                Ok(CanonicalEdge {
+                    from: e.from,
+                    to: e.to,
+                    kind: CanonicalEdgeKind::try_from(&e.kind).map_err(
+                        |err: crate::authorization::CanonicalizationError| err.to_string(),
+                    )?,
+                    is_type_only: false,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let structural_delta = CanonicalStructuralDelta::try_new(
+            std::mem::take(&mut new_nodes),
+            new_edges,
+            removed_edges,
+        )
+        .map_err(|e| e.to_string())?;
+
+        // Predicate content — task'ın predicate set'inden effective predicate'lara.
+        let task = input.task_resolver.resolve(task_id).ok_or_else(|| {
+            format!("task_id {task_id} not found in resolver during authorization context build")
+        })?;
+        let predicate_mode = PredicateModeTag::try_from(&task.target_predicate_set.mode)
+            .map_err(|e| e.to_string())?;
+        let predicates: Vec<crate::authorization::EffectiveMetricPredicate> = task
+            .target_predicate_set
+            .predicates
+            .iter()
+            .map(|wp| {
+                Ok(crate::authorization::EffectiveMetricPredicate {
+                    axis: PredicateAxisTag::try_from(&wp.predicate.metric)
+                        .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?,
+                    operator: crate::canonical_tags::ComparisonOpTag::try_from(
+                        &wp.predicate.operator,
+                    )
+                    .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?,
+                    threshold: wp.predicate.threshold,
+                    scope: canonicalize_scope(&wp.predicate.scope),
+                    required_source: canonicalize_source_req(&wp.predicate.required_source),
+                    effective_weight: wp.weight.unwrap_or(1.0),
+                    effective_tolerance: wp.predicate.tolerance,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        let predicate_content = CanonicalPredicateContent {
+            mode: predicate_mode,
+            predicates,
+        };
+
+        // Predicate evaluation basis — gerçek task policy + loss değerleri.
+        let target_vector = task
+            .target_predicate_set
+            .preferred_vector
+            .unwrap_or(input.target);
+        let predicate_evaluation = PredicateEvaluationBasis {
+            target_vector: CanonicalRawPosition {
+                x: target_vector.x,
+                y: target_vector.y,
+                z: target_vector.z,
+                w: target_vector.w,
+                v: target_vector.v,
+            },
+            loss_before: loss_before as CanonicalF64,
+            loss_after: loss_after as CanonicalF64,
+            failure_policy: crate::canonical_tags::PredicateFailurePolicyTag::try_from(
+                &task.policy.predicate_failure_policy,
+            )
+            .map_err(|e| e.to_string())?,
+            allow_progress_checkpoint: task.policy.allow_progress_checkpoint,
+            tolerance: task.policy.max_axis_regression as CanonicalF64,
+        };
+
+        // Measured result — gerçek engine-measured position + metric source.
+        let measured = input.measured.to_raw();
+        let measured_result = ProvenancedMeasuredResult {
+            raw: measured,
+            metric_source: input.measured.coupling.source.to_string(),
+        };
+
+        // Witness policy — gerçek omega'dan (plan-review #1).
+        let witness_policy = CanonicalWitnessPolicy::try_from(omega).map_err(|e| e.to_string())?;
+
+        // Measurement input digest — engine config gerçek değerleri.
+        let measurement_input = MeasurementInputContext {
+            schema_version: 1,
+            coordinate_system_config: CanonicalCoordinateConfig {
+                config_tag: 0,
+                entropy_axis_tag: 0,
+                witness_depth_axis_tag: 0,
+                theta_bound: self.config.theta_bound,
+                abstractness: self.config.abstractness,
+            },
+            repo_level_entropy: None,
+            repo_level_witness_depth: None,
+            axis_normalization_params: CanonicalAxisNormalization {
+                normalization_tag: 0,
+            },
+            metric_source_config: CanonicalMetricSourceConfig {
+                primary_source_tag: 0,
+                placeholder_strategy_tag: 0,
+            },
+            measurement_adapters_version: "v1".to_string(),
+        };
+        let measurement_input_digest =
+            MeasurementInputDigest::compute(&measurement_input).map_err(|e| e.to_string())?;
+
+        // Evaluation context digest + space view revision — engine accessor'ları (C6).
+        let evaluation_context_digest = self.current_evaluation_context_digest()?;
+        let base_space_view_revision = self.current_space_view_revision()?;
+
+        let basis = AuthorizationBasis {
+            schema_version: 1,
+            task_id,
+            claim_identity: ClaimIdentity {
+                claim_id: claim.id,
+                task_id,
+            },
+            claim_author: claim.author as ClaimAuthor,
+            structural_delta,
+            predicate_content,
+            predicate_evaluation,
+            measured_result,
+            deterministic_gate_result: outcome.gate_decision,
+            predicate_completion: outcome.predicate_completion,
+            mutation_decision: outcome.mutation_decision,
+            intended_apply_target: apply_target,
+            witness_policy,
+            measurement_input_digest,
+            evaluation_context_digest,
+            base_space_view_revision,
+        };
+
+        Ok(crate::authorization::AuthorizationContext {
+            outcome: outcome.clone(),
+            apply_target,
+            basis,
+            witness_requirement: WitnessRequirement::from(omega),
+        })
     }
 
     // ── Claim-based gates (Q4-Q6, Phase 0 — witness öncesi, deterministik) ───
@@ -838,7 +1079,10 @@ impl SpaceEngine {
         // Q1-Q3 Witness
         match crate::witness::evaluate(claim, omega) {
             crate::witness::WitnessDisposition::Satisfied { .. } => {
-                results.push(GateResult::passed("Q1-Q3 Witness", "Quorum met — Satisfied"));
+                results.push(GateResult::passed(
+                    "Q1-Q3 Witness",
+                    "Quorum met — Satisfied",
+                ));
             }
             crate::witness::WitnessDisposition::Held { reason, .. } => {
                 let h = Some(crate::agent::HallucinationType::Undersupported {
@@ -874,42 +1118,39 @@ impl SpaceEngine {
         self.t_c
     }
 
-    /// **INV-T9** — Mevcut space view revision (store-scoped, lane-qualified).
+    /// **INV-T9** — Mevcut space view revision.
     ///
-    /// Engine tam revision tracking'i P1'de alacak; şimdilik t_c-based placeholder.
-    /// Authorization basis bu revision'ı taşır — P1 resume staleness kontrolü için.
+    /// **reviewer P0-3 (C6):** Artık gerçek `SpaceDigest::compute` kullanır — node/edge
+    /// canonical içeriği. Önceki placeholder yalnız `t_c` üzerinden hash üretiyordu.
+    ///
+    /// `view_id` hala `Ephemeral(self.t_c)` — persisted identity dosya lifecycle'ı
+    /// Commit 4'te. Navigator, Ephemeral + CrossProcess store kombinasyonunu fail-closed
+    /// olarak reddeder (D3).
     pub fn current_space_view_revision(
         &self,
-    ) -> crate::authorization::SpaceViewRevision {
-        use crate::authorization::{SpaceDigest, SpaceViewRevision, StoreId};
-        // Placeholder digest — t_c'den türetilmiş deterministic.
-        let mut digest_bytes = [0u8; 32];
-        let tc_bytes = self.t_c.to_le_bytes();
-        digest_bytes[..8].copy_from_slice(&tc_bytes);
-        SpaceViewRevision {
-            store_id: StoreId("osp-engine".to_string()),
-            lane: crate::trajectory::CommitLane::Mainline,
+    ) -> Result<crate::authorization::SpaceViewRevision, String> {
+        use crate::authorization::{SpaceDigest, SpaceViewId, SpaceViewRevision};
+        let content_digest = SpaceDigest::compute(&self.space).map_err(|e| e.to_string())?;
+        Ok(SpaceViewRevision {
+            view_id: SpaceViewId::Ephemeral(self.t_c),
             sequence: self.t_c,
-            content_digest: SpaceDigest::from_bytes(digest_bytes),
-        }
+            content_digest,
+        })
     }
 
     /// **INV-T9** — Mevcut evaluation context digest (vision config + rule-set).
     ///
-    /// Engine tam context digest'i P1'de alacak; şimdilik vision θ_bound + rule count
-    /// tabanlı placeholder. Authorization basis stale measurement tespiti için.
+    /// **reviewer P0-3 (C6):** Artık gerçek `EvaluationContextDigest::compute` kullanır —
+    /// EngineConfig + RuleDescriptor + vision vector. Önceki placeholder yalnız
+    /// `theta_bound + rule count` kullanıyordu.
     pub fn current_evaluation_context_digest(
         &self,
-    ) -> crate::authorization::EvaluationContextDigest {
+    ) -> Result<crate::authorization::EvaluationContextDigest, String> {
         use crate::authorization::EvaluationContextDigest;
-        // Placeholder — vision θ_bound + rule count'tan deterministic digest.
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"osp.evaluation-context.v1\0");
-        hasher.update(&self.config.theta_bound.to_le_bytes());
-        hasher.update(&(self.rules.len() as u64).to_le_bytes());
-        let hash = hasher.finalize();
-        let bytes: [u8; 32] = hash.into();
-        EvaluationContextDigest::from_bytes(bytes)
+        let descriptors: Vec<crate::authorization::RuleDescriptor> =
+            self.rules.iter().map(|r| r.descriptor()).collect();
+        EvaluationContextDigest::compute(&self.config, &descriptors, &self.vision.raw)
+            .map_err(|e| e.to_string())
     }
 
     pub fn config(&self) -> &EngineConfig {
@@ -1014,6 +1255,52 @@ fn current_time_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Authorization context helpers — domain → canonical dönüşüm (free functions)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// PredicateScope → CanonicalPredicateScope (scope_tag + identity_bytes).
+fn canonicalize_scope(
+    scope: &crate::trajectory::PredicateScope,
+) -> crate::authorization::CanonicalPredicateScope {
+    use crate::trajectory::PredicateScope;
+    match scope {
+        PredicateScope::Node(id) => crate::authorization::CanonicalPredicateScope {
+            scope_tag: 0,
+            identity_bytes: id.to_le_bytes().to_vec(),
+        },
+        PredicateScope::Module(name) => crate::authorization::CanonicalPredicateScope {
+            scope_tag: 1,
+            identity_bytes: name.as_bytes().to_vec(),
+        },
+        PredicateScope::Subgraph(ids) => {
+            let mut bytes: Vec<u8> = Vec::with_capacity(ids.len() * 8);
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            for id in &sorted {
+                bytes.extend_from_slice(&id.to_le_bytes());
+            }
+            crate::authorization::CanonicalPredicateScope {
+                scope_tag: 2,
+                identity_bytes: bytes,
+            }
+        }
+    }
+}
+
+/// Option<MetricSource> → EffectiveSourceRequirement (source_tag).
+fn canonicalize_source_req(
+    required: &Option<crate::coords::MetricSource>,
+) -> crate::authorization::EffectiveSourceRequirement {
+    let source_tag = match required {
+        None => 0u8, // No requirement
+        Some(src) => crate::canonical_tags::CanonicalMetricSourceTag::try_from(src)
+            .map(|t| t.as_u8())
+            .unwrap_or(0),
+    };
+    crate::authorization::EffectiveSourceRequirement { source_tag }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

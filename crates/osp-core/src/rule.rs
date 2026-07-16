@@ -30,6 +30,20 @@ pub trait Rule: Send + Sync {
     /// Kural tanımlayıcısı.
     fn id(&self) -> &RuleId;
 
+    /// **plan-review #4:** Kural descriptor'ı — `EvaluationContextDigest` için.
+    ///
+    /// `rule_id` + `semantics_version` + `canonical_parameters`. Default impl
+    /// `semantics_version: 1, canonical_parameters: vec![]` döner — mevcut 3 rule
+    /// parametresiz. Rule implementasyonu değişirse `semantics_version` artırılmalı;
+    /// bu `EvaluationContextDigest`'i değiştirir → stale measurement tespiti çalışır.
+    fn descriptor(&self) -> crate::authorization::RuleDescriptor {
+        crate::authorization::RuleDescriptor {
+            rule_id: self.id().clone(),
+            semantics_version: 1,
+            canonical_parameters: vec![],
+        }
+    }
+
     /// Kuralın ΔS üzerinde ihlal durumunu değerlendir.
     ///
     /// `None` = ihlal yok (Q6 geçer). `Some(violation)` = ihlal tespit edildi (Q6 reject).

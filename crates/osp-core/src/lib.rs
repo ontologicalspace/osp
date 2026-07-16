@@ -18,6 +18,7 @@ pub mod anchoring;
 pub mod authorization;
 pub mod axes;
 pub mod bigbang;
+pub mod canonical_tags;
 pub mod coords;
 pub mod engine;
 pub mod navigator;

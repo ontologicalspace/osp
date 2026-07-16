@@ -14,7 +14,9 @@
 
 use crate::coords::RawPosition;
 use crate::space::NodeId;
-use crate::trajectory::{ApplyTarget, GateDecision, MutationDecision, PredicateCompletion};
+use crate::trajectory::{
+    ApplyTarget, AttemptOutcome, GateDecision, MutationDecision, PredicateCompletion,
+};
 use crate::witness::{AgentId, ClaimId, WitnessHoldReason, WitnessQuorumSnapshot};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -34,86 +36,544 @@ pub struct ClaimIdentity {
 /// Claim author — INV-T9 digest'ine dahil (author-witness ayrımı için kritik).
 pub type ClaimAuthor = AgentId;
 
-/// Structural delta'nın tam kanonik temsili.
+/// Structural delta'nın tam kanonik temsili — witness'ın yetkilendirdiği structural
+/// delta'nın tamamını bağlar (reviewer P0-4 inclusion table).
 ///
-/// `StructuralDeltaDigest` KULLANILMAZ — lossy özet iki farklı proposal'ı aynı
-/// authorization basis'e dönüştürebilir. Full canonical byte stream kullanılır.
-/// Node ID'leri sorted, edge'ler sorted — deterministic encoding.
+/// **Prensip:** Yalnız ölçümü etkileyen alanlar değil, witness'ın yetkilendirdiği
+/// bütün author-controlled structural içeriği bağlanır. Engine-derived alanlar
+/// (position) ve transient cache dahil DEĞİL.
 ///
-/// **Smart constructor invariant:** `new()` vec'leri sort eder. Public field'lar
-/// constructor dışında mutate edilebilir ama digest hesaplarken tekrar sort edilir
-/// (defensive — review P1-3).
+/// Node kind/edge kind stable numeric tag olarak (format!("{:?}") DEĞİL).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CanonicalStructuralDelta {
-    /// Eklenen node ID'leri (sorted ascending).
-    pub new_node_ids: Vec<NodeId>,
-    /// Eklenen edge'ler (from, to, kind) — sorted by (from, to, kind).
-    pub new_edges: Vec<(NodeId, NodeId, String)>,
-    /// Kaldırılan edge'ler (from, to, kind) — sorted. G2c-2 subtractive delta.
-    pub removed_edges: Vec<(NodeId, NodeId, String)>,
+    /// Eklenen node'lar (sorted by id). Full canonical content.
+    pub new_nodes: Vec<CanonicalNode>,
+    /// Eklenen edge'ler — sorted.
+    pub new_edges: Vec<CanonicalEdge>,
+    /// Kaldırılan edge'ler — sorted. G2c-2 subtractive delta.
+    pub removed_edges: Vec<CanonicalEdge>,
 }
 
+/// Canonical node — witness'ın yetkilendirdiği structural içeriğin tam temsili.
+///
+/// Inclusion table (reviewer P0-4):
+/// - id: identity
+/// - kind: structural semantics
+/// - mass: measurement input
+/// - cohesion: measurement input
+/// - classification: author-controlled structural (context-aware metric interpretation)
+/// - role: author-controlled structural (role-aware vision)
+/// - position: HAYIR (engine-derived, agent-declared değil)
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalNode {
+    pub id: NodeId,
+    pub kind: CanonicalNodeKind,
+    pub mass: CanonicalF64,
+    pub cohesion: Option<CanonicalF64>,
+    pub classification: CanonicalNodeClassification,
+    pub role: CanonicalNodeRole,
+}
+
+/// Canonical edge — structural relationship.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalEdge {
+    pub from: NodeId,
+    pub to: NodeId,
+    pub kind: CanonicalEdgeKind,
+    pub is_type_only: bool,
+}
+
+/// Stable numeric tags (format!("{:?}") DEĞİL).
+///
+/// **reviewer P1:** Artık validated newtype'lar (`canonical_tags` modülü). Ham `u8`
+/// alias DEĞİL — imkânsız tag üretilemez, domain enum'a yeni varyant eklenince
+/// compiler mapping'i güncellemeye zorlar. Tüm tipler `authorization` API yüzeyinden
+/// re-export edilir (downstream kod kırılmaz).
+pub use crate::canonical_tags::{
+    CanonicalEdgeKind, CanonicalMetricSourceTag, CanonicalNodeClassification, CanonicalNodeKind,
+    CanonicalNodeRole, ComparisonOpTag, PredicateAxisTag, PredicateFailurePolicyTag,
+    PredicateModeTag, WitnessIndependencePolicyTag,
+};
+
+/// Canonical f64 — NaN reject, -0.0 normalize, to_bits encoding.
+pub type CanonicalF64 = f64;
+
 impl CanonicalStructuralDelta {
-    /// Smart constructor — vec'leri canonical (sorted) sıraya koyar.
-    pub fn new(
-        mut new_node_ids: Vec<NodeId>,
-        mut new_edges: Vec<(NodeId, NodeId, String)>,
-        mut removed_edges: Vec<(NodeId, NodeId, String)>,
-    ) -> Self {
-        new_node_ids.sort_unstable();
+    /// **reviewer P1:** Validating smart constructor — vec'leri canonical (sorted)
+    /// sıraya koyar VE structural identity çelişkilerini reddeder.
+    ///
+    /// Digest katmanı savunmacıdır: syntax gate normal akışta duplicate'leri yakalasa da
+    /// canonical artifact deserialize edilerek doğrudan oluşturulabilir.
+    ///
+    /// Reddedilen durumlar:
+    /// - duplicate node id (new_nodes içinde)
+    /// - duplicate edge (aynı listede — new_edges veya removed_edges)
+    /// - **cross-list çelişki** (plan-review): aynı edge ∈ new_edges ve ∈ removed_edges
+    ///   → self-cancelling/ambiguous delta
+    /// - non-finite node field (mass veya cohesion)
+    pub fn try_new(
+        mut new_nodes: Vec<CanonicalNode>,
+        mut new_edges: Vec<CanonicalEdge>,
+        mut removed_edges: Vec<CanonicalEdge>,
+    ) -> Result<Self, CanonicalizationError> {
+        // Duplicate node id kontrolü.
+        new_nodes.sort_unstable_by_key(|n| n.id);
+        for window in new_nodes.windows(2) {
+            if window[0].id == window[1].id {
+                return Err(CanonicalizationError::DuplicateNodeId(window[0].id));
+            }
+        }
+        // Non-finite node field kontrolü.
+        for node in &new_nodes {
+            if !node.mass.is_finite() {
+                return Err(CanonicalizationError::NonFiniteNodeField(node.id));
+            }
+            if let Some(c) = node.cohesion {
+                if !c.is_finite() {
+                    return Err(CanonicalizationError::NonFiniteNodeField(node.id));
+                }
+            }
+        }
+        // Duplicate edge kontrolü (aynı liste).
         new_edges.sort_unstable();
+        if new_edges.windows(2).any(|w| w[0] == w[1]) {
+            return Err(CanonicalizationError::DuplicateEdge);
+        }
         removed_edges.sort_unstable();
-        Self {
-            new_node_ids,
+        if removed_edges.windows(2).any(|w| w[0] == w[1]) {
+            return Err(CanonicalizationError::DuplicateEdge);
+        }
+        // Cross-list çelişki: aynı edge hem new hem removed — self-cancelling delta.
+        for ne in &new_edges {
+            if removed_edges.iter().any(|re| re == ne) {
+                return Err(CanonicalizationError::CrossListEdgeConflict);
+            }
+        }
+        Ok(Self {
+            new_nodes,
             new_edges,
             removed_edges,
+        })
+    }
+
+    /// Convenience constructor — empty delta (engine context üretiminde sıklıkla kullanılır).
+    pub fn empty() -> Self {
+        Self {
+            new_nodes: vec![],
+            new_edges: vec![],
+            removed_edges: vec![],
         }
     }
 }
 
 /// Predicate içeriği — her zaman bağlı (identifier yetersiz, içerik mutable olabilir).
+///
+/// **EffectiveMetricPredicate (reviewer P0-4):** Runtime evaluator üretir.
+/// Canonical encoder kendi başına semantic varsayım YAPMAZ — effective modeli encode eder.
+/// `None ↔ Some(default)` yalnız evaluator gerçekten aynı yorumluyorsa.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CanonicalPredicateContent {
-    /// Predicate'lerin canonical serialization'ı (sorted, deterministic).
-    pub predicate_bytes: Vec<u8>,
+    /// EffectiveMetricPredicate'lerin canonical serialization'ı.
+    pub mode: PredicateModeTag,
+    pub predicates: Vec<EffectiveMetricPredicate>,
+}
+
+/// Effective metric predicate — runtime evaluator'dan türetilmiş.
+///
+/// Canonical encoder bu modeli encode eder. Semantic normalization (None ↔ default)
+/// yalnız evaluator aynı yorumluyorsa geçerli — encoder varsayım yapmaz.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveMetricPredicate {
+    pub axis: PredicateAxisTag,
+    pub operator: ComparisonOpTag,
+    pub threshold: CanonicalF64,
+    pub scope: CanonicalPredicateScope,
+    pub required_source: EffectiveSourceRequirement,
+    pub effective_weight: CanonicalF64,
+    pub effective_tolerance: CanonicalF64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalPredicateScope {
+    /// Scope type tag + identity bytes.
+    pub scope_tag: u8,
+    pub identity_bytes: Vec<u8>,
+}
+
+/// Effective source requirement — evaluator-derived (None ↔ Some(default) yalnız
+/// evaluator aynı yorumluyorsa).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveSourceRequirement {
+    pub source_tag: u8,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// SpaceViewRevision — store-scoped, lane-qualified
+// CanonicalWitnessPolicy (reviewer P0-1 — witness policy basis'e bağlı)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Store-scoped ve lane-qualified revision identity.
+/// Witness'ın yetkilendirdiği claim'in hangi authorization politikası altında
+/// değerlendirildiğini bağlar (reviewer P0-1).
 ///
-/// "Revision global" DEĞİL — store + lane + sequence + content_digest kombinasyonu.
-/// Authorization basis ölçümüne görünür olan lane'in her yapısal mutasyonunda değişir
-/// (Mainline commit, TrajectoryCheckpoint, Sandbox mutation — hepsi artırır).
+/// Aynı proposal `min_approvers=2, quorum=1.5` ve `min_approvers=0, quorum=0.0`
+/// politikalarıyla farklı authorization basis üretmelidir.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalWitnessPolicy {
+    pub schema_version: u32,
+    pub min_approvers: u32,
+    pub quorum_threshold: CanonicalF64,
+    pub independence_policy: WitnessIndependencePolicyTag,
+}
+
+impl CanonicalWitnessPolicy {
+    /// Effective requirement — record.witness_requirement ile cross-field doğrulanır.
+    pub fn effective_requirement(&self) -> WitnessRequirement {
+        WitnessRequirement {
+            min_approvers: self.min_approvers as usize,
+            quorum_threshold: self.quorum_threshold,
+        }
+    }
+}
+
+/// **reviewer plan-review #1 (P0):** CanonicalWitnessPolicy gerçek `omega`'dan türetilir.
 ///
-/// P1 resume'da staleness kontrolü: `current_revision == base_revision` → devam;
-/// `!=` → stale authorization basis → remeasure gerekir.
+/// Engine config YEDEK DEĞİL. Bu impl olmadan, placeholder basis üretirken engine config
+/// değerleri artifact'e kaydedilebilir; gerçek witness değerlendirmesi `input.omega` ile
+/// yapılırken basis farklı değerler taşır — high-risk witness safety sınırında P0.
+///
+/// ```text
+/// Gerçek değerlendirme: 1 approver / quorum 1.0
+/// Artifact basis:       2 approver / quorum 1.5   ← BU İMKANSIZ OLMALI
+/// ```
+///
+/// `independence_policy`: omega independence taşımıyor (henüz) → Strict varsayılan.
+/// Gelecekte omega genişletilirse buradan türetilir.
+impl TryFrom<&crate::witness::WitnessSet> for CanonicalWitnessPolicy {
+    type Error = AuthorizationBasisDigestError;
+
+    fn try_from(omega: &crate::witness::WitnessSet) -> Result<Self, Self::Error> {
+        // Non-finite quorum reddet (canonical encoding ile tutarlı).
+        if !omega.quorum_threshold.is_finite() {
+            return Err(AuthorizationBasisDigestError::NonFiniteRejected);
+        }
+        Ok(Self {
+            schema_version: 1,
+            min_approvers: omega.min_approvers as u32,
+            quorum_threshold: omega.quorum_threshold,
+            independence_policy: WitnessIndependencePolicyTag::default(),
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// MeasurementInputDigest (reviewer P0-3 — coordinate-system state)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Measurement-visible engine state — coordinate system, repo-level metrics,
+/// axis normalization, metric source config (reviewer P0-3).
+///
+/// İki engine aynı graph + farklı coordinate state → farklı authorization basis.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MeasurementInputContext {
+    pub schema_version: u32,
+    pub coordinate_system_config: CanonicalCoordinateConfig,
+    pub repo_level_entropy: Option<CanonicalF64>,
+    pub repo_level_witness_depth: Option<CanonicalF64>,
+    pub axis_normalization_params: CanonicalAxisNormalization,
+    pub metric_source_config: CanonicalMetricSourceConfig,
+    pub measurement_adapters_version: String,
+}
+
+/// Canonical coordinate system configuration (stable tags).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalCoordinateConfig {
+    pub config_tag: u8,
+    pub entropy_axis_tag: u8,
+    pub witness_depth_axis_tag: u8,
+    pub theta_bound: CanonicalF64,
+    pub abstractness: CanonicalF64,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalAxisNormalization {
+    pub normalization_tag: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalMetricSourceConfig {
+    pub primary_source_tag: u8,
+    pub placeholder_strategy_tag: u8,
+}
+
+/// Measurement input digest (BLAKE3, domain-separated).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct MeasurementInputDigest([u8; 32]);
+
+impl MeasurementInputDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.measurement-input.v1\0";
+
+    pub fn compute(ctx: &MeasurementInputContext) -> Result<Self, AuthorizationBasisDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u32(&mut hasher, ctx.schema_version, "mi_schema");
+        encode_u8(
+            &mut hasher,
+            ctx.coordinate_system_config.config_tag,
+            "coord_config",
+        );
+        encode_u8(
+            &mut hasher,
+            ctx.coordinate_system_config.entropy_axis_tag,
+            "entropy_axis",
+        );
+        encode_u8(
+            &mut hasher,
+            ctx.coordinate_system_config.witness_depth_axis_tag,
+            "witness_depth_axis",
+        );
+        encode_f64(
+            &mut hasher,
+            ctx.coordinate_system_config.theta_bound,
+            "theta_bound",
+        )?;
+        encode_f64(
+            &mut hasher,
+            ctx.coordinate_system_config.abstractness,
+            "abstractness",
+        )?;
+        encode_optional_f64(&mut hasher, ctx.repo_level_entropy, "repo_entropy")?;
+        encode_optional_f64(
+            &mut hasher,
+            ctx.repo_level_witness_depth,
+            "repo_witness_depth",
+        )?;
+        encode_u8(
+            &mut hasher,
+            ctx.axis_normalization_params.normalization_tag,
+            "axis_norm",
+        );
+        encode_u8(
+            &mut hasher,
+            ctx.metric_source_config.primary_source_tag,
+            "metric_source",
+        );
+        encode_u8(
+            &mut hasher,
+            ctx.metric_source_config.placeholder_strategy_tag,
+            "placeholder_strategy",
+        );
+        encode_bytes(&mut hasher, ctx.measurement_adapters_version.as_bytes())?;
+        let hash = hasher.finalize();
+        Ok(Self(hash.into()))
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// PredicateEvaluationBasis (reviewer P0-1 — mutation decision girdileri)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Mutation decision'ı üreten girdiler (reviewer P0-1).
+///
+/// `AcceptAsProgress` kararı target vector, loss_before/after, failure policy,
+/// allow_progress_checkpoint, tolerance'dan etkilenir. Bunlar basis'e bağlanmazsa
+/// aynı claim + aynı predicate farklı task policy altında farklı mutation decision
+/// üretebilir ama authorization basis bunu açıklayamaz.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PredicateEvaluationBasis {
+    pub target_vector: CanonicalRawPosition,
+    pub loss_before: CanonicalF64,
+    pub loss_after: CanonicalF64,
+    pub failure_policy: PredicateFailurePolicyTag,
+    pub allow_progress_checkpoint: bool,
+    pub tolerance: CanonicalF64,
+}
+
+/// Canonical raw position — 5-axis, NaN reject, -0.0 normalize.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalRawPosition {
+    pub x: CanonicalF64,
+    pub y: CanonicalF64,
+    pub z: CanonicalF64,
+    pub w: CanonicalF64,
+    pub v: CanonicalF64,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SpaceViewId + SpaceViewRevision (reviewer P0-2 — lifecycle tam)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Space view revision — measurement-visible space content identity.
+///
+/// **reviewer P0-2:** Engine ayrı lane state'leri tutmuyorsa sahte lane-qualified
+/// revision ÜRETİLMEZ. `intended_apply_target` basis'te zaten var. Base view tek
+/// engine space ise revision da yalnız o view'ı tanımlar.
+///
+/// P1 resume'da staleness kontrolü: `current == base` → devam; `!=` → remeasure.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SpaceViewRevision {
-    pub store_id: StoreId,
-    pub lane: crate::trajectory::CommitLane,
+    pub view_id: SpaceViewId,
     pub sequence: u64,
-    /// Space content digest (BLAKE3) — revision bütünlüğü için.
     pub content_digest: SpaceDigest,
 }
 
-/// Store identifier (projeye özgü, global değil).
+/// Space view identity — Persisted (cross-process) veya Ephemeral (process-local).
+///
+/// **Durability enforcement (reviewer P0-2):** Ephemeral + FilesystemStore + durable
+/// suspension = fail-closed. Production CLI yalnız Persisted + Filesystem kabul eder.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct StoreId(pub String);
+pub enum SpaceViewId {
+    /// Cross-process — `<repo>/.osp/space-identity`'den yüklenir (repo path'inden DEĞİL).
+    /// Repo taşınması kimliği değiştirmez; clone/fork bilinçli olarak aynı identity taşıyabilir.
+    Persisted(PersistedSpaceViewId),
+    /// Process-local — in-memory test. Cross-process resumable olarak sunulmaz.
+    Ephemeral(u64),
+}
 
-/// Space content digest (BLAKE3, 32 byte).
+/// Cryptographically random, fixed-size persisted identity (16 byte).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct PersistedSpaceViewId([u8; 16]);
+
+impl PersistedSpaceViewId {
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self(bytes)
+    }
+    pub fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
+    }
+    /// **reviewer P0-3 + plan-review:** Cryptographically random identity üret — OS CSPRNG.
+    ///
+    /// `getrandom::fill` işletim sisteminin tercih ettiği rastgele kaynağını kullanır.
+    /// **Fallback YOK** — timestamp/PID/address tabanlı yedekleme yapılmaz. Entropy
+    /// edinilemezse typed error döner (fail-closed). Önceki BLAKE3+timestamp+pid yaklaşımı
+    /// öngörülebilirdi ve aynı process içinde aynı timestamp çözünürlüğünde collision
+    /// üretebiliyordu.
+    ///
+    /// Deterministic test için `generate_with(&dyn EntropySource)` kullanılır.
+    pub fn generate() -> Result<Self, SpaceIdentityError> {
+        Self::generate_with(&OsEntropy)
+    }
+
+    /// Injectable entropy source ile identity üret — deterministic test için.
+    pub(crate) fn generate_with(src: &dyn EntropySource) -> Result<Self, SpaceIdentityError> {
+        let mut bytes = [0u8; 16];
+        src.fill(&mut bytes)?;
+        Ok(Self(bytes))
+    }
+}
+
+/// Operating-system entropy source — production. `getrandom::fill` wrapper.
+pub(crate) struct OsEntropy;
+
+/// Injectable entropy abstraction — deterministic test için (`FailingEntropySource`).
+pub(crate) trait EntropySource {
+    fn fill(&self, dest: &mut [u8]) -> Result<(), SpaceIdentityError>;
+}
+
+impl EntropySource for OsEntropy {
+    fn fill(&self, dest: &mut [u8]) -> Result<(), SpaceIdentityError> {
+        getrandom::fill(dest).map_err(|e| SpaceIdentityError::EntropyUnavailable {
+            message: e.to_string(),
+        })
+    }
+}
+
+/// Space identity üretim/yükleme hataları.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SpaceIdentityError {
+    /// OS entropy kaynağı kullanılamıyor. Fail-closed — fallback YOK.
+    #[error("operating-system entropy unavailable: {message}")]
+    EntropyUnavailable { message: String },
+    /// Identity dosyası bozuk/geçersiz. Otomatik yeniden üretim YOK (fail-closed).
+    #[error("space identity file is invalid: {0}")]
+    InvalidFile(String),
+    /// Identity dosyası I/O hatası.
+    #[error("space identity file I/O failed: {0}")]
+    IoFailed(String),
+}
+
+/// Space content digest (BLAKE3, 32 byte) — canonical binary encoding over nodes + edges.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SpaceDigest([u8; 32]);
 
 impl SpaceDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.space-content.v1\0";
+
+    /// **reviewer P0-3:** Space içeriğinin gerçek canonical digest'ı.
+    ///
+    /// Node'lar id'ye göre sıralanır ve canonical encode edilir (id, kind, mass, cohesion,
+    /// classification, role). **Position DAHİL DEĞİL** — engine-derived, author-controlled
+    /// değil (authorization.rs:55-73 inclusion table). Edge'ler canonical sıralanır ve
+    /// encode edilir (from, to, kind, is_type_only).
+    ///
+    /// Önceki placeholder yalnız `t_c` üzerinden hash üretiyordu — iki farklı space
+    /// aynı `t_c`'de aynı digest üretiyordu.
+    pub fn compute(space: &crate::space::Space) -> Result<Self, AuthorizationBasisDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+
+        // Node'ları id'ye göre sırala → canonical encode.
+        let mut nodes: Vec<&crate::space::Node> = space.nodes.values().collect();
+        nodes.sort_unstable_by_key(|n| n.id);
+        encode_u64(&mut hasher, nodes.len() as u64, "space_node_count");
+        for node in &nodes {
+            let canonical = canonicalize_node(node)?;
+            encode_canonical_node(&mut hasher, &canonical)?;
+        }
+
+        // Edge'leri canonical sırala → encode.
+        let canonical_edges: Vec<CanonicalEdge> = space
+            .edges
+            .iter()
+            .map(|e| {
+                Ok(CanonicalEdge {
+                    from: e.from,
+                    to: e.to,
+                    kind: CanonicalEdgeKind::try_from(&e.kind).map_err(
+                        |err: CanonicalizationError| {
+                            AuthorizationBasisDigestError::EncodingFailed(err.to_string())
+                        },
+                    )?,
+                    is_type_only: e.is_type_only,
+                })
+            })
+            .collect::<Result<Vec<_>, AuthorizationBasisDigestError>>()?;
+        encode_canonical_edge_vec(&mut hasher, &canonical_edges)?;
+
+        let hash = hasher.finalize();
+        Ok(Self(hash.into()))
+    }
+
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+/// Domain `Node` → `CanonicalNode` dönüşümü (NodeKind → CanonicalNodeKind via TryFrom).
+/// Position hariç — engine-derived. `pub(crate)` — engine context üretimi kullanır.
+pub(crate) fn canonicalize_node(
+    node: &crate::space::Node,
+) -> Result<CanonicalNode, AuthorizationBasisDigestError> {
+    Ok(CanonicalNode {
+        id: node.id,
+        kind: CanonicalNodeKind::try_from(&node.kind)
+            .map_err(|e| AuthorizationBasisDigestError::EncodingFailed(e.to_string()))?,
+        mass: node.mass,
+        cohesion: node.cohesion,
+        classification: CanonicalNodeClassification::try_from(&node.classification)
+            .map_err(|e| AuthorizationBasisDigestError::EncodingFailed(e.to_string()))?,
+        role: CanonicalNodeRole::try_from(&node.role)
+            .map_err(|e| AuthorizationBasisDigestError::EncodingFailed(e.to_string()))?,
+    })
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -127,7 +587,98 @@ impl SpaceDigest {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EvaluationContextDigest([u8; 32]);
 
+/// **plan-review düzeltme #4:** Rule descriptor — yalnız `rule_id` DEĞİL.
+///
+/// Aynı rule ID altında uygulama semantiği, parametreler veya threshold değişebilir.
+/// Salt `rule_id` bağlamak `NoSelfImport v1` ile `v2`'yi aynı evaluation context
+/// olarak gösterir — staleness kontrolünü bozar.
+///
+/// `semantics_version`: rule implementasyonu değiştiğinde artırılır. Mevcut 3 rule
+/// parametresiz → default impl `semantics_version: 1, canonical_parameters: vec![]`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RuleDescriptor {
+    pub rule_id: String,
+    pub semantics_version: u32,
+    pub canonical_parameters: Vec<u8>,
+}
+
 impl EvaluationContextDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.evaluation-context.v1\0";
+
+    /// **reviewer P0-3:** Gerçek evaluation context digest.
+    ///
+    /// EngineConfig'in ölçüm-atan tüm alanları + rule descriptor'ları (id + semantics
+    /// version + parameters) + vision target vector encode edilir. Önceki placeholder
+    /// yalnız `theta_bound + rule count` kullanıyordu.
+    ///
+    /// **Rule versioning:** Rule implementasyonu değişip `semantics_version` artırılırsa
+    /// context digest değişir → stale measurement tespiti çalışır.
+    pub fn compute(
+        config: &crate::engine::EngineConfig,
+        rules: &[RuleDescriptor],
+        vision_vector: &crate::coords::RawPosition,
+    ) -> Result<Self, AuthorizationBasisDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+
+        // EngineConfig — ölçüm-atan tüm alanlar.
+        encode_u32(&mut hasher, config.min_approvers as u32, "ec_min_approvers");
+        encode_f64(&mut hasher, config.quorum_threshold, "ec_quorum")?;
+        encode_f64(&mut hasher, config.theta_bound, "ec_theta_bound")?;
+        encode_u64(
+            &mut hasher,
+            config.milestone_interval,
+            "ec_milestone_interval",
+        );
+        encode_f64(&mut hasher, config.abstractness, "ec_abstractness")?;
+        encode_f64(&mut hasher, config.merge_ratio_observable, "ec_merge_ratio")?;
+
+        // Role overrides — sorted by key (tutarlı encoding için).
+        let mut role_keys: Vec<&String> = config.role_overrides.keys().collect();
+        role_keys.sort_unstable();
+        encode_u64(
+            &mut hasher,
+            role_keys.len() as u64,
+            "ec_role_override_count",
+        );
+        for key in role_keys {
+            let ov = &config.role_overrides[key];
+            encode_bytes(&mut hasher, key.as_bytes())?;
+            encode_u8(&mut hasher, ov.x.is_some() as u8, "ec_role_x_present");
+            if let Some(x) = ov.x {
+                encode_f64(&mut hasher, x, "ec_role_x")?;
+            }
+            encode_u8(&mut hasher, ov.y.is_some() as u8, "ec_role_y_present");
+            if let Some(y) = ov.y {
+                encode_f64(&mut hasher, y, "ec_role_y")?;
+            }
+            encode_u8(&mut hasher, ov.z.is_some() as u8, "ec_role_z_present");
+            if let Some(z) = ov.z {
+                encode_f64(&mut hasher, z, "ec_role_z")?;
+            }
+        }
+
+        // Rules — id + semantics_version + canonical_parameters.
+        let mut sorted_rules = rules.to_vec();
+        sorted_rules.sort_unstable_by(|a, b| a.rule_id.cmp(&b.rule_id));
+        encode_u64(&mut hasher, sorted_rules.len() as u64, "ec_rule_count");
+        for rule in &sorted_rules {
+            encode_bytes(&mut hasher, rule.rule_id.as_bytes())?;
+            encode_u32(&mut hasher, rule.semantics_version, "ec_rule_semver");
+            encode_bytes(&mut hasher, &rule.canonical_parameters)?;
+        }
+
+        // Vision target vector (5-axis).
+        encode_f64(&mut hasher, vision_vector.x, "ec_vision_x")?;
+        encode_f64(&mut hasher, vision_vector.y, "ec_vision_y")?;
+        encode_f64(&mut hasher, vision_vector.z, "ec_vision_z")?;
+        encode_f64(&mut hasher, vision_vector.w, "ec_vision_w")?;
+        encode_f64(&mut hasher, vision_vector.v, "ec_vision_v")?;
+
+        let hash = hasher.finalize();
+        Ok(Self(hash.into()))
+    }
+
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
@@ -142,9 +693,10 @@ impl EvaluationContextDigest {
 
 /// Witness'ın yetkilendirdiği claim'in tam kanonik temsili.
 ///
-/// Digest lenirken TÜM alanlar dahil edilir — structural delta full canonical
-/// (digest değil), predicate içerik her zaman bağlı (id yetersiz). `created_at`
-/// dahil DEĞİL — aynı basis farklı zamanda aynı digest vermeli.
+/// Digest hesaplanırken TÜM alanlar dahil edilir — structural delta full canonical
+/// (digest değil), predicate içerik her zaman bağlı (id yetersiz), witness policy
+/// bağlı (P0-1), measurement input bağlı (P0-3), predicate evaluation girdileri bağlı
+/// (P0-1). `created_at` dahil DEĞİL — aynı basis farklı zamanda aynı digest vermeli.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AuthorizationBasis {
     pub schema_version: u32,
@@ -153,11 +705,14 @@ pub struct AuthorizationBasis {
     pub claim_author: ClaimAuthor,
     pub structural_delta: CanonicalStructuralDelta,
     pub predicate_content: CanonicalPredicateContent,
+    pub predicate_evaluation: PredicateEvaluationBasis,
     pub measured_result: ProvenancedMeasuredResult,
     pub deterministic_gate_result: GateDecision,
     pub predicate_completion: PredicateCompletion,
     pub mutation_decision: MutationDecision,
     pub intended_apply_target: ApplyTarget,
+    pub witness_policy: CanonicalWitnessPolicy,
+    pub measurement_input_digest: MeasurementInputDigest,
     pub evaluation_context_digest: EvaluationContextDigest,
     pub base_space_view_revision: SpaceViewRevision,
 }
@@ -184,47 +739,105 @@ impl AuthorizationBasisDigest {
 
     /// Authorization basis'ten BLAKE3 digest hesapla.
     ///
-    /// **Canonical binary encoding** (review P1-3): her alan deterministic byte
-    /// sequence'e encode edilir. JSON kullanılmaz (serde_json field sırası/collections
-    /// deterministic değil). Float canonicalization: NaN reject, -0.0 → 0.0 normalize,
-    /// `f64::to_bits()` little-endian. Collections sorted. Domain separation prefix.
+    /// **Canonical binary encoding:** her alan deterministic byte sequence'e encode
+    /// edilir. JSON kullanılmaz. Float canonicalization: NaN reject, -0.0 → 0.0
+    /// normalize, `f64::to_bits()` little-endian. Collections sorted. Stable numeric
+    /// tags (format!("{:?}") DEĞİL). Domain separation prefix.
+    ///
+    /// **reviewer P0-1/P0-3:** witness_policy, measurement_input_digest,
+    /// predicate_evaluation basis'e bağlı. claim_identity.task_id encode edilir.
     pub fn compute(basis: &AuthorizationBasis) -> Result<Self, AuthorizationBasisDigestError> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(Self::DOMAIN_SEPARATOR);
 
-        // Canonical binary encoding — her alan explicit, deterministic.
+        // Identity.
         encode_u32(&mut hasher, basis.schema_version, "schema_version");
         encode_u64(&mut hasher, basis.task_id, "task_id");
         encode_u64(&mut hasher, basis.claim_identity.claim_id, "claim_id");
+        encode_u64(&mut hasher, basis.claim_identity.task_id, "claim_task_id"); // P0-2 claim_identity.task_id
         encode_u64(&mut hasher, basis.claim_author, "claim_author");
 
-        // Structural delta — collections sorted (defensive, constructor zaten sort eder).
-        let mut sorted_nodes = basis.structural_delta.new_node_ids.clone();
-        sorted_nodes.sort_unstable();
+        // Structural delta — CanonicalNode (full content) + CanonicalEdge (sorted).
+        let mut sorted_nodes = basis.structural_delta.new_nodes.clone();
+        sorted_nodes.sort_unstable_by_key(|n| n.id);
         encode_u64(&mut hasher, sorted_nodes.len() as u64, "new_node_count");
-        for nid in &sorted_nodes {
-            encode_u64(&mut hasher, *nid, "node_id");
+        for node in &sorted_nodes {
+            encode_canonical_node(&mut hasher, node)?;
         }
+        encode_canonical_edge_vec(&mut hasher, &basis.structural_delta.new_edges)?;
+        encode_canonical_edge_vec(&mut hasher, &basis.structural_delta.removed_edges)?;
 
-        encode_edge_vec(&mut hasher, &basis.structural_delta.new_edges, "new_edges")?;
-        encode_edge_vec(&mut hasher, &basis.structural_delta.removed_edges, "removed_edges")?;
+        // Predicate content — EffectiveMetricPredicate (evaluator-derived, sorted).
+        // **reviewer P0-2b:** predicate'ler canonical byte dizisi olarak sıralanır ve
+        // hash'e yazılır. Sorting ve hashing aynı encoder'ı kullanır — `-0.0` normalize.
+        encode_tag(&mut hasher, basis.predicate_content.mode, "predicate_mode");
+        encode_effective_predicate_set(&mut hasher, &basis.predicate_content.predicates)?;
 
-        // Predicate content bytes (length-prefixed).
-        encode_bytes(&mut hasher, &basis.predicate_content.predicate_bytes)?;
+        // Predicate evaluation basis (P0-1 — mutation decision girdileri).
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.target_vector.x,
+            "target_x",
+        )?;
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.target_vector.y,
+            "target_y",
+        )?;
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.target_vector.z,
+            "target_z",
+        )?;
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.target_vector.w,
+            "target_w",
+        )?;
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.target_vector.v,
+            "target_v",
+        )?;
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.loss_before,
+            "loss_before",
+        )?;
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.loss_after,
+            "loss_after",
+        )?;
+        encode_tag(
+            &mut hasher,
+            basis.predicate_evaluation.failure_policy,
+            "failure_policy",
+        );
+        encode_u8(
+            &mut hasher,
+            basis.predicate_evaluation.allow_progress_checkpoint as u8,
+            "allow_progress",
+        );
+        encode_f64(
+            &mut hasher,
+            basis.predicate_evaluation.tolerance,
+            "eval_tolerance",
+        )?;
 
-        // Measured result — float canonicalization.
-        encode_f64(&mut hasher, basis.measured_result.raw.x, "x")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.y, "y")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.z, "z")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.w, "w")?;
-        encode_f64(&mut hasher, basis.measured_result.raw.v, "v")?;
+        // Measured result.
+        encode_f64(&mut hasher, basis.measured_result.raw.x, "measured_x")?;
+        encode_f64(&mut hasher, basis.measured_result.raw.y, "measured_y")?;
+        encode_f64(&mut hasher, basis.measured_result.raw.z, "measured_z")?;
+        encode_f64(&mut hasher, basis.measured_result.raw.w, "measured_w")?;
+        encode_f64(&mut hasher, basis.measured_result.raw.v, "measured_v")?;
         encode_bytes(&mut hasher, basis.measured_result.metric_source.as_bytes())?;
 
-        // Deterministic gate result — enum tag as u8.
+        // Outcome tags.
         encode_u8(
             &mut hasher,
             gate_decision_tag(basis.deterministic_gate_result),
-            "gate_decision",
+            "gate",
         );
         encode_u8(
             &mut hasher,
@@ -236,25 +849,44 @@ impl AuthorizationBasisDigest {
             mutation_decision_tag(basis.mutation_decision),
             "mutation_decision",
         );
-        encode_u8(&mut hasher, apply_target_tag(&basis.intended_apply_target), "apply_target");
-
-        // Digests — raw bytes.
-        hasher.update(basis.evaluation_context_digest.as_bytes());
-        hasher.update(basis.base_space_view_revision.content_digest.as_bytes());
         encode_u8(
             &mut hasher,
-            commit_lane_tag(&basis.base_space_view_revision.lane),
-            "space_revision_lane",
+            apply_target_tag(&basis.intended_apply_target),
+            "apply_target",
         );
+
+        // Witness policy (P0-1).
+        encode_u32(
+            &mut hasher,
+            basis.witness_policy.schema_version,
+            "wp_schema",
+        );
+        encode_u32(
+            &mut hasher,
+            basis.witness_policy.min_approvers,
+            "wp_min_approvers",
+        );
+        encode_f64(
+            &mut hasher,
+            basis.witness_policy.quorum_threshold,
+            "wp_quorum",
+        )?;
+        encode_tag(
+            &mut hasher,
+            basis.witness_policy.independence_policy,
+            "wp_independence",
+        );
+
+        // Digests — raw bytes.
+        hasher.update(basis.measurement_input_digest.as_bytes());
+        hasher.update(basis.evaluation_context_digest.as_bytes());
+        hasher.update(basis.base_space_view_revision.content_digest.as_bytes());
+        encode_space_view_id(&mut hasher, &basis.base_space_view_revision.view_id)?;
         encode_u64(
             &mut hasher,
             basis.base_space_view_revision.sequence,
             "space_revision_sequence",
         );
-        encode_bytes(
-            &mut hasher,
-            basis.base_space_view_revision.store_id.0.as_bytes(),
-        )?;
 
         let hash = hasher.finalize();
         Ok(Self(hash.into()))
@@ -272,9 +904,8 @@ impl AuthorizationBasisDigest {
 
     /// Hex string'den parse.
     pub fn from_hex(hex_str: &str) -> Result<Self, AuthorizationBasisDigestError> {
-        let bytes = hex::decode(hex_str).map_err(|e| {
-            AuthorizationBasisDigestError::HexDecodeFailed(e.to_string())
-        })?;
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| AuthorizationBasisDigestError::HexDecodeFailed(e.to_string()))?;
         if bytes.len() != 32 {
             return Err(AuthorizationBasisDigestError::InvalidLength(bytes.len()));
         }
@@ -300,20 +931,75 @@ fn encode_u8(hasher: &mut blake3::Hasher, val: u8, _field: &str) {
     hasher.update(&[val]);
 }
 
-fn encode_bytes(hasher: &mut blake3::Hasher, bytes: &[u8]) -> Result<(), AuthorizationBasisDigestError> {
+/// Canonical numeric tag trait — newtype'ların `as_u8()` üzerinden encode edilmesi.
+///
+/// `encode_u8` ve `push_u8` generic hale gelir; newtype'lar otomatik desteklenir.
+/// Ham `u8` de desteklenir (scope_tag gibi plain numeric alanlar için).
+pub(crate) trait CanonicalTag {
+    fn tag_u8(&self) -> u8;
+}
+
+impl CanonicalTag for u8 {
+    fn tag_u8(&self) -> u8 {
+        *self
+    }
+}
+
+/// Tüm `canonical_tags` newtype'ları `CanonicalTag` uygular — macro yardımcı.
+macro_rules! impl_canonical_tag_for_newtype {
+    ($($name:ident),* $(,)?) => {
+        $(
+            impl $crate::authorization::CanonicalTag for $crate::canonical_tags::$name {
+                fn tag_u8(&self) -> u8 {
+                    self.as_u8()
+                }
+            }
+        )*
+    };
+}
+
+impl_canonical_tag_for_newtype!(
+    CanonicalNodeKind,
+    CanonicalEdgeKind,
+    CanonicalNodeClassification,
+    CanonicalNodeRole,
+    PredicateAxisTag,
+    ComparisonOpTag,
+    CanonicalMetricSourceTag,
+    PredicateModeTag,
+    PredicateFailurePolicyTag,
+);
+
+impl CanonicalTag for crate::canonical_tags::WitnessIndependencePolicyTag {
+    fn tag_u8(&self) -> u8 {
+        self.as_u8()
+    }
+}
+
+fn encode_tag<T: CanonicalTag>(hasher: &mut blake3::Hasher, val: T, field: &str) {
+    encode_u8(hasher, val.tag_u8(), field);
+}
+
+fn encode_bytes(
+    hasher: &mut blake3::Hasher,
+    bytes: &[u8],
+) -> Result<(), AuthorizationBasisDigestError> {
     encode_u64(hasher, bytes.len() as u64, "len");
     hasher.update(bytes);
     Ok(())
 }
 
-/// f64 canonical encoding — NaN reject, -0.0 → 0.0, little-endian to_bits.
+/// f64 canonical encoding — non-finite reject (NaN + ±Infinity), -0.0 → 0.0, little-endian to_bits.
+///
+/// **reviewer P0-2a:** yalnız NaN değil, ±Infinity de reddedilir. Plan NaN+infinity
+/// rejection öngörüyordu; `is_nan()` kontrolü infinity'yi geçiriyordu.
 fn encode_f64(
     hasher: &mut blake3::Hasher,
     val: f64,
     _field: &str,
 ) -> Result<(), AuthorizationBasisDigestError> {
-    if val.is_nan() {
-        return Err(AuthorizationBasisDigestError::NaNRejected);
+    if !val.is_finite() {
+        return Err(AuthorizationBasisDigestError::NonFiniteRejected);
     }
     // -0.0 → 0.0 normalize (to_bits farklı: -0.0 = 0x8000000000000000, 0.0 = 0x0).
     let normalized = if val == 0.0 { 0.0f64 } else { val };
@@ -321,18 +1007,141 @@ fn encode_f64(
     Ok(())
 }
 
-fn encode_edge_vec(
+/// Option\<f64\> canonical encoding — **reviewer P0-1 (encoding collision fix).**
+///
+/// Önceki yaklaşım `None → encode_u8(0)` ve `Some(v) → encode_f64(v)` kullanıyordu;
+/// bu `None` (1 byte) ile `Some(0.0)` (8 byte) dizilerini farklı uzunluklarda üretiyordu
+/// ama `None` + `Some(0.0)` kombinasyonları dokuz sıfır byte'a çakışabiliyordu.
+///
+/// Presence tag: `None → [0]`, `Some(v) → [1] || canonical_f64(v)`. Tag olmadan aynı
+/// byte dizisini üreten context çiftleri artık imkânsız.
+fn encode_optional_f64(
     hasher: &mut blake3::Hasher,
-    edges: &[(NodeId, NodeId, String)],
-    _field: &str,
+    value: Option<f64>,
+    field: &str,
+) -> Result<(), AuthorizationBasisDigestError> {
+    match value {
+        None => {
+            encode_u8(hasher, 0, field);
+            Ok(())
+        }
+        Some(v) => {
+            encode_u8(hasher, 1, field);
+            encode_f64(hasher, v, field)?;
+            Ok(())
+        }
+    }
+}
+
+fn encode_canonical_node(
+    hasher: &mut blake3::Hasher,
+    node: &CanonicalNode,
+) -> Result<(), AuthorizationBasisDigestError> {
+    encode_u64(hasher, node.id, "node_id");
+    encode_tag(hasher, node.kind, "node_kind");
+    encode_f64(hasher, node.mass, "node_mass")?;
+    encode_optional_f64(hasher, node.cohesion, "node_cohesion")?;
+    encode_tag(hasher, node.classification, "node_classification");
+    encode_tag(hasher, node.role, "node_role");
+    Ok(())
+}
+
+fn encode_canonical_edge_vec(
+    hasher: &mut blake3::Hasher,
+    edges: &[CanonicalEdge],
 ) -> Result<(), AuthorizationBasisDigestError> {
     let mut sorted = edges.to_vec();
     sorted.sort_unstable();
     encode_u64(hasher, sorted.len() as u64, "edge_count");
-    for (from, to, kind) in &sorted {
-        encode_u64(hasher, *from, "edge_from");
-        encode_u64(hasher, *to, "edge_to");
-        encode_bytes(hasher, kind.as_bytes())?;
+    for edge in &sorted {
+        encode_u64(hasher, edge.from, "edge_from");
+        encode_u64(hasher, edge.to, "edge_to");
+        encode_tag(hasher, edge.kind, "edge_kind");
+        encode_u8(hasher, edge.is_type_only as u8, "edge_is_type_only");
+    }
+    Ok(())
+}
+
+/// EffectiveMetricPredicate → canonical byte dizisi. **reviewer P0-2b:** sort ve hash
+/// aynı canonical encoder'ı kullanır. Önceki comparator ham `to_bits()` kullanıyordu;
+/// bu `-0.0` normalize etmediği için encoder ile çelişiyordu — semantik aynı predicate
+/// seti farklı sıraya ve farklı digest'e gidebiliyordu.
+fn encode_effective_predicate_to_vec(
+    pred: &EffectiveMetricPredicate,
+) -> Result<Vec<u8>, AuthorizationBasisDigestError> {
+    let mut buf: Vec<u8> = Vec::with_capacity(48);
+    push_tag(&mut buf, pred.axis);
+    push_tag(&mut buf, pred.operator);
+    push_f64(&mut buf, pred.threshold)?;
+    push_u8(&mut buf, pred.scope.scope_tag);
+    push_bytes(&mut buf, &pred.scope.identity_bytes);
+    push_u8(&mut buf, pred.required_source.source_tag);
+    push_f64(&mut buf, pred.effective_weight)?;
+    push_f64(&mut buf, pred.effective_tolerance)?;
+    Ok(buf)
+}
+
+/// Predicate set'i canonical byte dizilerine çevirip sıralayıp hash'e length-prefix
+/// ile yazar. Salt konkatenasyon YOK — her predicate `encode_bytes` ile ayrılmış.
+fn encode_effective_predicate_set(
+    hasher: &mut blake3::Hasher,
+    predicates: &[EffectiveMetricPredicate],
+) -> Result<(), AuthorizationBasisDigestError> {
+    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(predicates.len());
+    for pred in predicates {
+        encoded.push(encode_effective_predicate_to_vec(pred)?);
+    }
+    encoded.sort_unstable();
+    encode_u64(hasher, encoded.len() as u64, "predicate_count");
+    for buf in &encoded {
+        encode_bytes(hasher, buf)?;
+    }
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Vec\<u8\> canonical encoding helpers (predicate sort için)
+// ──────────────────────────────────────────────────────────────────────────────
+
+fn push_u8(buf: &mut Vec<u8>, val: u8) {
+    buf.push(val);
+}
+
+fn push_tag<T: CanonicalTag>(buf: &mut Vec<u8>, val: T) {
+    push_u8(buf, val.tag_u8());
+}
+
+fn push_u64(buf: &mut Vec<u8>, val: u64) {
+    buf.extend_from_slice(&val.to_le_bytes());
+}
+
+fn push_f64(buf: &mut Vec<u8>, val: f64) -> Result<(), AuthorizationBasisDigestError> {
+    if !val.is_finite() {
+        return Err(AuthorizationBasisDigestError::NonFiniteRejected);
+    }
+    let normalized = if val == 0.0 { 0.0f64 } else { val };
+    buf.extend_from_slice(&normalized.to_bits().to_le_bytes());
+    Ok(())
+}
+
+fn push_bytes(buf: &mut Vec<u8>, bytes: &[u8]) {
+    push_u64(buf, bytes.len() as u64);
+    buf.extend_from_slice(bytes);
+}
+
+fn encode_space_view_id(
+    hasher: &mut blake3::Hasher,
+    view_id: &SpaceViewId,
+) -> Result<(), AuthorizationBasisDigestError> {
+    match view_id {
+        SpaceViewId::Persisted(id) => {
+            encode_u8(hasher, 1, "view_id_persisted");
+            hasher.update(id.as_bytes());
+        }
+        SpaceViewId::Ephemeral(id) => {
+            encode_u8(hasher, 2, "view_id_ephemeral");
+            encode_u64(hasher, *id, "ephemeral_id");
+        }
     }
     Ok(())
 }
@@ -380,26 +1189,34 @@ fn apply_target_tag(at: &crate::trajectory::ApplyTarget) -> u8 {
     }
 }
 
-fn commit_lane_tag(lane: &crate::trajectory::CommitLane) -> u8 {
-    use crate::trajectory::CommitLane::*;
-    match lane {
-        Mainline => 1,
-        TrajectoryCheckpoint => 2,
-        Sandbox => 3,
-    }
-}
-
 /// Authorization basis digest hesaplama hataları.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AuthorizationBasisDigestError {
     #[error("canonical encoding failed: {0}")]
     EncodingFailed(String),
-    #[error("NaN detected in authorization basis — not allowed (canonical encoding)")]
-    NaNRejected,
+    #[error("non-finite float (NaN or ±Infinity) detected in authorization basis — not allowed (canonical encoding)")]
+    NonFiniteRejected,
     #[error("hex decode failed: {0}")]
     HexDecodeFailed(String),
     #[error("invalid digest length: expected 32 bytes, got {0}")]
     InvalidLength(usize),
+}
+
+/// Canonical structural delta doğrulama hatası (A5 — duplicate/non-finite field).
+///
+/// `CanonicalStructuralDelta::try_new` bu hatayı döndürür. Digest katmanı savunmacıdır:
+/// syntax gate normal akışta duplicate'leri yakalasa da canonical artifact deserialize
+/// edilerek doğrudan oluşturulabilir.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum CanonicalizationError {
+    #[error("duplicate node id {0} in new_nodes")]
+    DuplicateNodeId(u64),
+    #[error("duplicate edge in structural delta (same list)")]
+    DuplicateEdge,
+    #[error("ambiguous delta: edge present in both new_edges and removed_edges")]
+    CrossListEdgeConflict,
+    #[error("non-finite node field (mass or cohesion) for node id {0}")]
+    NonFiniteNodeField(u64),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -514,6 +1331,49 @@ pub struct WitnessRequirement {
     pub quorum_threshold: f64,
 }
 
+impl WitnessRequirement {
+    /// **reviewer plan-review #1 (P0):** WitnessRequirement gerçek `omega`'dan türetilir.
+    ///
+    /// Engine config YEDEK DEĞİL. Bu, `CanonicalWitnessPolicy::try_from(omega)` ile
+    /// tutarlıdır — artifact'in witness policy ile record'un witness_requirement'i
+    /// aynı omega kaynağından gelir. Cross-field doğrulama bozulmaz.
+    pub fn from(omega: &crate::witness::WitnessSet) -> Self {
+        Self {
+            min_approvers: omega.min_approvers,
+            quorum_threshold: omega.quorum_threshold,
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AuthorizationContext — engine-owned single source (reviewer P0-4 + plan-review #1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Engine'in witness'tan ÖNCE ürettiği tek authorization context.
+///
+/// **reviewer P0-4:** Context bütün deterministik gate'ler geçtikten sonra (Q6),
+/// `time.advance` (witness) çağrısından hemen önce üretilir. Satisfied/Held/Rejected
+/// aynı context nesnesini kullanır — navigator veya başka bir katman basis'i yeniden
+/// üretmez.
+///
+/// **plan-review #1:** `witness_requirement` gerçek `omega`'dan türetilir (engine config
+/// DEĞİL). `basis.witness_policy` ile cross-field tutarlıdır.
+///
+/// **Commit 2 (Authorization lifecycle completion):** Bu struct Commit 1'de tanımlı ve
+/// Held/Rejected'a thread edilir. Evaluated/Satisfied audit propagation ve tüm call
+/// path'lerinde tekilleştirme Commit 2'de tamamlanır.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AuthorizationContext {
+    /// PredicateGate sonucu (engine.rs:474) — gerçek outcome, hardcoded DEĞİL.
+    pub outcome: AttemptOutcome,
+    /// MutationDecision → ApplyTarget (engine.rs:476) — Reject→NotApplied buradan gelir.
+    pub apply_target: ApplyTarget,
+    /// Gerçek canonical basis — engine'in elindeki tüm verilerden inşa edilir.
+    pub basis: AuthorizationBasis,
+    /// `WitnessRequirement::from(omega)` — gerçek witness değerlendirmesiyle aynı kaynak.
+    pub witness_requirement: WitnessRequirement,
+}
+
 /// Attempt evidence identifier (P1 resume'da evidence store lookup için).
 pub type AttemptEvidenceId = u64;
 
@@ -592,7 +1452,10 @@ impl PendingAuthorizationEnvelope {
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PendingAuthorizationLoadError {
     #[error("unknown schema: found {found}, expected {expected}")]
-    UnknownSchema { found: String, expected: &'static str },
+    UnknownSchema {
+        found: String,
+        expected: &'static str,
+    },
     #[error("authorization basis digest mismatch — artifact may be tampered or corrupted")]
     BasisDigestMismatch,
     #[error("digest computation failed: {0}")]
@@ -605,11 +1468,31 @@ pub enum PendingAuthorizationLoadError {
 // PendingAuthorizationStore — navigator owns persistence (P0-1 çözümü)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// **plan-review düzeltme #2:** Suspension durability capability.
+///
+/// Navigator, trait object üzerinden store'un ProcessLocal mi CrossProcess mu olduğunu
+/// güvenilir biçimde anlamalıdır. Bu capability olmadan Ephemeral + Filesystem
+/// kombinasyonu ya testleri kırar ya da production güven sınırını gevşetir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuspensionDurability {
+    /// Process-local — in-memory test store. Process restart'ta kaybolur.
+    ProcessLocal,
+    /// Cross-process — filesystem store. Process restart'ta korunur; persisted space
+    /// identity gerektirir (Ephemeral identity ile fail-closed).
+    CrossProcess,
+}
+
 /// Navigator'ın `AwaitingWitnesses` döndürmeden ÖNCE çağırdığı persistence abstraction.
 ///
 /// Çökme penceresi YOK: `AwaitingWitnesses` yalnızca artifact başarılı publish edildikten
 /// sonra return edilir. P0-1 çözümü — CLI yazmaz, navigator injected store'a persist eder.
+///
+/// **plan-review #2:** `durability()` capability — navigator Ephemeral identity +
+/// CrossProcess store kombinasyonunu fail-closed olarak reddeder.
 pub trait PendingAuthorizationStore {
+    /// Store'un durability capability'si — ProcessLocal (test) veya CrossProcess (production).
+    fn durability(&self) -> SuspensionDurability;
+
     fn persist(
         &mut self,
         envelope: &PendingAuthorizationEnvelope,
@@ -627,10 +1510,10 @@ pub struct PendingAuthorizationReceipt {
 /// Persist/load hataları.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PendingAuthorizationStoreError {
-    #[error("artifact already exists with different basis — integrity error (no silent overwrite)")]
-    BasisConflict {
-        existing_path: std::path::PathBuf,
-    },
+    #[error(
+        "artifact already exists with different basis — integrity error (no silent overwrite)"
+    )]
+    BasisConflict { existing_path: std::path::PathBuf },
     #[error("artifact write failed: {0}")]
     WriteFailed(String),
     #[error("parent directory creation failed: {0}")]
@@ -660,20 +1543,29 @@ pub struct FilesystemPendingAuthorizationStore {
 impl FilesystemPendingAuthorizationStore {
     /// Yeni store — `root` altında `.osp/pending-authorizations/` dizini kullanılır.
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-        }
+        Self { root: root.into() }
     }
 
     /// Artifact path'i claim_id + digest'ten türet.
-    fn artifact_path(&self, claim_id: ClaimId, digest: &AuthorizationBasisDigest) -> std::path::PathBuf {
+    fn artifact_path(
+        &self,
+        claim_id: ClaimId,
+        digest: &AuthorizationBasisDigest,
+    ) -> std::path::PathBuf {
         let hex = digest.to_hex();
         let filename = format!("claim-{claim_id}--{hex}.json");
-        self.root.join(".osp").join("pending-authorizations").join(filename)
+        self.root
+            .join(".osp")
+            .join("pending-authorizations")
+            .join(filename)
     }
 }
 
 impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
+    fn durability(&self) -> SuspensionDurability {
+        SuspensionDurability::CrossProcess
+    }
+
     fn persist(
         &mut self,
         envelope: &PendingAuthorizationEnvelope,
@@ -708,9 +1600,8 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
 
         // Parent directory oluştur.
         if let Some(parent) = artifact_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                PendingAuthorizationStoreError::DirCreationFailed(e.to_string())
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| PendingAuthorizationStoreError::DirCreationFailed(e.to_string()))?;
         }
 
         // **P1-4:** Unique temp dosya adı (concurrent writer çakışması yok).
@@ -735,9 +1626,8 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
                 .open(&temp_path)
                 .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
 
-            let json = serde_json::to_vec_pretty(envelope).map_err(|e| {
-                PendingAuthorizationStoreError::SerializationFailed(e.to_string())
-            })?;
+            let json = serde_json::to_vec_pretty(envelope)
+                .map_err(|e| PendingAuthorizationStoreError::SerializationFailed(e.to_string()))?;
             temp_file
                 .write_all(&json)
                 .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
@@ -762,12 +1652,11 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
         // mevcut hedefte fail eder (no-clobber semantics). Cross-platform gerçek no-clobber
         // için exists()+rename yeterli değil — race window minimal ama kabul edilir.
         // Production'da concurrent writer'lar farklı digest'ler (farklı path) kullanır.
-        std::fs::rename(&temp_path, &artifact_path)
-            .map_err(|e| {
-                // Cleanup: rename failse temp'i sil.
-                let _ = std::fs::remove_file(&temp_path);
-                PendingAuthorizationStoreError::WriteFailed(e.to_string())
-            })?;
+        std::fs::rename(&temp_path, &artifact_path).map_err(|e| {
+            // Cleanup: rename failse temp'i sil.
+            let _ = std::fs::remove_file(&temp_path);
+            PendingAuthorizationStoreError::WriteFailed(e.to_string())
+        })?;
 
         // Parent directory sync (crash consistency) — Unix'te desteklenir.
         #[cfg(unix)]
@@ -810,6 +1699,10 @@ pub fn load_pending_authorization(
 pub struct NullPendingAuthorizationStore;
 
 impl PendingAuthorizationStore for NullPendingAuthorizationStore {
+    fn durability(&self) -> SuspensionDurability {
+        SuspensionDurability::ProcessLocal
+    }
+
     fn persist(
         &mut self,
         envelope: &PendingAuthorizationEnvelope,
@@ -836,13 +1729,47 @@ mod tests {
                 task_id: TaskId::from(1u64),
             },
             claim_author: AgentId::from(100u64),
-            structural_delta: CanonicalStructuralDelta {
-                new_node_ids: vec![10],
-                new_edges: vec![],
-                removed_edges: vec![(0, 1, "Imports".to_string())],
-            },
+            structural_delta: CanonicalStructuralDelta::try_new(
+                vec![CanonicalNode {
+                    id: 10,
+                    kind: CanonicalNodeKind::try_from(&crate::space::NodeKind::Module).unwrap(),
+                    mass: 100.0,
+                    cohesion: Some(0.5),
+                    classification: CanonicalNodeClassification::try_from(
+                        &crate::space::NodeClassification::Production,
+                    )
+                    .unwrap(),
+                    role: CanonicalNodeRole::try_from(&crate::space::NodeRole::Runtime).unwrap(),
+                }],
+                vec![],
+                vec![CanonicalEdge {
+                    from: 0,
+                    to: 1,
+                    kind: CanonicalEdgeKind::try_from(&crate::space::EdgeKind::Imports).unwrap(),
+                    is_type_only: false,
+                }],
+            )
+            .unwrap(),
             predicate_content: CanonicalPredicateContent {
-                predicate_bytes: b"coupling<=0.55".to_vec(),
+                mode: PredicateModeTag::try_from(&crate::trajectory::PredicateMode::All).unwrap(),
+                predicates: vec![],
+            },
+            predicate_evaluation: PredicateEvaluationBasis {
+                target_vector: CanonicalRawPosition {
+                    x: 0.55,
+                    y: 0.6,
+                    z: 0.4,
+                    w: 0.5,
+                    v: 0.3,
+                },
+                loss_before: 1.0,
+                loss_after: 0.5,
+                failure_policy: PredicateFailurePolicyTag::try_from(
+                    &crate::trajectory::PredicateFailurePolicy::StrictReject,
+                )
+                .unwrap(),
+                allow_progress_checkpoint: false,
+                tolerance: 0.02,
             },
             measured_result: ProvenancedMeasuredResult {
                 raw: RawPosition {
@@ -858,10 +1785,16 @@ mod tests {
             predicate_completion: PredicateCompletion::Completed,
             mutation_decision: MutationDecision::AcceptAsCompleted,
             intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+            witness_policy: CanonicalWitnessPolicy {
+                schema_version: 1,
+                min_approvers: 2,
+                quorum_threshold: 1.5,
+                independence_policy: WitnessIndependencePolicyTag::STRICT,
+            },
+            measurement_input_digest: MeasurementInputDigest::from_bytes([0xcc; 32]),
             evaluation_context_digest: EvaluationContextDigest::from_bytes([0xaa; 32]),
             base_space_view_revision: SpaceViewRevision {
-                store_id: StoreId("test-store".to_string()),
-                lane: CommitLane::Mainline,
+                view_id: SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xdd; 16])),
                 sequence: 7,
                 content_digest: SpaceDigest::from_bytes([0xbb; 32]),
             },
@@ -887,13 +1820,14 @@ mod tests {
     }
 
     #[test]
-    fn authorization_basis_digest_changes_when_base_lane_changes() {
+    fn authorization_basis_digest_changes_when_space_view_id_changes() {
         let basis = sample_basis();
         let d1 = AuthorizationBasisDigest::compute(&basis).unwrap();
         let mut basis2 = basis.clone();
-        basis2.base_space_view_revision.lane = CommitLane::TrajectoryCheckpoint;
+        basis2.base_space_view_revision.view_id =
+            SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xee; 16]));
         let d2 = AuthorizationBasisDigest::compute(&basis2).unwrap();
-        assert_ne!(d1, d2, "different lane → different digest");
+        assert_ne!(d1, d2, "different space view id → different digest");
     }
 
     #[test]
@@ -901,7 +1835,22 @@ mod tests {
         let basis = sample_basis();
         let d1 = AuthorizationBasisDigest::compute(&basis).unwrap();
         let mut basis2 = basis.clone();
-        basis2.predicate_content.predicate_bytes = b"coupling<=0.60".to_vec();
+        basis2
+            .predicate_content
+            .predicates
+            .push(EffectiveMetricPredicate {
+                axis: PredicateAxisTag::try_from(&crate::trajectory::PredicateAxis::Cohesion)
+                    .unwrap(),
+                operator: ComparisonOpTag::try_from(&crate::trajectory::ComparisonOp::Lt).unwrap(),
+                threshold: 0.6,
+                scope: CanonicalPredicateScope {
+                    scope_tag: 0,
+                    identity_bytes: vec![],
+                },
+                required_source: EffectiveSourceRequirement { source_tag: 0 },
+                effective_weight: 1.0,
+                effective_tolerance: 0.0,
+            });
         let d2 = AuthorizationBasisDigest::compute(&basis2).unwrap();
         assert_ne!(d1, d2, "different predicate content → different digest");
     }
@@ -946,7 +1895,7 @@ mod tests {
         let mut basis2 = basis.clone();
         basis2.measured_result.raw.x = f64::NAN;
         let err = AuthorizationBasisDigest::compute(&basis2).unwrap_err();
-        assert_eq!(err, AuthorizationBasisDigestError::NaNRejected);
+        assert_eq!(err, AuthorizationBasisDigestError::NonFiniteRejected);
     }
 
     #[test]
@@ -969,15 +1918,15 @@ mod tests {
 
     #[test]
     fn authorization_basis_digest_is_order_independent_for_node_ids() {
-        // Same node IDs in different order → same digest (sorted encoding).
+        // Same nodes in different order → same digest (sorted encoding).
         let basis1 = sample_basis();
         let mut basis2 = basis1.clone();
-        // new_node_ids sırasını ters çevir (eğer >1 element varsa).
-        basis2.structural_delta.new_node_ids.reverse();
+        // new_nodes sırasını ters çevir.
+        basis2.structural_delta.new_nodes.reverse();
 
         let d1 = AuthorizationBasisDigest::compute(&basis1).unwrap();
         let d2 = AuthorizationBasisDigest::compute(&basis2).unwrap();
-        assert_eq!(d1, d2, "same node IDs different order → same digest (sorted)");
+        assert_eq!(d1, d2, "same nodes different order → same digest (sorted)");
     }
 
     #[test]
@@ -1016,17 +1965,41 @@ mod tests {
 
     #[test]
     fn canonical_structural_delta_constructor_sorts_collections() {
-        let delta = CanonicalStructuralDelta::new(
-            vec![3, 1, 2],
-            vec![(2, 1, "b".into()), (1, 2, "a".into())],
+        let mk_node = |id| CanonicalNode {
+            id,
+            kind: CanonicalNodeKind::try_from(&crate::space::NodeKind::Module).unwrap(),
+            mass: 1.0,
+            cohesion: None,
+            classification: CanonicalNodeClassification::try_from(
+                &crate::space::NodeClassification::Production,
+            )
+            .unwrap(),
+            role: CanonicalNodeRole::try_from(&crate::space::NodeRole::Runtime).unwrap(),
+        };
+        let mk_edge = |from, to, kind_num| CanonicalEdge {
+            from,
+            to,
+            kind: CanonicalEdgeKind::try_from(
+                &(match kind_num {
+                    0 => crate::space::EdgeKind::Imports,
+                    _ => crate::space::EdgeKind::Calls,
+                }),
+            )
+            .unwrap(),
+            is_type_only: false,
+        };
+        let delta = CanonicalStructuralDelta::try_new(
+            vec![mk_node(3), mk_node(1), mk_node(2)],
+            vec![mk_edge(2, 1, 1), mk_edge(1, 2, 0)],
             vec![],
-        );
-        assert_eq!(delta.new_node_ids, vec![1, 2, 3], "node IDs sorted");
+        )
+        .unwrap();
         assert_eq!(
-            delta.new_edges[0],
-            (1, 2, "a".to_string()),
-            "edges sorted"
+            delta.new_nodes.iter().map(|n| n.id).collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "nodes sorted by id"
         );
+        assert_eq!(delta.new_edges[0].from, 1, "edges sorted");
     }
 
     #[test]
@@ -1039,8 +2012,7 @@ mod tests {
     #[test]
     fn space_view_revision_serializes_roundtrip() {
         let rev = SpaceViewRevision {
-            store_id: StoreId("test".to_string()),
-            lane: CommitLane::Mainline,
+            view_id: SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xab; 16])),
             sequence: 42,
             content_digest: SpaceDigest::from_bytes([0xcd; 32]),
         };
@@ -1065,8 +2037,7 @@ mod tests {
             )
             .unwrap(), // placeholder — Envelope::new overwrite eder
             base_space_view_revision: SpaceViewRevision {
-                store_id: StoreId("test-store".to_string()),
-                lane: CommitLane::Mainline,
+                view_id: SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xdd; 16])),
                 sequence: 7,
                 content_digest: SpaceDigest::from_bytes([0xbb; 32]),
             },
@@ -1096,7 +2067,10 @@ mod tests {
         let record = sample_pending_record();
         assert!(matches!(
             record.witness_hold_reason,
-            WitnessHoldReason::MinApproversNotMet { distinct: 0, required: 2 }
+            WitnessHoldReason::MinApproversNotMet {
+                distinct: 0,
+                required: 2
+            }
         ));
     }
 
@@ -1126,11 +2100,10 @@ mod tests {
         let mut envelope = PendingAuthorizationEnvelope::new(record, basis).unwrap();
 
         // Tamper — farklı digest set et.
-        envelope.record.authorization_basis_digest =
-            AuthorizationBasisDigest::from_hex(
-                "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            )
-            .unwrap();
+        envelope.record.authorization_basis_digest = AuthorizationBasisDigest::from_hex(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .unwrap();
 
         let err = envelope.verify().unwrap_err();
         assert_eq!(err, PendingAuthorizationLoadError::BasisDigestMismatch);
@@ -1144,7 +2117,10 @@ mod tests {
         envelope.schema = "osp.pending-authorization.v999".to_string();
 
         let err = envelope.verify().unwrap_err();
-        assert!(matches!(err, PendingAuthorizationLoadError::UnknownSchema { .. }));
+        assert!(matches!(
+            err,
+            PendingAuthorizationLoadError::UnknownSchema { .. }
+        ));
     }
 
     #[test]
@@ -1169,7 +2145,10 @@ mod tests {
         json = json.replace(PENDING_AUTHORIZATION_SCHEMA, "osp.bogus.v1");
         let envelope2: PendingAuthorizationEnvelope = serde_json::from_str(&json).unwrap();
         let err = envelope2.verify().unwrap_err();
-        assert!(matches!(err, PendingAuthorizationLoadError::UnknownSchema { .. }));
+        assert!(matches!(
+            err,
+            PendingAuthorizationLoadError::UnknownSchema { .. }
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -1177,9 +2156,7 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     fn temp_dir() -> std::path::PathBuf {
-        tempfile::tempdir()
-            .expect("temp dir")
-            .keep()
+        tempfile::tempdir().expect("temp dir").keep()
     }
 
     #[test]
@@ -1192,7 +2169,10 @@ mod tests {
 
         let receipt = store.persist(&envelope).expect("persist");
         assert!(receipt.artifact_path.exists(), "artifact should exist");
-        assert!(receipt.artifact_path.to_string_lossy().contains("claim-42--"));
+        assert!(receipt
+            .artifact_path
+            .to_string_lossy()
+            .contains("claim-42--"));
         assert!(receipt.artifact_path.to_string_lossy().contains(".json"));
     }
 
@@ -1205,7 +2185,9 @@ mod tests {
         let envelope = PendingAuthorizationEnvelope::new(record, basis).unwrap();
 
         let receipt1 = store.persist(&envelope).expect("first persist");
-        let receipt2 = store.persist(&envelope).expect("second persist (idempotent)");
+        let receipt2 = store
+            .persist(&envelope)
+            .expect("second persist (idempotent)");
 
         assert_eq!(receipt1.artifact_path, receipt2.artifact_path);
     }
@@ -1286,5 +2268,469 @@ mod tests {
         let _attempt_evidence_id = record.attempt_evidence_id;
         let _created_at = record.created_at;
         // Hepsi erişilebilir — record complete.
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 Commit 1 amend — Canonical primitives regression testleri
+    // (reviewer P0-1..P0-3, P1 + plan-review düzeltmeleri)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    fn sample_measurement_context(
+        entropy: Option<f64>,
+        witness_depth: Option<f64>,
+    ) -> MeasurementInputContext {
+        MeasurementInputContext {
+            schema_version: 1,
+            coordinate_system_config: CanonicalCoordinateConfig {
+                config_tag: 0,
+                entropy_axis_tag: 0,
+                witness_depth_axis_tag: 0,
+                theta_bound: 0.3,
+                abstractness: 0.5,
+            },
+            repo_level_entropy: entropy,
+            repo_level_witness_depth: witness_depth,
+            axis_normalization_params: CanonicalAxisNormalization {
+                normalization_tag: 0,
+            },
+            metric_source_config: CanonicalMetricSourceConfig {
+                primary_source_tag: 0,
+                placeholder_strategy_tag: 0,
+            },
+            measurement_adapters_version: "v1".to_string(),
+        }
+    }
+
+    #[test]
+    fn measurement_digest_distinguishes_none_some_zero_positions() {
+        // **reviewer P0-1:** Option<f64> presence tag — collision fix.
+        // Context A: entropy=None, witness_depth=Some(0.0)
+        // Context B: entropy=Some(0.0), witness_depth=None
+        // Önceki yaklaşım her ikisinde 9 sıfır byte üretiyordu.
+        let ctx_a = sample_measurement_context(None, Some(0.0));
+        let ctx_b = sample_measurement_context(Some(0.0), None);
+        let d_a = MeasurementInputDigest::compute(&ctx_a).unwrap();
+        let d_b = MeasurementInputDigest::compute(&ctx_b).unwrap();
+        assert_ne!(
+            d_a, d_b,
+            "None vs Some(0.0) presence positions must produce different digests"
+        );
+    }
+
+    #[test]
+    fn authorization_basis_rejects_positive_infinity() {
+        // **reviewer P0-2a:** ±Infinity reddedilmeli (yalnız NaN değil).
+        let basis = sample_basis();
+        let mut basis2 = basis.clone();
+        basis2.measured_result.raw.x = f64::INFINITY;
+        let err = AuthorizationBasisDigest::compute(&basis2).unwrap_err();
+        assert_eq!(err, AuthorizationBasisDigestError::NonFiniteRejected);
+    }
+
+    #[test]
+    fn authorization_basis_rejects_negative_infinity() {
+        let basis = sample_basis();
+        let mut basis2 = basis.clone();
+        basis2.measured_result.raw.y = f64::NEG_INFINITY;
+        let err = AuthorizationBasisDigest::compute(&basis2).unwrap_err();
+        assert_eq!(err, AuthorizationBasisDigestError::NonFiniteRejected);
+    }
+
+    #[test]
+    fn predicate_sort_uses_normalized_canonical_float_encoding() {
+        // **reviewer P0-2b:** Sorting canonical byte dizisi ile yapılır.
+        // -0.0 ve 0.0 aynı canonical byte dizisini üretmeli → aynı digest.
+        let mut basis_pos = sample_basis();
+        basis_pos
+            .predicate_content
+            .predicates
+            .push(EffectiveMetricPredicate {
+                axis: PredicateAxisTag::try_from(&crate::trajectory::PredicateAxis::Coupling)
+                    .unwrap(),
+                operator: ComparisonOpTag::try_from(&crate::trajectory::ComparisonOp::Lt).unwrap(),
+                threshold: -0.0f64, // negative zero
+                scope: CanonicalPredicateScope {
+                    scope_tag: 0,
+                    identity_bytes: vec![],
+                },
+                required_source: EffectiveSourceRequirement { source_tag: 0 },
+                effective_weight: 1.0,
+                effective_tolerance: 0.0,
+            });
+        let mut basis_zero = sample_basis();
+        basis_zero
+            .predicate_content
+            .predicates
+            .push(EffectiveMetricPredicate {
+                axis: PredicateAxisTag::try_from(&crate::trajectory::PredicateAxis::Coupling)
+                    .unwrap(),
+                operator: ComparisonOpTag::try_from(&crate::trajectory::ComparisonOp::Lt).unwrap(),
+                threshold: 0.0f64, // positive zero
+                scope: CanonicalPredicateScope {
+                    scope_tag: 0,
+                    identity_bytes: vec![],
+                },
+                required_source: EffectiveSourceRequirement { source_tag: 0 },
+                effective_weight: 1.0,
+                effective_tolerance: 0.0,
+            });
+        let d1 = AuthorizationBasisDigest::compute(&basis_pos).unwrap();
+        let d2 = AuthorizationBasisDigest::compute(&basis_zero).unwrap();
+        assert_eq!(
+            d1, d2,
+            "-0.0 and 0.0 predicate thresholds must normalize to same digest"
+        );
+    }
+
+    #[test]
+    fn canonical_structural_delta_rejects_duplicate_node_id() {
+        // **reviewer P1:** duplicate node ID reddedilmeli.
+        let node = || CanonicalNode {
+            id: 5,
+            kind: CanonicalNodeKind::try_from(&crate::space::NodeKind::Module).unwrap(),
+            mass: 1.0,
+            cohesion: None,
+            classification: CanonicalNodeClassification::try_from(
+                &crate::space::NodeClassification::Production,
+            )
+            .unwrap(),
+            role: CanonicalNodeRole::try_from(&crate::space::NodeRole::Runtime).unwrap(),
+        };
+        let err = CanonicalStructuralDelta::try_new(vec![node(), node()], vec![], vec![]);
+        assert!(matches!(
+            err,
+            Err(CanonicalizationError::DuplicateNodeId(5))
+        ));
+    }
+
+    #[test]
+    fn canonical_structural_delta_rejects_non_finite_node_field() {
+        let node = CanonicalNode {
+            id: 7,
+            kind: CanonicalNodeKind::try_from(&crate::space::NodeKind::Module).unwrap(),
+            mass: f64::NAN,
+            cohesion: None,
+            classification: CanonicalNodeClassification::try_from(
+                &crate::space::NodeClassification::Production,
+            )
+            .unwrap(),
+            role: CanonicalNodeRole::try_from(&crate::space::NodeRole::Runtime).unwrap(),
+        };
+        let err = CanonicalStructuralDelta::try_new(vec![node], vec![], vec![]);
+        assert!(matches!(
+            err,
+            Err(CanonicalizationError::NonFiniteNodeField(7))
+        ));
+    }
+
+    #[test]
+    fn canonical_structural_delta_rejects_cross_list_edge_conflict() {
+        // **plan-review ikincil:** aynı edge new_edges ve removed_edges'te → ambiguous delta.
+        let edge = CanonicalEdge {
+            from: 1,
+            to: 2,
+            kind: CanonicalEdgeKind::try_from(&crate::space::EdgeKind::Imports).unwrap(),
+            is_type_only: false,
+        };
+        let err = CanonicalStructuralDelta::try_new(vec![], vec![edge.clone()], vec![edge]);
+        assert_eq!(
+            err.unwrap_err(),
+            CanonicalizationError::CrossListEdgeConflict
+        );
+    }
+
+    #[test]
+    fn persisted_space_view_id_has_expected_length() {
+        // **reviewer P0-3:** CSPRNG identity — 16 byte.
+        let id = PersistedSpaceViewId::generate().unwrap();
+        assert_eq!(id.as_bytes().len(), 16);
+    }
+
+    #[test]
+    fn persisted_space_view_id_generation_propagates_entropy_failure() {
+        // **plan-review:** Injectable EntropySource ile deterministic failure test.
+        struct FailingEntropy;
+        impl super::EntropySource for FailingEntropy {
+            fn fill(&self, _dest: &mut [u8]) -> Result<(), SpaceIdentityError> {
+                Err(SpaceIdentityError::EntropyUnavailable {
+                    message: "simulated failure".to_string(),
+                })
+            }
+        }
+        let err = PersistedSpaceViewId::generate_with(&FailingEntropy).unwrap_err();
+        assert!(matches!(err, SpaceIdentityError::EntropyUnavailable { .. }));
+    }
+
+    #[test]
+    fn persisted_space_view_id_generation_uses_os_entropy() {
+        // İki generate çağrısı farklı byte dizileri üretmeli (CSPRNG).
+        let id1 = PersistedSpaceViewId::generate().unwrap();
+        let id2 = PersistedSpaceViewId::generate().unwrap();
+        assert_ne!(
+            id1.as_bytes(),
+            id2.as_bytes(),
+            "CSPRNG must produce unique ids"
+        );
+    }
+
+    #[test]
+    fn persisted_space_view_id_serialization_roundtrip() {
+        let id = PersistedSpaceViewId::generate().unwrap();
+        let json = serde_json::to_string(&id).unwrap();
+        let back: PersistedSpaceViewId = serde_json::from_str(&json).unwrap();
+        assert_eq!(id, back);
+    }
+
+    #[test]
+    fn space_digest_is_stable_for_identical_space() {
+        // **reviewer P0-3 (A7):** SpaceDigest gerçek canonical içerik.
+        use crate::coords::{DerivedPosition, Position, RawPosition};
+        use crate::space::{Edge, EdgeKind, Node, NodeClassification, NodeKind, NodeRole, Space};
+        let mk_space = || {
+            let mut space = Space::default();
+            space.nodes.insert(
+                1,
+                Node {
+                    id: 1,
+                    kind: NodeKind::Module,
+                    mass: 10.0,
+                    position: Position {
+                        raw: RawPosition::default(),
+                        derived: DerivedPosition::default(),
+                    },
+                    cohesion: Some(0.5),
+                    classification: NodeClassification::Production,
+                    role: NodeRole::Runtime,
+                },
+            );
+            space.edges.push(Edge {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::Imports,
+                is_type_only: false,
+            });
+            space
+        };
+        let d1 = SpaceDigest::compute(&mk_space()).unwrap();
+        let d2 = SpaceDigest::compute(&mk_space()).unwrap();
+        assert_eq!(d1, d2, "identical spaces → same digest");
+    }
+
+    #[test]
+    fn space_digest_excludes_position_field() {
+        // **reviewer P0-4 inclusion table:** position engine-derived, dahil DEĞİL.
+        // Sadece position farklı, diğer tüm alanlar aynı → aynı digest.
+        use crate::coords::{DerivedPosition, Position, RawPosition};
+        use crate::space::{Node, NodeClassification, NodeKind, NodeRole, Space};
+        let mk_space = |x: f64| {
+            let mut space = Space::default();
+            space.nodes.insert(
+                1,
+                Node {
+                    id: 1,
+                    kind: NodeKind::Module,
+                    mass: 10.0,
+                    position: Position {
+                        raw: RawPosition {
+                            x,
+                            y: 0.0,
+                            z: 0.0,
+                            w: 0.0,
+                            v: 0.0,
+                        },
+                        derived: DerivedPosition::default(),
+                    },
+                    cohesion: Some(0.5),
+                    classification: NodeClassification::Production,
+                    role: NodeRole::Runtime,
+                },
+            );
+            space
+        };
+        let d1 = SpaceDigest::compute(&mk_space(0.3)).unwrap();
+        let d2 = SpaceDigest::compute(&mk_space(0.9)).unwrap();
+        assert_eq!(
+            d1, d2,
+            "position is engine-derived and must NOT affect space digest"
+        );
+    }
+
+    #[test]
+    fn space_digest_changes_when_node_kind_changes() {
+        use crate::coords::{DerivedPosition, Position, RawPosition};
+        use crate::space::{Node, NodeClassification, NodeKind, NodeRole, Space};
+        let mk_space = |kind: NodeKind| {
+            let mut space = Space::default();
+            space.nodes.insert(
+                1,
+                Node {
+                    id: 1,
+                    kind,
+                    mass: 10.0,
+                    position: Position {
+                        raw: RawPosition::default(),
+                        derived: DerivedPosition::default(),
+                    },
+                    cohesion: Some(0.5),
+                    classification: NodeClassification::Production,
+                    role: NodeRole::Runtime,
+                },
+            );
+            space
+        };
+        let d1 = SpaceDigest::compute(&mk_space(NodeKind::Module)).unwrap();
+        let d2 = SpaceDigest::compute(&mk_space(NodeKind::Concept)).unwrap();
+        assert_ne!(d1, d2, "different node kind → different digest");
+    }
+
+    #[test]
+    fn evaluation_context_digest_is_stable_for_identical_context() {
+        // **reviewer P0-3 (A8):** EvaluationContextDigest gerçek içerik.
+        use crate::coords::RawPosition;
+        let config = crate::engine::EngineConfig {
+            min_approvers: 2,
+            quorum_threshold: 1.5,
+            theta_bound: 0.3,
+            milestone_interval: 1000,
+            abstractness: 0.5,
+            merge_ratio_observable: 0.1,
+            role_overrides: std::collections::HashMap::new(),
+        };
+        let rules = vec![RuleDescriptor {
+            rule_id: "structural.no_self_import".to_string(),
+            semantics_version: 1,
+            canonical_parameters: vec![],
+        }];
+        let vision = RawPosition {
+            x: 0.5,
+            y: 0.6,
+            z: 0.4,
+            w: 0.5,
+            v: 0.3,
+        };
+        let d1 = EvaluationContextDigest::compute(&config, &rules, &vision).unwrap();
+        let d2 = EvaluationContextDigest::compute(&config, &rules, &vision).unwrap();
+        assert_eq!(d1, d2);
+    }
+
+    #[test]
+    fn evaluation_context_digest_changes_when_theta_bound_changes() {
+        use crate::coords::RawPosition;
+        let mk = |theta: f64| {
+            let config = crate::engine::EngineConfig {
+                min_approvers: 2,
+                quorum_threshold: 1.5,
+                theta_bound: theta,
+                milestone_interval: 1000,
+                abstractness: 0.5,
+                merge_ratio_observable: 0.1,
+                role_overrides: std::collections::HashMap::new(),
+            };
+            EvaluationContextDigest::compute(&config, &[], &RawPosition::default()).unwrap()
+        };
+        assert_ne!(mk(0.3), mk(0.5));
+    }
+
+    #[test]
+    fn evaluation_context_digest_changes_when_rule_added() {
+        use crate::coords::RawPosition;
+        let config = crate::engine::EngineConfig {
+            min_approvers: 2,
+            quorum_threshold: 1.5,
+            theta_bound: 0.3,
+            milestone_interval: 1000,
+            abstractness: 0.5,
+            merge_ratio_observable: 0.1,
+            role_overrides: std::collections::HashMap::new(),
+        };
+        let d_no_rules =
+            EvaluationContextDigest::compute(&config, &[], &RawPosition::default()).unwrap();
+        let d_one_rule = EvaluationContextDigest::compute(
+            &config,
+            &[RuleDescriptor {
+                rule_id: "test.rule".to_string(),
+                semantics_version: 1,
+                canonical_parameters: vec![],
+            }],
+            &RawPosition::default(),
+        )
+        .unwrap();
+        assert_ne!(d_no_rules, d_one_rule);
+    }
+
+    #[test]
+    fn evaluation_context_digest_changes_when_rule_semantics_version_changes() {
+        // **plan-review #4:** semantics_version artarsa digest değişmeli.
+        use crate::coords::RawPosition;
+        let config = crate::engine::EngineConfig {
+            min_approvers: 2,
+            quorum_threshold: 1.5,
+            theta_bound: 0.3,
+            milestone_interval: 1000,
+            abstractness: 0.5,
+            merge_ratio_observable: 0.1,
+            role_overrides: std::collections::HashMap::new(),
+        };
+        let mk = |semver: u32| {
+            EvaluationContextDigest::compute(
+                &config,
+                &[RuleDescriptor {
+                    rule_id: "test.rule".to_string(),
+                    semantics_version: semver,
+                    canonical_parameters: vec![],
+                }],
+                &RawPosition::default(),
+            )
+            .unwrap()
+        };
+        assert_ne!(mk(1), mk(2));
+    }
+
+    #[test]
+    fn witness_requirement_derives_from_omega_not_config() {
+        // **plan-review #1 (P0):** WitnessRequirement gerçek omega'dan.
+        let omega = crate::witness::WitnessSet::new(vec![]).with_quorum(3, 2.0);
+        let req = WitnessRequirement::from(&omega);
+        assert_eq!(req.min_approvers, 3);
+        assert_eq!(req.quorum_threshold, 2.0);
+    }
+
+    #[test]
+    fn canonical_witness_policy_derives_from_omega_not_config() {
+        // **plan-review #1 (P0):** CanonicalWitnessPolicy gerçek omega'dan.
+        let omega = crate::witness::WitnessSet::new(vec![]).with_quorum(0, 0.0);
+        let policy = CanonicalWitnessPolicy::try_from(&omega).unwrap();
+        assert_eq!(policy.min_approvers, 0);
+        assert_eq!(policy.quorum_threshold, 0.0);
+        // Farklı omega → farklı policy.
+        let omega2 = crate::witness::WitnessSet::new(vec![]).with_quorum(5, 3.0);
+        let policy2 = CanonicalWitnessPolicy::try_from(&omega2).unwrap();
+        assert_ne!(policy.min_approvers, policy2.min_approvers);
+    }
+
+    #[test]
+    fn ephemeral_identity_with_cross_process_store_fails_closed() {
+        // **plan-review #2 (D3):** Ephemeral + CrossProcess → fail-closed.
+        // NullPendingAuthorizationStore ProcessLocal döndürür — Ephemeral ile OK.
+        let null_store = NullPendingAuthorizationStore;
+        assert_eq!(null_store.durability(), SuspensionDurability::ProcessLocal);
+
+        // FilesystemStore CrossProcess döndürür.
+        let dir = temp_dir();
+        let fs_store = FilesystemPendingAuthorizationStore::new(&dir);
+        assert_eq!(fs_store.durability(), SuspensionDurability::CrossProcess);
+    }
+
+    #[test]
+    fn filesystem_store_durability_is_cross_process() {
+        let dir = temp_dir();
+        let store = FilesystemPendingAuthorizationStore::new(&dir);
+        assert_eq!(store.durability(), SuspensionDurability::CrossProcess);
+    }
+
+    #[test]
+    fn null_store_durability_is_process_local() {
+        let store = NullPendingAuthorizationStore;
+        assert_eq!(store.durability(), SuspensionDurability::ProcessLocal);
     }
 }
