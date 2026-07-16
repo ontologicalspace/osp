@@ -550,6 +550,8 @@ fn run_one_experiment(
             output_contract: OutputContract::strict(),
             // G2c harness: controlled experiment → auto-approve (production değil).
             witness_policy: osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove,
+            pending_authorization_store: None,
+            clock: None,
         };
         nav.run_task(task_id, 1)
     };
@@ -844,6 +846,8 @@ fn run_synthetic_rq9(
             output_contract: OutputContract::strict(),
             // G2c harness: controlled experiment → auto-approve (production değil).
             witness_policy: osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove,
+            pending_authorization_store: None,
+            clock: None,
         };
         nav.run_task(task_id, 1)
     };

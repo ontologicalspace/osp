@@ -353,6 +353,12 @@ pub struct AgentNavigator<'a, L: LlmClient + ?Sized, R: TaskResolver> {
     /// Navigator bu field'a göre WitnessSet quorum'unu set eder — production
     /// güven iddiasını zayıflatmadan G2c runner/test'lere izin verir.
     pub witness_policy: NavigatorWitnessPolicy,
+    /// **INV-T9:** Pending authorization persistence store. Navigator `AwaitingWitnesses`
+    /// döndürmeden ÖNCE buraya persist eder (persist-before-return — çökme penceresi yok).
+    /// None ise persist yapılmaz (test/legacy path — Commit 5'te zorunlu yapılacak).
+    pub pending_authorization_store: Option<&'a mut dyn crate::authorization::PendingAuthorizationStore>,
+    /// **INV-T9:** Clock — pending authorization `created_at` için. None ise SystemClock.
+    pub clock: Option<&'a dyn crate::authorization::Clock>,
 }
 
 /// **G2c-3b (arkadaş review 9):** Navigator witness gate policy.
@@ -945,6 +951,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let result = nav.run_task(999, 7);
         assert_eq!(result, NavigatorResult::TaskNotFound);
@@ -984,6 +992,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let result = nav.run_task(1, 7);
         // D1: mock engine satisfied döndüğü için Completed; D2'de gerçek measure ile
@@ -1026,6 +1036,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let _ = nav.run_task(1, 7);
         // En az 1 evidence (reject'ler de kaydeder). Maneuver limit dolana kadar.
@@ -1070,6 +1082,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let result = nav.run_task(1, 7);
         // Loop çalıştı, evidence kaydedildi (progress veya complete veya maneuver).
@@ -1120,6 +1134,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let result = nav.run_task(1, 7);
         if let NavigatorResult::ExceededManeuverLimit { .. } = result {
@@ -1382,6 +1398,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let result = nav.run_task(1, 7);
         // Empty proposals → ExceededManeuverLimit (2 attempt evidence push edildi).
@@ -1431,6 +1449,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let _ = nav.run_task(1, 7);
         // Evidence boş DEĞİL ve gate_decision Unknown DEĞİL (gerçek gate set edildi).
@@ -1470,6 +1490,8 @@ mod tests {
             current_measured: measured_pos(0.82),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let _ = nav.run_task(1, 7);
         let e = &evidence[0];
@@ -1605,6 +1627,8 @@ mod tests {
             current_measured: measured_pos(0.5),
             output_contract: OutputContract::strict(),
             witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: None,
+            clock: None,
         };
         let _ = nav.run_task(1, 7);
         // Policy violation → RejectedByRule evidence.
@@ -1806,6 +1830,8 @@ mod tests {
             output_contract: OutputContract::strict(),
             // G2c-3: harness auto-approve (controlled experiment — production değil).
             witness_policy: NavigatorWitnessPolicy::HarnessAutoApprove,
+            pending_authorization_store: None,
+            clock: None,
         }
     }
 

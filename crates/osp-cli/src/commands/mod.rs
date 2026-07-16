@@ -304,6 +304,8 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         output_contract: osp_core::agent::OutputContract::strict(),
         // CLI = production → Production witness (min_approvers=2, Paper 1 güven modeli).
         witness_policy: osp_core::navigator::NavigatorWitnessPolicy::Production,
+        pending_authorization_store: None,
+        clock: None,
     };
     let result = nav.run_task(args.task_id, 1);
     // 6. Sonuç yazdır.
