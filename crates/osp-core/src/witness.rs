@@ -246,6 +246,151 @@ pub enum Reason {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 — WitnessDisposition + WitnessHoldReason + NonEmptyWitnessRejections
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Paper 2 model–implementation conformance fix: "insufficient witness quorum" bir
+// agent-correctable failure DEĞİLDIR. Expected authorization bekleme durumudur ve
+// generic Reject retry loop'una girmemelidir (INV-T9).
+//
+// Bu tipler Commit 1'de tanımlanır; `WitnessResult` → `WitnessDisposition` migration
+// Commit 2'de yapılır (deprecated alias). Engine `EngineCommitResult` ayrımı Commit 2.
+
+/// Witness değerlendirmesinin quorum anlık görüntüsü.
+///
+/// Hem satisfied hem hold/rejected durumlarında aynı yapı — navigator ve pending
+/// authorization record için tam kanıt taşır.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitnessQuorumSnapshot {
+    /// Distinct non-author approver sayısı (Q1).
+    pub approvers: usize,
+    /// Gerekli minimum approver sayısı (production: 2).
+    pub required_approvers: usize,
+    /// Ağırlıklı support (Q2).
+    pub support: f64,
+    /// Quorum threshold (production: 1.5).
+    pub required_support: f64,
+}
+
+/// Hold nedenleri — expected authorization bekleme (INVALID evidence DEĞİL).
+///
+/// `EvidenceNotLocallyObservable`, Paper 1 inv #3 tri-state'inden gelir: evidence
+/// lokalde gözlemlenemiyor (squash/rebase + trailersız). Bu bozuk evidence değil,
+/// erişilemeyen evidence'dır. `InvalidWitnessEvidence` yalnızca gerçekten bozuk/
+/// yetkisiz evidence içindir (malformed, author-self, duplicate).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WitnessHoldReason {
+    /// Q1: `distinct_non_author_approvers < min_approvers`.
+    MinApproversNotMet { distinct: usize, required: usize },
+    /// Q2: `support < θ_quorum`.
+    QuorumInsufficient { support: f64, threshold: f64 },
+    /// inv #3 tri-state — lokalde gözlemlenemeyen evidence (invalid DEĞİL).
+    EvidenceNotLocallyObservable { hint: String },
+}
+
+impl WitnessHoldReason {
+    /// Kısa stabil string — CLI JSON `"reason"` alanı ve digest için.
+    pub fn as_reason_str(&self) -> &'static str {
+        match self {
+            Self::MinApproversNotMet { .. } => "min_approvers_not_met",
+            Self::QuorumInsufficient { .. } => "quorum_insufficient",
+            Self::EvidenceNotLocallyObservable { .. } => "evidence_not_locally_observable",
+        }
+    }
+}
+
+/// Tek witness'ın explicit reddi (Q3 honest-reject). Hold DEĞİL — gerçek ret.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WitnessRejection {
+    /// Reddeden witness'ın agent ID'si.
+    pub witness: AgentId,
+    /// Red gerekçesi (opsiyonel, Faz 1.7+ explicit-reject sinyalleriyle gelir).
+    pub rationale: Option<String>,
+}
+
+/// Non-empty witness rejection listesi — smart constructor guaranteed.
+///
+/// Boş rejection listesi anlamsızdır (en az bir witness reddetmiş olmalı).
+/// `from_single` ve `from_vec` (non-empty kontrolü ile) dışında oluşturulamaz.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NonEmptyWitnessRejections(Vec<WitnessRejection>);
+
+impl NonEmptyWitnessRejections {
+    /// Tek rejection'dan oluştur.
+    pub fn from_single(rejection: WitnessRejection) -> Self {
+        Self(vec![rejection])
+    }
+
+    /// Vec'den oluştur — boşsa panic (smart constructor invariant).
+    pub fn from_vec(rejections: Vec<WitnessRejection>) -> Self {
+        assert!(
+            !rejections.is_empty(),
+            "NonEmptyWitnessRejections::from_vec — boş vec geçersiz (invariant)"
+        );
+        Self(rejections)
+    }
+
+    /// Vec'den oluştur — boşsa None (fallible variant, parsing/validation için).
+    pub fn try_from_vec(rejections: Vec<WitnessRejection>) -> Option<Self> {
+        if rejections.is_empty() {
+            None
+        } else {
+            Some(Self(rejections))
+        }
+    }
+
+    /// İç slice'a erişim.
+    pub fn as_slice(&self) -> &[WitnessRejection] {
+        &self.0
+    }
+
+    /// İç Vec'e erişim (consume).
+    pub fn into_inner(self) -> Vec<WitnessRejection> {
+        self.0
+    }
+
+    /// Rejection sayısı.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Her zaman false (non-empty invariant).
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+/// Canonical witness değerlendirme sonucu — TimeFSM::advance çıktısı.
+///
+/// **INV-T9:** `Held` expected authorization bekleme durumudur, HATA DEĞİL.
+/// `Rejected` explicit witness reddidir, HATA DEĞİL. Operational fault'lar
+/// (`InvalidWitnessEvidence`, permission, persistence, internal) `EngineCommitError`'da
+/// kalır — bu enum yalnızca domain outcome'ları taşır.
+///
+/// Migration: `WitnessResult` deprecated alias olarak korunur (Commit 2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum WitnessDisposition {
+    /// Quorum + vision-bound sağlandı → uzay genişler (§6).
+    Satisfied {
+        delta: crate::bigbang::Delta,
+        /// inv #7 — admin override kullanıldıysa true (asla sessiz).
+        safety_weakened: bool,
+        override_reason: Option<String>,
+        snapshot: WitnessQuorumSnapshot,
+    },
+    /// Q1/Q2/EvidenceNotLocallyObservable yetersiz — INV-T9 suspended authorization.
+    Held {
+        reason: WitnessHoldReason,
+        snapshot: WitnessQuorumSnapshot,
+    },
+    /// Q3: honest-reject (explicit witness rejection). NonEmpty invariant.
+    Rejected {
+        reasons: NonEmptyWitnessRejections,
+        snapshot: WitnessQuorumSnapshot,
+    },
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Intent + Claim (witness-domain; space'e NodeId ile bağlı)
 // ═══════════════════════════════════════════════════════════════════════════════
 
