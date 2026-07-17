@@ -2745,29 +2745,25 @@ mod tests {
             measured,
         });
 
-        // Held beklenir (boş witness) — authorization context üretilir (basis digest dahil).
-        match result {
-            Ok(crate::engine::EngineCommitResult::Held { .. }) => {}
-            Ok(crate::engine::EngineCommitResult::Evaluated { .. }) => {
-                // AcceptAsCompleted olabilir (witness varsa) — yine de authorization üretildi.
-            }
-            other => {
-                let _ = other;
-                // Auth context üretilmeden reject olabilir (predicate fail) — o yolda
-                // build_authorization_context çağrılmaz, sayaç 0 kalır. Test yine de
-                // "en fazla 1 çağrı" assert eder (ikinci snapshot üretimi yok).
-            }
-        }
-
-        // **Kritik assert:** commit_task_claim boyunca descriptor en fazla 1 KEZ
-        // çağrılmalı — Q6 ve digest aynı captured context'i paylaşır. Eski kodda
-        // build_authorization_context tekrar current_evaluation_context_digest() →
-        // current_rule_evaluation_context() çağırırdı → sayaç 2 olurdu.
-        let calls = counter.load(Ordering::SeqCst);
+        // **reviewer P2 (test sıkılaştırma):** Fixture kesin Held üretmeli (boş witness →
+        // MinApproversNotMet; predicate coupling 0.40 ≤ 0.55 Completed ama witness yok).
+        // Exact assertion — vacuous geçişi önler (Evaluated/other arm yok).
         assert!(
-            calls <= 1,
-            "descriptor must be called at most once during commit_task_claim (Q6 + digest share \
-             captured context); got {calls} calls"
+            matches!(result, Ok(crate::engine::EngineCommitResult::Held { .. })),
+            "fixture must reach Held (empty witness); got: {result:?}"
+        );
+
+        // **Kritik assert (reviewer P2 — exact):** commit_task_claim boyunca descriptor
+        // tam 1 KEZ çağrılmalı — Q6 ve digest aynı captured context'i paylaşır. Eski kodda
+        // build_authorization_context tekrar current_evaluation_context_digest() →
+        // current_rule_evaluation_context() çağırırdı → sayaç 2 olurdu. Exact assert
+        // (<= 1 DEĞİL) vacuous geçişi önler: Held'e ulaşıldığı kesin, bu yüzden descriptor
+        // tam olarak 1 kez çağrılmalı (authorization context üretildi).
+        let calls = counter.load(Ordering::SeqCst);
+        assert_eq!(
+            calls, 1,
+            "one captured rule context must serve both Q6 and authorization digest; got {calls} \
+             calls (0 = context not captured for Held path; 2 = second snapshot produced)"
         );
     }
 }
