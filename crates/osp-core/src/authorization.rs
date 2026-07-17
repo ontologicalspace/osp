@@ -4926,9 +4926,16 @@ v = 0.5
     }
 
     #[test]
-    fn different_inferred_roles_with_same_global_vision_change_digest() {
-        // **P1-a:** Runtime claim vs Support claim aynı global UserLoaded vision'ı
-        // kullansa bile farklı subject → farklı digest (claim-specific context korunur).
+    fn different_inferred_role_contexts_change_digest() {
+        // **P1-a (scoped-review P2 note):** Farklı classification'lardan çıkarılan farklı
+        // rollerin (Runtime vs Support) claim-specific context'i farklı digest üretir.
+        //
+        // Bu test "saf subject-only" değişim değildir: Runtime için `builtin_role_override`
+        // mevcut olduğundan Runtime context'inin effective vision + source'u da Support'tan
+        // ayrışır (Support builtin None → global inherit). Subject-only değişimi
+        // `evaluation_context_changes_when_only_subject_changes()` testi sabitler (aynı
+        // vector + aynı source altında yalnız subject). Burada tam claim decision-tree
+        // senaryosu doğrulanır: farklı inferred role → farklı subject + farklı vision chain.
         use crate::engine::EngineConfig;
         use crate::space::{Node, NodeClassification, NodeKind, Space};
         use crate::vision::{VisionSource, VisionVector};
@@ -4977,7 +4984,8 @@ v = 0.5
         let engine = mk_engine();
         let config = crate::engine::EngineConfig::default_calibrated();
         let rule_ctx = RuleEvaluationContext::try_new(vec![]).unwrap();
-        // Runtime claim (Production) → Role(Runtime). Support claim (Test) → Role(Support).
+        // Runtime claim (Production) → Role(Runtime) + BuiltinRole override.
+        // Support claim (Test) → Role(Support) + global inherit (builtin None).
         let runtime_sel = engine
             .effective_vision_selection(&mk_claim(NodeClassification::Production))
             .unwrap();
@@ -4994,7 +5002,7 @@ v = 0.5
         let d_support = EvaluationContextDigest::compute(&config, &rule_ctx, &support_ctx).unwrap();
         assert_ne!(
             d_runtime, d_support,
-            "different inferred roles (same global vision) → different digest"
+            "different inferred role contexts → different digest"
         );
     }
 
