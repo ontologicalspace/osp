@@ -275,7 +275,8 @@ pub fn cmd_simulate_claim(repo_path: &str, scenario: &str) -> Result<PipelineRes
         cs,
         vision,
         EngineConfig::default_calibrated(),
-    );
+    )
+    .map_err(|e| format!("rule registration failed: {e}"))?;
 
     // Scenario → delta
     let next_id = engine.space().nodes.keys().max().copied().unwrap_or(0) + 1;
@@ -517,7 +518,8 @@ pub fn cmd_compute_whatif(repo_path: &str, scenario: &str) -> Result<WhatIfResul
         cs,
         vision,
         EngineConfig::default_calibrated(),
-    );
+    )
+    .map_err(|e| format!("rule registration failed: {e}"))?;
 
     // Build delta from scenario (same logic as cmd_simulate_claim)
     let next_id = engine.space().nodes.keys().max().copied().unwrap_or(0) + 1;

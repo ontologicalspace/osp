@@ -468,7 +468,8 @@ fn run_one_experiment(
         cs,
         vision,
         osp_core::engine::EngineConfig::default_calibrated(),
-    );
+    )
+    .expect("g2c rule registration: 3 distinct default rules");
 
     // 3. Deterministik target node seç (review 5 #4).
     let (target_node, target_role, selection_reason) =
@@ -756,7 +757,8 @@ fn run_synthetic_rq9(
         cs,
         vision,
         osp_core::engine::EngineConfig::default_calibrated(),
-    );
+    )
+    .expect("g2c rule registration: 3 distinct default rules");
 
     // 3. Target node 0, target_vector instability measured'a yakın.
     let target_node: NodeId = 0;

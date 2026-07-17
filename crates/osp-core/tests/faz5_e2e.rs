@@ -81,6 +81,7 @@ fn make_engine(space: Space) -> SpaceEngine {
         v: 0.5,
     });
     SpaceEngine::with_default_rules(space, cs, vision, EngineConfig::default_calibrated())
+        .expect("faz5_e2e rule registration: 3 distinct default rules")
 }
 
 fn ev(id: EvidenceId, actor: u64) -> EvidenceEvent {
