@@ -1331,7 +1331,8 @@ mod tests {
             CohesionAxis::new(),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         SpaceEngine::new(
             space,
             cs,
@@ -2092,7 +2093,8 @@ mod tests {
             CohesionAxis::new(),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         // Değerlendirilebilir vision (GlobalDefault) — θ küçük, Q5 vision geçer.
         // Vision instability = measured (~0.80) ile aynı — loss coupling'den düşer, vision geçer.
         let vision = VisionVector::new(RawPosition {

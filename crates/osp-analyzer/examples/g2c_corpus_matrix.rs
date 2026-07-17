@@ -455,7 +455,7 @@ fn run_one_experiment(
         osp_core::axes::CohesionAxis::new(),
         osp_core::axes::EntropyAxis::from_commit_entropy(6.0),
         osp_core::axes::WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = osp_core::vision::VisionVector::new(RawPosition {
         x: 0.4,
         y: 0.6,
@@ -743,7 +743,7 @@ fn run_synthetic_rq9(
         osp_core::axes::CohesionAxis::new(),
         osp_core::axes::EntropyAxis::from_commit_entropy(6.0),
         osp_core::axes::WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = osp_core::vision::VisionVector::new(RawPosition {
         x: 0.55,
         y: 0.6,

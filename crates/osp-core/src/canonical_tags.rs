@@ -261,10 +261,12 @@ impl TryFrom<u8> for WitnessIndependencePolicyTag {
         if Self::VALID_TAGS.contains(&tag) {
             Ok(Self(tag))
         } else {
-            Err(crate::authorization::CanonicalizationError::InvalidCanonicalTag {
-                type_name: "WitnessIndependencePolicyTag",
-                tag,
-            })
+            Err(
+                crate::authorization::CanonicalizationError::InvalidCanonicalTag {
+                    type_name: "WitnessIndependencePolicyTag",
+                    tag,
+                },
+            )
         }
     }
 }

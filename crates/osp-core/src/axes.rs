@@ -11,7 +11,10 @@
 //! - **Repo-level** (Entropy/WitnessDepth/VisionAlignment): construction'da değer alır,
 //!   tüm düğümlere aynı değeri döner. Faz 0'daki repo-aggregate metriklerin izdüşümü.
 
-use crate::coords::{Axis, CoordinateSystem};
+use crate::coords::{
+    Axis, AxisDescriptor, AxisDescriptorError, AxisParameterEncoder, AxisRegistrationError,
+    CoordinateSystem,
+};
 use crate::space::{EdgeKind, Node, Space};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -39,6 +42,14 @@ impl CouplingAxis {
 impl Axis for CouplingAxis {
     fn name(&self) -> &'static str {
         "coupling"
+    }
+    /// **INV-T9 Adım 3:** Parametresiz axis, ama algoritma semantik kimliği explicit.
+    /// Formula marker 0 = value-level Imports out-degree `deg/(1+deg)`. Algoritma
+    /// değişirse (örn semantic-weighted) semantics_version artırılmalı.
+    fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(0); // parametresiz marker
+        AxisDescriptor::try_new(self.name(), 1, params)
     }
     fn compute(&self, node: &Node, space: &Space) -> f64 {
         // Value-only out-degree: type-only import'lar (`import type`) runtime dependency
@@ -82,6 +93,16 @@ impl Axis for EntropyAxis {
     fn name(&self) -> &'static str {
         "entropy"
     }
+    /// **INV-T9 Adım 3 (effective normalized):** Descriptor `compute()`'un okuduğu
+    /// tek effective state olan `self.value`'yu bağlar; ham constructor `h` DEĞİL.
+    /// Formula marker 2 = `h/13.0 clamp(0,1)` normalization. `from_commit_entropy(13)`
+    /// ve `(100)` clamp sonrası aynı value üretirse → aynı descriptor.
+    fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(2); // formula marker: h/13.0 clamp
+        params.push_f64(self.value)?;
+        AxisDescriptor::try_new(self.name(), 1, params)
+    }
     fn compute(&self, _node: &Node, _space: &Space) -> f64 {
         self.value
     }
@@ -121,6 +142,16 @@ impl Axis for WitnessDepthAxis {
     fn name(&self) -> &'static str {
         "witness_depth"
     }
+    /// **INV-T9 Adım 3 (effective normalized):** Descriptor `self.value`'yu bağlar;
+    /// ham `(ratio, distinct)` DEĞİL. Formula marker 3 = `raw=ratio*ln(1+distinct)`,
+    /// `raw/(1+raw)` soft-normalize. `from_witness(-0.3,5)` ve `(0.0,5)` max(0) sonrası
+    /// aynı value üretirse → aynı descriptor.
+    fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(3); // formula marker: raw=ratio*ln(1+distinct), raw/(1+raw)
+        params.push_f64(self.value)?;
+        AxisDescriptor::try_new(self.name(), 1, params)
+    }
     fn compute(&self, _node: &Node, _space: &Space) -> f64 {
         self.value
     }
@@ -154,6 +185,13 @@ impl InstabilityAxis {
 impl Axis for InstabilityAxis {
     fn name(&self) -> &'static str {
         "instability"
+    }
+    /// **INV-T9 Adım 3:** Parametresiz axis, algoritma semantik kimliği explicit.
+    /// Formula marker 0 = value-level Martin `I = Ce/(Ce+Ca)`, isolated→0.5.
+    fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(0); // parametresiz marker
+        AxisDescriptor::try_new(self.name(), 1, params)
     }
     fn compute(&self, node: &Node, space: &Space) -> f64 {
         // Value-only degrees: type-only import'lar Ce/Ca'dan hariç (CouplingAxis ile aynı
@@ -230,6 +268,16 @@ impl Axis for CohesionAxis {
     fn name(&self) -> &'static str {
         "cohesion"
     }
+    /// **INV-T9 Adım 3 (effective normalized, P0-1):** Descriptor `self.value()`
+    /// (effective fallback: None→0.5 veya Some(x)) bağlar; constructor provenance marker'ı
+    /// (None vs Some) DEĞİL. Formula marker 1 = LCOM4→cohesion normalize.
+    /// `new()` (None→0.5) ile `from_normalized(0.5)` aynı descriptor — observational equivalence.
+    fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(1); // formula marker: LCOM4→cohesion normalize
+        params.push_f64(self.value())?;
+        AxisDescriptor::try_new(self.name(), 1, params)
+    }
     fn compute(&self, node: &Node, _space: &Space) -> f64 {
         // Per-node cohesion (analyzer SCIP LCOM4) → fallback → 0.5 neutral
         node.cohesion.or(self.fallback).unwrap_or(0.5)
@@ -251,11 +299,14 @@ impl CoordinateSystem {
     /// Faz 1.9'da `y` (CohesionAxis LCOM4) + `z` (InstabilityAxis Martin I) eklenir
     /// → `default_raw_five`. `u` (vision alignment) **derived**'dır, preset'te YOK
     /// (inv #4 — `DerivedPosition` içinde `compute_derived` ile, Faz 1.7 `vision.rs`).
-    pub fn default_raw_three(entropy: EntropyAxis, witness: WitnessDepthAxis) -> Self {
+    pub fn default_raw_three(
+        entropy: EntropyAxis,
+        witness: WitnessDepthAxis,
+    ) -> Result<Self, AxisRegistrationError> {
         Self::empty()
-            .with_axis(CouplingAxis::new())
-            .with_axis(entropy)
-            .with_axis(witness)
+            .try_with_axis(CouplingAxis::new())?
+            .try_with_axis(entropy)?
+            .try_with_axis(witness)
     }
 
     /// Varsayılan **raw** preset — 5 eksen (`x` coupling, `y` cohesion, `z` instability,
@@ -264,17 +315,20 @@ impl CoordinateSystem {
     /// `u` (vision alignment) **derived**'dır, preset'te YOK (inv #4 — `compute_derived`
     /// ile `DerivedPosition`'da, `vision.rs` Faz 1.7). `D` (Martin main-sequence) de
     /// derived — `compute_derived` ayrı parametre olarak alır (inv #10).
+    ///
+    /// **INV-T9 Adım 3:** `try_with_axis` zinciri — validated registration (duplicate
+    /// reject, identity check). Çağıran `?` ile yaymalı.
     pub fn default_raw_five(
         cohesion: CohesionAxis,
         entropy: EntropyAxis,
         witness: WitnessDepthAxis,
-    ) -> Self {
+    ) -> Result<Self, AxisRegistrationError> {
         Self::empty()
-            .with_axis(CouplingAxis::new()) // x — per-node
-            .with_axis(cohesion) // y — precomputed
-            .with_axis(InstabilityAxis::new()) // z — per-node
-            .with_axis(entropy) // w — precomputed
-            .with_axis(witness) // v — precomputed
+            .try_with_axis(CouplingAxis::new())? // x — per-node
+            .try_with_axis(cohesion)? // y — precomputed
+            .try_with_axis(InstabilityAxis::new())? // z — per-node
+            .try_with_axis(entropy)? // w — precomputed
+            .try_with_axis(witness) // v — precomputed
     }
 }
 
@@ -507,7 +561,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         assert_eq!(cs.dim(), 3);
         assert_eq!(
             cs.axis_names(),
@@ -521,7 +576,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         assert!(
             !cs.axis_names().contains(&"vision_alignment"),
             "vision_alignment raw preset'te olmamalı (derived, inv #4)"
@@ -533,7 +589,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.5), // w = 0.5 (6.5/13.0, Faz 1.11 cap tune)
             WitnessDepthAxis::from_witness(0.3, 5), // v
-        );
+        )
+        .unwrap();
         let mut space = Space::new();
         space.insert_node(node(1));
         space.insert_node(node(2));
@@ -728,7 +785,8 @@ mod tests {
             CohesionAxis::from_lcom4(1),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         assert_eq!(cs.dim(), 5);
         assert_eq!(
             cs.axis_names(),
@@ -749,7 +807,8 @@ mod tests {
             CohesionAxis::from_lcom4(1),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         assert!(
             !cs.axis_names().contains(&"vision_alignment"),
             "vision_alignment derived — raw preset'te olmamalı"
@@ -762,7 +821,8 @@ mod tests {
             CohesionAxis::from_normalized(0.8),     // y
             EntropyAxis::from_commit_entropy(6.5),  // w = 0.5 (6.5/13.0, Faz 1.11 cap tune)
             WitnessDepthAxis::from_witness(0.3, 5), // v
-        );
+        )
+        .unwrap();
         let mut space = Space::new();
         space.insert_node(node(1));
         space.insert_node(node(2));
@@ -788,7 +848,8 @@ mod tests {
             CohesionAxis::from_lcom4(1),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let mut space = Space::new();
         space.insert_node(node(1));
         space.insert_node(node(2));
@@ -802,5 +863,101 @@ mod tests {
             raw1.z
         );
         assert!(raw2.z.abs() < 1e-9, "node 2 z (stable) = {}", raw2.z);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 Adım 3 — axis descriptor (effective normalized) testleri
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn axis_descriptor_coupling_explicit_implementation() {
+        // Parametresiz axis ama explicit descriptor — algoritma semantik kimliği.
+        let d = CouplingAxis::new().descriptor().unwrap();
+        assert_eq!(d.axis_id(), "coupling");
+        assert_eq!(d.semantics_version(), 1);
+        // marker 0 (parametresiz)
+        assert_eq!(d.canonical_parameters(), &[0u8]);
+    }
+
+    #[test]
+    fn axis_descriptor_instability_explicit_implementation() {
+        let d = InstabilityAxis::new().descriptor().unwrap();
+        assert_eq!(d.axis_id(), "instability");
+        assert_eq!(d.semantics_version(), 1);
+        assert_eq!(d.canonical_parameters(), &[0u8]);
+    }
+
+    #[test]
+    fn axis_descriptor_entropy_binds_effective_normalized_value() {
+        // from_commit_entropy(6.0) → value = (6.0/13.0).clamp(0,1) ≈ 0.4615
+        let axis = EntropyAxis::from_commit_entropy(6.0);
+        let d = axis.descriptor().unwrap();
+        assert_eq!(d.axis_id(), "entropy");
+        assert_eq!(d.semantics_version(), 1);
+        // marker 2 + effective value LE bytes
+        let expected_value = (6.0_f64 / 13.0).clamp(0.0, 1.0);
+        let mut expected = vec![2u8];
+        expected.extend_from_slice(&expected_value.to_le_bytes());
+        assert_eq!(d.canonical_parameters(), &expected[..]);
+    }
+
+    #[test]
+    fn axis_descriptor_witness_depth_binds_effective_normalized_value() {
+        let axis = WitnessDepthAxis::from_witness(0.3, 5);
+        let d = axis.descriptor().unwrap();
+        assert_eq!(d.axis_id(), "witness_depth");
+        assert_eq!(d.semantics_version(), 1);
+        let raw = 0.3_f64.max(0.0) * (1.0 + 5.0_f64).ln();
+        let expected_value = raw / (1.0 + raw);
+        let mut expected = vec![3u8];
+        expected.extend_from_slice(&expected_value.to_le_bytes());
+        assert_eq!(d.canonical_parameters(), &expected[..]);
+    }
+
+    #[test]
+    fn axis_descriptor_cohesion_binds_effective_fallback() {
+        // from_normalized(0.5) → effective fallback 0.5, marker 1.
+        let axis = CohesionAxis::from_normalized(0.5);
+        let d = axis.descriptor().unwrap();
+        assert_eq!(d.axis_id(), "cohesion");
+        let mut expected = vec![1u8];
+        expected.extend_from_slice(&0.5_f64.to_le_bytes());
+        assert_eq!(d.canonical_parameters(), &expected[..]);
+    }
+
+    #[test]
+    fn observationally_equivalent_cohesion_configs_share_descriptor() {
+        // **P0-1 (effective model):** new() (None→0.5) ile from_normalized(0.5) aynı
+        // effective fallback → aynı descriptor. Constructor provenance marker'ı YOK.
+        let d_new = CohesionAxis::new().descriptor().unwrap();
+        let d_norm = CohesionAxis::from_normalized(0.5).descriptor().unwrap();
+        assert_eq!(
+            d_new, d_norm,
+            "new() and from_normalized(0.5) must share descriptor (observational equivalence)"
+        );
+    }
+
+    #[test]
+    fn observationally_equivalent_entropy_configs_share_descriptor() {
+        // from_commit_entropy(13) → value = 1.0; from_commit_entropy(100) → clamp(100/13,0,1)=1.0
+        // Aynı effective value → aynı descriptor.
+        let d_13 = EntropyAxis::from_commit_entropy(13.0).descriptor().unwrap();
+        let d_100 = EntropyAxis::from_commit_entropy(100.0)
+            .descriptor()
+            .unwrap();
+        assert_eq!(
+            d_13, d_100,
+            "same effective value (clamp) must share descriptor"
+        );
+    }
+
+    #[test]
+    fn same_axis_id_with_different_descriptor_changes_digest() {
+        // Aynı axis_id "coupling" ama farklı canonical_parameters → farklı descriptor.
+        let d1 = CouplingAxis::new().descriptor().unwrap();
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(9); // farklı marker
+        let d2 = AxisDescriptor::try_new("coupling", 1, params).unwrap();
+        assert_ne!(d1, d2);
     }
 }

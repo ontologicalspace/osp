@@ -12,6 +12,7 @@
 //! (Commit 4) hem digest hem full [`AuthorizationBasis`] taşır — load sırasında
 //! digest tekrar hesaplanıp doğrulanır.
 
+use crate::coords::{AxisDescriptor, CoordinateSystem};
 use crate::space::NodeId;
 use crate::trajectory::{
     ApplyTarget, AttemptOutcome, GateDecision, MutationDecision, PredicateCompletion,
@@ -373,43 +374,146 @@ impl TryFrom<&crate::witness::WitnessSet> for CanonicalWitnessPolicy {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// MeasurementInputDigest (reviewer P0-3 — coordinate-system state)
+// MeasurementInputContext + MeasurementInputDigest (INV-T9 Adım 3 — axis descriptors)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Measurement-visible engine state — coordinate system, repo-level metrics,
-/// axis normalization, metric source config (reviewer P0-3).
+/// Measurement-visible coordinate-system state — axis implementation identity +
+/// semantics version + canonical parameters (effective normalized runtime state).
 ///
-/// İki engine aynı graph + farklı coordinate state → farklı authorization basis.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// **reviewer (ontolojik ayrım):** Context axis *tanımlarını* (formül/config/normalizasyon
+/// sabitleri) taşır — "bu ölçüm hangi eksen tanımları ve semantiklerle üretildi?"
+/// Ölçümün *ürettiği değer + source* `ProvenancedMeasuredResult`'da (basis'te).
+///
+/// **reviewer (daraltma):** Placeholder `config_tag`, sahte source policy (`metric_source_config`),
+/// tekrar eden ölçüm değerleri (`repo_level_*`), evaluation girdileri (`theta_bound`/
+/// `abstractness` — `EvaluationContextDigest`'te) kaldırıldı. Yalnız core raw axis
+/// descriptor'ları (seçenek B): coupling/cohesion/instability/entropy/witness_depth.
+///
+/// **v1 schema:** Henüz yayınlanmadı; bu commit ilk v1 representation'ı finalizes.
+/// Basis digest taşır (bound), full context taşımaz (readable) — self-description ileride.
+pub const MEASUREMENT_INPUT_SCHEMA_VERSION: u32 = 1;
+pub const MEASUREMENT_SEMANTICS_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MeasurementInputContext {
-    pub schema_version: u32,
-    pub coordinate_system_config: CanonicalCoordinateConfig,
-    pub repo_level_entropy: Option<CanonicalF64>,
-    pub repo_level_witness_depth: Option<CanonicalF64>,
-    pub axis_normalization_params: CanonicalAxisNormalization,
-    pub metric_source_config: CanonicalMetricSourceConfig,
-    pub measurement_adapters_version: String,
+    schema_version: u32,
+    axis_descriptors: Vec<AxisDescriptor>,
+    measurement_semantics_version: u32,
 }
 
-/// Canonical coordinate system configuration (stable tags).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CanonicalCoordinateConfig {
-    pub config_tag: u8,
-    pub entropy_axis_tag: u8,
-    pub witness_depth_axis_tag: u8,
-    pub theta_bound: CanonicalF64,
-    pub abstractness: CanonicalF64,
+impl MeasurementInputContext {
+    /// Runtime üretimi — güncel version sabitleri ile.
+    pub fn try_new(descriptors: Vec<AxisDescriptor>) -> Result<Self, CanonicalizationError> {
+        Self::try_from_parts(
+            MEASUREMENT_INPUT_SCHEMA_VERSION,
+            descriptors,
+            MEASUREMENT_SEMANTICS_VERSION,
+        )
+    }
+
+    /// Deserialize/migration sınırı — version'ları doğrular, normalize ETMEZ.
+    /// Diskten `schema_version: 999` gelirse sessizce `1`'e normalize edilmez;
+    /// `UnsupportedMeasurementInputSchema` ile reddedilir.
+    fn try_from_parts(
+        schema_version: u32,
+        mut descriptors: Vec<AxisDescriptor>,
+        measurement_semantics_version: u32,
+    ) -> Result<Self, CanonicalizationError> {
+        if schema_version != MEASUREMENT_INPUT_SCHEMA_VERSION {
+            return Err(CanonicalizationError::UnsupportedMeasurementInputSchema(
+                schema_version,
+            ));
+        }
+        if measurement_semantics_version != MEASUREMENT_SEMANTICS_VERSION {
+            return Err(CanonicalizationError::UnsupportedMeasurementSemantics(
+                measurement_semantics_version,
+            ));
+        }
+        // Canonical sıralama (axis_id'ye göre) + duplicate reddi.
+        descriptors.sort_unstable_by(|a, b| a.axis_id().cmp(b.axis_id()));
+        for pair in descriptors.windows(2) {
+            if pair[0].axis_id() == pair[1].axis_id() {
+                return Err(CanonicalizationError::DuplicateIdentifier(
+                    pair[0].axis_id().to_owned(),
+                ));
+            }
+        }
+        Ok(Self {
+            schema_version,
+            axis_descriptors: descriptors,
+            measurement_semantics_version,
+        })
+    }
+
+    /// Defensive validation — version + duplicate. `MeasurementInputDigest::compute`
+    /// başında çağrılır (invariant drift tespiti).
+    pub fn validate(&self) -> Result<(), CanonicalizationError> {
+        if self.schema_version != MEASUREMENT_INPUT_SCHEMA_VERSION {
+            return Err(CanonicalizationError::UnsupportedMeasurementInputSchema(
+                self.schema_version,
+            ));
+        }
+        if self.measurement_semantics_version != MEASUREMENT_SEMANTICS_VERSION {
+            return Err(CanonicalizationError::UnsupportedMeasurementSemantics(
+                self.measurement_semantics_version,
+            ));
+        }
+        for pair in self.axis_descriptors.windows(2) {
+            if pair[0].axis_id() >= pair[1].axis_id() {
+                return Err(CanonicalizationError::DuplicateIdentifier(
+                    pair[1].axis_id().to_owned(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+    pub fn axis_descriptors(&self) -> &[AxisDescriptor] {
+        &self.axis_descriptors
+    }
+    pub fn measurement_semantics_version(&self) -> u32 {
+        self.measurement_semantics_version
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CanonicalAxisNormalization {
-    pub normalization_tag: u8,
+/// Custom `Deserialize` — version-preserving. `MeasurementInputContextWire` derived
+/// deserialize ile wire format okunur, sonra `try_from_parts` version'ları doğrular.
+impl<'de> serde::Deserialize<'de> for MeasurementInputContext {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        struct MeasurementInputContextWire {
+            schema_version: u32,
+            axis_descriptors: Vec<AxisDescriptor>,
+            measurement_semantics_version: u32,
+        }
+        let wire = MeasurementInputContextWire::deserialize(deserializer)?;
+        MeasurementInputContext::try_from_parts(
+            wire.schema_version,
+            wire.axis_descriptors,
+            wire.measurement_semantics_version,
+        )
+        .map_err(serde::de::Error::custom)
+    }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct CanonicalMetricSourceConfig {
-    pub primary_source_tag: u8,
-    pub placeholder_strategy_tag: u8,
+/// `CoordinateSystem → MeasurementInputContext` köprüsü. `coords → authorization`
+/// döngüsü yok — axis descriptor'lar neutral coords layer'da üretilir, context
+/// authorization layer'da inşa edilir.
+impl TryFrom<&CoordinateSystem> for MeasurementInputContext {
+    type Error = CanonicalizationError;
+
+    fn try_from(coords: &CoordinateSystem) -> Result<Self, Self::Error> {
+        let descriptors = coords
+            .canonical_raw_axis_descriptors()
+            .map_err(|e| CanonicalizationError::AxisContextFailed(e.to_string()))?;
+        Self::try_new(descriptors)
+    }
 }
 
 /// Measurement input digest (BLAKE3, domain-separated).
@@ -419,57 +523,34 @@ pub struct MeasurementInputDigest([u8; 32]);
 impl MeasurementInputDigest {
     const DOMAIN_SEPARATOR: &'static [u8] = b"osp.measurement-input.v1\0";
 
+    /// **INV-T9 Adım 3:** Full axis descriptor listesi encode edilir (RuleDescriptor
+    /// pattern'ı). `validate()` defensive çağrılır, sonra defensive sort + encode.
     pub fn compute(ctx: &MeasurementInputContext) -> Result<Self, AuthorizationBasisDigestError> {
+        ctx.validate()
+            .map_err(|e| AuthorizationBasisDigestError::EncodingFailed(e.to_string()))?;
         let mut hasher = blake3::Hasher::new();
         hasher.update(Self::DOMAIN_SEPARATOR);
-        encode_u32(&mut hasher, ctx.schema_version, "mi_schema");
-        encode_u8(
+        encode_u32(&mut hasher, ctx.schema_version(), "mi_schema");
+        encode_u32(
             &mut hasher,
-            ctx.coordinate_system_config.config_tag,
-            "coord_config",
+            ctx.measurement_semantics_version(),
+            "mi_semver",
         );
-        encode_u8(
-            &mut hasher,
-            ctx.coordinate_system_config.entropy_axis_tag,
-            "entropy_axis",
-        );
-        encode_u8(
-            &mut hasher,
-            ctx.coordinate_system_config.witness_depth_axis_tag,
-            "witness_depth_axis",
-        );
-        encode_f64(
-            &mut hasher,
-            ctx.coordinate_system_config.theta_bound,
-            "theta_bound",
-        )?;
-        encode_f64(
-            &mut hasher,
-            ctx.coordinate_system_config.abstractness,
-            "abstractness",
-        )?;
-        encode_optional_f64(&mut hasher, ctx.repo_level_entropy, "repo_entropy")?;
-        encode_optional_f64(
-            &mut hasher,
-            ctx.repo_level_witness_depth,
-            "repo_witness_depth",
-        )?;
-        encode_u8(
-            &mut hasher,
-            ctx.axis_normalization_params.normalization_tag,
-            "axis_norm",
-        );
-        encode_u8(
-            &mut hasher,
-            ctx.metric_source_config.primary_source_tag,
-            "metric_source",
-        );
-        encode_u8(
-            &mut hasher,
-            ctx.metric_source_config.placeholder_strategy_tag,
-            "placeholder_strategy",
-        );
-        encode_bytes(&mut hasher, ctx.measurement_adapters_version.as_bytes())?;
+        // Defensive sort (validate'de canonical sıra zaten garanti, ama encoder
+        // kendi sıralamasına güvenmez).
+        let mut sorted = ctx.axis_descriptors().to_vec();
+        sorted.sort_unstable_by(|a, b| a.axis_id().cmp(b.axis_id()));
+        let count = u64::try_from(sorted.len()).map_err(|_| {
+            AuthorizationBasisDigestError::LengthOverflow {
+                field: "mi_axis_count",
+            }
+        })?;
+        encode_u64(&mut hasher, count, "mi_axis_count");
+        for d in &sorted {
+            encode_bytes(&mut hasher, d.axis_id().as_bytes())?;
+            encode_u32(&mut hasher, d.semantics_version(), "mi_axis_semver");
+            encode_bytes(&mut hasher, d.canonical_parameters())?;
+        }
         let hash = hasher.finalize();
         Ok(Self(hash.into()))
     }
@@ -1376,6 +1457,9 @@ pub enum AuthorizationBasisDigestError {
     HexDecodeFailed(String),
     #[error("invalid digest length: expected 32 bytes, got {0}")]
     InvalidLength(usize),
+    /// **INV-T9 Adım 3 (P1-a):** canonical length overflow (checked u64 conversion).
+    #[error("canonical length overflow in {field}")]
+    LengthOverflow { field: &'static str },
 }
 
 /// Canonical structural delta doğrulama hatası (A5 — duplicate/non-finite field).
@@ -1404,6 +1488,15 @@ pub enum CanonicalizationError {
     /// `[1,1,2]` iki ayrı canonical representation doğurur; reddedilir.
     #[error("duplicate scope node {0} in subgraph predicate scope")]
     DuplicateScopeNode(u64),
+    /// **INV-T9 Adım 3:** unsupported measurement input schema version (deserialize/migration).
+    #[error("unsupported measurement input schema version {0}")]
+    UnsupportedMeasurementInputSchema(u32),
+    /// **INV-T9 Adım 3:** unsupported measurement semantics version (deserialize/migration).
+    #[error("unsupported measurement semantics version {0}")]
+    UnsupportedMeasurementSemantics(u32),
+    /// **INV-T9 Adım 3 (P1-a):** axis context / canonical length overflow.
+    #[error("axis context failed: {0}")]
+    AxisContextFailed(String),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2628,45 +2721,63 @@ mod tests {
     // (reviewer P0-1..P0-3, P1 + plan-review düzeltmeleri)
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    fn sample_measurement_context(
-        entropy: Option<f64>,
-        witness_depth: Option<f64>,
-    ) -> MeasurementInputContext {
-        MeasurementInputContext {
-            schema_version: 1,
-            coordinate_system_config: CanonicalCoordinateConfig {
-                config_tag: 0,
-                entropy_axis_tag: 0,
-                witness_depth_axis_tag: 0,
-                theta_bound: 0.3,
-                abstractness: 0.5,
-            },
-            repo_level_entropy: entropy,
-            repo_level_witness_depth: witness_depth,
-            axis_normalization_params: CanonicalAxisNormalization {
-                normalization_tag: 0,
-            },
-            metric_source_config: CanonicalMetricSourceConfig {
-                primary_source_tag: 0,
-                placeholder_strategy_tag: 0,
-            },
-            measurement_adapters_version: "v1".to_string(),
-        }
+    /// **INV-T9 Adım 3:** Yeni dar model — context axis descriptor listesinden üretilir.
+    /// `entropy`/`witness_depth` artık context'te DEĞİL; axis descriptor'lara gömülü
+    /// (effective normalized value). Bu helper test için 5 core axis descriptor'ı üretir.
+    fn sample_measurement_context() -> MeasurementInputContext {
+        use crate::coords::{AxisDescriptor, AxisParameterEncoder};
+        // 5 core axis descriptor — effective normalized values ile.
+        let mk = |id: &str, marker: u8, value: f64| -> AxisDescriptor {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(marker);
+            params.push_f64(value).unwrap();
+            AxisDescriptor::try_new(id, 1, params).unwrap()
+        };
+        let descriptors = vec![
+            mk("coupling", 0, 0.0), // parametresiz marker, value placeholder
+            mk("cohesion", 1, 0.5),
+            mk("instability", 0, 0.0),
+            mk("entropy", 2, 0.5),
+            mk("witness_depth", 3, 0.3),
+        ];
+        MeasurementInputContext::try_new(descriptors).unwrap()
     }
 
     #[test]
     fn measurement_digest_distinguishes_none_some_zero_positions() {
-        // **reviewer P0-1:** Option<f64> presence tag — collision fix.
-        // Context A: entropy=None, witness_depth=Some(0.0)
-        // Context B: entropy=Some(0.0), witness_depth=None
-        // Önceki yaklaşım her ikisinde 9 sıfır byte üretiyordu.
-        let ctx_a = sample_measurement_context(None, Some(0.0));
-        let ctx_b = sample_measurement_context(Some(0.0), None);
+        // **INV-T9 Adım 3 (yeni model):** context artık axis descriptor listesi taşıyor;
+        // Option<f64> presence collision eski modelde kaldı. Yeni test: farklı axis
+        // descriptor canonical_parameters → farklı digest. Aynı descriptor listesi →
+        // aynı digest (stability).
+        let ctx_a = sample_measurement_context();
+        let ctx_b = sample_measurement_context();
         let d_a = MeasurementInputDigest::compute(&ctx_a).unwrap();
         let d_b = MeasurementInputDigest::compute(&ctx_b).unwrap();
-        assert_ne!(
+        assert_eq!(
             d_a, d_b,
-            "None vs Some(0.0) presence positions must produce different digests"
+            "identical descriptor list → same digest (stability)"
+        );
+
+        // Farklı entropy axis descriptor (farklı canonical_parameters) → farklı digest.
+        use crate::coords::{AxisDescriptor, AxisParameterEncoder};
+        let mk = |id: &str, marker: u8, value: f64| -> AxisDescriptor {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(marker);
+            params.push_f64(value).unwrap();
+            AxisDescriptor::try_new(id, 1, params).unwrap()
+        };
+        let descriptors_changed = vec![
+            mk("coupling", 0, 0.0),
+            mk("cohesion", 1, 0.5),
+            mk("instability", 0, 0.0),
+            mk("entropy", 2, 0.9), // farklı effective value
+            mk("witness_depth", 3, 0.3),
+        ];
+        let ctx_c = MeasurementInputContext::try_new(descriptors_changed).unwrap();
+        let d_c = MeasurementInputDigest::compute(&ctx_c).unwrap();
+        assert_ne!(
+            d_a, d_c,
+            "axis descriptor change (entropy effective value) must produce different digest"
         );
     }
 
@@ -3079,5 +3190,154 @@ mod tests {
     fn null_store_durability_is_process_local() {
         let store = NullPendingAuthorizationStore;
         assert_eq!(store.durability(), SuspensionDurability::ProcessLocal);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 Adım 3 — MeasurementInputContext version preservation + validation
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn measurement_context_runtime_constructor_uses_current_versions() {
+        let ctx = sample_measurement_context();
+        assert_eq!(ctx.schema_version(), MEASUREMENT_INPUT_SCHEMA_VERSION);
+        assert_eq!(
+            ctx.measurement_semantics_version(),
+            MEASUREMENT_SEMANTICS_VERSION
+        );
+        // 5 core axis descriptor.
+        assert_eq!(ctx.axis_descriptors().len(), 5);
+    }
+
+    #[test]
+    fn measurement_context_deserialization_rejects_unknown_schema_version() {
+        // Wire format: schema_version=999 → UnsupportedMeasurementInputSchema.
+        let ctx = sample_measurement_context();
+        let mut json = serde_json::to_value(&ctx).unwrap();
+        json["schema_version"] = serde_json::json!(999);
+        let json_str = serde_json::to_string(&json).unwrap();
+        let err = serde_json::from_str::<MeasurementInputContext>(&json_str).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported measurement input schema"),
+            "deserialize must reject unknown schema: {err}"
+        );
+    }
+
+    #[test]
+    fn measurement_context_deserialization_rejects_unknown_semantics_version() {
+        let ctx = sample_measurement_context();
+        let mut json = serde_json::to_value(&ctx).unwrap();
+        json["measurement_semantics_version"] = serde_json::json!(999);
+        let json_str = serde_json::to_string(&json).unwrap();
+        let err = serde_json::from_str::<MeasurementInputContext>(&json_str).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported measurement semantics"),
+            "deserialize must reject unknown semantics: {err}"
+        );
+    }
+
+    #[test]
+    fn measurement_context_defensively_rejects_duplicate_axis_descriptors() {
+        // try_new duplicate axis_id reddetmeli (canonical sıralama sonrası windows check).
+        use crate::coords::{AxisDescriptor, AxisParameterEncoder};
+        let mk = |id: &str| -> AxisDescriptor {
+            let mut p = AxisParameterEncoder::new();
+            p.push_u8(0);
+            AxisDescriptor::try_new(id, 1, p).unwrap()
+        };
+        let err =
+            MeasurementInputContext::try_new(vec![mk("coupling"), mk("coupling")]).unwrap_err();
+        assert_eq!(
+            err,
+            CanonicalizationError::DuplicateIdentifier("coupling".into())
+        );
+    }
+
+    #[test]
+    fn measurement_context_excludes_repo_level_values() {
+        // **Ontolojik ayrım:** context axis tanımlarını taşır, ölçüm değerleri basis'te.
+        // Context'te repo_level_entropy/witness_depth field YOK — serialization'da görünmemeli.
+        let ctx = sample_measurement_context();
+        let json = serde_json::to_string(&ctx).unwrap();
+        assert!(
+            !json.contains("repo_level_entropy"),
+            "context must not carry repo_level values (in basis)"
+        );
+        assert!(
+            !json.contains("repo_level_witness_depth"),
+            "context must not carry repo_level values (in basis)"
+        );
+        assert!(
+            !json.contains("metric_source_config"),
+            "context must not carry placeholder metric source policy"
+        );
+    }
+
+    #[test]
+    fn measurement_input_digest_reflects_real_coordinate_system() {
+        // Gerçek CoordinateSystem'den üretilen context → digest placeholder 0 DEĞİL,
+        // gerçek axis descriptor içerikleri. İki farklı coord_system → farklı digest.
+        use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+        let cs1 = crate::coords::CoordinateSystem::default_raw_five(
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(6.0),
+            WitnessDepthAxis::from_witness(0.3, 5),
+        )
+        .unwrap();
+        let cs2 = crate::coords::CoordinateSystem::default_raw_five(
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(9.0), // farklı effective entropy
+            WitnessDepthAxis::from_witness(0.3, 5),
+        )
+        .unwrap();
+        let ctx1 = MeasurementInputContext::try_from(&cs1).unwrap();
+        let ctx2 = MeasurementInputContext::try_from(&cs2).unwrap();
+        let d1 = MeasurementInputDigest::compute(&ctx1).unwrap();
+        let d2 = MeasurementInputDigest::compute(&ctx2).unwrap();
+        assert_ne!(
+            d1, d2,
+            "different axis effective state (entropy) must change digest"
+        );
+    }
+
+    #[test]
+    fn measurement_digest_is_independent_of_axis_registration_order_for_raw_mapping() {
+        // Aynı axis'ler farklı registration sırasında → aynı descriptor seti (sorted) →
+        // aynı digest. Seçenek B: axis order normatif DEĞİL (name-mapped).
+        use crate::axes::{CohesionAxis, EntropyAxis, InstabilityAxis, WitnessDepthAxis};
+        use crate::coords::CoordinateSystem;
+        // Sıra 1: coupling, cohesion, instability, entropy, witness
+        let cs1 = CoordinateSystem::empty()
+            .try_with_axis(crate::axes::CouplingAxis::new())
+            .unwrap()
+            .try_with_axis(CohesionAxis::new())
+            .unwrap()
+            .try_with_axis(InstabilityAxis::new())
+            .unwrap()
+            .try_with_axis(EntropyAxis::from_commit_entropy(6.0))
+            .unwrap()
+            .try_with_axis(WitnessDepthAxis::from_witness(0.3, 5))
+            .unwrap();
+        // Sıra 2: ters
+        let cs2 = CoordinateSystem::empty()
+            .try_with_axis(WitnessDepthAxis::from_witness(0.3, 5))
+            .unwrap()
+            .try_with_axis(EntropyAxis::from_commit_entropy(6.0))
+            .unwrap()
+            .try_with_axis(InstabilityAxis::new())
+            .unwrap()
+            .try_with_axis(CohesionAxis::new())
+            .unwrap()
+            .try_with_axis(crate::axes::CouplingAxis::new())
+            .unwrap();
+        let d1 = MeasurementInputDigest::compute(&MeasurementInputContext::try_from(&cs1).unwrap())
+            .unwrap();
+        let d2 = MeasurementInputDigest::compute(&MeasurementInputContext::try_from(&cs2).unwrap())
+            .unwrap();
+        assert_eq!(
+            d1, d2,
+            "registration order must not affect digest (name-mapped, sorted descriptors)"
+        );
     }
 }

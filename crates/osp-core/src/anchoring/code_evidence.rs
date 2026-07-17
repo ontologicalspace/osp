@@ -385,12 +385,11 @@ where
         &self,
         code_entity_id: &ConceptNodeId,
     ) -> Result<EvidenceStrength, CodeEvidenceError> {
-        Ok(
-            self.find_evidence(code_entity_id)?
-                .map_or_else(EvidenceStrength::zero, |ev| {
-                    ev.observations().minimum_observed_strength()
-                }),
-        )
+        Ok(self
+            .find_evidence(code_entity_id)?
+            .map_or_else(EvidenceStrength::zero, |ev| {
+                ev.observations().minimum_observed_strength()
+            }))
     }
 }
 
@@ -436,11 +435,46 @@ mod tests {
         let coverage = EvidenceCoverage::new(1.0).unwrap();
         let scip = ObservedCodeMetricSource::Scip;
         ObservedPhysicalMetrics::try_new(vec![
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Coupling, 0.42, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Cohesion, 0.78, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Instability, 0.30, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Entropy, 0.52, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::WitnessDepth, 0.68, scip, strength, coverage).unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Coupling,
+                0.42,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Cohesion,
+                0.78,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Instability,
+                0.30,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Entropy,
+                0.52,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::WitnessDepth,
+                0.68,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
         ])
         .unwrap()
     }
@@ -587,7 +621,10 @@ mod tests {
         );
         let result = InMemoryCodeEvidenceSource::try_from_evidence(vec![ev1, ev2]);
         assert!(
-            matches!(result, Err(CodeEvidenceSourceBuildError::DuplicateIdentity(_))),
+            matches!(
+                result,
+                Err(CodeEvidenceSourceBuildError::DuplicateIdentity(_))
+            ),
             "duplicate identity key → fail-closed reject (sessiz overwrite YOK)"
         );
     }
@@ -614,10 +651,15 @@ mod tests {
             ),
             200,
         );
-        let result = InMemoryCodeEvidenceSource::empty().try_with_evidence(ev1).unwrap();
+        let result = InMemoryCodeEvidenceSource::empty()
+            .try_with_evidence(ev1)
+            .unwrap();
         let duplicate = result.try_with_evidence(ev2);
         assert!(
-            matches!(duplicate, Err(CodeEvidenceSourceBuildError::DuplicateIdentity(_))),
+            matches!(
+                duplicate,
+                Err(CodeEvidenceSourceBuildError::DuplicateIdentity(_))
+            ),
             "builder duplicate → fail-closed reject"
         );
     }
@@ -664,8 +706,8 @@ mod tests {
             node_exists: true,
             binding: Some(key.clone()),
         };
-        let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![auth_service_evidence()])
-            .unwrap();
+        let source =
+            InMemoryCodeEvidenceSource::try_from_evidence(vec![auth_service_evidence()]).unwrap();
         let adapter = ResolvedCodeEvidenceProvider::new(&lookup, &source);
         let node_id = ConceptNodeId("CodeEntity:AuthService".into());
         let ev = adapter
@@ -781,7 +823,10 @@ mod tests {
     #[test]
     fn observed_code_evidence_accessors() {
         let ev = auth_service_evidence();
-        assert_eq!(ev.code_identity_key(), &identity_key("CodeEntity:AuthService"));
+        assert_eq!(
+            ev.code_identity_key(),
+            &identity_key("CodeEntity:AuthService")
+        );
         assert_eq!(ev.measured_at(), 1_700_000_000);
         let coupling = ev
             .observations()
@@ -793,10 +838,7 @@ mod tests {
         assert_eq!(coupling.source(), ObservedCodeMetricSource::Scip);
         assert_eq!(coupling.strength().get(), 0.85);
         assert_eq!(coupling.coverage().get(), 1.0);
-        assert_eq!(
-            ev.observations().minimum_observed_strength().get(),
-            0.85
-        );
+        assert_eq!(ev.observations().minimum_observed_strength().get(), 0.85);
     }
 }
 
@@ -817,11 +859,13 @@ mod resolution_identity_integration_tests {
     };
     use crate::anchoring::store::{AnchorStore, InMemoryAnchorStore};
     use crate::anchoring::types::{
-        CodeIdentityBinding, ConceptNode, ConceptNodeKind, ConceptNodeId, EvidenceCoverage,
+        CodeIdentityBinding, ConceptNode, ConceptNodeId, ConceptNodeKind, EvidenceCoverage,
         EvidenceStrength, GraphSeed, ObservedCodeMetricSource, ObservedPhysicalMetric,
         ObservedPhysicalMetrics,
     };
-    use crate::anchoring::{DecisionStatus, NonEmptyExplanation, PhysicalCodeMetricAxis, PositionFamily};
+    use crate::anchoring::{
+        DecisionStatus, NonEmptyExplanation, PhysicalCodeMetricAxis, PositionFamily,
+    };
 
     /// Accepted CodeEntityCandidate node (PhysicalCode family).
     fn accepted_candidate(path: &str) -> ConceptNode {
@@ -840,11 +884,8 @@ mod resolution_identity_integration_tests {
         let mut seed = GraphSeed::default();
         seed.code_entities.push(accepted_candidate(path));
         let mut store = InMemoryAnchorStore::with_seed(seed);
-        let key = CodeIdentityKey::new(
-            CodeIdentityScheme::AnalysisPathV1 { case_policy },
-            path,
-        )
-        .unwrap();
+        let key =
+            CodeIdentityKey::new(CodeIdentityScheme::AnalysisPathV1 { case_policy }, path).unwrap();
         store
             .seed_code_identity_bindings_trusted(&[CodeIdentityBinding {
                 node_id: ConceptNodeId(format!("CodeEntityCandidate:{path}")),
@@ -860,11 +901,46 @@ mod resolution_identity_integration_tests {
         let coverage = EvidenceCoverage::new(1.0).unwrap();
         let scip = ObservedCodeMetricSource::Scip;
         ObservedPhysicalMetrics::try_new(vec![
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Coupling, 0.4, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Cohesion, 0.5, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Instability, 0.3, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::Entropy, 0.5, scip, strength, coverage).unwrap(),
-            ObservedPhysicalMetric::new(PhysicalCodeMetricAxis::WitnessDepth, 0.6, scip, strength, coverage).unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Coupling,
+                0.4,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Cohesion,
+                0.5,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Instability,
+                0.3,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::Entropy,
+                0.5,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
+            ObservedPhysicalMetric::new(
+                PhysicalCodeMetricAxis::WitnessDepth,
+                0.6,
+                scip,
+                strength,
+                coverage,
+            )
+            .unwrap(),
         ])
         .unwrap()
     }
@@ -930,12 +1006,15 @@ mod resolution_identity_integration_tests {
         // resolve sonrası her ikisi de aynı entity'ye converge ve aynı evidence görür.
         //
         // Setup: candidate-a + candidate-b aynı key (AsciiCaseInsensitive: src/auth.rs == src/Auth.rs).
-        let mut store = store_with_candidate("src/auth.rs", CodePathCasePolicy::AsciiCaseInsensitive);
+        let mut store =
+            store_with_candidate("src/auth.rs", CodePathCasePolicy::AsciiCaseInsensitive);
 
         // İkinci candidate ekle (aynı identity key, farklı path spelling).
         let candidate_b_path = "src/Auth.rs";
         let mut seed2 = GraphSeed::default();
-        seed2.code_entities.push(accepted_candidate(candidate_b_path));
+        seed2
+            .code_entities
+            .push(accepted_candidate(candidate_b_path));
         store.seed_trusted(&seed2).unwrap();
         store
             .seed_code_identity_bindings_trusted(&[CodeIdentityBinding {
@@ -960,11 +1039,8 @@ mod resolution_identity_integration_tests {
         .unwrap();
 
         // Evidence source: tek evidence (shared key).
-        let evidence = ObservedCodeEvidence::new(
-            shared_key.clone(),
-            full_observations(0.85),
-            1_700_000_000,
-        );
+        let evidence =
+            ObservedCodeEvidence::new(shared_key.clone(), full_observations(0.85), 1_700_000_000);
         let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
 
         // Adapter: store lookup + source → CodeEvidenceProvider.
@@ -974,8 +1050,14 @@ mod resolution_identity_integration_tests {
         let candidate_b = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
 
         // EI2: candidate-a ve candidate-b aynı evidence object görür (identity-owned).
-        let ev_a = adapter.find_evidence(&candidate_a).unwrap().expect("evidence a");
-        let ev_b = adapter.find_evidence(&candidate_b).unwrap().expect("evidence b");
+        let ev_a = adapter
+            .find_evidence(&candidate_a)
+            .unwrap()
+            .expect("evidence a");
+        let ev_b = adapter
+            .find_evidence(&candidate_b)
+            .unwrap()
+            .expect("evidence b");
         assert_eq!(
             ev_a.code_identity_key(),
             ev_b.code_identity_key(),
@@ -997,12 +1079,15 @@ mod resolution_identity_integration_tests {
     fn n1_resolution_creates_then_reuses_same_entity_and_evidence() {
         // EI4-c: resolve candidate-a → Created entity; resolve candidate-b → Reused same entity.
         // Resolution sonrası entity node da aynı identity key'e bound → aynı evidence.
-        let mut store = store_with_candidate("src/auth.rs", CodePathCasePolicy::AsciiCaseInsensitive);
+        let mut store =
+            store_with_candidate("src/auth.rs", CodePathCasePolicy::AsciiCaseInsensitive);
 
         // İkinci candidate (aynı key).
         let candidate_b_path = "src/Auth.rs";
         let mut seed2 = GraphSeed::default();
-        seed2.code_entities.push(accepted_candidate(candidate_b_path));
+        seed2
+            .code_entities
+            .push(accepted_candidate(candidate_b_path));
         store.seed_trusted(&seed2).unwrap();
         store
             .seed_code_identity_bindings_trusted(&[CodeIdentityBinding {
@@ -1027,11 +1112,8 @@ mod resolution_identity_integration_tests {
         .unwrap();
 
         // Evidence source.
-        let evidence = ObservedCodeEvidence::new(
-            shared_key.clone(),
-            full_observations(0.85),
-            1_700_000_000,
-        );
+        let evidence =
+            ObservedCodeEvidence::new(shared_key.clone(), full_observations(0.85), 1_700_000_000);
         let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
 
         let candidate_a = ConceptNodeId("CodeEntityCandidate:src/auth.rs".into());
@@ -1051,7 +1133,10 @@ mod resolution_identity_integration_tests {
                 NonEmptyExplanation::new("first").unwrap(),
             )
             .unwrap();
-        assert!(matches!(record_a.outcome, ResolutionOutcome::Created { .. }));
+        assert!(matches!(
+            record_a.outcome,
+            ResolutionOutcome::Created { .. }
+        ));
         let entity_id = record_a.entity_id.clone();
 
         // Resolve candidate-b → Reused same entity.
@@ -1125,7 +1210,8 @@ mod resolution_identity_integration_tests {
 
         // Shared key + evidence.
         let key = identity_key("src/auth.rs");
-        let evidence = ObservedCodeEvidence::new(key.clone(), full_observations(0.85), 1_700_000_000);
+        let evidence =
+            ObservedCodeEvidence::new(key.clone(), full_observations(0.85), 1_700_000_000);
         let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
 
         // Original store adapter.
@@ -1134,10 +1220,7 @@ mod resolution_identity_integration_tests {
         let adapter_restored = ResolvedCodeEvidenceProvider::new(&restored, &source);
 
         // EI6: candidate lookup aynı.
-        let resolved_orig = adapter_orig
-            .find_evidence(&candidate_id)
-            .unwrap()
-            .unwrap();
+        let resolved_orig = adapter_orig.find_evidence(&candidate_id).unwrap().unwrap();
         let resolved_restored = adapter_restored
             .find_evidence(&candidate_id)
             .unwrap()
@@ -1168,7 +1251,8 @@ mod resolution_identity_integration_tests {
         // gördüğü skalar da restore sonrası aynı. find_evidence equality zaten yukarıda
         // kanıtlandı; strength türetilmiş skalar ama ayrı assertion matrisi dürüstleştirir.
         let strength_orig_candidate = adapter_orig.evidence_strength(&candidate_id).unwrap();
-        let strength_restored_candidate = adapter_restored.evidence_strength(&candidate_id).unwrap();
+        let strength_restored_candidate =
+            adapter_restored.evidence_strength(&candidate_id).unwrap();
         assert_eq!(
             strength_orig_candidate, strength_restored_candidate,
             "EI6: candidate evidence_strength restore sonrası aynı (scorer consumer)"
@@ -1190,7 +1274,8 @@ mod resolution_identity_integration_tests {
         // EI8-V1: graph'ta olmayan node + unbound node lookup'ları source içeriğini değiştirmez.
         let store = store_with_candidate("src/auth.rs", CodePathCasePolicy::CaseSensitive);
         let key = identity_key("src/auth.rs");
-        let evidence = ObservedCodeEvidence::new(key.clone(), full_observations(0.85), 1_700_000_000);
+        let evidence =
+            ObservedCodeEvidence::new(key.clone(), full_observations(0.85), 1_700_000_000);
         let source = InMemoryCodeEvidenceSource::try_from_evidence(vec![evidence]).unwrap();
         let adapter = ResolvedCodeEvidenceProvider::new(&store, &source);
 
@@ -1202,7 +1287,9 @@ mod resolution_identity_integration_tests {
 
         // Unbound node (grafta var, binding yok).
         let mut seed_unbound = GraphSeed::default();
-        seed_unbound.code_entities.push(accepted_candidate("src/unbound.rs"));
+        seed_unbound
+            .code_entities
+            .push(accepted_candidate("src/unbound.rs"));
         let store2 = InMemoryAnchorStore::with_seed(seed_unbound);
         // Binding seed'leme → unbound.
         let unbound = ConceptNodeId("CodeEntityCandidate:src/unbound.rs".into());
@@ -1239,7 +1326,11 @@ mod resolution_identity_integration_tests {
 
         // Adapter: node + binding var (resolve_code_identity Ok döner) ama source'ta evidence yok.
         assert_eq!(
-            store.resolve_code_identity(&candidate_id).unwrap().identity_key().canonical_key(),
+            store
+                .resolve_code_identity(&candidate_id)
+                .unwrap()
+                .identity_key()
+                .canonical_key(),
             "src/auth.rs",
             "node + binding mevcut (lookup Ok)"
         );

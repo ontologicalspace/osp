@@ -86,11 +86,13 @@ impl Workspace {
         let semantic_coverage = result.semantic_coverage.clone();
 
         // 3. Engine kur (D2 calibrated — osp-cli ve osp-desktop ile aynı).
+        // **INV-T9 Adım 3:** default_raw_five artık validated Result döner.
         let cs = CoordinateSystem::default_raw_five(
             CohesionAxis::new(),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .map_err(|e| WorkspaceError::Analyze(format!("axis registration failed: {e}")))?;
         // Default vision — Aşama C'de operator override edebilir.
         let vision = VisionVector::new(osp_core::coords::RawPosition {
             x: 0.4,

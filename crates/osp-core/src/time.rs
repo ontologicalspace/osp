@@ -24,7 +24,12 @@ use crate::witness::{evaluate, Claim, WitnessDisposition, WitnessSet};
 /// **INV-T9:** `Held` expected authorization bekleme, `Rejected` explicit witness ret —
 /// ikisi de expected domain outcome, HATA DEĞİL.
 pub trait TimeMachine {
-    fn advance(&mut self, space: &mut Space, claim: &Claim, omega: &WitnessSet) -> WitnessDisposition;
+    fn advance(
+        &mut self,
+        space: &mut Space,
+        claim: &Claim,
+        omega: &WitnessSet,
+    ) -> WitnessDisposition;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -40,7 +45,12 @@ pub trait TimeMachine {
 pub struct TimeFSM;
 
 impl TimeMachine for TimeFSM {
-    fn advance(&mut self, space: &mut Space, claim: &Claim, omega: &WitnessSet) -> WitnessDisposition {
+    fn advance(
+        &mut self,
+        space: &mut Space,
+        claim: &Claim,
+        omega: &WitnessSet,
+    ) -> WitnessDisposition {
         match evaluate(claim, omega) {
             WitnessDisposition::Satisfied {
                 mut delta,
@@ -123,7 +133,8 @@ mod tests {
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
-        if let WitnessDisposition::Satisfied { delta, .. } = fsm.advance(&mut space, &claim, &omega) {
+        if let WitnessDisposition::Satisfied { delta, .. } = fsm.advance(&mut space, &claim, &omega)
+        {
             assert_eq!(delta.new_nodes.len(), 1);
             assert_eq!(delta.new_nodes[0].id, 42);
             // repositioned ΔV ∪ N₁(ΔV) — node 42 eklendi, komşu yok → sadece {42}

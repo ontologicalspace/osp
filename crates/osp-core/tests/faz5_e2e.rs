@@ -71,7 +71,8 @@ fn make_engine(space: Space) -> SpaceEngine {
         CohesionAxis::new(),
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.5, 3),
-    );
+    )
+    .expect("faz5_e2e axis registration: 5 distinct core axes");
     let vision = VisionVector::new(RawPosition {
         x: 0.4,
         y: 0.6,

@@ -117,7 +117,9 @@ pub enum StoreError {
         basis: ConceptNodeId,
         application: ConceptNodeId,
     },
-    #[error("stale resolution basis: expected_digest={expected_digest}, found_digest={found_digest}")]
+    #[error(
+        "stale resolution basis: expected_digest={expected_digest}, found_digest={found_digest}"
+    )]
     StaleResolutionBasis {
         expected_digest: u64,
         found_digest: u64,
@@ -169,13 +171,9 @@ pub struct ResolutionBasisView {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolutionTargetView {
     /// Yeni CodeEntity oluşturulacak (deterministic ID).
-    Create {
-        proposed_entity_id: ConceptNodeId,
-    },
+    Create { proposed_entity_id: ConceptNodeId },
     /// Mevcut live CodeEntity yeniden kullanılacak (N:1).
-    Reuse {
-        entity: ConceptNode,
-    },
+    Reuse { entity: ConceptNode },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -354,10 +352,7 @@ pub enum SnapshotError {
     },
     // ─── PR E (INV-C16): resolution snapshot validation ──────────────────────
     #[error("resolution record {seq} endpoint node missing: {node_id}")]
-    ResolutionRecordNodeMissing {
-        seq: u64,
-        node_id: ConceptNodeId,
-    },
+    ResolutionRecordNodeMissing { seq: u64, node_id: ConceptNodeId },
     #[error("resolution record {seq} source status not Accepted: {status:?}")]
     ResolutionSourceStatusInconsistent { seq: u64, status: DecisionStatus },
     #[error("resolution record {seq} target not live code identity: {status:?}")]
@@ -615,11 +610,12 @@ pub trait AnchorStore {
         Vec<crate::anchoring::resolved_implementation::ResolvedImplementationExpectation>,
         crate::anchoring::resolved_implementation::ResolvedImplementationQueryError<Self::Error>,
     > {
-        let basis = self
-            .resolved_implementation_basis()
-            .map_err(crate::anchoring::resolved_implementation::ResolvedImplementationQueryError::Store)?;
-        crate::anchoring::resolved_implementation::project_resolved_implementations(&basis)
-            .map_err(crate::anchoring::resolved_implementation::ResolvedImplementationQueryError::Projection)
+        let basis = self.resolved_implementation_basis().map_err(
+            crate::anchoring::resolved_implementation::ResolvedImplementationQueryError::Store,
+        )?;
+        crate::anchoring::resolved_implementation::project_resolved_implementations(&basis).map_err(
+            crate::anchoring::resolved_implementation::ResolvedImplementationQueryError::Projection,
+        )
     }
 }
 
@@ -648,7 +644,8 @@ pub struct InMemoryAnchorStore {
     /// entity/edge/binding/append yapar. `audit_seq` üç ledger paylaşımlı.
     resolution_ledger: Vec<crate::anchoring::review::ResolutionRecord>,
     /// PR E (tur 3 P1-A) — store-owned identity bindings (PhysicalCode node ↔ CodeIdentityKey).
-    code_identity_bindings: std::collections::BTreeMap<ConceptNodeId, crate::anchoring::identity::CodeIdentityKey>,
+    code_identity_bindings:
+        std::collections::BTreeMap<ConceptNodeId, crate::anchoring::identity::CodeIdentityKey>,
     /// Global audit sequence counter — `decision_ledger`, `supersede_ledger`, `resolution_ledger`
     /// paylaşımlı. Cross-ledger total order.
     audit_seq: u64,
@@ -779,10 +776,12 @@ impl InMemoryAnchorStore {
         let mut code_identity_bindings: Vec<_> = self
             .code_identity_bindings
             .iter()
-            .map(|(node_id, identity_key)| crate::anchoring::types::CodeIdentityBinding {
-                node_id: node_id.clone(),
-                identity_key: identity_key.clone(),
-            })
+            .map(
+                |(node_id, identity_key)| crate::anchoring::types::CodeIdentityBinding {
+                    node_id: node_id.clone(),
+                    identity_key: identity_key.clone(),
+                },
+            )
             .collect();
         code_identity_bindings.sort_by(|a, b| a.node_id.0.cmp(&b.node_id.0));
         AnchorStoreSnapshot {
@@ -830,7 +829,8 @@ impl InMemoryAnchorStore {
         s.supersede_ledger = snapshot.supersede_records;
         s.resolution_ledger = snapshot.resolution_records;
         for binding in snapshot.code_identity_bindings {
-            s.code_identity_bindings.insert(binding.node_id, binding.identity_key);
+            s.code_identity_bindings
+                .insert(binding.node_id, binding.identity_key);
         }
         s.audit_seq = snapshot.audit_sequence;
         Ok(s)
@@ -1393,9 +1393,8 @@ impl AnchorStore for InMemoryAnchorStore {
         // (9) Endpoint compatibility — canonical predicate (preview ile aynı source).
         // Coarse structural (same kind + family). Semantic replacement judgment operator-reviewed
         // basis'te; lineage/scope key future work.
-        let compatibility = supersede_compatibility_from_parts(
-            sup_kind, suc_kind, sup_family, suc_family,
-        );
+        let compatibility =
+            supersede_compatibility_from_parts(sup_kind, suc_kind, sup_family, suc_family);
         if !compatibility.is_compatible() {
             return Err(StoreError::IncompatibleSupersedeEndpoints {
                 superseded_kind: sup_kind,
@@ -1520,7 +1519,9 @@ impl AnchorStore for InMemoryAnchorStore {
             }
             // (5) R7: duplicate live entity for same key (staged — batch içindeki çakışma dahil).
             // Sadece binding'in node'u live CodeEntity ise kontrol gerekli.
-            if node.node_kind == ConceptNodeKind::CodeEntity && node.decision_status.is_live_code_identity() {
+            if node.node_kind == ConceptNodeKind::CodeEntity
+                && node.decision_status.is_live_code_identity()
+            {
                 let duplicate_live = staged.iter().any(|(nid, key)| {
                     *nid != binding.node_id
                         && key == &binding.identity_key
@@ -1603,7 +1604,9 @@ impl AnchorStore for InMemoryAnchorStore {
             .get(&candidate_id)
             .ok_or_else(|| StoreError::MissingResolutionIdentityBinding(candidate_id.clone()))?;
         if candidate_binding != &basis_identity_key {
-            return Err(StoreError::MissingResolutionIdentityBinding(candidate_id.clone()));
+            return Err(StoreError::MissingResolutionIdentityBinding(
+                candidate_id.clone(),
+            ));
         }
 
         // (8) Candidate has no committed outgoing ResolvesTo (R6).
@@ -1690,10 +1693,7 @@ impl AnchorStore for InMemoryAnchorStore {
             }
             ResolutionOutcome::Reused { .. } => {
                 let entity = self.graph.node(&entity_id).expect("reuse target mevcut");
-                (
-                    crate::anchoring::review::node_digest(entity),
-                    true,
-                )
+                (crate::anchoring::review::node_digest(entity), true)
             }
         };
 
@@ -1745,7 +1745,9 @@ impl AnchorStore for InMemoryAnchorStore {
             .clone();
         // tur 3 nokta 3: compile Accepted candidate için (mevcut PresentedBasis::compile Candidate-only).
         if candidate_node.decision_status != DecisionStatus::Accepted {
-            return Err(StoreError::NotPromotableFrom(candidate_node.decision_status));
+            return Err(StoreError::NotPromotableFrom(
+                candidate_node.decision_status,
+            ));
         }
         // kind CodeEntityCandidate (R3 store-side defense).
         if candidate_node.node_kind != ConceptNodeKind::CodeEntityCandidate {
@@ -1778,7 +1780,8 @@ impl AnchorStore for InMemoryAnchorStore {
             .filter(|(_, k)| *k == key)
             .filter_map(|(nid, _)| self.graph.node(nid))
             .filter(|n| {
-                n.node_kind == ConceptNodeKind::CodeEntity && n.decision_status.is_live_code_identity()
+                n.node_kind == ConceptNodeKind::CodeEntity
+                    && n.decision_status.is_live_code_identity()
             })
             .cloned()
             .collect();
@@ -1847,16 +1850,18 @@ impl AnchorStore for InMemoryAnchorStore {
     /// PR G — node + edge snapshot (tek immutable borrow → same-snapshot garantisi).
     fn resolved_implementation_basis(
         &self,
-    ) -> Result<
-        crate::anchoring::resolved_implementation::ResolvedImplementationBasis,
-        Self::Error,
-    > {
+    ) -> Result<crate::anchoring::resolved_implementation::ResolvedImplementationBasis, Self::Error>
+    {
         use crate::anchoring::resolved_implementation::ResolvedImplementationBasis;
         let nodes: Vec<ConceptNode> = self.graph.nodes_iter().cloned().collect();
         let edges: Vec<ConceptEdge> = self.graph.edges().cloned().collect();
         // R1a P1-1 (review tur 1) — resolution ledger snapshot (triangulation için).
         let resolution_records = self.resolution_ledger();
-        Ok(ResolvedImplementationBasis::new(nodes, edges, resolution_records))
+        Ok(ResolvedImplementationBasis::new(
+            nodes,
+            edges,
+            resolution_records,
+        ))
     }
 }
 
@@ -2202,14 +2207,20 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
             }
             // R3: source CodeEntityCandidate
             let source = snapshot.graph.nodes.iter().find(|n| n.id == e.from);
-            if source.map(|n| n.node_kind != ConceptNodeKind::CodeEntityCandidate).unwrap_or(true) {
+            if source
+                .map(|n| n.node_kind != ConceptNodeKind::CodeEntityCandidate)
+                .unwrap_or(true)
+            {
                 return Err(SnapshotError::ResolutionSourceKindWrong {
                     node_id: e.from.clone(),
                 });
             }
             // R4: target CodeEntity
             let target = snapshot.graph.nodes.iter().find(|n| n.id == e.to);
-            if target.map(|n| n.node_kind != ConceptNodeKind::CodeEntity).unwrap_or(true) {
+            if target
+                .map(|n| n.node_kind != ConceptNodeKind::CodeEntity)
+                .unwrap_or(true)
+            {
                 return Err(SnapshotError::ResolutionTargetKindWrong {
                     node_id: e.to.clone(),
                 });
@@ -2285,14 +2296,24 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
     sorted_records.sort_by_key(|r| r.seq);
     for record in &sorted_records {
         // candidate existence
-        if !snapshot.graph.nodes.iter().any(|n| n.id == record.candidate_id) {
+        if !snapshot
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.id == record.candidate_id)
+        {
             return Err(SnapshotError::ResolutionRecordNodeMissing {
                 seq: record.seq,
                 node_id: record.candidate_id.clone(),
             });
         }
         // entity existence
-        if !snapshot.graph.nodes.iter().any(|n| n.id == record.entity_id) {
+        if !snapshot
+            .graph
+            .nodes
+            .iter()
+            .any(|n| n.id == record.entity_id)
+        {
             return Err(SnapshotError::ResolutionRecordNodeMissing {
                 seq: record.seq,
                 node_id: record.entity_id.clone(),
@@ -2368,15 +2389,11 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
             | crate::anchoring::review::ResolutionOutcome::Reused { entity_id } => entity_id,
         };
         if outcome_entity_id != &record.entity_id {
-            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                seq: record.seq,
-            });
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent { seq: record.seq });
         }
         // P1-3: record.entity_id == identity_key.derive_entity_id() (deterministic derivation).
         if record.entity_id != record.identity_key.derive_entity_id() {
-            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                seq: record.seq,
-            });
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent { seq: record.seq });
         }
         // P2-1 (review tur 5): Created outcome → entity deterministic material doğrulaması.
         // canonical = key.canonical_key(), aliases = [] (tur 3 P2-C ile tutarlı).
@@ -2410,14 +2427,10 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
         }
         // P1-3: record digests == current node digests (freshness at restore time).
         if record.candidate_digest != crate::anchoring::review::node_digest(candidate).get() {
-            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                seq: record.seq,
-            });
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent { seq: record.seq });
         }
         if record.entity_digest != crate::anchoring::review::node_digest(entity).get() {
-            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent {
-                seq: record.seq,
-            });
+            return Err(SnapshotError::ResolutionRecordOutcomeInconsistent { seq: record.seq });
         }
     }
 
@@ -2440,7 +2453,12 @@ fn validate_snapshot(snapshot: &AnchorStoreSnapshot) -> Result<(), SnapshotError
     let mut live_entity_keys: BTreeMap<crate::anchoring::identity::CodeIdentityKey, u32> =
         BTreeMap::new();
     for binding in &snapshot.code_identity_bindings {
-        if let Some(node) = snapshot.graph.nodes.iter().find(|n| n.id == binding.node_id) {
+        if let Some(node) = snapshot
+            .graph
+            .nodes
+            .iter()
+            .find(|n| n.id == binding.node_id)
+        {
             if node.node_kind == ConceptNodeKind::CodeEntity
                 && node.decision_status.is_live_code_identity()
             {
@@ -2648,11 +2666,9 @@ mod tests {
     /// Expected error: `StoreError::DuplicateLiveCodeEntityIdentity`.
     #[test]
     fn resolution_target_rejects_duplicate_live_entity_same_key() {
-        use crate::anchoring::identity::{
-            CodeIdentityKey, CodeIdentityScheme, CodePathCasePolicy,
-        };
+        use crate::anchoring::identity::{CodeIdentityKey, CodeIdentityScheme, CodePathCasePolicy};
         use crate::anchoring::store::AnchorStore;
-        use crate::anchoring::types::{ConceptNode, CodeIdentityBinding};
+        use crate::anchoring::types::{CodeIdentityBinding, ConceptNode};
 
         let key = CodeIdentityKey::new(
             CodeIdentityScheme::AnalysisPathV1 {
@@ -2676,7 +2692,8 @@ mod tests {
         };
 
         let mut seed = GraphSeed::default();
-        seed.code_entities.push(mk_code_entity("CodeEntity:src/auth.rs"));
+        seed.code_entities
+            .push(mk_code_entity("CodeEntity:src/auth.rs"));
         seed.code_entities
             .push(mk_code_entity("CodeEntity:src/auth/legacy.rs"));
         let mut store = InMemoryAnchorStore::with_seed(seed);
@@ -2685,15 +2702,14 @@ mod tests {
         store
             .code_identity_bindings
             .insert(ConceptNodeId("CodeEntity:src/auth.rs".into()), key.clone());
-        store
-            .code_identity_bindings
-            .insert(ConceptNodeId("CodeEntity:src/auth/legacy.rs".into()), key.clone());
+        store.code_identity_bindings.insert(
+            ConceptNodeId("CodeEntity:src/auth/legacy.rs".into()),
+            key.clone(),
+        );
 
         // Resolution-target computation must reject the duplicate live entity.
         let before = store.export_snapshot();
-        let err = store
-            .resolution_target_for_identity(&key)
-            .unwrap_err();
+        let err = store.resolution_target_for_identity(&key).unwrap_err();
         assert!(
             matches!(err, StoreError::DuplicateLiveCodeEntityIdentity),
             "expected DuplicateLiveCodeEntityIdentity, got {err:?}"
@@ -4038,15 +4054,12 @@ mod tests {
     /// would_create_supersede_cycle: existing B→A, proposed A→B → true.
     #[test]
     fn would_create_supersede_cycle_true() {
-        let mut store = snap_store_with_candidates(&[
-            "RuleCandidate:A",
-            "RuleCandidate:B",
-            "RuleCandidate:C",
-        ]);
+        let mut store =
+            snap_store_with_candidates(&["RuleCandidate:A", "RuleCandidate:B", "RuleCandidate:C"]);
         snap_accept(&mut store, "RuleCandidate:A");
         snap_accept(&mut store, "RuleCandidate:B");
         snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:B"); // committed B→A
-        // proposed: A→B (superseded=B, successor=A) → B→A mevcut → cycle
+                                                                          // proposed: A→B (superseded=B, successor=A) → B→A mevcut → cycle
         assert!(store
             .would_create_supersede_cycle(
                 &ConceptNodeId("RuleCandidate:B".into()), // superseded
@@ -4064,7 +4077,7 @@ mod tests {
         snap_accept(&mut store, "RuleCandidate:B");
         snap_accept(&mut store, "RuleCandidate:C");
         snap_supersede(&mut store, "RuleCandidate:A", "RuleCandidate:B"); // committed B→A
-        // proposed: A→C (C unrelated) → no cycle
+                                                                          // proposed: A→C (C unrelated) → no cycle
         assert!(!store
             .would_create_supersede_cycle(
                 &ConceptNodeId("RuleCandidate:C".into()), // superseded

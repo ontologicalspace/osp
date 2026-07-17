@@ -46,6 +46,7 @@ fn make_coord_system() -> CoordinateSystem {
         EntropyAxis::from_commit_entropy(6.5),
         WitnessDepthAxis::from_witness(0.35, 30),
     )
+    .expect("integration test axis registration: 5 distinct core axes")
 }
 
 fn claim_aligned(id: u64, author: u64, vision_raw: RawPosition) -> Claim {

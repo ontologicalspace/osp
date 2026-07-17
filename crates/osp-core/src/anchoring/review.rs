@@ -1111,8 +1111,7 @@ impl PresentedResolutionBasis {
         let view = store
             .resolution_basis_view(candidate_id)
             .map_err(|e| ResolutionError::Store(Box::new(e)))?;
-        let candidate_digest =
-            crate::anchoring::review::node_digest(&view.candidate);
+        let candidate_digest = crate::anchoring::review::node_digest(&view.candidate);
         let target = match view.target {
             crate::anchoring::store::ResolutionTargetView::Create { proposed_entity_id } => {
                 PresentedResolutionTarget::Create { proposed_entity_id }
@@ -1325,7 +1324,10 @@ impl CodeEntityResolutionSession {
         }
 
         // (2) Counter exhaustion precedence (Tur 4 §3 — session-level geçerlilik sonrası).
-        let next_resolutions = self.resolutions.checked_add(1).ok_or(ResolutionError::SessionCounterExhausted)?;
+        let next_resolutions = self
+            .resolutions
+            .checked_add(1)
+            .ok_or(ResolutionError::SessionCounterExhausted)?;
 
         // (3) Opaque application üretimi.
         let application = ResolutionApplication::new(
@@ -3012,7 +3014,10 @@ mod tests {
             )
             .unwrap();
         let entity = store.graph().node(&record.entity_id).unwrap();
-        assert_eq!(entity.canonical, "src/auth.rs", "canonical = key.canonical_key()");
+        assert_eq!(
+            entity.canonical, "src/auth.rs",
+            "canonical = key.canonical_key()"
+        );
         assert!(entity.aliases.is_empty(), "aliases = []");
     }
 
@@ -3091,7 +3096,9 @@ mod tests {
             node_id: ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into()),
             identity_key: insensitive_key("src/auth.rs"),
         };
-        store.seed_code_identity_bindings_trusted(&[binding2]).unwrap();
+        store
+            .seed_code_identity_bindings_trusted(&[binding2])
+            .unwrap();
         let candidate2_id = ConceptNodeId("CodeEntityCandidate:src/Auth.rs".into());
         let basis2 = PresentedResolutionBasis::compile(&store, &candidate2_id).unwrap();
         let record2 = session
@@ -3386,10 +3393,7 @@ mod tests {
 
         // Entity canonical mutate → digest değişir → basis stale.
         store.graph_mut().node_mut(&entity_id).unwrap().canonical = "mutated.rs".into();
-        let binding_count_before = store
-            .export_snapshot()
-            .code_identity_bindings
-            .len();
+        let binding_count_before = store.export_snapshot().code_identity_bindings.len();
         let err = session
             .resolve(
                 &mut store,
@@ -3403,11 +3407,11 @@ mod tests {
             "stale reuse target digest reject — got {err:?}"
         );
         // Store unchanged (yeni binding YOK — candidate2 resolve olmadı).
-        let binding_count_after = store
-            .export_snapshot()
-            .code_identity_bindings
-            .len();
-        assert_eq!(binding_count_before, binding_count_after, "store unchanged on error");
+        let binding_count_after = store.export_snapshot().code_identity_bindings.len();
+        assert_eq!(
+            binding_count_before, binding_count_after,
+            "store unchanged on error"
+        );
     }
 
     /// P1-2: Batch validation — duplicate node aynı batch'te.
@@ -3432,7 +3436,10 @@ mod tests {
             ])
             .unwrap_err();
         assert!(
-            matches!(err, crate::anchoring::store::StoreError::DuplicateBinding(_)),
+            matches!(
+                err,
+                crate::anchoring::store::StoreError::DuplicateBinding(_)
+            ),
             "batch duplicate node reject — got {err:?}"
         );
     }
@@ -3478,10 +3485,7 @@ mod tests {
     #[test]
     fn trusted_binding_batch_error_leaves_bindings_unchanged() {
         let mut store = store_with_resolvable_candidate("src/auth.rs");
-        let binding_count_before = store
-            .export_snapshot()
-            .code_identity_bindings
-            .len();
+        let binding_count_before = store.export_snapshot().code_identity_bindings.len();
         // Hatalı batch (Concept node — wrong kind).
         let err = store
             .seed_code_identity_bindings_trusted(&[crate::anchoring::types::CodeIdentityBinding {
@@ -3490,13 +3494,13 @@ mod tests {
             }])
             .unwrap_err();
         assert!(
-            matches!(err, crate::anchoring::store::StoreError::DuplicateBinding(_)),
+            matches!(
+                err,
+                crate::anchoring::store::StoreError::DuplicateBinding(_)
+            ),
             "batch error (duplicate) — got {err:?}"
         );
-        let binding_count_after = store
-            .export_snapshot()
-            .code_identity_bindings
-            .len();
+        let binding_count_after = store.export_snapshot().code_identity_bindings.len();
         assert_eq!(
             binding_count_before, binding_count_after,
             "batch error leaves bindings unchanged"
@@ -3557,8 +3561,11 @@ mod tests {
             .map(|e| e.to.clone())
             .unwrap();
         // Entity'yi Rejected yap (inactive). graph_mut ile status değiştir.
-        store.graph_mut().node_mut(&entity_id).unwrap().decision_status =
-            DecisionStatus::Rejected;
+        store
+            .graph_mut()
+            .node_mut(&entity_id)
+            .unwrap()
+            .decision_status = DecisionStatus::Rejected;
         // İkinci candidate aynı key → compile inactive entity görür → EntityNotLiveForResolution.
         let candidate2 = accepted_code_entity_candidate("src/Auth.rs");
         let mut seed2 = GraphSeed::default();
@@ -3595,7 +3602,8 @@ mod tests {
             .unwrap();
         // Forge: candidate binding'i bir daha ekle (duplicate same key).
         let mut snap = store.export_snapshot();
-        snap.code_identity_bindings.push(snap.code_identity_bindings[0].clone());
+        snap.code_identity_bindings
+            .push(snap.code_identity_bindings[0].clone());
         let err = InMemoryAnchorStore::restore_snapshot(snap).unwrap_err();
         assert!(
             matches!(

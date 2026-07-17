@@ -183,7 +183,7 @@ pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
         CohesionAxis::new(),
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = VisionVector::new(osp_core::coords::RawPosition {
         x: 0.4,
         y: 0.6,
@@ -219,7 +219,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         CohesionAxis::new(),
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = VisionVector::new(osp_core::coords::RawPosition {
         x: 0.4,
         y: 0.6,

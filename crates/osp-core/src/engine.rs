@@ -584,12 +584,11 @@ impl SpaceEngine {
         omega: &crate::witness::WitnessSet,
     ) -> Result<crate::authorization::AuthorizationContext, String> {
         use crate::authorization::{
-            canonicalize_node, AuthorizationBasis, CanonicalAxisNormalization,
-            CanonicalCoordinateConfig, CanonicalEdge, CanonicalEdgeKind, CanonicalF64,
-            CanonicalMetricSourceConfig, CanonicalPredicateContent, CanonicalRawPosition,
-            CanonicalStructuralDelta, CanonicalWitnessPolicy, ClaimAuthor, ClaimIdentity,
-            MeasurementInputContext, MeasurementInputDigest, PredicateEvaluationBasis,
-            ProvenancedMeasuredResult, WitnessRequirement,
+            canonicalize_node, AuthorizationBasis, CanonicalEdge, CanonicalEdgeKind, CanonicalF64,
+            CanonicalPredicateContent, CanonicalRawPosition, CanonicalStructuralDelta,
+            CanonicalWitnessPolicy, ClaimAuthor, ClaimIdentity, MeasurementInputContext,
+            MeasurementInputDigest, PredicateEvaluationBasis, ProvenancedMeasuredResult,
+            WitnessRequirement,
         };
         use crate::canonical_tags::{PredicateAxisTag, PredicateModeTag};
         let claim = input.claim;
@@ -714,27 +713,11 @@ impl SpaceEngine {
         // Witness policy — gerçek omega'dan (plan-review #1).
         let witness_policy = CanonicalWitnessPolicy::try_from(omega).map_err(|e| e.to_string())?;
 
-        // Measurement input digest — engine config gerçek değerleri.
-        let measurement_input = MeasurementInputContext {
-            schema_version: 1,
-            coordinate_system_config: CanonicalCoordinateConfig {
-                config_tag: 0,
-                entropy_axis_tag: 0,
-                witness_depth_axis_tag: 0,
-                theta_bound: self.config.theta_bound,
-                abstractness: self.config.abstractness,
-            },
-            repo_level_entropy: None,
-            repo_level_witness_depth: None,
-            axis_normalization_params: CanonicalAxisNormalization {
-                normalization_tag: 0,
-            },
-            metric_source_config: CanonicalMetricSourceConfig {
-                primary_source_tag: 0,
-                placeholder_strategy_tag: 0,
-            },
-            measurement_adapters_version: "v1".to_string(),
-        };
+        // **INV-T9 Adım 3:** Measurement input context — gerçek axis descriptor'ları
+        // (placeholder config_tag/axis_tags kaldırıldı). CoordinateSystem'den üretilir;
+        // axis implementation identity + semantics + canonical parameters bağlanır.
+        let measurement_input =
+            MeasurementInputContext::try_from(&self.coord_system).map_err(|e| e.to_string())?;
         let measurement_input_digest =
             MeasurementInputDigest::compute(&measurement_input).map_err(|e| e.to_string())?;
 
@@ -1376,7 +1359,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let vision = VisionVector::new(RawPosition {
             x: 0.5,
             y: 0.5,
@@ -1484,7 +1468,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let vision = VisionVector::new(RawPosition {
             x: 0.2, // low coupling vision — node 1 (x≈0.95) will drift
             y: 0.5,
@@ -1530,7 +1515,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let vision = VisionVector::new(CENTER);
         let mut engine = SpaceEngine::new(Space::new(), cs, vision, config)
             .with_persistence(tmp.path())
@@ -1576,7 +1562,8 @@ mod tests {
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let mut engine = SpaceEngine::new(
             space,
             cs,
@@ -1607,7 +1594,8 @@ v = 0.5
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let engine = SpaceEngine::from_vision_config(Space::new(), cs, &config);
 
         assert!((engine.vision().raw().x - 0.4).abs() < 1e-9);
@@ -1776,7 +1764,8 @@ v = 0.5
         let cs = CoordinateSystem::default_raw_three(
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let vision = VisionVector::new(RawPosition {
             x: 0.5,
             y: 0.5,
@@ -1885,7 +1874,8 @@ v = 0.5
             CohesionAxis::new(),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .unwrap();
         let vision = VisionVector::new(RawPosition {
             x: 0.5,
             y: 0.5,

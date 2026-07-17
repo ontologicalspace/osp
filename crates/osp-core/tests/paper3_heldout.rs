@@ -176,7 +176,8 @@ fn run_held_out_case(case: &HeldOutCase) -> Value {
         .unwrap_or_else(|| panic!("[{}] DerivesRule üretilmedi", case.id));
     let expected_node_id = format!("RuleCandidate:{}", case.expected_canonical);
     assert_eq!(
-        rule_cand.target_node_id().0, expected_node_id,
+        rule_cand.target_node_id().0,
+        expected_node_id,
         "[{}] canonical cross-check",
         case.id
     );
@@ -210,11 +211,7 @@ fn run_held_out_case(case: &HeldOutCase) -> Value {
             );
             let axes: Vec<PhysicalCodeMetricAxis> =
                 hint.axis_candidates().iter().map(|h| h.axis()).collect();
-            assert_eq!(
-                axes, case.expected_axes,
-                "[{}] axes mismatch",
-                case.id
-            );
+            assert_eq!(axes, case.expected_axes, "[{}] axes mismatch", case.id);
             (format!("{:?}", exp_ambig), format!("{:?}", axes), true)
         }
         None => {
@@ -224,7 +221,11 @@ fn run_held_out_case(case: &HeldOutCase) -> Value {
                 case.id,
                 case.sentence
             );
-            ("NoAxisCandidate (hint None)".to_string(), "[]".to_string(), false)
+            (
+                "NoAxisCandidate (hint None)".to_string(),
+                "[]".to_string(),
+                false,
+            )
         }
     };
 

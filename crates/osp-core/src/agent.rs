@@ -412,7 +412,8 @@ impl HallucinationType {
                 Some(Self::Undersupported {
                     support: 0.0,
                     threshold: 1.5,
-                }).map(|h| {
+                })
+                .map(|h| {
                     // msg'yi detail'e göm — evidence debug için.
                     let _ = msg;
                     h

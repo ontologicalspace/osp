@@ -233,7 +233,9 @@ pub enum ConceptPacketType {
 /// High-stake (11): INV-C7 gereği explanation zorunlu. Düşük-stake (4): opsiyonel.
 ///
 /// PR G: `Ord`/`PartialOrd` eklendi (canonical triple dedup `BTreeSet` key için).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "PascalCase")]
 pub enum ConceptEdgeKind {
     // --- 15 ontolojik ---

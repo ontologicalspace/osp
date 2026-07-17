@@ -527,11 +527,11 @@ mod tests {
     /// auth_service observation'ları — entropy/witness representative normalized
     /// (PR C: 1.1/5.0 raw → 0.52/0.68). 5 eksende de uniform [0,1].
     fn auth_service_observations() -> crate::anchoring::types::ObservedPhysicalMetrics {
-        use crate::anchoring::PhysicalCodeMetricAxis;
+        use crate::anchoring::types::ObservedCodeMetricSource;
         use crate::anchoring::types::{
             EvidenceCoverage, EvidenceStrength, ObservedPhysicalMetric, ObservedPhysicalMetrics,
         };
-        use crate::anchoring::types::ObservedCodeMetricSource;
+        use crate::anchoring::PhysicalCodeMetricAxis;
         let strength = EvidenceStrength::new(0.85).unwrap();
         let coverage = EvidenceCoverage::new(1.0).unwrap();
         let scip = ObservedCodeMetricSource::Scip;

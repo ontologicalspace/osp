@@ -190,7 +190,8 @@ fn preflight_canonical_and_rule_signal_for_paper3_evidence_sentences() {
             });
         let expected_node_id = format!("RuleCandidate:{exp_canonical}");
         assert_eq!(
-            rule_cand.target_node_id().0, expected_node_id,
+            rule_cand.target_node_id().0,
+            expected_node_id,
             "canonical cross-check failed for: {sentence:?}\n  \
              expected: {expected_node_id}\n  \
              (derive_rule_name ilk 3 kelimeyi PascalCase yapar — canonical-kesme tuzağı)"
@@ -202,7 +203,10 @@ fn preflight_canonical_and_rule_signal_for_paper3_evidence_sentences() {
             .graph()
             .node(rule_cand.target_node_id())
             .unwrap_or_else(|| {
-                panic!("RuleCandidate node graph'a insert edilmedi: {}", expected_node_id)
+                panic!(
+                    "RuleCandidate node graph'a insert edilmedi: {}",
+                    expected_node_id
+                )
             });
         assert_eq!(node.node_kind, ConceptNodeKind::RuleCandidate);
         assert_eq!(node.decision_status, DecisionStatus::Candidate);
@@ -227,10 +231,7 @@ fn preflight_canonical_and_rule_signal_for_paper3_evidence_sentences() {
                 );
                 let axes: Vec<PhysicalCodeMetricAxis> =
                     hint.axis_candidates().iter().map(|h| h.axis()).collect();
-                assert_eq!(
-                    axes, vec![*exp_axis],
-                    "axes for: {sentence:?}"
-                );
+                assert_eq!(axes, vec![*exp_axis], "axes for: {sentence:?}");
             }
             ExpectedHint::MultipleCandidates(exp_axes) => {
                 let hint = stub.cross_family_hint().unwrap_or_else(|| {
@@ -243,11 +244,7 @@ fn preflight_canonical_and_rule_signal_for_paper3_evidence_sentences() {
                 );
                 let axes: Vec<PhysicalCodeMetricAxis> =
                     hint.axis_candidates().iter().map(|h| h.axis()).collect();
-                assert_eq!(
-                    axes,
-                    exp_axes.to_vec(),
-                    "axes for: {sentence:?}"
-                );
+                assert_eq!(axes, exp_axes.to_vec(), "axes for: {sentence:?}");
             }
             ExpectedHint::NoAxisCandidate => {
                 assert!(
@@ -409,10 +406,13 @@ fn build_e2e_binding_chain_replay() -> Value {
     // Faz 8a gerçek promotion: open → compile basis → accept.
     use osp_core::anchoring::review::{OperatorId, OperatorReviewSession, PresentedBasis};
     use osp_core::anchoring::types::NonEmptyExplanation;
-    let task_cand_id = osp_core::anchoring::types::ConceptNodeId("TaskCandidate:ReduceCoupling".into());
-    let mut session = OperatorReviewSession::open_for_operator(OperatorId::new("e2e-replay-operator"));
+    let task_cand_id =
+        osp_core::anchoring::types::ConceptNodeId("TaskCandidate:ReduceCoupling".into());
+    let mut session =
+        OperatorReviewSession::open_for_operator(OperatorId::new("e2e-replay-operator"));
     let basis = PresentedBasis::compile(&store2, &task_cand_id).expect("basis compile");
-    let reason = NonEmptyExplanation::new("ReduceCoupling accepted for e2e binding chain replay").unwrap();
+    let reason =
+        NonEmptyExplanation::new("ReduceCoupling accepted for e2e binding chain replay").unwrap();
     let decision_record = session
         .accept(&mut store2, &task_cand_id, basis, reason)
         .expect("real promotion via OperatorReviewSession");
@@ -556,9 +556,7 @@ fn build_e2e_rejected_paths_replay() -> Value {
 
     // ── Negatif yol 4: NotAccepted (Candidate TaskCandidate + verify) ──────────
     let candidate_task_node = ConceptNode {
-        id: osp_core::anchoring::types::ConceptNodeId(
-            "TaskCandidate:StillCandidate".into(),
-        ),
+        id: osp_core::anchoring::types::ConceptNodeId("TaskCandidate:StillCandidate".into()),
         canonical: "StillCandidate".into(),
         aliases: vec![],
         node_kind: ConceptNodeKind::TaskCandidate,
@@ -754,15 +752,16 @@ fn make_multiple_candidates_stub() -> osp_core::anchoring::predicate_lowering::P
 }
 
 fn make_no_template_stub() -> osp_core::anchoring::predicate_lowering::PredicateStub {
-    use osp_core::anchoring::predicate_lowering::{
-        PredicateStubReason, PredicateTemplateId,
-    };
+    use osp_core::anchoring::predicate_lowering::{PredicateStubReason, PredicateTemplateId};
     use osp_core::anchoring::types::ConceptNodeId;
     osp_core::anchoring::predicate_lowering::PredicateStub::new_with_cross_family_hint(
         ConceptNodeId("RuleCandidate:EvidenceOnly".into()),
         PredicateStubReason::NoTemplateMatch,
         vec![],
-        vec![PredicateTemplateId::MetricThreshold].into_iter().take(0).collect(),
+        vec![PredicateTemplateId::MetricThreshold]
+            .into_iter()
+            .take(0)
+            .collect(),
         None,
     )
     .unwrap()
@@ -775,12 +774,11 @@ fn make_no_template_stub() -> osp_core::anchoring::predicate_lowering::Predicate
 #[test]
 fn e2e_binding_chain_snapshot_matches_frozen_json() {
     let generated = build_e2e_binding_chain_replay();
-    let frozen: Value = serde_json::from_str(
-        &std::fs::read_to_string(E2E_JSON_PATH)
-            .unwrap_or_else(|e| panic!("frozen JSON okunamadı {E2E_JSON_PATH}: {e} — PAPER3_FREEZE=1 ile dondurun"),
-        ),
-    )
-    .expect("frozen JSON parse");
+    let frozen: Value =
+        serde_json::from_str(&std::fs::read_to_string(E2E_JSON_PATH).unwrap_or_else(|e| {
+            panic!("frozen JSON okunamadı {E2E_JSON_PATH}: {e} — PAPER3_FREEZE=1 ile dondurun")
+        }))
+        .expect("frozen JSON parse");
     assert_eq!(
         generated, frozen,
         "E2E binding chain JSON drift — kod değişti, kanıt güncel değil. \
@@ -793,8 +791,7 @@ fn e2e_rejected_paths_snapshot_matches_frozen_json() {
     let generated = build_e2e_rejected_paths_replay();
     let frozen: Value = serde_json::from_str(
         &std::fs::read_to_string(REJECTED_JSON_PATH)
-            .unwrap_or_else(|e| panic!("frozen JSON okunamadı {REJECTED_JSON_PATH}: {e}"),
-        ),
+            .unwrap_or_else(|e| panic!("frozen JSON okunamadı {REJECTED_JSON_PATH}: {e}")),
     )
     .expect("frozen JSON parse");
     assert_eq!(
@@ -812,8 +809,11 @@ fn regenerate_paper3_evidence_json() {
     }
     let e2e = build_e2e_binding_chain_replay();
     let rejected = build_e2e_rejected_paths_replay();
-    std::fs::write(E2E_JSON_PATH, format!("{}\n", serde_json::to_string_pretty(&e2e).unwrap()))
-        .unwrap_or_else(|e| panic!("write {E2E_JSON_PATH}: {e}"));
+    std::fs::write(
+        E2E_JSON_PATH,
+        format!("{}\n", serde_json::to_string_pretty(&e2e).unwrap()),
+    )
+    .unwrap_or_else(|e| panic!("write {E2E_JSON_PATH}: {e}"));
     std::fs::write(
         REJECTED_JSON_PATH,
         format!("{}\n", serde_json::to_string_pretty(&rejected).unwrap()),
