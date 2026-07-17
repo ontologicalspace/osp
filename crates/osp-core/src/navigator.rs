@@ -2781,4 +2781,102 @@ mod tests {
              calls (0 = context not captured for Held path; 2 = second snapshot produced)"
         );
     }
+
+    /// **scoped-review P2-a:** GlobalDefault vision authority failure → gerçek navigator
+    /// loop'unun terminal davranışı. Context üretim hatası `VisionContextInvalid` terminal
+    /// olarak map'lenir — maneuver budget tüketmez, retry yok, state değişmez.
+    ///
+    /// Authorization.rs'deki engine-integration testi context üretim + mapping doğrular;
+    /// bu test gerçek `run_task` loop'unu çalıştırır: SystemFailure + call_count=1 +
+    /// evidence empty + space/t_c unchanged.
+    #[test]
+    fn global_default_authority_failure_does_not_retry_or_consume_budget() {
+        use crate::engine::EngineConfig;
+        use crate::space::{Node, NodeKind, Space};
+        use crate::vision::VisionVector;
+
+        // Engine: GlobalDefault vision (VisionVector::new legacy constructor → source
+        // GlobalDefault). make_balanced_engine UserLoaded kullanır; burada manuel kurulum.
+        let mut space = Space::default();
+        for id in 0..=4u64 {
+            space.nodes.insert(
+                id,
+                Node {
+                    id,
+                    kind: NodeKind::Module,
+                    mass: 100.0,
+                    cohesion: Some(0.6),
+                    ..Default::default()
+                },
+            );
+        }
+        let cs = crate::coords::CoordinateSystem::default_raw_five(
+            crate::axes::CohesionAxis::new(),
+            crate::axes::EntropyAxis::from_commit_entropy(6.0),
+            crate::axes::WitnessDepthAxis::from_witness(0.3, 5),
+        )
+        .unwrap();
+        let mut config = EngineConfig::default_calibrated();
+        config.min_approvers = 0; // witness auto-approve (authority failure Q5 öncesi).
+        let mut engine = SpaceEngine::new(
+            space,
+            cs,
+            VisionVector::new(crate::coords::RawPosition {
+                x: 0.55,
+                y: 0.6,
+                z: 0.80,
+                w: 0.5,
+                v: 0.3,
+            }),
+            config,
+        );
+
+        // State before — INV-T9: terminal failure state'i değiştirmemeli.
+        // Space PartialEq değil → SpaceDigest ile canonical karşılaştırma (node/edge içeriği).
+        let space_digest_before =
+            crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        let t_c_before = engine.t_c();
+
+        // Task + single proposal → LLM bir kez çağrılır, sonra terminal.
+        let mut policy = TaskPolicy::default();
+        policy.maneuver_limit = 5; // Yüksek — eğer retry olsaydı 5 kez çağrılırdı.
+        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        let task = g2c3_coupling_task(1, &policy);
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let mock = MockLlmClient::new(incremental_coupling_proposals());
+        let mut evidence = vec![];
+        let mut nav = g2c3_nav(&mock, &resolver, &mut engine, &mut evidence);
+
+        let result = nav.run_task(1, 7);
+
+        // Terminal: SystemFailure (VisionContextInvalid → SystemFailure, retry yok).
+        assert!(
+            matches!(result, NavigatorResult::SystemFailure(_)),
+            "GlobalDefault authority failure must be terminal SystemFailure, got: {result:?}"
+        );
+        // call_count == 1 — LLM bir kez çağrıldı (terminal, retry YOK).
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "terminal failure must not retry — LLM called exactly once"
+        );
+        // Evidence empty — attempt Q5 öncesi reject edildi (commit pipeline'a ulaşmadı).
+        assert!(
+            evidence.is_empty(),
+            "terminal failure before Q5 must not produce evidence"
+        );
+        // State unchanged — space ve t_c korunmalı (mutation yok).
+        let space_digest_after =
+            crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        assert_eq!(
+            space_digest_before, space_digest_after,
+            "terminal failure must not mutate space"
+        );
+        assert_eq!(
+            engine.t_c(),
+            t_c_before,
+            "terminal failure must not advance t_c"
+        );
+    }
 }

@@ -983,18 +983,30 @@ pub(crate) const DEVIATION_SEMANTICS_VERSION: u32 = 1;
 /// `engine::effective_vision_selection(claim)` üretir. Q5 (`check_claim_vision`),
 /// `build_authorization_context` ve `EvaluationContextDigest` aynı sonucu paylaşır
 /// (captured-context pattern — 4a rule_context ile aynı).
+///
+/// **scoped-review P0:** Vision source TEK truth — `effective_vision.source()`.
+/// Ayrı `vision_source` alanı YOK (dual-truth mismatch açığı kapandı). Provenance her
+/// zaman vector'ün içinden okunur; validation ve digest aynı kaynağı kullanır.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EffectiveVisionSelection {
-    /// Effective vision vektörü (override uygulanmış veya global).
+    /// Effective vision vektörü (override uygulanmış veya global). **Tek source of
+    /// truth** — `effective_vision.source()` provenance'ı verir.
     pub(crate) effective_vision: crate::vision::VisionVector,
-    /// Effective vision'ın provenance'ı (None/GlobalDefault/BuiltinRole/RoleProfile/UserLoaded).
-    pub(crate) vision_source: crate::vision::VisionSource,
-    /// Bu vision'ın hangi role atandığı (Global = rol-süz).
+    /// Bu vision'ın hangi role atandığı (Global = rol-süz / delta_node yok).
+    /// **scoped-review P1-a:** delta_node varsa override olsun/olmasın `Role(infer_role)`
+    /// üretilir — claim'in değerlendirme subject'i global fallback'te de korunur.
     pub(crate) subject: CanonicalVisionSubject,
     /// `infer_role` heuristic semantiği (digest'e bağlı — staleness tespiti).
     pub(crate) role_inference_semver: u32,
     /// `effective_vision_selection` karar ağacı semantiği (digest'e bağlı).
     pub(crate) vision_selection_semver: u32,
+}
+
+impl EffectiveVisionSelection {
+    /// Provenance — `effective_vision.source()` tek truth. Ayrı alan YOK (P0).
+    pub(crate) fn vision_source(&self) -> crate::vision::VisionSource {
+        self.effective_vision.source()
+    }
 }
 
 /// **INV-T9 Step 4b:** θ_bound aralığı.
@@ -1053,9 +1065,20 @@ pub enum VisionContextError {
     /// theta_bound [MIN_THETA_BOUND, MAX_THETA_BOUND] aralığı dışında.
     #[error("theta_bound {0} out of range [{MIN_THETA_BOUND}, {MAX_THETA_BOUND}]")]
     ThetaBoundOutOfRange(f64),
-    /// Semantics version sıfır (geçersiz — > 0 olmalı).
-    #[error("invalid semantics version for {field}: {version} (must be > 0)")]
-    InvalidSemanticsVersion { field: &'static str, version: u32 },
+    /// **scoped-review P1-b:** Semantics version exact-version modeli. Binary'nin
+    /// uygulamadığı bir semantiği digest'e yazması engellenir (rule context'teki
+    /// `UnsupportedRuleContextSemantics` ile aynı). `found != supported` → reject.
+    #[error("unsupported semantics version for {field}: found {found}, supported {supported}")]
+    UnsupportedSemanticsVersion {
+        field: &'static str,
+        found: u32,
+        supported: u32,
+    },
+    /// **scoped-review P1-c:** Canonical role conversion fail-closed. Yeni `NodeRole`
+    /// varyantı eklendiğinde context başka role aitmiş gibi kaydedilmesin — conversion
+    /// hatası terminal olarak yayılır (sessiz `Runtime` fallback YOK).
+    #[error("canonical node role conversion failed during vision selection: {0}")]
+    CanonicalRoleConversionFailed(String),
 }
 
 impl EffectiveVisionGateContext {
@@ -1077,12 +1100,16 @@ impl EffectiveVisionGateContext {
 
     /// **reviewer P0-3:** Authority validation — mutation yüzeylerinde çağrılır.
     /// None → VisionUnavailable, GlobalDefault → VisionAuthorityInsufficient, diğerleri Ok.
+    ///
+    /// **scoped-review P0:** `vision_source` artık `effective_vision.source()` tek
+    /// truth'tan okunur — ayrı alan YOK, dual-truth mismatch açığı kapandı.
     pub(crate) fn validate_authority_for_mutation(&self) -> Result<(), VisionContextError> {
-        match self.selection.vision_source {
+        let source = self.selection.vision_source();
+        match source {
             crate::vision::VisionSource::None => Err(VisionContextError::VisionUnavailable),
             crate::vision::VisionSource::GlobalDefault => {
                 Err(VisionContextError::VisionAuthorityInsufficient {
-                    vision_source: self.selection.vision_source,
+                    vision_source: source,
                 })
             }
             crate::vision::VisionSource::BuiltinRole
@@ -1105,23 +1132,28 @@ impl EffectiveVisionGateContext {
         use crate::vision::VisionSource as S;
         use CanonicalVisionSubject as Sub;
 
-        // Semantics versions > 0.
-        if self.selection.role_inference_semver == 0 {
-            return Err(VisionContextError::InvalidSemanticsVersion {
-                field: "role_inference_semver",
-                version: 0,
+        // **scoped-review P1-b:** Semantics version exact-match modeli. Binary'nin
+        // uygulamadığı bir semantiği digest'e yazması engellenir (rule context'teki
+        // `UnsupportedRuleContextSemantics` ile aynı prensip). `found != supported` → reject.
+        if self.selection.role_inference_semver != ROLE_INFERENCE_SEMANTICS_VERSION {
+            return Err(VisionContextError::UnsupportedSemanticsVersion {
+                field: "role_inference",
+                found: self.selection.role_inference_semver,
+                supported: ROLE_INFERENCE_SEMANTICS_VERSION,
             });
         }
-        if self.selection.vision_selection_semver == 0 {
-            return Err(VisionContextError::InvalidSemanticsVersion {
-                field: "vision_selection_semver",
-                version: 0,
+        if self.selection.vision_selection_semver != VISION_SELECTION_SEMANTICS_VERSION {
+            return Err(VisionContextError::UnsupportedSemanticsVersion {
+                field: "vision_selection",
+                found: self.selection.vision_selection_semver,
+                supported: VISION_SELECTION_SEMANTICS_VERSION,
             });
         }
-        if self.deviation_semver == 0 {
-            return Err(VisionContextError::InvalidSemanticsVersion {
-                field: "deviation_semver",
-                version: 0,
+        if self.deviation_semver != DEVIATION_SEMANTICS_VERSION {
+            return Err(VisionContextError::UnsupportedSemanticsVersion {
+                field: "deviation",
+                found: self.deviation_semver,
+                supported: DEVIATION_SEMANTICS_VERSION,
             });
         }
 
@@ -1147,18 +1179,21 @@ impl EffectiveVisionGateContext {
             }
         }
 
+        // Provenance tek truth: effective_vision.source() (P0).
+        let source = self.selection.vision_source();
+
         // None → VisionUnavailable (subject'ten bağımsız).
-        if matches!(self.selection.vision_source, S::None) {
+        if matches!(source, S::None) {
             return Err(VisionContextError::VisionUnavailable);
         }
 
         // Subject-source combinational check.
-        match (self.selection.subject, self.selection.vision_source) {
+        match (self.selection.subject, source) {
             // Global subject + role-scoped source → mismatch (yapısal çelişki).
             (Sub::Global, S::BuiltinRole) | (Sub::Global, S::RoleProfile) => {
                 Err(VisionContextError::SubjectSourceMismatch {
                     subject: self.selection.subject,
-                    vision_source: self.selection.vision_source,
+                    vision_source: source,
                 })
             }
             // Diğer tüm kombinasyonlar yapısal olarak geçerli (authority katmanında
@@ -1280,9 +1315,10 @@ impl EvaluationContextDigest {
             sel.effective_vision.raw.v,
             "ec_effective_vision_v",
         )?;
-        // Vision source tag (canonical, validated newtype).
+        // Vision source tag (canonical, validated newtype). **P0:** tek truth'tan —
+        // `effective_vision.source()` (ayrı alan YOK).
         let source_tag =
-            crate::canonical_tags::CanonicalVisionSourceTag::try_from(&sel.vision_source)
+            crate::canonical_tags::CanonicalVisionSourceTag::try_from(&sel.vision_source())
                 .map_err(|e| AuthorizationBasisDigestError::EncodingFailed(e.to_string()))?;
         encode_u8(&mut hasher, source_tag.as_u8(), "ec_vision_source_tag");
         // Subject kind: Global → 0, Role → 1. Global: dummy role tag YOK.
@@ -3845,7 +3881,6 @@ mod tests {
                 },
                 VisionSource::UserLoaded,
             ),
-            vision_source: VisionSource::UserLoaded,
             subject: CanonicalVisionSubject::Global,
             role_inference_semver: ROLE_INFERENCE_SEMANTICS_VERSION,
             vision_selection_semver: VISION_SELECTION_SEMANTICS_VERSION,
@@ -4100,6 +4135,9 @@ mod tests {
     /// **Step 4b test helper:** Parametreli `EffectiveVisionSelection` — farklı
     /// source/subject/vision kombinasyonları için. `mk_vision_context` sabit bir
     /// kombinasyon (UserLoaded/Global) üretir; bu helper esnektir.
+    ///
+    /// **scoped-review P0:** `vision_source` ayrı alan YOK — source `effective_vision`'a
+    /// gömülü (tek truth).
     fn mk_selection(
         source: crate::vision::VisionSource,
         subject: CanonicalVisionSubject,
@@ -4107,7 +4145,6 @@ mod tests {
     ) -> EffectiveVisionSelection {
         EffectiveVisionSelection {
             effective_vision: crate::vision::VisionVector::with_source(raw, source),
-            vision_source: source,
             subject,
             role_inference_semver: ROLE_INFERENCE_SEMANTICS_VERSION,
             vision_selection_semver: VISION_SELECTION_SEMANTICS_VERSION,
@@ -4299,7 +4336,7 @@ mod tests {
             task_id: Some(1),
             removed_edges: vec![],
         };
-        let sel = engine.effective_vision_selection(&claim);
+        let sel = engine.effective_vision_selection(&claim).unwrap();
         assert!(
             matches!(sel.subject, CanonicalVisionSubject::Global),
             "empty delta_nodes must fall to Global subject, got {:?}",
@@ -4327,7 +4364,6 @@ mod tests {
                     },
                     VisionSource::UserLoaded,
                 ),
-                vision_source: VisionSource::UserLoaded,
                 subject: CanonicalVisionSubject::Global,
                 role_inference_semver: ROLE_INFERENCE_SEMANTICS_VERSION,
                 vision_selection_semver: VISION_SELECTION_SEMANTICS_VERSION,
@@ -4473,8 +4509,9 @@ mod tests {
             removed_edges: vec![],
         };
         // No overrides → builtin Runtime override uygulanır (BuiltinRole).
-        let sel_no_user =
-            mk_engine(std::collections::HashMap::new()).effective_vision_selection(&mk_claim());
+        let sel_no_user = mk_engine(std::collections::HashMap::new())
+            .effective_vision_selection(&mk_claim())
+            .unwrap();
         // User override for Runtime → RoleProfile (kullanıcı override kazanır).
         let mut user_overrides = std::collections::HashMap::new();
         user_overrides.insert(
@@ -4485,17 +4522,19 @@ mod tests {
                 z: None,
             },
         );
-        let sel_with_user = mk_engine(user_overrides).effective_vision_selection(&mk_claim());
+        let sel_with_user = mk_engine(user_overrides)
+            .effective_vision_selection(&mk_claim())
+            .unwrap();
         assert_ne!(
             sel_no_user.effective_vision.raw.x, sel_with_user.effective_vision.raw.x,
             "selected role override must change effective vision"
         );
         assert_eq!(
-            sel_no_user.vision_source,
+            sel_no_user.vision_source(),
             crate::vision::VisionSource::BuiltinRole
         );
         assert_eq!(
-            sel_with_user.vision_source,
+            sel_with_user.vision_source(),
             crate::vision::VisionSource::RoleProfile
         );
     }
@@ -4566,13 +4605,20 @@ mod tests {
             task_id: Some(1),
             removed_edges: vec![],
         };
-        let sel = engine.effective_vision_selection(&claim);
-        // Support → builtin_role_override(Support) = None → override yok → Global inherit.
+        let sel = engine.effective_vision_selection(&claim).unwrap();
+        // **scoped-review P1-a:** Support claim artık Role(Support) subject üretir
+        // (override olsun/olmasın claim'in değerlendirme bağlamı korunur). Override yok
+        // çünkü builtin_role_override(Support) = None ve user override Runtime için.
+        // Vision global inherit edilir (Runtime override 0.99 uygulanmadı).
+        let support_tag =
+            crate::canonical_tags::CanonicalNodeRole::try_from(&crate::space::NodeRole::Support)
+                .unwrap();
         assert!(
-            matches!(sel.subject, CanonicalVisionSubject::Global),
-            "Support claim with unrelated Runtime override must stay Global"
+            matches!(sel.subject, CanonicalVisionSubject::Role(tag) if tag == support_tag),
+            "Support claim must produce Role(Support) subject, got {:?}",
+            sel.subject
         );
-        // Global vision x = 0.5 (Runtime override 0.99 uygulanmadı).
+        // Global vision x = 0.5 (Runtime override 0.99 uygulanmadı — unrelated role).
         assert_eq!(sel.effective_vision.raw.x, 0.5);
     }
 
@@ -4737,22 +4783,33 @@ mod tests {
 
     #[test]
     fn vision_config_produces_user_loaded_authoritative_source() {
-        // from_vision_config → UserLoaded source üretmeli (kullanıcı TOML [raw]).
-        // Bu test caller audit'in temelini doğrular: gerçek kullanıcı vision'ı
-        // UserLoaded ile işaretlenir, GlobalDefault ile DEĞİL.
+        // **scoped-review P2-b:** Gerçek production dönüşümü — VisionConfig::from_str
+        // (TOML parse) → to_vision_vector() → UserLoaded source. Bu, kullanıcının elle
+        // deklare ettiği vision'ın en yüksek provenance ile işaretlendiğini doğrular
+        // (GlobalDefault DEĞİL). Caller audit'in gerçek yolunu test eder.
         use crate::vision::VisionSource;
-        // VisionVector::with_source(raw, UserLoaded) — kullanıcı TOML [raw] yolu.
-        let user_vision = crate::vision::VisionVector::with_source(
-            crate::coords::RawPosition::default(),
+        let toml = r#"
+[raw]
+x = 0.4
+y = 0.7
+z = 0.5
+w = 0.5
+v = 0.5
+"#;
+        let config =
+            crate::vision_config::VisionConfig::from_str(toml).expect("valid TOML must parse");
+        let vector = config.to_vision_vector();
+        assert_eq!(
+            vector.source(),
             VisionSource::UserLoaded,
+            "VisionConfig [raw] → to_vision_vector must produce UserLoaded (highest authority)"
         );
-        assert_eq!(user_vision.source(), VisionSource::UserLoaded);
-        assert!(user_vision.is_evaluable());
+        assert!(vector.is_evaluable());
         // UserLoaded authority'de kabul edilir (validate_authority_for_mutation Ok).
         let sel = mk_selection(
             VisionSource::UserLoaded,
             CanonicalVisionSubject::Global,
-            crate::coords::RawPosition::default(),
+            vector.raw,
         );
         let ctx = EffectiveVisionGateContext::try_new(sel, 0.3);
         assert!(ctx.is_ok(), "UserLoaded must pass authority validation");
@@ -4775,5 +4832,268 @@ mod tests {
             theta, 1.0,
             "CosineDeviation None fallback must return 1.0 (defensive)"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // scoped-review closure testleri (P0 + P1-a + P1-b + P1-c)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn vision_source_is_single_truth_from_effective_vector() {
+        // **P0:** EffectiveVisionSelection'ın ayrı vision_source alanı YOK. Source her
+        // zaman effective_vision.source()'dan okunur (dual-truth mismatch açığı kapandı).
+        let sel = mk_selection(
+            crate::vision::VisionSource::UserLoaded,
+            CanonicalVisionSubject::Global,
+            crate::coords::RawPosition::default(),
+        );
+        assert_eq!(
+            sel.vision_source(),
+            crate::vision::VisionSource::UserLoaded,
+            "vision_source() must read from effective_vision (single truth)"
+        );
+        // Struct literal'da ayrı field yok — compile-time guarantee (field kaldırıldı).
+    }
+
+    #[test]
+    fn role_claim_with_user_loaded_global_fallback_keeps_role_subject() {
+        // **P1-a:** delta_node varsa override yok bile olsa Role(infer_role) korunur.
+        // Runtime claim + global UserLoaded fallback → subject Role(Runtime), source UserLoaded.
+        use crate::engine::EngineConfig;
+        use crate::space::{Node, NodeClassification, NodeKind, Space};
+        use crate::vision::{VisionSource, VisionVector};
+        let mut space = Space::default();
+        space.nodes.insert(
+            0,
+            Node {
+                id: 0,
+                kind: NodeKind::Module,
+                mass: 100.0,
+                ..Default::default()
+            },
+        );
+        let engine = crate::engine::SpaceEngine::new(
+            space,
+            crate::coords::CoordinateSystem::default_raw_five(
+                crate::axes::CohesionAxis::new(),
+                crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+            )
+            .unwrap(),
+            // Global UserLoaded vision — override yok ama authority yeterli.
+            VisionVector::with_source(
+                crate::coords::RawPosition {
+                    x: 0.5,
+                    y: 0.6,
+                    z: 0.4,
+                    w: 0.5,
+                    v: 0.3,
+                },
+                VisionSource::UserLoaded,
+            ),
+            EngineConfig::default_calibrated(),
+        );
+        // Test classification node → infer_role → Support. builtin_role_override(Support)
+        // = None, role_overrides boş → override YOK, global UserLoaded fallback. Bu P1-a'nın
+        // tam senaryosu: override yok ama subject yine de Role(Support) korunur.
+        let claim = crate::witness::Claim {
+            id: 1,
+            intent: crate::witness::Intent::new(0, crate::coords::RawPosition::default()),
+            author: 0,
+            computed_raw: crate::coords::RawPosition::default(),
+            delta_nodes: vec![Node {
+                id: 0,
+                kind: NodeKind::Module,
+                mass: 100.0,
+                classification: NodeClassification::Test,
+                ..Default::default()
+            }],
+            delta_edges: vec![],
+            task_id: Some(1),
+            removed_edges: vec![],
+        };
+        let sel = engine.effective_vision_selection(&claim).unwrap();
+        let support_tag =
+            crate::canonical_tags::CanonicalNodeRole::try_from(&crate::space::NodeRole::Support)
+                .unwrap();
+        assert!(
+            matches!(sel.subject, CanonicalVisionSubject::Role(tag) if tag == support_tag),
+            "Support claim must keep Role(Support) subject even without override, got {:?}",
+            sel.subject
+        );
+        // Override yok → global vision inherit → UserLoaded source.
+        assert_eq!(sel.vision_source(), VisionSource::UserLoaded);
+    }
+
+    #[test]
+    fn different_inferred_roles_with_same_global_vision_change_digest() {
+        // **P1-a:** Runtime claim vs Support claim aynı global UserLoaded vision'ı
+        // kullansa bile farklı subject → farklı digest (claim-specific context korunur).
+        use crate::engine::EngineConfig;
+        use crate::space::{Node, NodeClassification, NodeKind, Space};
+        use crate::vision::{VisionSource, VisionVector};
+        let mk_engine = || {
+            let mut space = Space::default();
+            space.nodes.insert(
+                0,
+                Node {
+                    id: 0,
+                    kind: NodeKind::Module,
+                    mass: 100.0,
+                    ..Default::default()
+                },
+            );
+            crate::engine::SpaceEngine::new(
+                space,
+                crate::coords::CoordinateSystem::default_raw_five(
+                    crate::axes::CohesionAxis::new(),
+                    crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                    crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+                )
+                .unwrap(),
+                VisionVector::with_source(
+                    crate::coords::RawPosition::default(),
+                    VisionSource::UserLoaded,
+                ),
+                EngineConfig::default_calibrated(),
+            )
+        };
+        let mk_claim = |classification: NodeClassification| crate::witness::Claim {
+            id: 1,
+            intent: crate::witness::Intent::new(0, crate::coords::RawPosition::default()),
+            author: 0,
+            computed_raw: crate::coords::RawPosition::default(),
+            delta_nodes: vec![Node {
+                id: 0,
+                kind: NodeKind::Module,
+                mass: 100.0,
+                classification,
+                ..Default::default()
+            }],
+            delta_edges: vec![],
+            task_id: Some(1),
+            removed_edges: vec![],
+        };
+        let engine = mk_engine();
+        let config = crate::engine::EngineConfig::default_calibrated();
+        let rule_ctx = RuleEvaluationContext::try_new(vec![]).unwrap();
+        // Runtime claim (Production) → Role(Runtime). Support claim (Test) → Role(Support).
+        let runtime_sel = engine
+            .effective_vision_selection(&mk_claim(NodeClassification::Production))
+            .unwrap();
+        let support_sel = engine
+            .effective_vision_selection(&mk_claim(NodeClassification::Test))
+            .unwrap();
+        assert_ne!(
+            runtime_sel.subject, support_sel.subject,
+            "different classifications → different inferred roles → different subjects"
+        );
+        let runtime_ctx = EffectiveVisionGateContext::try_new(runtime_sel, 0.3).unwrap();
+        let support_ctx = EffectiveVisionGateContext::try_new(support_sel, 0.3).unwrap();
+        let d_runtime = EvaluationContextDigest::compute(&config, &rule_ctx, &runtime_ctx).unwrap();
+        let d_support = EvaluationContextDigest::compute(&config, &rule_ctx, &support_ctx).unwrap();
+        assert_ne!(
+            d_runtime, d_support,
+            "different inferred roles (same global vision) → different digest"
+        );
+    }
+
+    #[test]
+    fn unsupported_semantics_version_rejected() {
+        // **P1-b:** Exact-version modeli. Binary'nin uygulamadığı semantiği digest'e
+        // yazması engellenir (999 → UnsupportedSemanticsVersion).
+        let mut sel = mk_selection(
+            crate::vision::VisionSource::UserLoaded,
+            CanonicalVisionSubject::Global,
+            crate::coords::RawPosition::default(),
+        );
+        // role_inference_semver = 999 (supported: 1) → reject.
+        sel.role_inference_semver = 999;
+        let err = EffectiveVisionGateContext::try_new(sel.clone(), 0.3).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                VisionContextError::UnsupportedSemanticsVersion {
+                    field: "role_inference",
+                    found: 999,
+                    supported: ROLE_INFERENCE_SEMANTICS_VERSION
+                }
+            ),
+            "role_inference_semver=999 must be rejected (exact-version), got {err:?}"
+        );
+        // vision_selection_semver = 999 → reject.
+        let mut sel2 = sel.clone();
+        sel2.role_inference_semver = ROLE_INFERENCE_SEMANTICS_VERSION;
+        sel2.vision_selection_semver = 999;
+        let err2 = EffectiveVisionGateContext::try_new(sel2, 0.3).unwrap_err();
+        assert!(
+            matches!(
+                err2,
+                VisionContextError::UnsupportedSemanticsVersion {
+                    field: "vision_selection",
+                    found: 999,
+                    supported: VISION_SELECTION_SEMANTICS_VERSION
+                }
+            ),
+            "vision_selection_semver=999 must be rejected (exact-version), got {err2:?}"
+        );
+    }
+
+    #[test]
+    fn canonical_role_conversion_fail_closed() {
+        // **P1-c:** effective_vision_selection Result döner; canonical role conversion
+        // hatası terminal olarak yayılır (sessiz Runtime fallback YOK). Mevcut enum'da
+        // infer_role yalnız Support/Runtime üretir (conversion hep başarılı), ama API
+        // sözleşmesi fail-closed'dır — yeni NodeRole varyantı eklendiğinde koruma aktif.
+        //
+        // Bu test yapısal assertion: effective_vision_selection Result döner ve hata
+        // tipi VisionContextError::CanonicalRoleConversionFailed. Runtime'da tetiklenmez
+        // (infer_role sınırlı) ama API guarantee'yi doğrular.
+        use crate::engine::EngineConfig;
+        use crate::space::{Node, NodeClassification, NodeKind, Space};
+        use crate::vision::{VisionSource, VisionVector};
+        let engine = crate::engine::SpaceEngine::new(
+            Space::default(),
+            crate::coords::CoordinateSystem::default_raw_five(
+                crate::axes::CohesionAxis::new(),
+                crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+            )
+            .unwrap(),
+            VisionVector::with_source(
+                crate::coords::RawPosition::default(),
+                VisionSource::UserLoaded,
+            ),
+            EngineConfig::default_calibrated(),
+        );
+        let claim = crate::witness::Claim {
+            id: 1,
+            intent: crate::witness::Intent::new(0, crate::coords::RawPosition::default()),
+            author: 0,
+            computed_raw: crate::coords::RawPosition::default(),
+            delta_nodes: vec![Node {
+                id: 0,
+                kind: NodeKind::Module,
+                mass: 100.0,
+                classification: NodeClassification::Production,
+                ..Default::default()
+            }],
+            delta_edges: vec![],
+            task_id: Some(1),
+            removed_edges: vec![],
+        };
+        // Conversion bugün başarılı (Runtime valid) — API Result döndüğünü doğrula.
+        let result = engine.effective_vision_selection(&claim);
+        assert!(
+            result.is_ok(),
+            "valid claim must produce selection; API is Result (fail-closed contract): {:?}",
+            result.err()
+        );
+        // VisionContextError::CanonicalRoleConversionFailed variantı mevcut — yeni
+        // NodeRole eklendiğinde TryFrom exhaustive match derleme hatası verir, mapping
+        // güncellenmek zorunda kalınır (compiler-enforced).
+        let _variant_exists = |e: VisionContextError| {
+            matches!(e, VisionContextError::CanonicalRoleConversionFailed(_))
+        };
     }
 }

@@ -976,14 +976,24 @@ impl SpaceEngine {
     /// **INV-T9 Step 4b (reviewer P0-1):** Tek karar ağacı — role inference + vision
     /// selection AYNI fonksiyonda. Subject + effective vector + source birlikte üretilir.
     ///
-    /// Cascade (korundu — 3-tier):
-    /// 1. İlk `delta_node` varsa → `infer_role("", classification, None)` ile rol çıkar
-    ///    (engine path bilmez; yalnız classification). Sonra:
+    /// **scoped-review P1-a:** Subject = claim'in değerlendirme bağlamı. `delta_node`
+    /// varsa override olsun/olmasın `Role(infer_role)` üretilir — global fallback'te
+    /// bile claim'in rolü korunur (Runtime claim + global UserLoaded ≠ Support claim +
+    /// global UserLoaded). Yalnız `delta_node` yoksa `Global`.
+    ///
+    /// **scoped-review P1-c:** Canonical role conversion fail-closed. Yeni `NodeRole`
+    /// varyantı eklendiğinde context başka role aitmiş gibi kaydedilmesin; dönüşüm hatası
+    /// `CanonicalRoleConversionFailed` olarak terminal yayılır (sessiz Runtime fallback YOK).
+    ///
+    /// **scoped-review P0:** Vision source TEK truth — `effective_vision.source()`. Ayrı
+    /// `vision_source` alanı YOK.
+    ///
+    /// Cascade (subject her zaman önce üretilir, sonra source/vector):
+    /// 1. `delta_node.first()` varsa → `infer_role("", classification, None)` → `subject = Role(role)`.
     ///    a. Kullanıcı TOML override (`role_overrides[Role]`) → `RoleProfile`
     ///    b. `builtin_role_override` (hardcoded) → `BuiltinRole`
-    ///    → Subject `Role(role)`, vision override uygulanmış.
-    /// 2. Override yoksa (delta_node yok, veya override bulunamadı) → engine global
-    ///    vision'ı (`self.vision`) inherit et. Subject `Global`, source inherit edilir.
+    ///    c. Override yok → global vision inherit → source inherit (UserLoaded/GlobalDefault/None)
+    /// 2. `delta_node` yok → `subject = Global`, global vision inherit.
     ///
     /// **Alan adı:** `subject` (`inferred_role` DEĞİL — global bir inferred role değildir).
     /// Semantics version'lar (`ROLE_INFERENCE_SEMANTICS_VERSION`,
@@ -991,7 +1001,10 @@ impl SpaceEngine {
     pub(crate) fn effective_vision_selection(
         &self,
         claim: &Claim,
-    ) -> crate::authorization::EffectiveVisionSelection {
+    ) -> Result<
+        crate::authorization::EffectiveVisionSelection,
+        crate::authorization::VisionContextError,
+    > {
         use crate::authorization::{
             CanonicalVisionSubject, EffectiveVisionSelection, ROLE_INFERENCE_SEMANTICS_VERSION,
             VISION_SELECTION_SEMANTICS_VERSION,
@@ -1004,6 +1017,16 @@ impl SpaceEngine {
         // classification-only — engine path bilmez, sadece node classification).
         if let Some(node) = claim.delta_nodes.first() {
             let role = infer_role("", node.classification, None);
+            // **P1-c:** Canonical role conversion fail-closed (sessiz Runtime fallback YOK).
+            let canonical_role = crate::canonical_tags::CanonicalNodeRole::try_from(&role)
+                .map_err(|e| {
+                    crate::authorization::VisionContextError::CanonicalRoleConversionFailed(
+                        e.to_string(),
+                    )
+                })?;
+            // **P1-a:** subject her zaman Role (override olsun/olmasın) — claim'in
+            // değerlendirme bağlamı korunur.
+            let subject = CanonicalVisionSubject::Role(canonical_role);
             // Önce kullanıcı TOML override'ı (RoleProfile), sonra builtin (BuiltinRole).
             let key = format!("{:?}", role);
             let user_override = self.config.role_overrides.get(&key).cloned();
@@ -1026,33 +1049,29 @@ impl SpaceEngine {
                 } else {
                     VisionSource::BuiltinRole
                 };
-                let canonical_role = crate::canonical_tags::CanonicalNodeRole::try_from(&role)
-                    .unwrap_or_else(|_| {
-                        // infer_role yalnız Support/Runtime üretir (dead code Coverage'da).
-                        // Hata olamaz; defensive fallback Runtime.
-                        crate::canonical_tags::CanonicalNodeRole::try_from(
-                            &crate::space::NodeRole::Runtime,
-                        )
-                        .expect("Runtime is a valid CanonicalNodeRole")
-                    });
-                return EffectiveVisionSelection {
+                return Ok(EffectiveVisionSelection {
                     effective_vision: VisionVector::with_source(raw_v, source),
-                    vision_source: source,
-                    subject: CanonicalVisionSubject::Role(canonical_role),
+                    subject,
                     role_inference_semver: ROLE_INFERENCE_SEMANTICS_VERSION,
                     vision_selection_semver: VISION_SELECTION_SEMANTICS_VERSION,
-                };
+                });
             }
+            // Override yok → engine global vision'ı inherit et. Subject Role korunur (P1-a);
+            // source vision'ın kendi provenance'ından gelir (UserLoaded/GlobalDefault/None).
+            return Ok(EffectiveVisionSelection {
+                effective_vision: self.vision,
+                subject,
+                role_inference_semver: ROLE_INFERENCE_SEMANTICS_VERSION,
+                vision_selection_semver: VISION_SELECTION_SEMANTICS_VERSION,
+            });
         }
-        // Override yok → engine global vision'ı (source dahil) inherit et.
-        // Subject Global (rol atanmadı); source vision'ın kendi provenance'ından gelir.
-        EffectiveVisionSelection {
+        // delta_node yok → engine global vision'ı inherit. Subject Global.
+        Ok(EffectiveVisionSelection {
             effective_vision: self.vision,
-            vision_source: self.vision.source(),
             subject: CanonicalVisionSubject::Global,
             role_inference_semver: ROLE_INFERENCE_SEMANTICS_VERSION,
             vision_selection_semver: VISION_SELECTION_SEMANTICS_VERSION,
-        }
+        })
     }
 
     /// **INV-T9 Step 4b (reviewer P0-1 + P0-3):** Claim-specific effective vision gate
@@ -1069,7 +1088,7 @@ impl SpaceEngine {
         crate::authorization::VisionContextError,
     > {
         use crate::authorization::EffectiveVisionGateContext;
-        let selection = self.effective_vision_selection(claim);
+        let selection = self.effective_vision_selection(claim)?;
         EffectiveVisionGateContext::try_new(selection, self.config.theta_bound)
     }
 
