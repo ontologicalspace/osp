@@ -1,5 +1,11 @@
 # INV-T9 Commit 1 Amend — Tur 2 Handoff / Yol Haritası
 
+> **Status: Historical pre-Step-3/4 implementation handoff.**
+> This document records an earlier working-tree state and superseded design
+> proposals. Its commands, SHAs, test counts, APIs, and implementation guidance
+> must not be treated as current. Current truth is PR #69 and its head commit
+> (Steps 1-4c done; Step 5-6 pending).
+
 **Tarih:** 2026-07-16
 **Branch:** `fix/inv-t9-witness-suspension`
 **PR:** #69 (https://github.com/ontologicalspace/osp/pull/69)
@@ -275,6 +281,12 @@ pub fn evaluation_context_digest_for_claim(
 ) -> Result<EvaluationContextDigest, CanonicalizationError>;
 ```
 Engine `build_authorization_context` zaten claim'i parametre alıyor — `vision_for_claim(claim)` çağırıp gerçek effective vision'ı bağlar. Sadece ilgili role override; ilgisiz role override stale yapmaz.
+
+> **⚠️ Superseded by Step 4a/4b captured-context propagation.** Bu accessor önerisi
+> **uygulanmadı** — `current_evaluation_context_digest` accessor'ü Step 4b'de tamamen
+> kaldırıldı. Mevcut mimaride vision context bir kez capture edilir (`effective_vision_
+> gate_context(claim)`), Q5 ve digest aynı captured context'i kullanır. Ayrı bir
+> recompute accessor'ü YOK. Bu bölüm tarihsel tasarım kaydı olarak korunuyor.
 
 **VisionSource enum (vision.rs:32-51):** None/GlobalDefault/BuiltinRole/RoleProfile/UserLoaded.
 

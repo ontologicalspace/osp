@@ -2268,15 +2268,20 @@ v = 0.5
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// **Step 4c test helper:** `commit_task_claim → Held` production yolundan gerçek
-    /// `AuthorizationContext.basis.evaluation_context_digest` üret. Boş `WitnessSet`
-    /// (min_approvers=2 kendi içinde) + predicate satisfied → Held (quorum yetersiz).
+    /// `(AuthorizationContext, WitnessHoldReason, WitnessQuorumSnapshot)` üret. Boş
+    /// `WitnessSet` (min_approvers=2 kendi içinde) + predicate satisfied → Held.
     ///
     /// **Omega kaynağı:** `WitnessSet::new(vec![])` kendi `min_approvers: 2, quorum_threshold:
     /// 1.5` değerlerini taşır (engine.rs:113-118, EngineConfig'ten bağımsız). Held sebebi
     /// `input.omega`'dan gelir — `EngineConfig.min_approvers/quorum_threshold` değil.
-    fn held_authorization_for_config(
+    /// Bu yüzden reason + snapshot EngineConfig'ten bağımsız olmalı (test assert'leri).
+    fn held_for_config(
         config: EngineConfig,
-    ) -> crate::authorization::AuthorizationContext {
+    ) -> (
+        crate::authorization::AuthorizationContext,
+        crate::witness::WitnessHoldReason,
+        crate::witness::WitnessQuorumSnapshot,
+    ) {
         use crate::trajectory::{
             InMemoryTaskRegistry, MetricPredicate, PredicateAxis, PredicateMode, PredicateSet,
             Task, TaskPolicy, TaskStatus, WeightedPredicate,
@@ -2413,7 +2418,11 @@ v = 0.5
         };
 
         match engine.commit_task_claim(input) {
-            Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
+            Ok(crate::engine::EngineCommitResult::Held {
+                authorization,
+                reason,
+                snapshot,
+            }) => (authorization, reason, snapshot),
             other => panic!(
                 "fixture must reach Held (empty WitnessSet, predicate satisfied); got: {other:?}"
             ),
@@ -2453,10 +2462,20 @@ v = 0.5
             role_overrides: std::collections::HashMap::new(),
         };
 
-        let auth_a = held_authorization_for_config(config_a);
-        let auth_b = held_authorization_for_config(config_b);
+        let (auth_a, reason_a, snapshot_a) = held_for_config(config_a);
+        let (auth_b, reason_b, snapshot_b) = held_for_config(config_b);
 
         // Fixture izolasyonu: EngineConfig farklı, omega aynı → Held çıktıları aynı.
+        // reason + snapshot omega'dan türetilir (EngineConfig.min_approvers/quorum_threshold'tan
+        // DEĞİL) — iki config farklı değerler taşısa da Held davranışı özdeş kalmalı.
+        assert_eq!(
+            reason_a, reason_b,
+            "Held reason derives from omega, not EngineConfig"
+        );
+        assert_eq!(
+            snapshot_a, snapshot_b,
+            "witness snapshot derives from omega, not EngineConfig"
+        );
         assert_eq!(
             auth_a.basis.witness_policy, auth_b.basis.witness_policy,
             "witness policy derives from omega, not EngineConfig"

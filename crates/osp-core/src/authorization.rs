@@ -1249,8 +1249,11 @@ impl EvaluationContextDigest {
     /// "intermediate runtime context types are not persisted wire schemas."
     ///
     /// **DOMAIN_SEPARATOR v1:** No published or compatibility-supported v1
-    /// evaluation-context encoding exists — PR pre-merge, runtime context opak taşınır
-    /// (AuthorizationBasis digest baytlarını saklar, reload'da recompute). Step 6 golden
+    /// evaluation-context encoding exists — PR pre-merge. Reload semantics:
+    /// `AuthorizationBasisDigest` is recomputed from the embedded `AuthorizationBasis`
+    /// during `PendingAuthorizationEnvelope::verify()`; the embedded
+    /// `EvaluationContextDigest` is NOT independently recomputed from runtime rule
+    /// and vision contexts on reload (opak bytes olarak saklanır). Step 6 golden
     /// vector v1 sözleşmesini kilitler; sonraki breaking değişiklik (canonical field/order/
     /// tag/encoding) explicit v2 kararı gerektirir.
     ///
