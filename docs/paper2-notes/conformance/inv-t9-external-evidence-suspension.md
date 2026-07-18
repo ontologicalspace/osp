@@ -407,8 +407,9 @@ canonical v1 byte contract (golden vectors), and store hardening. The following 
 - **Cross-process resume orchestration:** pending artifact load + staleness re-measure
   (`current_revision == base_revision` → continue; `!=` → remeasure).
 
-The data model is complete: `PendingAuthorizationEnvelope` embeds the full
-`AuthorizationBasis`, so lifecycle work can persist and resume without redesign.
+The canonical authorization-basis portion of the data model is complete and can be
+reused by lifecycle resume work. The pending envelope and revision evidence surfaces
+still require the merge-blocking `SuspendedAttemptEvidence` extension tracked in #72.
 
 ## 10. High-risk GOVERNANCE disclosure
 
