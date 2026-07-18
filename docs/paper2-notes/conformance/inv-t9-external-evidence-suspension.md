@@ -196,6 +196,11 @@ the digest. `verify()` recomputes the digest on load and rejects mismatches (tam
 corruption detection). Single canonical schema string `"osp.pending-authorization.v1"`
 (no separate schema_version in record).
 
+**Scope note (#72):** The envelope is self-contained w.r.t. the **authorization basis**.
+Complete embedded **attempt-evidence** integrity (canonical `SuspendedAttemptEvidence`
+snapshot, domain-separated evidence digest, record ↔ basis ↔ evidence cross-field
+verification) is not yet established — that is merge-blocking work tracked in #72.
+
 ### Navigator-owned persistence (P0-1)
 
 `PendingAuthorizationStore` trait + `FilesystemPendingAuthorizationStore`. Navigator
@@ -230,7 +235,10 @@ waiting consumes no additional maneuver budget (proposal generation counts once)
 
 `NavigatorResult::RequiresRevision(RevisionRequired)` carries task_id, claim_id,
 authorization basis digest, witness reasons (NonEmpty), witness snapshot, attempt
-evidence id — full evidence-preserving struct.
+evidence id. It preserves the current evidence identifier and witness data, but complete
+embedded attempt-evidence integrity is not yet established. Canonical snapshot embedding,
+domain-separated evidence digesting, and basis/claim cross-field verification are
+merge-blocking work tracked in #72.
 
 ## 6. Test evidence
 
@@ -375,29 +383,32 @@ non-breaking):
 - **Persisted evidence schema:** AttemptEvidence + AuthorizationEvent separation
   planned for P1 (currently single composite TrajectoryEvidence record).
 
-## 9. Deferred boundary (P1 follow-up PR)
+## 9. Deferred boundary
 
-This PR establishes suspension semantics, claim continuity, budget isolation,
-persist-before-return, exhaustive error taxonomy, canonical digest, and store
-hardening — all reviewer P1 findings addressed. The following are **deferred to the
-immediately following lifecycle PR**:
+INV-T9 Steps 1-6 established suspension semantics, claim continuity, budget isolation,
+persist-before-return, exhaustive error taxonomy, canonical decision-basis (rule
+sequence binding, claim-specific effective vision, structural-delta defensive integrity),
+canonical v1 byte contract (golden vectors), and store hardening. The following remain
+**merge-blocking** (tracked as separate issues):
+
+- **#70 — EngineMeasurement pipeline:** real per-axis provenance + engine-issued
+  measurement token. The golden vectors lock the v1 byte encoding of the currently
+  defined models; they do not prove runtime data is correctly produced. #70 is the
+  runtime semantic-correctness blocker.
+- **#72 — Embedded attempt-evidence integrity:** canonical `SuspendedAttemptEvidence`
+  snapshot in `PendingAuthorizationEnvelope` + `RevisionRequired`, domain-separated
+  evidence digest, record ↔ basis ↔ evidence cross-field verification. Until #72 lands,
+  evidence is bound only by indirect `attempt_evidence_id`.
+
+**Separate lifecycle follow-up (not merge-blocking):**
 
 - **Witness resume workflow:** `osp trajectory status`, `osp witness add`,
   `osp trajectory resume` CLI + store-backed persistence.
-- **Engine revision/context expose:** `current_space_view_revision()` and
-  `current_evaluation_context_digest()` are placeholder implementations (t_c-based).
-  P1 makes them real (full revision tracking + context digest from vision/rule config).
-- **Cross-process resume:** pending artifact load + staleness re-measure
+- **Cross-process resume orchestration:** pending artifact load + staleness re-measure
   (`current_revision == base_revision` → continue; `!=` → remeasure).
-- **Stale authorization basis detection:** on resume, if gate policy (vision/
-  rule-set) changed since basis measurement, remeasure before witness evaluation.
-- **`new_evidence_reuses_the_same_claim` test:** pending resume integration test.
-- **AuthorizationBasis construction from engine:** `suspend_for_witness` currently
-  builds a minimal basis (placeholder predicate content). P1 wires full structural
-  delta + predicate content from engine.
 
-The `PendingAuthorizationEnvelope` embeds the full `AuthorizationBasis`, so P1 can
-persist and resume without redesign — the data model is complete.
+The data model is complete: `PendingAuthorizationEnvelope` embeds the full
+`AuthorizationBasis`, so lifecycle work can persist and resume without redesign.
 
 ## 10. High-risk GOVERNANCE disclosure
 
