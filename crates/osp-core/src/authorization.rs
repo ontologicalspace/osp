@@ -5811,20 +5811,136 @@ v = 0.5
         EffectiveVisionGateContext::try_new(selection, 0.37).unwrap()
     }
 
-    /// **Step 6 PRE-refactor utility** — mevcut encoder ile aday golden hex üretir.
-    /// Refactor sonrası tekrar çalıştır → PRE == POST doğrula (byte-preserving refactor).
-    /// Golden hardcode sonrası KALDIRILIR (reviewer P2).
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 Step 6 — Golden vectors + exact preimage tests (v1 byte contract lock)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Golden hex sabitleri — POST-refactor doğrulanmış değerler (PRE == POST).
+    /// DO NOT update as routine test maintenance. A mismatch means the canonical v1
+    /// byte contract changed and requires an explicit compatibility/version decision
+    /// (domain separator bump v1 → v2).
+    const AUTHORIZATION_V1_GOLDEN_HEX: &str =
+        "7f67f2acf97bc9747b9f708437eb6a3454628f3cb4c23541e48e00554a4945f5";
+    const EVALUATION_CONTEXT_V1_GOLDEN_HEX: &str =
+        "b2e7e883e0af8bdbff02e691d39f1574caaeb6be9d1a29e8467a3b99d79f1a5f";
+
     #[test]
-    #[ignore = "developer-only: pre-refactor candidate golden — remove after golden hardcode"]
-    fn print_pre_refactor_golden_candidates() {
-        let authorization =
+    fn authorization_basis_digest_v1_golden_vector() {
+        // **Step 6:** v1 byte contract lock — AuthorizationBasisDigest. Encoding
+        // (field order, tag values, float canonicalization, predicate sorting, edge
+        // identity-only) bu testle kilitlenir. Nested digest'ler sentinel →
+        // AuthorizationBasis encoding değişikliği buradan gelir, nested değişiklikten değil.
+        let actual =
             AuthorizationBasisDigest::compute(&golden_authorization_basis_fixture()).unwrap();
-        let evaluation = EvaluationContextDigest::compute(
+        assert_eq!(
+            actual.to_hex(),
+            AUTHORIZATION_V1_GOLDEN_HEX,
+            "AuthorizationBasis v1 byte contract changed — explicit version decision required"
+        );
+    }
+
+    #[test]
+    fn evaluation_context_digest_v1_golden_vector() {
+        // **Step 6:** v1 byte contract lock — EvaluationContextDigest. Q5 vision-gate +
+        // Q6 ordered-rule encoding kilitlenir. Authorization golden'dan AYRI —
+        // evaluation encoding değişikliği bu testi kırar, authorization'ı değil.
+        let actual = EvaluationContextDigest::compute(
             &golden_rule_context_fixture(),
             &golden_vision_context_fixture(),
         )
         .unwrap();
-        println!("PRE authorization={}", authorization.to_hex());
-        println!("PRE evaluation={}", digest_hex(evaluation.as_bytes()));
+        assert_eq!(
+            digest_hex(actual.as_bytes()),
+            EVALUATION_CONTEXT_V1_GOLDEN_HEX,
+            "EvaluationContext v1 byte contract changed — explicit version decision required"
+        );
+    }
+
+    // ── Exact preimage testleri (shared byte helper'lar üzerinden) ──────────────
+
+    #[test]
+    fn canonical_f64_bytes_preimage() {
+        // **Step 6 P0:** canonical_f64_bytes — finite, -0.0 normalize, LE to_bits.
+        assert_eq!(
+            canonical_f64_bytes(1.0).unwrap(),
+            1.0f64.to_bits().to_le_bytes()
+        );
+        // -0.0 == +0.0 encoding (normalize).
+        assert_eq!(
+            canonical_f64_bytes(-0.0).unwrap(),
+            canonical_f64_bytes(0.0).unwrap()
+        );
+        // Non-finite reject.
+        assert!(canonical_f64_bytes(f64::NAN).is_err());
+        assert!(canonical_f64_bytes(f64::INFINITY).is_err());
+        assert!(canonical_f64_bytes(f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn encode_optional_f64_to_vec_preimage() {
+        // **Step 6 P0:** Option<f64> encoding — presence tag + canonical float.
+        assert_eq!(encode_optional_f64_to_vec(None).unwrap(), vec![0u8]);
+        let some = encode_optional_f64_to_vec(Some(1.0)).unwrap();
+        assert_eq!(some.len(), 9, "Some(v) = tag(1) + canonical_f64(8)");
+        assert_eq!(some[0], 1u8, "presence tag = 1");
+        assert_eq!(
+            &some[1..],
+            &1.0f64.to_bits().to_le_bytes(),
+            "value = canonical_f64_bytes(1.0)"
+        );
+    }
+
+    #[test]
+    fn encode_canonical_edge_to_vec_preimage() {
+        // **Step 6 P0:** CanonicalEdge → 18 byte (from + to + kind + is_type_only).
+        let imports = CanonicalEdgeKind::try_from(&crate::space::EdgeKind::Imports).unwrap();
+        let edge = CanonicalEdge {
+            from: 1,
+            to: 2,
+            kind: imports,
+            is_type_only: true,
+        };
+        let encoded = encode_canonical_edge_to_vec(&edge);
+        assert_eq!(
+            encoded.len(),
+            18,
+            "edge = from(8) + to(8) + kind(1) + is_type_only(1)"
+        );
+        assert_eq!(&encoded[0..8], &1u64.to_le_bytes(), "from = 1");
+        assert_eq!(&encoded[8..16], &2u64.to_le_bytes(), "to = 2");
+        assert_eq!(encoded[16], imports.as_u8(), "kind = Imports tag");
+        assert_eq!(encoded[17], 1u8, "is_type_only = true");
+    }
+
+    #[test]
+    fn encode_vision_subject_to_vec_preimage() {
+        // **Step 6 P0:** CanonicalVisionSubject — Global [0], Role(role) [1, role].
+        let global = encode_vision_subject_to_vec(CanonicalVisionSubject::Global);
+        assert_eq!(global, vec![0u8], "Global = [0] (1 byte)");
+        let runtime_tag =
+            crate::canonical_tags::CanonicalNodeRole::try_from(&crate::space::NodeRole::Runtime)
+                .unwrap();
+        let role = encode_vision_subject_to_vec(CanonicalVisionSubject::Role(runtime_tag));
+        assert_eq!(role.len(), 2, "Role = [1, role_tag] (2 byte)");
+        assert_eq!(role[0], 1u8, "subject kind = 1 (Role)");
+        assert_eq!(role[1], runtime_tag.as_u8(), "role tag");
+    }
+
+    #[test]
+    fn push_effective_source_preimage() {
+        // **Step 6 P1:** EffectiveSourceRequirement — Any [0], Exact(src) [1, src].
+        // (push_effective_source mevcut helper — encode_effective_predicate_to_vec kullanıyor.)
+        let mut any_buf = Vec::new();
+        push_effective_source(&mut any_buf, &EffectiveSourceRequirement::Any);
+        assert_eq!(any_buf, vec![0u8], "Any = [0]");
+        let scip = crate::canonical_tags::CanonicalMetricSourceTag::try_from(
+            &crate::coords::MetricSource::Scip,
+        )
+        .unwrap();
+        let mut exact_buf = Vec::new();
+        push_effective_source(&mut exact_buf, &EffectiveSourceRequirement::Exact(scip));
+        assert_eq!(exact_buf.len(), 2, "Exact = [1, source_tag]");
+        assert_eq!(exact_buf[0], 1u8, "presence = 1 (Exact)");
+        assert_eq!(exact_buf[1], scip.as_u8(), "source = Scip tag");
     }
 }
