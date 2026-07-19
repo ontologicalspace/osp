@@ -243,23 +243,29 @@ scoped review):
 - Surface-specific disposition: `PendingAuthorization` only Held, `RevisionRequired`
   only Rejected.
 
-**Held/Rejected verification scope:**
-- Held evidence production path: when the fixture produces `AwaitingWitnesses`, exact
-  assertions verify evidence propagation (attempt_num, disposition Held, record↔evidence
-  consistency, evidence_digest == recomputed, receipt identity == pending identity).
-- **Held exact test fixture gap (known limitation):** Current fixtures may produce
-  `ExceededManeuverLimit`/`NoMoreProposals` instead of Held (predicate fail retries).
-  Deterministic Held fixture (predicate satisfied → Held reliably) requires fixture
-  redesign — separate work. When the test does not reach the Held path, it logs a
-  NOTE and passes without verifying evidence production (not silently treated as
-  success; the gap is explicit). Q3 wiring is not the blocker here (Q1/Q2 already
-  produce Held); deterministic fixture is.
-- Rejected evidence construction is verified through the production mapper
-  (`make_revision_required_from_rejection` pub(crate) free function) used by the
-  navigator's Rejected arm (`rejected_mapper_constructs_canonical_revision_evidence`
-  test calls the helper directly — no inline construction in test or navigator arm).
-- Upstream production reachability of the Rejected arm is currently absent because
-  witness Q3 honest-reject signaling is not wired; this is tracked separately in #73.
+**Held/Rejected verification scope (#72 evidence-integrity scope complete):**
+- **Held evidence propagation: navigator üzerinden end-to-end exact test.**
+  `inv_t9_72_held_production_path_exact` — deterministic fixture (Coupling <= 1.0
+  predicate satisfied, scope Node(0), target_vector from task preferred_vector,
+  Production witness policy → WitnessSet::new → min_approvers=2/quorum=1.5
+  hardcoded authority). Exact AwaitingWitnesses (else panic), call_count == 1,
+  exact Q1 witness output (MinApproversNotMet {distinct:0, required:2}, snapshot
+  0/2/0.0/1.5), space digest unchanged, t_c unchanged, full evidence assertions
+  (record↔evidence consistency, authorization_basis_digest zinciri pending↔evidence↔
+  receipt↔loaded, evidence_digest == recomputed, embedded Held disposition
+  reason+snapshot payload exact), disk reload via `load_pending_authorization` helper,
+  loaded record equality.
+- **Fixture gap resolved.** Önceki turda "known limitation" olarak belirtilen
+  deterministic Held fixture gap kapandı — kök neden: WitnessSet authority (engine
+  config quorum değil), scope alignment (Node(0)), target drift. Process-local
+  filesystem test adapter (`#[cfg(test)]` only) D3 ephemeral guard'ı korur.
+- **Rejected evidence construction: navigator arm'ın kullandığı production mapper
+  üzerinden direct test.** `make_revision_required_from_rejection` pub(crate) free
+  function. `rejected_mapper_constructs_canonical_revision_evidence` test helper'ı
+  direkt çağırır (inline construction YOK), sabit expected değerlerle pinned
+  (task_id=1, claim_id=42, attempt_num=3, basis digest), fixture precondition assertions.
+- **Rejected witness-gate end-to-end reachability remains tracked by #73.** #72
+  evidence-integrity scope kapanır; #73 witness-semantics scope korunur.
 
 
 ### Navigator-owned persistence (P0-1)

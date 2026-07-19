@@ -8522,16 +8522,13 @@ v = 0.5
         assert_eq!(json_a, json_b, "canonical stored representation identical");
     }
 
+    /// Reversed input order is normalized into one canonical rejected-evidence
+    /// representation. This test does not persist an artifact.
     #[test]
-    fn reversed_rejection_inputs_persist_idempotently_to_same_artifact() {
-        // **P1-1 closure (false conflict kapandı):** Aynı logical rejection kümesi
-        // farklı input sırasıyla → aynı evidence → aynı digest → aynı artifact path.
-        //
-        // PendingAuthorizationEnvelope Held-only surface-specific — Rejected evidence
-        // ile kurulamaz. Bu nedenle test evidence-level idempotency'yi doğrular:
-        // reversed inputs → equal evidence → equal digest → equal serialized form.
-        // Store path evidence digest'ten türediği için same digest = same path
-        // (store identity contract).
+    fn reversed_rejection_inputs_produce_identical_canonical_evidence() {
+        // Reviewer P2-4: Test kanıtı ismiyle uyumlu — persist/artifact/store-path iddiası YOK.
+        // reversed logical input → identical canonical evidence → identical evidence digest
+        // → identical serialized representation.
         use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
         let basis_digest = AuthorizationBasisDigest::from_hex(
             "5555555555555555555555555555555555555555555555555555555555555555",
@@ -8584,21 +8581,21 @@ v = 0.5
         // Equal evidence (canonical stored representation).
         assert_eq!(
             evidence_a, evidence_b,
-            "API normalizes → reversed inputs produce equal evidence"
+            "reversed inputs → identical canonical evidence"
         );
-        // Equal digest (store identity — same path).
+        // Equal digest.
         let digest_a = SuspendedAttemptEvidenceDigest::compute(&evidence_a).unwrap();
         let digest_b = SuspendedAttemptEvidenceDigest::compute(&evidence_b).unwrap();
         assert_eq!(
             digest_a, digest_b,
-            "equal evidence → equal digest → same store path (no false conflict)"
+            "identical canonical evidence → identical evidence digest"
         );
-        // Serialized form identical (persist idempotency).
+        // Identical serialized representation.
         let json_a = serde_json::to_string(&evidence_a).unwrap();
         let json_b = serde_json::to_string(&evidence_b).unwrap();
         assert_eq!(
             json_a, json_b,
-            "equal evidence → identical serialized bytes (idempotent persist)"
+            "identical canonical evidence → identical serialized representation"
         );
     }
 

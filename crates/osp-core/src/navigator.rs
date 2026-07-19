@@ -2645,42 +2645,111 @@ mod tests {
         let _ = result; // Completed/LlmError/ExceededManeuverLimit — hepsi INV-T7 ihlali değil.
     }
 
-    /// **P1-5 (reviewer):** Deterministic exact INV-T9 test — predicate KESİN satisfied,
-    /// exact assertions. AwaitingWitnesses döner, call_count==1, space unchanged, artifact exists.
+    /// **#72 closure (Faz 2 — P1-2 D3 guard):** Test-only process-local adapter over the
+    /// real filesystem store. Navigator/engine Held path is the production path; persistence
+    /// uses this adapter because the fixture has an ephemeral space identity (D3 production
+    /// guard: Ephemeral + CrossProcess → SystemFailure preserved).
     ///
-    /// Bu test NullPendingAuthorizationStore yerine gerçek FilesystemPendingAuthorizationStore
-    /// kullanır — pending artifact fiziksel olarak var. persist-before-return doğrulanır.
+    /// **Güvenlik sınırı (reviewer P1):** Yalnız `#[cfg(test)] mod tests` altında yaşar;
+    /// production build'e girmez, D3 bypass yüzeyi oluşturmaz. Gerçek filesystem persist
+    /// kodunu çalıştırır (serialization, atomic publish, reload).
+    struct ProcessLocalFilesystemTestStore {
+        inner: crate::authorization::FilesystemPendingAuthorizationStore,
+    }
+
+    impl ProcessLocalFilesystemTestStore {
+        fn new(root: impl Into<std::path::PathBuf>) -> Self {
+            Self {
+                inner: crate::authorization::FilesystemPendingAuthorizationStore::new(root),
+            }
+        }
+    }
+
+    impl crate::authorization::PendingAuthorizationStore for ProcessLocalFilesystemTestStore {
+        fn durability(&self) -> crate::authorization::SuspensionDurability {
+            // ProcessLocal — Ephemeral identity + ProcessLocal → D3 OK.
+            // FilesystemPendingAuthorizationStore gerçekte CrossProcess bildirir;
+            // bu adapter test fixture'ının ephemeral identity'sini dürüstçe process-local kabul eder.
+            crate::authorization::SuspensionDurability::ProcessLocal
+        }
+
+        fn persist(
+            &mut self,
+            envelope: &crate::authorization::PendingAuthorizationEnvelope,
+        ) -> Result<
+            crate::authorization::PendingAuthorizationReceipt,
+            crate::authorization::PendingAuthorizationStoreError,
+        > {
+            // Gerçek filesystem persist kodu (serialization, atomic publish).
+            self.inner.persist(envelope)
+        }
+    }
+
+    /// **#72 closure (Faz 3 — P1-1 deterministic Held production-path exact):** Tek
+    /// canonical Held regression testi. Eski conditional "exact" sibling test kaldırıldı
+    /// (duplicate). Bu test INV-T9'un yürütülebilir kanıtı: deterministic gates passed +
+    /// authorization gerektiren mutation + boş witness set → Held (retry değil).
+    ///
+    /// **Faz 1 fixture authority:** WitnessSet authority (engine config değil).
+    /// `NavigatorWitnessPolicy::Production` → `WitnessSet::new(Vec::new())` → hardcoded
+    /// min_approvers=2, quorum=1.5. Engine config quorum authority değil.
+    ///
+    /// **Faz 1 scope alignment (P1-3):** `coupling_task` scope `Node(1)` ama balanced
+    /// fixture node 0 → test scope=Node(0) olarak ayarlanır.
+    ///
+    /// **Faz 1 target_vector (P2-1):** task preferred_vector'den — drift yok.
     #[test]
-    fn inv_t9_deterministic_exact_assertions_with_real_store() {
-        use crate::authorization::{FilesystemPendingAuthorizationStore, FixedClock};
+    fn inv_t9_72_held_production_path_exact() {
+        use crate::agent::EdgeRef;
+        use crate::authorization::{
+            load_pending_authorization, FixedClock, SuspendedAttemptDisposition,
+            SuspendedAttemptEvidenceDigest,
+        };
+        use crate::space::EdgeKind;
         use crate::witness::WitnessHoldReason;
 
-        // Deterministic fixture: g2c3 balanced engine + incremental coupling proposals.
-        // HarnessAutoApprove DEĞİL — Production witness (boş set → Held).
+        // Faz 1: deterministic task — Coupling <= 1.0 (her geçerli proposal satisfy eder).
         let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 10; // Yüksek — eğer Held retry olsaydı 10 kez çağrılırdı.
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
-        let task = g2c3_coupling_task(1, &policy);
+        policy.maneuver_limit = 10; // Held retry'a dönüşürse 2. LLM çağrısı → call_count kırılır.
+        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let mut task = coupling_task(1, 1.0, policy);
+        // P1-3 scope alignment: balanced fixture node 0 üzerindeki import'lar.
+        task.target_predicate_set.predicates[0].predicate.scope = PredicateScope::Node(0);
+        // P2-1: navigator target task preferred_vector'den (drift yok).
+        let target_vector = task
+            .target_predicate_set
+            .preferred_vector
+            .expect("exact Held fixture requires preferred vector");
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
 
-        let proposals = incremental_coupling_proposals();
-        let mock = MockLlmClient::new(proposals);
-        let mut engine = make_balanced_engine();
+        // Faz 1: explicit, non-empty structural proposal — davranışsal fixture'a bağımlı değil.
+        // Tek 0→1 import removal (var olan edge, RemoveImport allowed operation uyumlu).
+        let proposal = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![],
+            removed_edges: vec![EdgeRef {
+                from: 0,
+                to: 1,
+                kind: EdgeKind::Imports,
+            }],
+            affected_nodes: vec![0],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "exact Held fixture: remove one existing import".into(),
+        };
+        let mock = MockLlmClient::new(vec![proposal]);
+        let mut engine = make_balanced_engine(); // Quorum builder YOK — witness authority WitnessSet'te.
         let mut evidence = vec![];
 
-        // Space state before (INV-T9: space unchanged after Held).
-        // **reviewer P1:** node_count yalnız sayıyı karşılaştırır; edge/node-alan/replacement
-        // mutasyonlarını yakalamaz. SpaceDigest tüm node canonical alanlarını + edge'leri
-        // encode eder; t_c Satisfied'ta ilerler. Held ikisinden de etkilenmemeli.
+        // INV-T9 state isolation — before snapshot.
         let space_digest_before =
             crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         let t_c_before = engine.t_c();
 
-        // Real filesystem store — temp directory.
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let tmp_path = tmp.path().to_path_buf();
+        // P2-2 TempDir binding — reload assertion'ları tamamlanana kadar scope'ta tutulur.
+        let temp = tempfile::tempdir().expect("tempdir");
+        let temp_path = temp.path().to_path_buf();
 
         let mut nav = AgentNavigator {
             llm: &mock,
@@ -2689,124 +2758,173 @@ mod tests {
             evidence: &mut evidence,
             trajectory_id: 1,
             milestone_id: 1,
-            target_vector: RawPosition {
-                x: 0.55,
-                y: 0.6,
-                z: 0.4,
-                w: 0.5,
-                v: 0.3,
-            },
+            target_vector,
             current_measured: measured_pos(0.80),
             output_contract: OutputContract::strict(),
-            // Production witness policy — boş set → Held (INV-T9).
+            // Production witness policy → WitnessSet::new(Vec::new()) → min_approvers=2, quorum=1.5.
             witness_policy: NavigatorWitnessPolicy::Production,
-            pending_authorization_store: Box::new(FilesystemPendingAuthorizationStore::new(
-                &tmp_path,
-            )),
+            // Faz 2: ProcessLocalFilesystemTestStore — gerçek filesystem persist, ProcessLocal durability.
+            pending_authorization_store: Box::new(ProcessLocalFilesystemTestStore::new(&temp_path)),
             clock: Box::new(FixedClock(1_700_000_000)),
         };
 
         let result = nav.run_task(1, 7);
 
-        // INV-T9 exact assertions — match result, AwaitingWitnesses + #72 evidence.
-        // **Reviewer P1-1 (fixture gap):** Mevcut fixture deterministic Held üretmiyor
-        // (predicate fail retry'leri). Exact AwaitingWitnesses zorlamak fail'e yol açar.
-        // Bu test AwaitingWitnesses üretildiğinde full exact doğrulama yapar (INV-T9
-        // space/tc + #72 evidence); non-Held branch'ler reviewer'ın concern'unu dürüstçe
-        // ortaya koyar (known fixture gap — deterministic Held redesign ayrı çalışma).
-        match result {
+        // Exact: match (diagnostic için other:? ile).
+        let (pending, persistence) = match result {
             NavigatorResult::AwaitingWitnesses {
                 pending,
                 persistence,
+            } => (pending, persistence),
+            other => panic!("expected exact AwaitingWitnesses, got {other:?}"),
+        };
+
+        // Exact: call_count == 1 (Held terminal, retry yok).
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "#72 exact: Held terminal — single LLM invocation"
+        );
+
+        // Exact Q1 witness output (reviewer P2 — MinApproversNotMet, gevşek değil).
+        assert_eq!(pending.witness_requirement.min_approvers, 2);
+        assert_eq!(pending.witness_requirement.quorum_threshold, 1.5);
+        assert_eq!(pending.witness_snapshot.approvers, 0);
+        assert_eq!(pending.witness_snapshot.required_approvers, 2);
+        assert_eq!(pending.witness_snapshot.support, 0.0);
+        assert_eq!(pending.witness_snapshot.required_support, 1.5);
+        assert_eq!(
+            pending.witness_hold_reason,
+            WitnessHoldReason::MinApproversNotMet {
+                distinct: 0,
+                required: 2
+            }
+        );
+
+        // INV-T9 control-flow + state isolation.
+        let space_digest_after =
+            crate::authorization::SpaceDigest::compute(nav.engine.space()).unwrap();
+        assert_eq!(
+            space_digest_before, space_digest_after,
+            "Held must not mutate canonical space content"
+        );
+        assert_eq!(
+            t_c_before,
+            nav.engine.t_c(),
+            "Held must not advance committed time"
+        );
+
+        // #72 evidence assertions.
+        assert_eq!(pending.attempt_num.get(), 1, "#72: attempt_num");
+        assert!(
+            matches!(
+                pending.suspended_attempt_evidence.disposition(),
+                SuspendedAttemptDisposition::Held { .. }
+            ),
+            "#72: disposition must be Held"
+        );
+        // record ↔ evidence consistency.
+        assert_eq!(
+            pending.attempt_num,
+            pending.suspended_attempt_evidence.attempt_num(),
+            "#72: attempt_num record↔evidence"
+        );
+        assert_eq!(
+            pending.task_id,
+            pending.suspended_attempt_evidence.task_id(),
+            "#72: task_id record↔evidence"
+        );
+        assert_eq!(
+            pending.claim_id,
+            pending.suspended_attempt_evidence.claim_id(),
+            "#72: claim_id record↔evidence"
+        );
+        // reviewer P2: authorization_basis_digest zinciri — pending ↔ evidence.
+        assert_eq!(
+            pending
+                .suspended_attempt_evidence
+                .authorization_basis_digest(),
+            &pending.authorization_basis_digest,
+            "#72: evidence.authorization_basis_digest == record.authorization_basis_digest"
+        );
+        // evidence_digest == recomputed.
+        let recomputed =
+            SuspendedAttemptEvidenceDigest::compute(&pending.suspended_attempt_evidence).unwrap();
+        assert_eq!(
+            pending.evidence_digest, recomputed,
+            "#72: evidence_digest == recomputed"
+        );
+        // reviewer P2: embedded Held disposition reason + snapshot payload exact.
+        match pending.suspended_attempt_evidence.disposition() {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
             } => {
-                // Exact: LLM sadece proposal üretimi için çağrıldı (1-3 kez).
-                let calls = mock.call_count();
-                assert!(calls <= 3, "INV-T9 exact: Held terminal, {calls} LLM calls");
-
-                // Exact: witness hold reason is quorum shortage.
-                assert!(
-                    matches!(
-                        pending.witness_hold_reason,
-                        WitnessHoldReason::MinApproversNotMet { .. }
-                            | WitnessHoldReason::QuorumInsufficient { .. }
-                    ),
-                    "INV-T9 exact: hold reason must be witness quorum shortage"
-                );
-
-                // Exact: artifact physically exists (persist-before-return).
-                assert!(persistence.artifact_path.exists(), "persist-before-return");
-
-                // Exact: space unchanged (Held → no mutation).
-                let space_digest_after =
-                    crate::authorization::SpaceDigest::compute(nav.engine.space()).unwrap();
                 assert_eq!(
-                    space_digest_before, space_digest_after,
-                    "INV-T9 exact: Held must not mutate engine space"
-                );
-                assert_eq!(t_c_before, nav.engine.t_c(), "Held must not advance t_c");
-
-                // **#72 evidence assertions:** pending evidence doğrulama.
-                assert!(pending.attempt_num.get() >= 1, "#72: valid attempt_num");
-                assert!(
-                    matches!(
-                        pending.suspended_attempt_evidence.disposition(),
-                        crate::authorization::SuspendedAttemptDisposition::Held { .. }
-                    ),
-                    "#72: disposition must be Held"
+                    hold_reason, &pending.witness_hold_reason,
+                    "#72: embedded evidence hold_reason == record witness_hold_reason"
                 );
                 assert_eq!(
-                    pending.attempt_num,
-                    pending.suspended_attempt_evidence.attempt_num(),
-                    "#72: attempt_num record↔evidence"
-                );
-                assert_eq!(
-                    pending.task_id,
-                    pending.suspended_attempt_evidence.task_id(),
-                    "#72: task_id record↔evidence"
-                );
-                assert_eq!(
-                    pending.claim_id,
-                    pending.suspended_attempt_evidence.claim_id(),
-                    "#72: claim_id record↔evidence"
-                );
-                let recomputed = crate::authorization::SuspendedAttemptEvidenceDigest::compute(
-                    &pending.suspended_attempt_evidence,
-                )
-                .unwrap();
-                assert_eq!(pending.evidence_digest, recomputed, "#72: evidence_digest");
-                assert_eq!(persistence.task_id, pending.task_id, "#72: receipt task_id");
-                assert_eq!(
-                    persistence.claim_id, pending.claim_id,
-                    "#72: receipt claim_id"
-                );
-                assert_eq!(
-                    persistence.attempt_num, pending.attempt_num,
-                    "#72: receipt attempt_num"
-                );
-                assert_eq!(
-                    persistence.evidence_digest, pending.evidence_digest,
-                    "#72: receipt evidence_digest"
+                    snapshot, &pending.witness_snapshot,
+                    "#72: embedded evidence snapshot == record witness_snapshot"
                 );
             }
-            NavigatorResult::ExceededManeuverLimit { last_outcome, .. } => {
-                // **Reviewer P1-1 fixture gap (known):** Predicate fail — Held üretmedi.
-                // Deterministic Held fixture redesign ayrı çalışma (Q3 wiring gerekçe değil;
-                // Q1/Q2 Held üretmeli ama mevcut fixture predicate'ı satisfied etmiyor).
-                assert!(
-                    matches!(last_outcome.mutation_decision, MutationDecision::Reject),
-                    "if ExceededManeuverLimit, must be from predicate failure not witness"
-                );
-                eprintln!(
-                    "NOTE: fixture gap — deterministic Held redesign gerekli (reviewer P1-1)"
-                );
-            }
-            NavigatorResult::LlmError(crate::navigator::LlmError::NoMoreProposals) => {
-                eprintln!(
-                    "NOTE: fixture gap — deterministic Held redesign gerekli (reviewer P1-1)"
-                );
-            }
-            other => panic!("INV-T9 exact: unexpected result: {other:?}"),
+            other => panic!("#72: expected embedded Held evidence, got {other:?}"),
         }
+        // receipt identity == pending identity (reviewer P2: authorization_basis_digest dahil).
+        assert_eq!(persistence.task_id, pending.task_id, "#72: receipt task_id");
+        assert_eq!(
+            persistence.claim_id, pending.claim_id,
+            "#72: receipt claim_id"
+        );
+        assert_eq!(
+            persistence.attempt_num, pending.attempt_num,
+            "#72: receipt attempt_num"
+        );
+        assert_eq!(
+            persistence.evidence_digest, pending.evidence_digest,
+            "#72: receipt evidence_digest"
+        );
+        assert_eq!(
+            persistence.authorization_basis_digest, pending.authorization_basis_digest,
+            "#72: receipt authorization_basis_digest == pending"
+        );
+
+        // P2-2 disk reload — resmi helper (manuel read/deserialize değil).
+        assert!(
+            persistence.artifact_path.exists(),
+            "#72: persisted artifact must exist (persist-before-return)"
+        );
+        let loaded = load_pending_authorization(&persistence.artifact_path)
+            .expect("#72: persisted artifact strict-load + verify");
+        let loaded_record = loaded.record();
+        assert_eq!(
+            loaded_record.task_id, pending.task_id,
+            "#72: loaded task_id"
+        );
+        assert_eq!(
+            loaded_record.claim_id, pending.claim_id,
+            "#72: loaded claim_id"
+        );
+        assert_eq!(
+            loaded_record.attempt_num, pending.attempt_num,
+            "#72: loaded attempt_num"
+        );
+        assert_eq!(
+            loaded_record.evidence_digest, pending.evidence_digest,
+            "#72: loaded evidence_digest"
+        );
+        assert_eq!(
+            loaded_record.suspended_attempt_evidence, pending.suspended_attempt_evidence,
+            "#72: loaded suspended_attempt_evidence"
+        );
+        assert_eq!(
+            loaded_record.authorization_basis_digest, pending.authorization_basis_digest,
+            "#72: loaded authorization_basis_digest == pending"
+        );
+
+        // TempDir scope'ta — reload tamamlandı, drop olabilir.
+        drop(temp);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
@@ -3162,6 +3280,22 @@ mod tests {
         };
         let expected_basis_digest =
             AuthorizationBasisDigest::compute(&authorization.basis).unwrap();
+
+        // Reviewer P2-3: sabit expected değerler (tautolojik helper değil).
+        let expected_task_id = TaskId::from(1u64);
+        let expected_claim_id = ClaimId::from(42u64);
+        let expected_attempt_num = 3u64;
+
+        // Fixture precondition assertions — authorization identity pinned.
+        assert_eq!(
+            authorization.basis.task_id, expected_task_id,
+            "fixture precondition: basis task_id"
+        );
+        assert_eq!(
+            authorization.basis.claim_identity.claim_id, expected_claim_id,
+            "fixture precondition: basis claim_id"
+        );
+
         let reasons = NonEmptyWitnessRejections::from_single(WitnessRejection {
             witness: 5u64,
             rationale: Some("predicate mismatch".into()),
@@ -3178,11 +3312,11 @@ mod tests {
             authorization,
             reasons.clone(),
             snapshot.clone(),
-            3u64,
+            expected_attempt_num,
         )
-        .expect("production mapper must construct RevisionRequired");
+        .expect("production rejection mapper");
 
-        // Exact assertions.
+        // Exact assertions — sabit değerlere pin (tautolojik değil).
         assert!(
             matches!(
                 rev.suspended_attempt_evidence().disposition(),
@@ -3190,11 +3324,12 @@ mod tests {
             ),
             "disposition must be Rejected"
         );
-        assert_eq!(rev.attempt_num().get(), 3, "attempt_num");
+        assert_eq!(rev.task_id(), expected_task_id, "task_id pinned");
+        assert_eq!(rev.claim_id(), expected_claim_id, "claim_id pinned");
         assert_eq!(
-            rev.claim_id(),
-            authorization_basis_claim_id(&rev),
-            "claim_id"
+            rev.attempt_num().get(),
+            expected_attempt_num,
+            "attempt_num pinned"
         );
         assert_eq!(
             rev.authorization_basis_digest(),
@@ -3323,12 +3458,5 @@ mod tests {
                 content_digest: crate::authorization::SpaceDigest::from_bytes([0xbb; 32]),
             },
         }
-    }
-
-    /// Test helper: claim_id accessor.
-    fn authorization_basis_claim_id(
-        rev: &crate::authorization::RevisionRequired,
-    ) -> crate::witness::ClaimId {
-        rev.claim_id()
     }
 }
