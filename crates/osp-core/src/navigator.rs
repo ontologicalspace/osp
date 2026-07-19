@@ -466,12 +466,17 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             Ok(ev) => ev,
             Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
         };
+        let evidence_digest =
+            match crate::authorization::SuspendedAttemptEvidenceDigest::compute(&evidence) {
+                Ok(d) => d,
+                Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
+            };
 
-        // **Transitional dolgu (P0-5):** Mevcut `PendingAuthorization` alanları
-        // evidence'dan doldurulur — schema henüz değişmez (Commit 3 envelope binding).
-        // Evidence produced ama henüz record'a gömülmez; bu commit navigator iç akışı
-        // tekilleştirir ve evidence'ın doğru üretildiğini doğrular.
-        let _ = &evidence; // Commit 3'te record içine gömülecek; şimdilik yapısal doğrulama.
+        // **INV-T9 #72 (Commit 3):** Evidence record içine gömülü (P0-3 — runtime
+        // `AwaitingWitnesses { pending }` aynı evidence nesnesini taşır). Tekrarlayan
+        // alanlar (witness_hold_reason, witness_snapshot, attempt_evidence_id) hala
+        // transitional olarak set — Commit 4 kaldıracak. Cross-field validation
+        // `Envelope::new()` içinde çalışır (P1 constructor validation).
         let pending = PendingAuthorization {
             task_id: authorization.basis.task_id,
             claim_id: authorization.basis.claim_identity.claim_id,
@@ -485,6 +490,8 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             witness_hold_reason: hold_reason,
             witness_snapshot,
             attempt_evidence_id: attempt_num,
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
             created_at: self.clock.unix_seconds(),
         };
 
@@ -834,21 +841,23 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         Ok(ev) => ev,
                         Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
                     };
-                    // **Transitional dolgu (P0-5):** RevisionRequired alanları
-                    // evidence'dan doldurulur — schema henüz değişmez (Commit 3
-                    // binding). Commit 3'te `suspended_attempt_evidence` field
-                    // eklenecek ve tekrarlayan alanlar kaldırılacak.
-                    let _ = &evidence;
-                    return NavigatorResult::RequiresRevision(
-                        crate::authorization::RevisionRequired {
-                            task_id: authorization.basis.task_id,
-                            claim_id: authorization.basis.claim_identity.claim_id,
-                            authorization_basis_digest: basis_digest,
-                            reasons,
-                            witness_snapshot: snapshot,
-                            attempt_evidence_id: attempt_num as u64,
-                        },
-                    );
+                    // **INV-T9 #72 (Commit 3):** Evidence `RevisionRequired` içine
+                    // gömülü. `try_new` surface-specific disposition check yapar
+                    // (yalnız Rejected). Transitional tekrarlayan alanlar hala set
+                    // (Commit 4 kaldıracak).
+                    let revision = match crate::authorization::RevisionRequired::try_new(
+                        authorization.basis.task_id,
+                        authorization.basis.claim_identity.claim_id,
+                        basis_digest,
+                        reasons,
+                        snapshot,
+                        attempt_num as u64,
+                        evidence,
+                    ) {
+                        Ok(r) => r,
+                        Err(e) => return NavigatorResult::SystemFailure(e.to_string()),
+                    };
+                    return NavigatorResult::RequiresRevision(revision);
                 }
                 Err(crate::engine::EngineCommitError::PermissionDenied(msg)) => {
                     // Binding hatası (task not found / standalone). Terminal — retry YOK.

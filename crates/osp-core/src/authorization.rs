@@ -2456,6 +2456,11 @@ impl Clock for FixedClock {
 /// AcceptAsProgress). Navigator bunu `AwaitingWitnesses` varyantında döndürür.
 /// Commit 4 `PendingAuthorizationEnvelope` (embedded AuthorizationBasis) +
 /// `PendingAuthorizationStore` ekler.
+///
+/// **INV-T9 #72 (Commit 3):** `suspended_attempt_evidence` + `evidence_digest`
+/// record içine gömülür (P0-3 — runtime `AwaitingWitnesses { pending }` aynı
+/// evidence nesnesini taşır). Surface-specific disposition: `PendingAuthorization`
+/// yalnız `Held` disposition kabul eder (`Envelope::new()` reject Rejected).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PendingAuthorization {
     pub task_id: crate::trajectory::TaskId,
@@ -2471,6 +2476,12 @@ pub struct PendingAuthorization {
     pub witness_hold_reason: WitnessHoldReason,
     pub witness_snapshot: WitnessQuorumSnapshot,
     pub attempt_evidence_id: AttemptEvidenceId,
+    /// **INV-T9 #72:** Embedded canonical evidence snapshot (Held disposition).
+    /// Record içinde — runtime `AwaitingWitnesses { pending }` taşır (P0-3).
+    pub suspended_attempt_evidence: SuspendedAttemptEvidence,
+    /// **INV-T9 #72:** Evidence'ın domain-separated digest'i. `verify()` tekrar
+    /// hesaplayıp karşılaştırır (tamper detection).
+    pub evidence_digest: SuspendedAttemptEvidenceDigest,
     /// Clock trait'inden — digest'e DAHİL DEĞİL.
     pub created_at: u64,
 }
@@ -2849,6 +2860,15 @@ impl SuspendedAttemptEvidenceDigest {
 ///
 /// `NavigatorResult::RequiresRevision` bu struct'ı taşır. Budget tüketmez, LLM
 /// reinvocation YOK. Agent yeni structural proposal üretmeli.
+///
+/// **INV-T9 #72 (Commit 3):** `suspended_attempt_evidence` (Rejected disposition)
+/// gömülü — Rejected yolunda attempt evidence + basis binding kaybını kapatır
+/// (P1 daraltma: full basis reconstruction ayrı embedded/persisted basis yüzeyine
+/// bağlı, bu struct taşımaz). Surface-specific disposition: yalnız `Rejected`.
+///
+/// **Transitional (Commit 3):** `task_id`, `claim_id`, `reasons`, `witness_snapshot`,
+/// `attempt_evidence_id` alanları hala tekrarlanır — Commit 4'te evidence erişim
+/// metodlarına geçilecek. Şimdilik iki yüzey de evidence ile tutarlı olmalı.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RevisionRequired {
     pub task_id: crate::trajectory::TaskId,
@@ -2857,6 +2877,52 @@ pub struct RevisionRequired {
     pub reasons: crate::witness::NonEmptyWitnessRejections,
     pub witness_snapshot: crate::witness::WitnessQuorumSnapshot,
     pub attempt_evidence_id: AttemptEvidenceId,
+    /// **INV-T9 #72:** Embedded canonical evidence snapshot (Rejected disposition).
+    /// Surface-specific: `try_new()` yalnız Rejected disposition kabul eder.
+    pub suspended_attempt_evidence: SuspendedAttemptEvidence,
+}
+
+impl RevisionRequired {
+    /// Validated smart constructor — surface-specific disposition (P1).
+    ///
+    /// `suspended_attempt_evidence` yalnız `Rejected` disposition taşımalı.
+    /// Held disposition → `InvalidEvidenceDisposition` (PendingAuthorizationEnvelope
+    /// Held için, RevisionRequired Rejected için).
+    pub fn try_new(
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_basis_digest: AuthorizationBasisDigest,
+        reasons: crate::witness::NonEmptyWitnessRejections,
+        witness_snapshot: crate::witness::WitnessQuorumSnapshot,
+        attempt_evidence_id: AttemptEvidenceId,
+        suspended_attempt_evidence: SuspendedAttemptEvidence,
+    ) -> Result<Self, RevisionRequiredError> {
+        // Surface-specific disposition check (P1).
+        if !matches!(
+            suspended_attempt_evidence.disposition(),
+            SuspendedAttemptDisposition::Rejected { .. }
+        ) {
+            return Err(RevisionRequiredError::InvalidEvidenceDisposition {
+                found: "Held (expected Rejected for RevisionRequired)".to_string(),
+            });
+        }
+        Ok(Self {
+            task_id,
+            claim_id,
+            authorization_basis_digest,
+            reasons,
+            witness_snapshot,
+            attempt_evidence_id,
+            suspended_attempt_evidence,
+        })
+    }
+}
+
+/// `RevisionRequired` doğrulama hatası.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum RevisionRequiredError {
+    #[error("invalid evidence disposition for RevisionRequired: {found}")]
+    InvalidEvidenceDisposition { found: String },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2884,43 +2950,311 @@ pub struct PendingAuthorizationEnvelope {
 pub const PENDING_AUTHORIZATION_SCHEMA: &str = "osp.pending-authorization.v1";
 
 impl PendingAuthorizationEnvelope {
-    /// Smart constructor — digest'i basis'ten hesaplar, record'a yerleştirir.
+    /// Smart constructor — basis digest + evidence digest hesaplar, record'a yerleştirir,
+    /// full cross-field validation çalıştırır (P1 constructor validation).
+    ///
+    /// **INV-T9 #72 (Commit 3):** Sadece geçerli envelope döner — invalid kombinasyon
+    /// (mismatched task_id/claim_id/digest/disposition) hata döndürür. `verify()`
+    /// load sırasında aynı kontrolleri defensive olarak tekrarlar.
+    ///
+    /// **Surface-specific disposition (P1):** `record.suspended_attempt_evidence`
+    /// yalnız `Held` disposition taşımalı. Rejected → `InvalidEvidenceDisposition`.
     pub fn new(
         mut record: PendingAuthorization,
         basis: AuthorizationBasis,
-    ) -> Result<Self, AuthorizationBasisDigestError> {
-        let digest = AuthorizationBasisDigest::compute(&basis)?;
-        record.authorization_basis_digest = digest;
-        Ok(Self {
+    ) -> Result<Self, PendingAuthorizationLoadError> {
+        // 1. Basis digest + evidence digest üret ve record'a yaz.
+        let basis_digest = AuthorizationBasisDigest::compute(&basis)
+            .map_err(|e| PendingAuthorizationLoadError::DigestComputationFailed(e.to_string()))?;
+        record.authorization_basis_digest = basis_digest.clone();
+        let evidence_digest = SuspendedAttemptEvidenceDigest::compute(
+            &record.suspended_attempt_evidence,
+        )
+        .map_err(|e| PendingAuthorizationLoadError::DigestComputationFailed(e.to_string()))?;
+        record.evidence_digest = evidence_digest;
+
+        let envelope = Self {
             schema: PENDING_AUTHORIZATION_SCHEMA.to_string(),
             record,
             authorization_basis: basis,
-        })
+        };
+        // 2. Constructor içi cross-field validation (P1).
+        envelope.verify()?;
+        Ok(envelope)
     }
 
-    /// Load + verify — envelope'ı deserialize eder, basis digest'ini tekrar hesaplayıp
-    /// `record.authorization_basis_digest` ile karşılaştırır. Mismatch → integrity error.
+    /// Load + verify — envelope'ı deserialize eder, full cross-field validation
+    /// çalıştırır. Mismatch → typed integrity error.
+    ///
+    /// **INV-T9 #72 (Commit 3):** 11-adım verification chain (kullanıcı sırası):
+    /// 1. Schema version
+    /// 2. Structural delta defensive validation (mevcut)
+    /// 3. `AuthorizationBasisDigest` recompute
+    /// 4. Evidence structural (serialize sonrası — custom Deserialize zaten reject)
+    /// 5. `SuspendedAttemptEvidenceDigest` recompute
+    /// 6. record ↔ basis kimlik (task_id, claim_id)
+    /// 7. record ↔ evidence kimlik (task_id, claim_id, attempt_num)
+    /// 8. basis ↔ evidence digest binding
+    /// 9. record ↔ basis karar alanları (predicate/mutation/apply/revision/ec-digest)
+    /// 10. witness_requirement ↔ basis.witness_policy
+    /// 11. disposition ↔ reason/snapshot semantic (`validate_hold_reason_against_snapshot`)
     pub fn verify(&self) -> Result<(), PendingAuthorizationLoadError> {
+        // 1. Schema version
         if self.schema != PENDING_AUTHORIZATION_SCHEMA {
             return Err(PendingAuthorizationLoadError::UnknownSchema {
                 found: self.schema.clone(),
                 expected: PENDING_AUTHORIZATION_SCHEMA,
             });
         }
-        // **Step 5:** Defensive structural-delta validation. Custom Deserialize zaten
-        // reject eder (try_new üzerinden), ama reload sırasında ikinci güvenlik katmanı —
-        // deserialize bypass edilse bile verify yakalar.
+
+        // 2. Structural delta defensive validation (mevcut — Step 5).
         self.authorization_basis
             .structural_delta
             .validate()
             .map_err(|e| PendingAuthorizationLoadError::StructuralDeltaInvalid(e.to_string()))?;
-        let computed = AuthorizationBasisDigest::compute(&self.authorization_basis)
+
+        // 3. AuthorizationBasisDigest recompute (mevcut — Step 5).
+        let computed_basis = AuthorizationBasisDigest::compute(&self.authorization_basis)
             .map_err(|e| PendingAuthorizationLoadError::DigestComputationFailed(e.to_string()))?;
-        if computed != self.record.authorization_basis_digest {
+        if computed_basis != self.record.authorization_basis_digest {
             return Err(PendingAuthorizationLoadError::BasisDigestMismatch);
         }
+
+        // 4. Evidence structural — custom Deserialize zaten reject etti (serialize
+        // sırasında). Bu adımda ek kontrol yok; disposition check adım 11'de.
+
+        // 5. SuspendedAttemptEvidenceDigest recompute (yeni — #72).
+        let computed_evidence =
+            SuspendedAttemptEvidenceDigest::compute(&self.record.suspended_attempt_evidence)
+                .map_err(|e| {
+                    PendingAuthorizationLoadError::DigestComputationFailed(e.to_string())
+                })?;
+        if computed_evidence != self.record.evidence_digest {
+            return Err(PendingAuthorizationLoadError::EvidenceDigestMismatch);
+        }
+
+        // 6. record ↔ basis kimlik: task_id, claim_id.
+        if self.record.task_id != self.authorization_basis.task_id {
+            return Err(PendingAuthorizationLoadError::TaskIdMismatch {
+                record: self.record.task_id,
+                basis: self.authorization_basis.task_id,
+            });
+        }
+        if self.record.claim_id != self.authorization_basis.claim_identity.claim_id {
+            return Err(PendingAuthorizationLoadError::ClaimIdMismatch {
+                record: self.record.claim_id,
+                basis: self.authorization_basis.claim_identity.claim_id,
+                evidence: self.record.suspended_attempt_evidence.claim_id(),
+            });
+        }
+
+        // P1 basis iç task_id invariant: basis.task_id == basis.claim_identity.task_id.
+        if self.authorization_basis.task_id != self.authorization_basis.claim_identity.task_id {
+            return Err(PendingAuthorizationLoadError::BasisInternalTaskIdMismatch {
+                basis_task_id: self.authorization_basis.task_id,
+                claim_task_id: self.authorization_basis.claim_identity.task_id,
+            });
+        }
+
+        // 7. record ↔ evidence kimlik: task_id, claim_id, attempt_num.
+        let evidence = &self.record.suspended_attempt_evidence;
+        if self.record.task_id != evidence.task_id() {
+            return Err(PendingAuthorizationLoadError::TaskIdMismatch {
+                record: self.record.task_id,
+                basis: evidence.task_id(),
+            });
+        }
+        if self.record.claim_id != evidence.claim_id() {
+            return Err(PendingAuthorizationLoadError::ClaimIdMismatch {
+                record: self.record.claim_id,
+                basis: self.authorization_basis.claim_identity.claim_id,
+                evidence: evidence.claim_id(),
+            });
+        }
+        if self.record.attempt_evidence_id != evidence.attempt_num().get() {
+            return Err(PendingAuthorizationLoadError::AttemptNumberMismatch {
+                record: self.record.attempt_evidence_id,
+                evidence: evidence.attempt_num().get(),
+            });
+        }
+
+        // 8. basis ↔ evidence digest binding.
+        if evidence.authorization_basis_digest() != &self.record.authorization_basis_digest {
+            return Err(PendingAuthorizationLoadError::EvidenceBasisDigestMismatch);
+        }
+
+        // 9. record ↔ basis karar alanları.
+        if self.record.predicate_completion != self.authorization_basis.predicate_completion {
+            return Err(PendingAuthorizationLoadError::PredicateCompletionMismatch {
+                record: self.record.predicate_completion,
+                basis: self.authorization_basis.predicate_completion,
+            });
+        }
+        if self.record.mutation_decision != self.authorization_basis.mutation_decision {
+            return Err(PendingAuthorizationLoadError::MutationDecisionMismatch {
+                record: self.record.mutation_decision,
+                basis: self.authorization_basis.mutation_decision,
+            });
+        }
+        if self.record.intended_apply_target != self.authorization_basis.intended_apply_target {
+            return Err(PendingAuthorizationLoadError::ApplyTargetMismatch {
+                record: self.record.intended_apply_target,
+                basis: self.authorization_basis.intended_apply_target,
+            });
+        }
+        if self.record.base_space_view_revision != self.authorization_basis.base_space_view_revision
+        {
+            return Err(PendingAuthorizationLoadError::SpaceViewRevisionMismatch);
+        }
+        if self.record.evaluation_context_digest
+            != self.authorization_basis.evaluation_context_digest
+        {
+            return Err(PendingAuthorizationLoadError::EvaluationContextDigestMismatch);
+        }
+
+        // 10. witness_requirement ↔ basis.witness_policy (P0-1 invariant).
+        let effective = self
+            .authorization_basis
+            .witness_policy
+            .effective_requirement();
+        if self.record.witness_requirement.min_approvers != effective.min_approvers
+            || self.record.witness_requirement.quorum_threshold != effective.quorum_threshold
+        {
+            return Err(PendingAuthorizationLoadError::WitnessRequirementMismatch {
+                record_min: self.record.witness_requirement.min_approvers,
+                record_quorum: self.record.witness_requirement.quorum_threshold,
+                basis_min: self.authorization_basis.witness_policy.min_approvers,
+                basis_quorum: self.authorization_basis.witness_policy.quorum_threshold,
+            });
+        }
+
+        // 11. disposition ↔ reason/snapshot semantic (P1 surface-specific + validate).
+        match evidence.disposition() {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            } => {
+                // Surface-specific: PendingAuthorization yalnız Held.
+                if &self.record.witness_hold_reason != hold_reason {
+                    return Err(PendingAuthorizationLoadError::WitnessHoldReasonMismatch);
+                }
+                if &self.record.witness_snapshot != snapshot {
+                    return Err(PendingAuthorizationLoadError::WitnessSnapshotMismatch);
+                }
+                // Disposition iç tutarlılık (P1 exhaustive 3 varyant).
+                validate_hold_reason_against_snapshot(hold_reason, snapshot)?;
+            }
+            SuspendedAttemptDisposition::Rejected { .. } => {
+                // Surface-specific violation — PendingAuthorizationEnvelope Held için.
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    "PendingAuthorizationEnvelope requires Held disposition, found Rejected".into(),
+                ));
+            }
+        }
+
         Ok(())
     }
+}
+
+/// **P1 exhaustive hold-reason validation** — disposition iç tutarlılık.
+///
+/// `hold_reason` ile `snapshot` arasında mantıksal tutarlılık kontrolü. Üç varyant
+/// exhaustive handle edilir:
+/// - `MinApproversNotMet`: snapshot.approvers == distinct, required_approvers == required,
+///   distinct < required
+/// - `QuorumInsufficient`: snapshot.support == support, required_support == threshold
+///   (canonical -0.0 normalize), support < threshold
+/// - `EvidenceNotLocallyObservable`: hint non-empty (Q1/Q2 başarısızlığı zorunlu değil)
+///
+/// Snapshot genel: finite, support >= 0, required_support >= 0.
+fn validate_hold_reason_against_snapshot(
+    reason: &crate::witness::WitnessHoldReason,
+    snapshot: &crate::witness::WitnessQuorumSnapshot,
+) -> Result<(), PendingAuthorizationLoadError> {
+    use crate::witness::WitnessHoldReason;
+    // Snapshot genel doğrulama.
+    if !snapshot.support.is_finite() || !snapshot.required_support.is_finite() {
+        return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+            "witness snapshot support/required_support must be finite".into(),
+        ));
+    }
+    if snapshot.support < 0.0 || snapshot.required_support < 0.0 {
+        return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+            "witness snapshot support must be >= 0".into(),
+        ));
+    }
+    match reason {
+        WitnessHoldReason::MinApproversNotMet { distinct, required } => {
+            if snapshot.approvers != *distinct {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    format!(
+                        "MinApproversNotMet: snapshot.approvers ({}) != hold_reason.distinct ({})",
+                        snapshot.approvers, distinct
+                    ),
+                ));
+            }
+            if snapshot.required_approvers != *required {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    format!(
+                        "MinApproversNotMet: snapshot.required_approvers ({}) != hold_reason.required ({})",
+                        snapshot.required_approvers, required
+                    ),
+                ));
+            }
+            if *distinct >= *required {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    format!(
+                        "MinApproversNotMet: distinct ({}) must be < required ({})",
+                        distinct, required
+                    ),
+                ));
+            }
+        }
+        WitnessHoldReason::QuorumInsufficient { support, threshold } => {
+            // Canonical -0.0 normalize karşılaştırma.
+            let norm = |v: f64| -> f64 {
+                if v == 0.0 {
+                    0.0
+                } else {
+                    v
+                }
+            };
+            if norm(snapshot.support) != norm(*support) {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    format!(
+                        "QuorumInsufficient: snapshot.support ({}) != hold_reason.support ({})",
+                        snapshot.support, support
+                    ),
+                ));
+            }
+            if norm(snapshot.required_support) != norm(*threshold) {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    format!(
+                        "QuorumInsufficient: snapshot.required_support ({}) != hold_reason.threshold ({})",
+                        snapshot.required_support, threshold
+                    ),
+                ));
+            }
+            if *support >= *threshold {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    format!(
+                        "QuorumInsufficient: support ({}) must be < threshold ({})",
+                        support, threshold
+                    ),
+                ));
+            }
+        }
+        WitnessHoldReason::EvidenceNotLocallyObservable { hint } => {
+            if hint.trim().is_empty() {
+                return Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(
+                    "EvidenceNotLocallyObservable: hint must be non-empty".into(),
+                ));
+            }
+            // Q1/Q2 başarısızlığı zorunlu değil — policy alanları yine basis ile eşleşmeli
+            // (adım 10'da doğrulandı).
+        }
+    }
+    Ok(())
 }
 
 /// Pending authorization load hataları.
@@ -2941,6 +3275,61 @@ pub enum PendingAuthorizationLoadError {
     /// Defensive — custom Deserialize zaten reject eder; bu ikinci katman.
     #[error("structural delta invalid: {0}")]
     StructuralDeltaInvalid(String),
+    // ── INV-T9 #72 (Commit 3) — typed cross-field mismatch errors (P1) ──
+    #[error("suspended attempt-evidence digest mismatch — artifact may be tampered or corrupted")]
+    EvidenceDigestMismatch,
+    #[error("task_id mismatch: record={record}, basis={basis}")]
+    TaskIdMismatch { record: u64, basis: u64 },
+    #[error("claim_id mismatch: record={record}, basis={basis}, evidence={evidence}")]
+    ClaimIdMismatch {
+        record: u64,
+        basis: u64,
+        evidence: u64,
+    },
+    #[error("attempt number mismatch: record={record}, evidence={evidence}")]
+    AttemptNumberMismatch { record: u64, evidence: u64 },
+    #[error(
+        "evidence authorization_basis_digest mismatch: evidence does not match record/basis digest"
+    )]
+    EvidenceBasisDigestMismatch,
+    /// **P1 basis iç task_id invariant:** `basis.task_id == basis.claim_identity.task_id`.
+    #[error("basis internal task_id mismatch: basis.task_id={basis_task_id}, claim_identity.task_id={claim_task_id}")]
+    BasisInternalTaskIdMismatch {
+        basis_task_id: u64,
+        claim_task_id: u64,
+    },
+    #[error("predicate completion mismatch: record={record:?}, basis={basis:?}")]
+    PredicateCompletionMismatch {
+        record: PredicateCompletion,
+        basis: PredicateCompletion,
+    },
+    #[error("mutation decision mismatch: record={record:?}, basis={basis:?}")]
+    MutationDecisionMismatch {
+        record: MutationDecision,
+        basis: MutationDecision,
+    },
+    #[error("apply target mismatch: record={record:?}, basis={basis:?}")]
+    ApplyTargetMismatch {
+        record: ApplyTarget,
+        basis: ApplyTarget,
+    },
+    #[error("base space-view revision mismatch: record != basis")]
+    SpaceViewRevisionMismatch,
+    #[error("evaluation context digest mismatch: record != basis")]
+    EvaluationContextDigestMismatch,
+    #[error("witness requirement mismatch: record min_approvers={record_min}, quorum={record_quorum}; basis policy min_approvers={basis_min}, quorum={basis_quorum}")]
+    WitnessRequirementMismatch {
+        record_min: usize,
+        record_quorum: f64,
+        basis_min: u32,
+        basis_quorum: f64,
+    },
+    #[error("witness hold reason mismatch: record != evidence disposition")]
+    WitnessHoldReasonMismatch,
+    #[error("witness snapshot mismatch: record != evidence disposition")]
+    WitnessSnapshotMismatch,
+    #[error("invalid evidence disposition for PendingAuthorization: {0}")]
+    InvalidEvidenceDisposition(String),
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2979,18 +3368,25 @@ pub trait PendingAuthorizationStore {
 }
 
 /// Başarılı persist'in kanıtı — artifact path + kimlik.
+///
+/// **INV-T9 #72 (Commit 3):** `task_id`, `attempt_num`, `evidence_digest` eklendi
+/// (P0-4 store identity migration). Artifact artık evidence identity ile adreslenir
+/// — aynı basis farklı evidence ayrı artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingAuthorizationReceipt {
     pub artifact_path: std::path::PathBuf,
+    pub task_id: crate::trajectory::TaskId,
     pub claim_id: ClaimId,
+    pub attempt_num: AttemptNumber,
     pub authorization_basis_digest: AuthorizationBasisDigest,
+    pub evidence_digest: SuspendedAttemptEvidenceDigest,
 }
 
 /// Persist/load hataları.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PendingAuthorizationStoreError {
     #[error(
-        "artifact already exists with different basis — integrity error (no silent overwrite)"
+        "artifact already exists with different evidence — integrity error (no silent overwrite)"
     )]
     BasisConflict { existing_path: std::path::PathBuf },
     #[error("artifact write failed: {0}")]
@@ -3003,11 +3399,17 @@ pub enum PendingAuthorizationStoreError {
 
 /// Dosya tabanlı default implementation.
 ///
-/// Path: `<root>/.osp/pending-authorizations/<claim-id>--<basis-digest-hex>.json`
+/// **Path (INV-T9 #72 Commit 3):**
+/// `<root>/.osp/pending-authorizations/task-{task_id}--claim-{claim_id}--attempt-{attempt_num}--{evidence_digest}.json`
+///
+/// Evidence identity (`task_id` + `claim_id` + `attempt_num` + `evidence_digest`)
+/// artifact'i adresler. `evidence_digest` basis digest'ini binding olarak içerdiği
+/// için filename'e ayrıca basis digest eklemek zorunlu DEĞİL — audit için eklenebilir
+/// ama dosya adı gereksiz büyür.
 ///
 /// **No-clobber:** `create_new` — sessiz overwrite YOK.
-/// **Idempotent:** aynı claim+digest+içerik → success; aynı claim+digest+farklı içerik →
-/// integrity error; aynı claim+farklı digest → ayrı artifact.
+/// **Idempotent:** aynı evidence digest + aynı içerik → success; aynı evidence path +
+/// farklı içerik → integrity error; aynı basis + farklı evidence digest → ayrı artifact.
 ///
 /// **Crash-consistent publish:** same-dir temp → write_all → sync_all → atomic no-clobber
 /// publish/rename → parent-dir sync where supported.
@@ -3025,14 +3427,21 @@ impl FilesystemPendingAuthorizationStore {
         Self { root: root.into() }
     }
 
-    /// Artifact path'i claim_id + digest'ten türet.
+    /// Artifact path'i evidence identity'den türet (P0-4).
+    ///
+    /// `task_id` + `claim_id` + `attempt_num` + `evidence_digest` → benzersiz path.
     fn artifact_path(
         &self,
+        task_id: crate::trajectory::TaskId,
         claim_id: ClaimId,
-        digest: &AuthorizationBasisDigest,
+        attempt_num: AttemptNumber,
+        evidence_digest: &SuspendedAttemptEvidenceDigest,
     ) -> std::path::PathBuf {
-        let hex = digest.to_hex();
-        let filename = format!("claim-{claim_id}--{hex}.json");
+        let hex = evidence_digest.to_hex();
+        let filename = format!(
+            "task-{task_id}--claim-{claim_id}--attempt-{}--{hex}.json",
+            attempt_num.get()
+        );
         self.root
             .join(".osp")
             .join("pending-authorizations")
@@ -3052,8 +3461,10 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
         use std::io::Write;
 
         let artifact_path = self.artifact_path(
+            envelope.record.task_id,
             envelope.record.claim_id,
-            &envelope.record.authorization_basis_digest,
+            envelope.record.suspended_attempt_evidence.attempt_num(),
+            &envelope.record.evidence_digest,
         );
 
         // Idempotency: aynı path zaten varsa — içeriği karşılaştır.
@@ -3063,14 +3474,17 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
             let current = serde_json::to_vec_pretty(envelope)
                 .map_err(|e| PendingAuthorizationStoreError::SerializationFailed(e.to_string()))?;
             if existing == current {
-                // Idempotent success — aynı claim+digest+içerik.
+                // Idempotent success — aynı evidence identity + aynı içerik.
                 return Ok(PendingAuthorizationReceipt {
                     artifact_path,
+                    task_id: envelope.record.task_id,
                     claim_id: envelope.record.claim_id,
+                    attempt_num: envelope.record.suspended_attempt_evidence.attempt_num(),
                     authorization_basis_digest: envelope.record.authorization_basis_digest.clone(),
+                    evidence_digest: envelope.record.evidence_digest.clone(),
                 });
             } else {
-                // Conflict — aynı path, farklı içerik (digest çakışması veya corruption).
+                // Conflict — aynı evidence path, farklı içerik (digest çakışması veya corruption).
                 return Err(PendingAuthorizationStoreError::BasisConflict {
                     existing_path: artifact_path,
                 });
@@ -3152,8 +3566,11 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
 
         Ok(PendingAuthorizationReceipt {
             artifact_path,
+            task_id: envelope.record.task_id,
             claim_id: envelope.record.claim_id,
+            attempt_num: envelope.record.suspended_attempt_evidence.attempt_num(),
             authorization_basis_digest: envelope.record.authorization_basis_digest.clone(),
+            evidence_digest: envelope.record.evidence_digest.clone(),
         })
     }
 }
@@ -3188,8 +3605,11 @@ impl PendingAuthorizationStore for NullPendingAuthorizationStore {
     ) -> Result<PendingAuthorizationReceipt, PendingAuthorizationStoreError> {
         Ok(PendingAuthorizationReceipt {
             artifact_path: std::path::PathBuf::new(), // null — no artifact
+            task_id: envelope.record.task_id,
             claim_id: envelope.record.claim_id,
+            attempt_num: envelope.record.suspended_attempt_evidence.attempt_num(),
             authorization_basis_digest: envelope.record.authorization_basis_digest.clone(),
+            evidence_digest: envelope.record.evidence_digest.clone(),
         })
     }
 }
@@ -3670,16 +4090,41 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     fn sample_pending_record() -> PendingAuthorization {
+        // **INV-T9 #72 (Commit 3):** Evidence ve digest `sample_basis()` ile tutarlı
+        // olmalı — `Envelope::new` cross-field validation yapar (task_id, claim_id,
+        // basis_digest binding). Evidence basis'in compute edilen digest'ını kullanır
+        // (placeholder değil — adım 8 evidence basis digest binding'i için).
+        let basis = sample_basis();
+        let basis_digest = AuthorizationBasisDigest::compute(&basis).unwrap();
+        let hold_reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest.clone(),
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: hold_reason.clone(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .unwrap();
+        let evidence_digest = SuspendedAttemptEvidenceDigest::compute(&evidence).unwrap();
         PendingAuthorization {
             task_id: TaskId::from(1u64),
             claim_id: ClaimId::from(42u64),
             predicate_completion: PredicateCompletion::Completed,
             mutation_decision: MutationDecision::AcceptAsCompleted,
             intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
-            authorization_basis_digest: AuthorizationBasisDigest::from_hex(
-                "0000000000000000000000000000000000000000000000000000000000000000",
-            )
-            .unwrap(), // placeholder — Envelope::new overwrite eder
+            authorization_basis_digest: basis_digest, // Envelope::new overwrite eder (aynı değer)
             base_space_view_revision: SpaceViewRevision {
                 view_id: SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xdd; 16])),
                 sequence: 7,
@@ -3690,17 +4135,11 @@ mod tests {
                 min_approvers: 2,
                 quorum_threshold: 1.5,
             },
-            witness_hold_reason: WitnessHoldReason::MinApproversNotMet {
-                distinct: 0,
-                required: 2,
-            },
-            witness_snapshot: WitnessQuorumSnapshot {
-                approvers: 0,
-                required_approvers: 2,
-                support: 0.0,
-                required_support: 1.5,
-            },
+            witness_hold_reason: hold_reason,
+            witness_snapshot: snapshot,
             attempt_evidence_id: 1,
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
             created_at: 1_700_000_000,
         }
     }
@@ -3860,6 +4299,8 @@ mod tests {
 
     #[test]
     fn filesystem_store_filename_uses_validated_ids_only() {
+        // **INV-T9 #72 (Commit 3):** Artifact filename evidence identity kullanır —
+        // `task-{task_id}--claim-{claim_id}--attempt-{attempt_num}--{evidence_digest}.json`.
         let dir = temp_dir();
         let mut store = FilesystemPendingAuthorizationStore::new(&dir);
         let basis = sample_basis();
@@ -3874,10 +4315,25 @@ mod tests {
             .to_string_lossy()
             .to_string();
         assert!(
-            filename.starts_with("claim-42--"),
-            "filename must use claim_id + digest: {filename}"
+            filename.starts_with("task-1--claim-42--attempt-1--"),
+            "filename must use evidence identity (task+claim+attempt+evidence_digest): {filename}"
         );
-        assert!(filename.ends_with(".json"));
+        assert!(
+            filename.ends_with(".json"),
+            "filename must end with .json: {filename}"
+        );
+        // Evidence digest hex filename'de olmalı (64 hex chars).
+        let hex_part = filename
+            .strip_prefix("task-1--claim-42--attempt-1--")
+            .and_then(|s| s.strip_suffix(".json"));
+        assert!(
+            hex_part.map(|h| h.len() == 64).unwrap_or(false),
+            "filename must contain 64-char evidence_digest hex: {filename}"
+        );
+        // Receipt evidence identity filename ile eşleşmeli.
+        assert_eq!(receipt.task_id, 1);
+        assert_eq!(receipt.claim_id, 42);
+        assert_eq!(receipt.attempt_num.get(), 1);
     }
 
     #[test]
@@ -7008,5 +7464,483 @@ v = 0.5
             SUSPENDED_ATTEMPT_EVIDENCE_V1_GOLDEN_HEX,
             "SuspendedAttemptEvidence v1 byte contract changed — explicit version decision required"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #72 — Commit 3: Envelope binding typed mismatch unit tests (P2 phase)
+    //
+    // Her typed mismatch varyantı için tek test — tek alan mutate edilir, exact error
+    // varyantı doğrulanır. Commit 5 persisted artifact seviyesinde (serialize→byte
+    // tamper→load/verify) ayrı testler ekler; bu Commit 3 testleri in-memory verify.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Helper: valid envelope üret (sample_basis + sample_pending_record).
+    fn sample_valid_envelope() -> PendingAuthorizationEnvelope {
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        PendingAuthorizationEnvelope::new(record, basis).unwrap()
+    }
+
+    #[test]
+    fn envelope_verify_rejects_evidence_digest_mismatch() {
+        // Tamper evidence_digest field.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.evidence_digest = SuspendedAttemptEvidenceDigest::from_bytes([0xAB; 32]);
+        assert_eq!(
+            envelope.verify(),
+            Err(PendingAuthorizationLoadError::EvidenceDigestMismatch),
+            "tampered evidence_digest must be rejected"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_task_id_mismatch_record_vs_basis() {
+        // record.task_id != basis.task_id.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.task_id = 999; // basis.task_id = 1
+                                       // evidence.task_id hala 1 — bu da mismatchtet yakalanır ama önce task_id (record↔basis).
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::TaskIdMismatch { .. })
+            ),
+            "record vs basis task_id mismatch must be TaskIdMismatch, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_claim_id_mismatch_record_vs_basis() {
+        // record.claim_id != basis.claim_identity.claim_id.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.claim_id = 999; // basis.claim_id = 42
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::ClaimIdMismatch { .. })
+            ),
+            "record vs basis claim_id mismatch must be ClaimIdMismatch, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_attempt_number_mismatch() {
+        // record.attempt_evidence_id != evidence.attempt_num.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.attempt_evidence_id = 999; // evidence.attempt_num = 1
+        let result = envelope.verify();
+        assert!(
+            matches!(result, Err(PendingAuthorizationLoadError::AttemptNumberMismatch { .. })),
+            "record vs evidence attempt number mismatch must be AttemptNumberMismatch, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_evidence_basis_digest_mismatch() {
+        // evidence.authorization_basis_digest != record/basis digest.
+        let mut envelope = sample_valid_envelope();
+        // Evidence'ı farklı basis digest ile yeniden üret.
+        let wrong_digest = AuthorizationBasisDigest::from_hex(
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        )
+        .unwrap();
+        let hold_reason = envelope.record.witness_hold_reason.clone();
+        let snapshot = envelope.record.witness_snapshot.clone();
+        let wrong_evidence = SuspendedAttemptEvidence::try_new(
+            envelope.record.task_id,
+            envelope.record.claim_id,
+            wrong_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            },
+        )
+        .unwrap();
+        envelope.record.suspended_attempt_evidence = wrong_evidence;
+        // evidence_digest de güncelle (yoksa EvidenceDigestMismatch önce gelir).
+        envelope.record.evidence_digest =
+            SuspendedAttemptEvidenceDigest::compute(&envelope.record.suspended_attempt_evidence)
+                .unwrap();
+        let result = envelope.verify();
+        assert!(
+            matches!(result, Err(PendingAuthorizationLoadError::EvidenceBasisDigestMismatch)),
+            "evidence basis digest != record/basis digest must be EvidenceBasisDigestMismatch, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_basis_internal_task_id_mismatch() {
+        // basis.task_id != basis.claim_identity.task_id (P1 basis iç invariant).
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        // Basis'i tutarsız yap: claim_identity.task_id farklı.
+        let mut bad_basis = basis.clone();
+        bad_basis.claim_identity.task_id = 999; // basis.task_id = 1
+                                                // Record basis'e göre değil, sample'a göre — evidence da sample'dan.
+                                                // Constructor verify çağırır → BasisInternalTaskIdMismatch döner.
+        let result = PendingAuthorizationEnvelope::new(record.clone(), bad_basis);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::BasisInternalTaskIdMismatch { .. })
+            ),
+            "basis internal task_id mismatch must be rejected at constructor, got: {result:?}"
+        );
+        let _ = basis; // (sample_basis zaten çağrıldı, unused uyarısı önle)
+    }
+
+    #[test]
+    fn envelope_verify_rejects_predicate_completion_mismatch() {
+        // record.predicate_completion != basis.predicate_completion.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.predicate_completion = PredicateCompletion::NotCompleted; // basis = Completed
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::PredicateCompletionMismatch { .. })
+            ),
+            "predicate completion mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_mutation_decision_mismatch() {
+        // record.mutation_decision != basis.mutation_decision.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.mutation_decision = MutationDecision::Reject; // basis = AcceptAsCompleted
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::MutationDecisionMismatch { .. })
+            ),
+            "mutation decision mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_apply_target_mismatch() {
+        // record.intended_apply_target != basis.intended_apply_target.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.intended_apply_target = ApplyTarget::Lane(CommitLane::Sandbox); // basis = Mainline
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::ApplyTargetMismatch { .. })
+            ),
+            "apply target mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_space_view_revision_mismatch() {
+        // record.base_space_view_revision != basis.base_space_view_revision.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.base_space_view_revision.sequence = 999; // basis = 7
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::SpaceViewRevisionMismatch)
+            ),
+            "space-view revision mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_evaluation_context_digest_mismatch() {
+        // record.evaluation_context_digest != basis.evaluation_context_digest.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.evaluation_context_digest = EvaluationContextDigest::from_bytes([0x99; 32]); // basis = [0xaa; 32]
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::EvaluationContextDigestMismatch)
+            ),
+            "evaluation context digest mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_witness_requirement_mismatch() {
+        // record.witness_requirement != basis.witness_policy.effective_requirement().
+        let mut envelope = sample_valid_envelope();
+        envelope.record.witness_requirement = WitnessRequirement {
+            min_approvers: 5,      // basis = 2
+            quorum_threshold: 3.0, // basis = 1.5
+        };
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::WitnessRequirementMismatch { .. })
+            ),
+            "witness requirement mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_witness_hold_reason_mismatch() {
+        // record.witness_hold_reason != evidence disposition hold_reason.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.witness_hold_reason = WitnessHoldReason::QuorumInsufficient {
+            support: 0.5,
+            threshold: 1.5,
+        }; // evidence = MinApproversNotMet
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::WitnessHoldReasonMismatch)
+            ),
+            "witness hold reason mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_witness_snapshot_mismatch() {
+        // record.witness_snapshot != evidence disposition snapshot.
+        let mut envelope = sample_valid_envelope();
+        envelope.record.witness_snapshot = WitnessQuorumSnapshot {
+            approvers: 5,
+            required_approvers: 2,
+            support: 2.0,
+            required_support: 1.5,
+        }; // evidence snapshot = approvers 0
+        let result = envelope.verify();
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::WitnessSnapshotMismatch)
+            ),
+            "witness snapshot mismatch must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn envelope_verify_rejects_rejected_disposition_for_pending() {
+        // Surface-specific: PendingAuthorizationEnvelope yalnız Held disposition.
+        // Rejected evidence → InvalidEvidenceDisposition.
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis = sample_basis();
+        let basis_digest = AuthorizationBasisDigest::compute(&basis).unwrap();
+        let rejected_evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
+                    witness: 5u64,
+                    rationale: None,
+                }),
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let mut record = sample_pending_record();
+        record.suspended_attempt_evidence = rejected_evidence;
+        record.evidence_digest =
+            SuspendedAttemptEvidenceDigest::compute(&record.suspended_attempt_evidence).unwrap();
+        let result = PendingAuthorizationEnvelope::new(record, basis);
+        assert!(
+            matches!(result, Err(PendingAuthorizationLoadError::InvalidEvidenceDisposition(_))),
+            "Rejected disposition for PendingAuthorization must be InvalidEvidenceDisposition, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn revision_required_try_new_rejects_held_disposition() {
+        // Surface-specific: RevisionRequired yalnız Rejected disposition.
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "1111111111111111111111111111111111111111111111111111111111111111",
+        )
+        .unwrap();
+        let held_evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: WitnessHoldReason::MinApproversNotMet {
+                    distinct: 0,
+                    required: 2,
+                },
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let result = RevisionRequired::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            AuthorizationBasisDigest::from_hex(
+                "1111111111111111111111111111111111111111111111111111111111111111",
+            )
+            .unwrap(),
+            NonEmptyWitnessRejections::from_single(WitnessRejection {
+                witness: 5u64,
+                rationale: None,
+            }),
+            WitnessQuorumSnapshot {
+                approvers: 0,
+                required_approvers: 2,
+                support: 0.0,
+                required_support: 1.5,
+            },
+            1,
+            held_evidence,
+        );
+        assert!(
+            matches!(
+                result,
+                Err(RevisionRequiredError::InvalidEvidenceDisposition { .. })
+            ),
+            "Held disposition for RevisionRequired must be rejected, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn validate_hold_reason_rejects_inconsistent_snapshot_min_approvers() {
+        // MinApproversNotMet { distinct: 0, required: 2 } ama snapshot.approvers = 5
+        // → iç çelişki.
+        let reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        let inconsistent_snapshot = WitnessQuorumSnapshot {
+            approvers: 5, // distinct 0 olmalı
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let result = validate_hold_reason_against_snapshot(&reason, &inconsistent_snapshot);
+        assert!(
+            result.is_err(),
+            "MinApproversNotMet with inconsistent snapshot.approvers must be rejected"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("MinApproversNotMet") && err.contains("snapshot.approvers"),
+            "error must name the inconsistency, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_hold_reason_rejects_quorum_insufficient_support_geq_threshold() {
+        // QuorumInsufficient { support: 1.5, threshold: 1.5 } → support >= threshold
+        // (quorum sağlanmış gibi) → iç çelişki.
+        let reason = WitnessHoldReason::QuorumInsufficient {
+            support: 1.5,
+            threshold: 1.5,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 2,
+            required_approvers: 2,
+            support: 1.5,
+            required_support: 1.5,
+        };
+        let result = validate_hold_reason_against_snapshot(&reason, &snapshot);
+        assert!(
+            result.is_err(),
+            "QuorumInsufficient with support >= threshold must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_hold_reason_rejects_empty_evidence_not_locally_observable_hint() {
+        // EvidenceNotLocallyObservable { hint: "" } → hint non-empty invariant.
+        let reason = WitnessHoldReason::EvidenceNotLocallyObservable {
+            hint: "   ".to_string(), // trim boş
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let result = validate_hold_reason_against_snapshot(&reason, &snapshot);
+        assert!(
+            result.is_err(),
+            "EvidenceNotLocallyObservable with whitespace-only hint must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_hold_reason_accepts_consistent_min_approvers() {
+        // Tutarlı kombinasyon — geçerli.
+        let reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        assert!(
+            validate_hold_reason_against_snapshot(&reason, &snapshot).is_ok(),
+            "consistent MinApproversNotMet + snapshot must pass"
+        );
+    }
+
+    #[test]
+    fn envelope_new_constructor_runs_cross_field_validation() {
+        // P1: constructor validation — invalid kombinasyon reject, valid geçer.
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        // Valid → success.
+        let envelope = PendingAuthorizationEnvelope::new(record.clone(), basis.clone());
+        assert!(envelope.is_ok(), "valid envelope must construct");
+        // Invalid: predicate_completion değiştir → constructor reject.
+        let mut bad_record = record;
+        bad_record.predicate_completion = PredicateCompletion::NotCompleted;
+        let result = PendingAuthorizationEnvelope::new(bad_record, basis);
+        assert!(
+            matches!(result, Err(PendingAuthorizationLoadError::PredicateCompletionMismatch { .. })),
+            "constructor must run cross-field validation and reject mismatched predicate_completion"
+        );
+    }
+
+    #[test]
+    fn pending_authorization_round_trips_with_evidence() {
+        // PendingAuthorization evidence field'larla serde round-trip.
+        let record = sample_pending_record();
+        let json = serde_json::to_string(&record).unwrap();
+        let restored: PendingAuthorization = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, record, "evidence fields must round-trip");
+    }
+
+    #[test]
+    fn pending_authorization_record_carries_evidence_to_runtime() {
+        // P0-3: record içine gömülü evidence runtime AwaitingWitnesses'e gider.
+        // (Bu test record.field erişilebilirliğini doğrular — navigator integration
+        // Commit 2 test'lerinde zaten.)
+        let record = sample_pending_record();
+        assert_eq!(record.suspended_attempt_evidence.task_id(), 1);
+        assert_eq!(record.suspended_attempt_evidence.claim_id(), 42);
+        assert_eq!(record.suspended_attempt_evidence.attempt_num().get(), 1);
+        assert!(matches!(
+            record.suspended_attempt_evidence.disposition(),
+            SuspendedAttemptDisposition::Held { .. }
+        ));
+        // evidence_digest serialize edilmiş olmalı.
+        assert_eq!(record.evidence_digest.to_hex().len(), 64);
     }
 }
