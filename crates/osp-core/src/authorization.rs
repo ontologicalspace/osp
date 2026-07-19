@@ -8074,4 +8074,290 @@ v = 0.5
         let restored: PendingAuthorization = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.attempt_num, record.attempt_num);
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #72 — Commit 5: Persisted artifact tamper matrix
+    //
+    // Commit 3 typed unit test'lerden FARKLI seviye — serialize → byte/JSON tamper →
+    // deserialize → load_pending_authorization → verify. Disk artifact üzerinde
+    // representative end-to-end tamper matrix. Tekrar yok (Commit 3 in-memory verify,
+    // Commit 5 persisted artifact seviyesi).
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Helper: persist envelope to temp dir, return artifact path.
+    fn persist_to_temp(envelope: &PendingAuthorizationEnvelope) -> std::path::PathBuf {
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+        let receipt = store.persist(envelope).expect("persist");
+        receipt.artifact_path
+    }
+
+    #[test]
+    fn persisted_artifact_load_verifies_clean_envelope() {
+        // Baseline: temiz artifact load + verify başarılı.
+        let envelope = sample_valid_envelope();
+        let path = persist_to_temp(&envelope);
+        let loaded = load_pending_authorization(&path);
+        assert!(loaded.is_ok(), "clean artifact must load + verify");
+        assert_eq!(loaded.unwrap(), envelope);
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_evidence_digest_rejected_on_load() {
+        // Serialize → JSON tamper (evidence_digest array bytes) → load → verify reject.
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        // Digest 32-byte array olarak serileşir — geçerli array format ama farklı bytes.
+        let tampered_array: Vec<u8> = vec![0xAB; 32];
+        json["record"]["evidence_digest"] = serde_json::to_value(&tampered_array).unwrap();
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-evidence-digest.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::EvidenceDigestMismatch)
+            ),
+            "tampered evidence_digest must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_basis_digest_rejected_on_load() {
+        // authorization_basis_digest tamper → load → BasisDigestMismatch.
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        let tampered_array: Vec<u8> = vec![0xCD; 32];
+        json["record"]["authorization_basis_digest"] =
+            serde_json::to_value(&tampered_array).unwrap();
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-basis-digest.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::BasisDigestMismatch)
+            ),
+            "tampered basis_digest must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_task_id_rejected_on_load() {
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["record"]["task_id"] = serde_json::json!(999);
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-task-id.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::TaskIdMismatch { .. })
+            ),
+            "tampered record.task_id must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_claim_id_rejected_on_load() {
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["record"]["claim_id"] = serde_json::json!(999);
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-claim-id.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::ClaimIdMismatch { .. })
+            ),
+            "tampered record.claim_id must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_attempt_num_rejected_on_load() {
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["record"]["attempt_num"] = serde_json::json!(999);
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-attempt-num.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::AttemptNumberMismatch { .. })
+            ),
+            "tampered record.attempt_num must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_predicate_completion_rejected_on_load() {
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["record"]["predicate_completion"] = serde_json::json!("NotCompleted");
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-predicate-completion.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::PredicateCompletionMismatch { .. })
+            ),
+            "tampered record.predicate_completion must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_witness_requirement_rejected_on_load() {
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["record"]["witness_requirement"]["min_approvers"] = serde_json::json!(5);
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-witness-req.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::WitnessRequirementMismatch { .. })
+            ),
+            "tampered witness_requirement must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_tamper_schema_rejected_on_load() {
+        let envelope = sample_valid_envelope();
+        let mut json = serde_json::to_value(&envelope).unwrap();
+        json["schema"] = serde_json::json!("osp.pending-authorization.v2");
+        let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
+
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("tampered-schema.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &tampered_bytes).unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::UnknownSchema { .. })
+            ),
+            "tampered schema must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_corrupted_json_rejected_on_load() {
+        let dir = temp_dir();
+        let path = dir.join(".osp").join("corrupted.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"{ this is not valid json").unwrap();
+
+        let result = load_pending_authorization(&path);
+        assert!(
+            matches!(
+                result,
+                Err(PendingAuthorizationLoadError::DeserializationFailed(_))
+            ),
+            "corrupted JSON must be rejected on load: {result:?}"
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_round_trip_through_filesystem_store_load() {
+        let envelope = sample_valid_envelope();
+        let path = persist_to_temp(&envelope);
+        let loaded = load_pending_authorization(&path).expect("load + verify");
+        assert_eq!(
+            loaded, envelope,
+            "persisted artifact must round-trip exactly"
+        );
+        assert_eq!(
+            loaded.record.suspended_attempt_evidence,
+            envelope.record.suspended_attempt_evidence
+        );
+        assert_eq!(
+            loaded.record.evidence_digest,
+            envelope.record.evidence_digest
+        );
+    }
+
+    #[test]
+    fn persisted_artifact_distinct_evidence_distinct_files() {
+        // P0-4: aynı basis farklı evidence → ayrı artifact (no false conflict).
+        let basis = sample_basis();
+        let record1 = sample_pending_record();
+
+        let mut record2 = sample_pending_record();
+        let evidence2 = SuspendedAttemptEvidence::try_new(
+            record2.task_id,
+            record2.claim_id,
+            record2.authorization_basis_digest.clone(),
+            AttemptNumber::try_from(2u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: record2.witness_hold_reason.clone(),
+                snapshot: record2.witness_snapshot.clone(),
+            },
+        )
+        .unwrap();
+        record2.attempt_num = AttemptNumber::try_from(2u64).unwrap();
+        record2.suspended_attempt_evidence = evidence2;
+        record2.evidence_digest =
+            SuspendedAttemptEvidenceDigest::compute(&record2.suspended_attempt_evidence).unwrap();
+
+        let env1 = PendingAuthorizationEnvelope::new(record1, basis.clone()).unwrap();
+        let env2 = PendingAuthorizationEnvelope::new(record2, basis).unwrap();
+
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+        let receipt1 = store.persist(&env1).expect("persist 1");
+        let receipt2 = store.persist(&env2).expect("persist 2");
+
+        assert_ne!(
+            receipt1.artifact_path, receipt2.artifact_path,
+            "distinct evidence → distinct artifact files (no false conflict)"
+        );
+        assert_ne!(
+            receipt1.evidence_digest, receipt2.evidence_digest,
+            "distinct attempt → distinct evidence digest"
+        );
+    }
 }

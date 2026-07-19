@@ -156,18 +156,20 @@ lock the resulting v1 byte contract.
   (`DuplicateNodeId` vs `UnsortedNodes`; `DuplicateEdge` vs `UnsortedNewEdges`/
   `UnsortedRemovedEdges`).
 
-### v1 byte contract (Step 6 golden vectors)
+### v1 byte contract (Step 6 golden vectors + #72 evidence digest)
 
 Step 6 golden vectors (`authorization_basis_digest_v1_golden_vector`,
 `evaluation_context_digest_v1_golden_vector`) **establish and lock** the first
 compatibility-supported v1 byte contract for the currently defined canonical models.
-The expected values (non-normative mirror — executable normative values are the test
-constants):
+#72 adds `suspended_attempt_evidence_digest_v1_golden_vector` for the new
+domain-separated evidence digest. The expected values (non-normative mirror —
+executable normative values are the test constants):
 
-| Digest | v1 golden hex |
-|--------|---------------|
-| `AuthorizationBasisDigest` | `7f67f2acf97bc9747b9f708437eb6a3454628f3cb4c23541e48e00554a4945f5` |
-| `EvaluationContextDigest` | `b2e7e883e0af8bdbff02e691d39f1574caaeb6be9d1a29e8467a3b99d79f1a5f` |
+| Digest | Domain separator | v1 golden hex |
+|--------|------------------|---------------|
+| `AuthorizationBasisDigest` | `osp.authorization-basis.v1\0` | `7f67f2acf97bc9747b9f708437eb6a3454628f3cb4c23541e48e00554a4945f5` |
+| `EvaluationContextDigest` | `osp.evaluation-context.v1\0` | `b2e7e883e0af8bdbff02e691d39f1574caaeb6be9d1a29e8467a3b99d79f1a5f` |
+| `SuspendedAttemptEvidenceDigest` (#72) | `osp.attempt-evidence.v1\0` | `3cfb984502df3382fec90111b5afd19a5d6543c071c98ba6c3fc3f7a0fe0052c` |
 
 **Byte contract vs runtime semantic correctness:** Golden vectors lock the canonical
 byte encoding of the currently-defined v1 models. They do **not** prove runtime data is
@@ -179,7 +181,14 @@ pre-release v1 revision / v2 decision.
 
 Breaking changes (canonical field/order/tag/encoding) after this lock require an
 explicit v2 domain-separator decision (`osp.authorization-basis.v2\0` /
-`osp.evaluation-context.v2\0`).
+`osp.evaluation-context.v2\0` / `osp.attempt-evidence.v2\0`).
+
+**#72 schema finalize:** `osp.pending-authorization.v1` schema adds
+`suspended_attempt_evidence` + `evidence_digest` fields to `PendingAuthorization` and
+`suspended_attempt_evidence` to `RevisionRequired`; the dangling `attempt_evidence_id`
+field is removed from both. PR #69 is pre-merge, so this is the first correct v1
+finalize (no v2 bump required — the change is documented and the schema was not yet
+compatibility-supported).
 
 ### Pending authorization (Model B + Sabitleme 1)
 
@@ -196,10 +205,20 @@ the digest. `verify()` recomputes the digest on load and rejects mismatches (tam
 corruption detection). Single canonical schema string `"osp.pending-authorization.v1"`
 (no separate schema_version in record).
 
-**Scope note (#72):** The envelope is self-contained w.r.t. the **authorization basis**.
-Complete embedded **attempt-evidence** integrity (canonical `SuspendedAttemptEvidence`
-snapshot, domain-separated evidence digest, record ↔ basis ↔ evidence cross-field
-verification) is not yet established — that is merge-blocking work tracked in #72.
+**#72 (CLOSED):** The envelope is now self-contained w.r.t. **both** the authorization
+basis **and** the attempt evidence. Complete embedded attempt-evidence integrity is
+established:
+- Canonical `SuspendedAttemptEvidence` snapshot (common header + tagged disposition enum)
+  is embedded in `PendingAuthorization` and `RevisionRequired`.
+- Domain-separated `SuspendedAttemptEvidenceDigest` (`osp.attempt-evidence.v1\0`).
+- Full 11-adım `verify()` chain: record ↔ basis ↔ evidence cross-field verification
+  (task_id, claim_id, attempt_num, basis digest binding, predicate/mutation/apply/
+  revision/ec-digest, witness requirement ↔ policy, disposition ↔ reason/snapshot
+  semantic consistency).
+- Typed mismatch errors (P1): each invariant violation produces a distinct error
+  variant for diagnostic clarity.
+- Surface-specific disposition: `PendingAuthorization` only Held, `RevisionRequired`
+  only Rejected.
 
 ### Navigator-owned persistence (P0-1)
 
@@ -208,10 +227,16 @@ calls `persist()` BEFORE returning `AwaitingWitnesses` — no external suspended
 without a published artifact. No `AwaitingWitnesses` result is externally returned
 unless its pending artifact has first been successfully published.
 
-No-clobber (create_new): silent overwrite forbidden. Idempotent: same claim+digest+
-content → success; same path+different content → BasisConflict; same claim+different
-digest → separate artifact. Crash-consistent publish: same-dir temp → write_all →
-sync_all → atomic no-clobber rename.
+**#72 (artifact identity migration):** Artifact filename now uses evidence identity —
+`task-{task_id}--claim-{claim_id}--attempt-{attempt_num}--{evidence_digest}.json`.
+The same basis with different evidence produces distinct artifacts (no false conflict).
+Receipt carries `task_id`, `attempt_num`, `evidence_digest` alongside `claim_id` and
+`authorization_basis_digest`.
+
+No-clobber (create_new): silent overwrite forbidden. Idempotent: same evidence digest +
+same content → success; same evidence path + different content → BasisConflict; same
+basis + different evidence digest → separate artifact. Crash-consistent publish:
+same-dir temp → write_all → sync_all → atomic no-clobber rename.
 
 ### Exhaustive navigator mapping (no catch-all)
 
@@ -231,14 +256,19 @@ Err(EngineCommitError::Internal(..)) => { /* terminal */ }
 Budget isolation: Held/Rejected/terminal paths have no `continue`. Authorization
 waiting consumes no additional maneuver budget (proposal generation counts once).
 
-### `RevisionRequired` evidence preservation
+### `RevisionRequired` evidence preservation (#72 CLOSED)
 
 `NavigatorResult::RequiresRevision(RevisionRequired)` carries task_id, claim_id,
-authorization basis digest, witness reasons (NonEmpty), witness snapshot, attempt
-evidence id. It preserves the current evidence identifier and witness data, but complete
-embedded attempt-evidence integrity is not yet established. Canonical snapshot embedding,
-domain-separated evidence digesting, and basis/claim cross-field verification are
-merge-blocking work tracked in #72.
+authorization basis digest, witness reasons (NonEmpty), witness snapshot, and the
+canonical `SuspendedAttemptEvidence` snapshot (Rejected disposition). Embedded evidence
++ domain-separated digest closes the attempt-evidence + basis binding loss on the
+Rejected path.
+
+**Scope (P1 daraltma):** Full `AuthorizationBasis` reconstruction on the Rejected path
+remains a separate concern (depends on an embedded/persisted basis surface); this
+struct carries the evidence snapshot and digest binding, not the full basis. The
+dangling `attempt_evidence_id` field is removed — `attempt_num()` accessor retrieves
+the trajectory attempt number via the embedded evidence.
 
 ## 6. Test evidence
 
@@ -385,20 +415,24 @@ non-breaking):
 
 ## 9. Deferred boundary
 
-INV-T9 Steps 1-6 established suspension semantics, claim continuity, budget isolation,
-persist-before-return, exhaustive error taxonomy, canonical decision-basis (rule
-sequence binding, claim-specific effective vision, structural-delta defensive integrity),
-canonical v1 byte contract (golden vectors), and store hardening. The following remain
-**merge-blocking** (tracked as separate issues):
+INV-T9 Steps 1-6 + #72 established suspension semantics, claim continuity, budget
+isolation, persist-before-return, exhaustive error taxonomy, canonical decision-basis
+(rule sequence binding, claim-specific effective vision, structural-delta defensive
+integrity), canonical v1 byte contract (golden vectors), store hardening, and embedded
+attempt-evidence integrity (canonical `SuspendedAttemptEvidence` snapshot + domain-
+separated evidence digest + full record↔basis↔evidence cross-field verification). The
+following remain **merge-blocking** (tracked as separate issues):
 
 - **#70 — EngineMeasurement pipeline:** real per-axis provenance + engine-issued
   measurement token. The golden vectors lock the v1 byte encoding of the currently
   defined models; they do not prove runtime data is correctly produced. #70 is the
   runtime semantic-correctness blocker.
-- **#72 — Embedded attempt-evidence integrity:** canonical `SuspendedAttemptEvidence`
-  snapshot in `PendingAuthorizationEnvelope` + `RevisionRequired`, domain-separated
-  evidence digest, record ↔ basis ↔ evidence cross-field verification. Until #72 lands,
-  evidence is bound only by indirect `attempt_evidence_id`.
+
+**#72 (CLOSED):** Embedded attempt-evidence integrity landed. Canonical
+`SuspendedAttemptEvidence` snapshot in `PendingAuthorization` + `RevisionRequired`,
+domain-separated evidence digest (`osp.attempt-evidence.v1\0`), record ↔ basis ↔
+evidence cross-field verification (11-adım chain with typed mismatch errors), and
+store identity migration (artifact filename + receipt use evidence identity).
 
 **Separate lifecycle follow-up (not merge-blocking):**
 
@@ -407,9 +441,8 @@ canonical v1 byte contract (golden vectors), and store hardening. The following 
 - **Cross-process resume orchestration:** pending artifact load + staleness re-measure
   (`current_revision == base_revision` → continue; `!=` → remeasure).
 
-The canonical authorization-basis portion of the data model is complete and can be
-reused by lifecycle resume work. The pending envelope and revision evidence surfaces
-still require the merge-blocking `SuspendedAttemptEvidence` extension tracked in #72.
+The canonical authorization-basis + attempt-evidence data model is complete and can be
+reused by lifecycle resume work.
 
 ## 10. High-risk GOVERNANCE disclosure
 
