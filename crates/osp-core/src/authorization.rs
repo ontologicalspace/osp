@@ -2132,6 +2132,125 @@ fn encode_space_view_id(
     Ok(())
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #72 — Canonical witness evidence encoding helpers
+//
+// `SuspendedAttemptEvidenceDigest::compute` için shared encoder'lar. Mevcut
+// `canonical_f64_bytes`, `encode_u8/u32/u64`, `encode_bytes`, `encode_f64`
+// helper'ları yeniden kullanılır. Yeni: witness snapshot/hold-reason/rejection
+// encoder'ları + canonical rejection sort (digest determinism).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// `WitnessQuorumSnapshot` canonical encoding — `SuspendedAttemptEvidenceDigest` için.
+///
+/// Sıra: `approvers` (u64), `required_approvers` (u64), `support` (canonical f64),
+/// `required_support` (canonical f64).
+fn encode_witness_quorum_snapshot(
+    hasher: &mut blake3::Hasher,
+    snapshot: &crate::witness::WitnessQuorumSnapshot,
+) -> Result<(), CanonicalDigestError> {
+    encode_u64(hasher, snapshot.approvers as u64, "snapshot_approvers");
+    encode_u64(
+        hasher,
+        snapshot.required_approvers as u64,
+        "snapshot_required_approvers",
+    );
+    encode_f64(hasher, snapshot.support, "snapshot_support")?;
+    encode_f64(
+        hasher,
+        snapshot.required_support,
+        "snapshot_required_support",
+    )?;
+    Ok(())
+}
+
+/// `WitnessHoldReason` canonical encoding — variant tag + alanlar (exhaustive 3 varyant).
+///
+/// Tag ataması: `MinApproversNotMet=1`, `QuorumInsufficient=2`,
+/// `EvidenceNotLocallyObservable=3`. `format!("{:?}")` DEĞİL — stable numeric tag.
+fn encode_witness_hold_reason(
+    hasher: &mut blake3::Hasher,
+    reason: &crate::witness::WitnessHoldReason,
+) -> Result<(), CanonicalDigestError> {
+    use crate::witness::WitnessHoldReason::*;
+    match reason {
+        MinApproversNotMet { distinct, required } => {
+            encode_u8(hasher, 1, "hold_reason_tag");
+            encode_u64(hasher, *distinct as u64, "hold_reason_distinct");
+            encode_u64(hasher, *required as u64, "hold_reason_required");
+        }
+        QuorumInsufficient { support, threshold } => {
+            encode_u8(hasher, 2, "hold_reason_tag");
+            encode_f64(hasher, *support, "hold_reason_support")?;
+            encode_f64(hasher, *threshold, "hold_reason_threshold")?;
+        }
+        EvidenceNotLocallyObservable { hint } => {
+            encode_u8(hasher, 3, "hold_reason_tag");
+            encode_bytes(hasher, hint.as_bytes())?;
+        }
+    }
+    Ok(())
+}
+
+/// `NonEmptyWitnessRejections` canonical encoding — **canonical sort + duplicate
+/// reject** (digest determinism).
+///
+/// **P1 rejection canonical ordering:** Witness reddi bir küme ise (sequence
+/// semantiği korunmuyorsa), aynı mantıksal evidence farklı input sırasıyla aynı
+/// digest üretmelidir. Bu yüzden:
+/// 1. Her rejection `(witness u64 LE, rationale canonical bytes)` ikilisine encode
+///    edilir.
+/// 2. Byte dizileri lexicographic sort edilir.
+/// 3. Duplicate `(witness, rationale)` çifti → `CanonicalDigestError::EncodingFailed`
+///    (aynı witness aynı rationale ile iki kez reddedemez).
+/// 4. Sort edilmiş byte dizileri tek tek `encode_bytes` ile yazılır.
+fn encode_non_empty_witness_rejections(
+    hasher: &mut blake3::Hasher,
+    rejections: &crate::witness::NonEmptyWitnessRejections,
+) -> Result<(), CanonicalDigestError> {
+    let mut encoded: Vec<Vec<u8>> = Vec::with_capacity(rejections.len());
+    for rejection in rejections.as_slice() {
+        encoded.push(encode_witness_rejection_to_vec(rejection)?);
+    }
+    // Lexicographic sort — canonical ordering.
+    encoded.sort_unstable();
+
+    // Duplicate detection — aynı (witness, rationale) ikilisi reddedilir.
+    for window in encoded.windows(2) {
+        if window[0] == window[1] {
+            return Err(CanonicalDigestError::EncodingFailed(
+                "duplicate witness rejection in canonical encoding (digest determinism)".into(),
+            ));
+        }
+    }
+
+    encode_u64(hasher, encoded.len() as u64, "rejection_count");
+    for buf in &encoded {
+        encode_bytes(hasher, buf)?;
+    }
+    Ok(())
+}
+
+/// Tek `WitnessRejection` canonical byte producer (sort edilebilir Vec üretir).
+///
+/// Encoding:
+/// - witness AgentId (u64 LE)
+/// - rationale Option tag (None=0, Some=1 + u64 length prefix + UTF-8 bytes)
+fn encode_witness_rejection_to_vec(
+    rejection: &crate::witness::WitnessRejection,
+) -> Result<Vec<u8>, CanonicalDigestError> {
+    let mut buf: Vec<u8> = Vec::with_capacity(32);
+    push_u64(&mut buf, rejection.witness);
+    match &rejection.rationale {
+        None => push_u8(&mut buf, 0),
+        Some(text) => {
+            push_u8(&mut buf, 1);
+            push_bytes(&mut buf, text.as_bytes());
+        }
+    }
+    Ok(buf)
+}
+
 fn gate_decision_tag(gd: crate::trajectory::GateDecision) -> u8 {
     use crate::trajectory::GateDecision::*;
     match gd {
@@ -2175,12 +2294,16 @@ fn apply_target_tag(at: &crate::trajectory::ApplyTarget) -> u8 {
     }
 }
 
-/// Authorization basis digest hesaplama hataları.
+/// Canonical digest hesaplama hataları — tüm BLAKE3 domain-separated digest'ler için
+/// ortak error tipi (P1 digest error taxonomy).
+///
+/// Authorization-basis adı evidence katmanına sızmaz; evidence digest de aynı tipi kullanır.
+/// Backward-compat: [`AuthorizationBasisDigestError`] alias olarak korunur.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
-pub enum AuthorizationBasisDigestError {
+pub enum CanonicalDigestError {
     #[error("canonical encoding failed: {0}")]
     EncodingFailed(String),
-    #[error("non-finite float (NaN or ±Infinity) detected in authorization basis — not allowed (canonical encoding)")]
+    #[error("non-finite float (NaN or ±Infinity) detected in canonical encoding — not allowed")]
     NonFiniteRejected,
     #[error("hex decode failed: {0}")]
     HexDecodeFailed(String),
@@ -2190,6 +2313,10 @@ pub enum AuthorizationBasisDigestError {
     #[error("canonical length overflow in {field}")]
     LengthOverflow { field: &'static str },
 }
+
+/// Backward-compat alias — eski call site'lar çalışmaya devam eder. Yeni kod
+/// `CanonicalDigestError` kullanmalı (P1 digest error taxonomy).
+pub type AuthorizationBasisDigestError = CanonicalDigestError;
 
 /// Canonical structural delta doğrulama hatası (A5 — duplicate/non-finite field).
 ///
@@ -2400,6 +2527,323 @@ pub struct AuthorizationContext {
 
 /// Attempt evidence identifier (P1 resume'da evidence store lookup için).
 pub type AttemptEvidenceId = u64;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #72 — Canonical suspended-attempt evidence model
+//
+// Embedded attempt-evidence integrity: `SuspendedAttemptEvidence` canonical snapshot,
+// domain-separated `SuspendedAttemptEvidenceDigest`, surface-specific disposition.
+//
+// **P0-1:** `AttemptNumber` custom Deserialize + `TryFrom<u64>` (derived Deserialize
+//          bypass fix — `0` reject). Struct literal bypass imkânsız (field private).
+// **P0-2:** Engine ownership korunur — disposition payload `EngineCommitResult`'ta kalır.
+//           Navigator `attempt_num` ile final evidence'ı üretir (tek kaynak).
+// **P0-3:** Evidence record içinde — runtime `AwaitingWitnesses { pending }` taşır.
+// **P1:**   Common header + tagged disposition enum (schema drift risk yok).
+//           Canonical rejection sort + duplicate reject (digest determinism).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Validated trajectory attempt number (1-based, sıfır reject).
+///
+/// **P0-1 invariant:** Sistemde attempt numarası 1-based'dir (`navigator.rs`:
+/// `for attempt_num in 1..=maneuver_limit`). Derived `Deserialize` bu invariant'ı
+/// bypass ederdi (`0` JSON'dan kabul edilirdi). Bu tip custom `Deserialize` ile
+/// `TryFrom<u64>` üzerinden geçer — wire format da dahil her girişte `0` reject.
+///
+/// `serde::Serialize` derive edilir (transparent — u64 olarak serileşir), ancak
+/// `Deserialize` MANUEL uygulanır (`TryFrom` çağrılır).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct AttemptNumber(u64);
+
+/// `AttemptNumber` invariant ihlali.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum AttemptNumberError {
+    /// Attempt numarası sıfır — 1-based invariant ihlali.
+    #[error("attempt number must be >= 1 (zero rejected — 1-based trajectory invariant)")]
+    Zero,
+}
+
+impl TryFrom<u64> for AttemptNumber {
+    type Error = AttemptNumberError;
+
+    fn try_from(value: u64) -> Result<Self, Self::Error> {
+        if value == 0 {
+            return Err(AttemptNumberError::Zero);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for AttemptNumber {
+    /// **P0-1:** Custom deserialize — `u64::deserialize` sonrası `TryFrom` ile validate.
+    /// Derived Deserialize bu adımı atlar, `0` değerini kabul ederdi (invariant bypass).
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = u64::deserialize(deserializer)?;
+        Self::try_from(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl AttemptNumber {
+    /// Raw `u64` değerine erişim.
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// Disposition-specific evidence — suspended authorization'ın *neden* oluştuğunu
+/// ontolojik olarak sabitler (P1 surface-specific disposition).
+///
+/// **Enum seçimi:** Unified `Option`-field struct illegal-state üretir
+/// (`Held + hold_reason=None`, `Rejected + reasons=None`, vb.). Enum ile:
+/// - `Held` → `hold_reason` zorunlu, `reasons` imkânsız
+/// - `Rejected` → non-empty `reasons` zorunlu, `hold_reason` imkânsız
+///
+/// **P1 schema drift:** Ortak header outer struct'ta; disposition-specific evidence
+/// bu tagged enum'da. İki büyük enum varyantı (alan tekrarı) değil.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SuspendedAttemptDisposition {
+    /// Q1/Q2/EvidenceNotLocallyObservable yetersiz — expected authorization bekleme.
+    Held {
+        hold_reason: WitnessHoldReason,
+        snapshot: WitnessQuorumSnapshot,
+    },
+    /// Q3 honest-reject — explicit witness reddi. Agent yeni proposal üretmeli.
+    Rejected {
+        reasons: crate::witness::NonEmptyWitnessRejections,
+        snapshot: WitnessQuorumSnapshot,
+    },
+}
+
+/// `SuspendedAttemptEvidence::try_new` doğrulama hatası.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SuspendedAttemptEvidenceError {
+    #[error("schema version mismatch: found {found}, expected {expected}")]
+    SchemaVersionMismatch { found: u32, expected: u32 },
+}
+
+/// Canonical suspended-attempt evidence schema version (v1).
+pub const SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION: u32 = 1;
+
+/// Canonical embedded attempt-evidence — common header + disposition.
+///
+/// **INV-T9 #72:** Persisted artifact'te ve runtime Held/Rejected sonucunda aynı
+/// nesne kullanılır (tek production source). Domain-separated digest
+/// ([`SuspendedAttemptEvidenceDigest`]) ile bütünlük bağlanır.
+///
+/// **Private fields + `try_new`:** Struct literal bypass imkânsız. Custom
+/// `Deserialize` `deny_unknown_fields` ile `try_new` üzerinden geçer → diskten
+/// malformed evidence (unknown-field, schema-version mismatch) deserialize
+/// sırasında reject.
+///
+/// **Binding:** `task_id` + `claim_id` + `authorization_basis_digest` +
+/// `attempt_num` → trajectory içindeki yapısal denemenin konumu ve o denemede
+/// askıya alınan authorization kararının kimliği. Durable evidence lookup yok;
+/// `attempt_num` global lookup anahtarı DEĞİL, yalnız trajectory sequence bilgisi.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SuspendedAttemptEvidence {
+    schema_version: u32,
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    authorization_basis_digest: AuthorizationBasisDigest,
+    attempt_num: AttemptNumber,
+    disposition: SuspendedAttemptDisposition,
+}
+
+impl SuspendedAttemptEvidence {
+    /// Validated smart constructor.
+    ///
+    /// **P0-2 (ownership):** Bu constructor navigator boundary'de çağrılır —
+    /// engine değil. Engine disposition payload'unu (`reason`, `reasons`,
+    /// `snapshot`) `EngineCommitResult`'ta taşır; navigator gerçek `attempt_num`
+    /// ile final evidence'ı üretir.
+    pub fn try_new(
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_basis_digest: AuthorizationBasisDigest,
+        attempt_num: AttemptNumber,
+        disposition: SuspendedAttemptDisposition,
+    ) -> Result<Self, SuspendedAttemptEvidenceError> {
+        Ok(Self {
+            schema_version: SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION,
+            task_id,
+            claim_id,
+            authorization_basis_digest,
+            attempt_num,
+            disposition,
+        })
+    }
+
+    pub fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+    pub fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub fn authorization_basis_digest(&self) -> &AuthorizationBasisDigest {
+        &self.authorization_basis_digest
+    }
+    pub fn attempt_num(&self) -> AttemptNumber {
+        self.attempt_num
+    }
+    pub fn disposition(&self) -> &SuspendedAttemptDisposition {
+        &self.disposition
+    }
+}
+
+/// `SuspendedAttemptEvidence` için custom Deserialize — `deny_unknown_fields` +
+/// schema-version validation (P0-1 deserialization-invariant parity).
+///
+/// `#[serde(deny_unknown_fields)]` attribute tagged enum ile çakıştığı için manuel
+/// `Deserialize` uygulanır: geçici wire struct → schema-version check → `try_new`.
+impl<'de> serde::Deserialize<'de> for SuspendedAttemptEvidence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema_version: u32,
+            task_id: crate::trajectory::TaskId,
+            claim_id: ClaimId,
+            authorization_basis_digest: AuthorizationBasisDigest,
+            attempt_num: AttemptNumber,
+            disposition: SuspendedAttemptDisposition,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        if wire.schema_version != SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION {
+            return Err(serde::de::Error::custom(
+                SuspendedAttemptEvidenceError::SchemaVersionMismatch {
+                    found: wire.schema_version,
+                    expected: SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION,
+                },
+            ));
+        }
+        // try_new schema_version'ı constant olarak yazar — wire'dan değil.
+        // Yukarıdaki check wire-format integrity'sini garanti eder.
+        SuspendedAttemptEvidence::try_new(
+            wire.task_id,
+            wire.claim_id,
+            wire.authorization_basis_digest,
+            wire.attempt_num,
+            wire.disposition,
+        )
+        .map_err(serde::de::Error::custom)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// SuspendedAttemptEvidenceDigest — BLAKE3 domain-separated canonical digest
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// BLAKE3 tabanlı suspended attempt-evidence digest.
+///
+/// Domain separation: `"osp.attempt-evidence.v1\0" || canonical_encoding`.
+/// Float canonicalization: NaN reject, -0.0 → 0.0, little-endian, sorted collections.
+/// Canonical rejection list: `(witness, rationale)` sort + duplicate reject.
+///
+/// **v1 byte contract:** Step 6 golden vector pattern'i takip eder —
+/// `suspended_attempt_evidence_digest_v1_golden_vector` testi encoding'i kilitler.
+/// Encoding (field order, tag values, float canonicalization, rejection canonical
+/// ordering) bu testle kilitlenir. Breaking changes after this lock require explicit
+/// v2 domain separator (`osp.attempt-evidence.v2\0`).
+///
+/// **Reload semantics:** `PendingAuthorizationEnvelope::verify()` (Commit 3) digest'i
+/// embedded evidence'dan tekrar hesaplar ve `record.evidence_digest` ile karşılaştırır
+/// (load sırasında tamper detection).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SuspendedAttemptEvidenceDigest([u8; 32]);
+
+impl SuspendedAttemptEvidenceDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.attempt-evidence.v1\0";
+
+    /// Evidence'dan BLAKE3 digest hesapla.
+    ///
+    /// **Canonical encoding sırası:**
+    /// 1. `schema_version` (u32 LE)
+    /// 2. `task_id` (u64 LE)
+    /// 3. `claim_id` (u64 LE)
+    /// 4. `authorization_basis_digest` (raw 32 bytes)
+    /// 5. `attempt_num` (u64 LE)
+    /// 6. Disposition:
+    ///    - variant tag (u8: Held=1, Rejected=2)
+    ///    - `WitnessQuorumSnapshot` canonical encoding
+    ///    - disposition-specific payload (`WitnessHoldReason` veya canonical-sorted
+    ///      `NonEmptyWitnessRejections`)
+    pub fn compute(evidence: &SuspendedAttemptEvidence) -> Result<Self, CanonicalDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u32(
+            &mut hasher,
+            evidence.schema_version,
+            "evidence_schema_version",
+        );
+        encode_u64(&mut hasher, evidence.task_id, "evidence_task_id");
+        encode_u64(&mut hasher, evidence.claim_id, "evidence_claim_id");
+        hasher.update(evidence.authorization_basis_digest.as_bytes());
+        encode_u64(
+            &mut hasher,
+            evidence.attempt_num.get(),
+            "evidence_attempt_num",
+        );
+
+        match &evidence.disposition {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            } => {
+                encode_u8(&mut hasher, 1, "disposition_held_tag");
+                encode_witness_quorum_snapshot(&mut hasher, snapshot)?;
+                encode_witness_hold_reason(&mut hasher, hold_reason)?;
+            }
+            SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+                encode_u8(&mut hasher, 2, "disposition_rejected_tag");
+                encode_witness_quorum_snapshot(&mut hasher, snapshot)?;
+                encode_non_empty_witness_rejections(&mut hasher, reasons)?;
+            }
+        }
+
+        let hash = hasher.finalize();
+        Ok(Self(hash.into()))
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_hex(&self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in &self.0 {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Hex string'den decode (test fixtures ve diagnostic için).
+    pub fn from_hex(hex_str: &str) -> Result<Self, CanonicalDigestError> {
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| CanonicalDigestError::HexDecodeFailed(e.to_string()))?;
+        if bytes.len() != 32 {
+            return Err(CanonicalDigestError::InvalidLength(bytes.len()));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Self(arr))
+    }
+}
 
 /// Explicit witness rejection sonucu — agent proposal revises. Evidence-preserving.
 ///
@@ -5999,5 +6443,570 @@ v = 0.5
         assert_eq!(exact_buf.len(), 2, "Exact = [1, source_tag]");
         assert_eq!(exact_buf[0], 1u8, "presence = 1 (Exact)");
         assert_eq!(exact_buf[1], scip.as_u8(), "source = Scip tag");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #72 — Suspended attempt-evidence model tests (Commit 1)
+    //
+    // P0-1 AttemptNumber invariant (custom Deserialize + TryFrom).
+    // P1 canonical rejection ordering (sort + duplicate reject).
+    // Evidence digest golden vector + preimage tests.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn attempt_number_try_from_rejects_zero() {
+        // P0-1: 0 → Err(Zero). 1-based trajectory invariant.
+        assert_eq!(
+            AttemptNumber::try_from(0u64),
+            Err(AttemptNumberError::Zero),
+            "attempt number zero must be rejected (1-based invariant)"
+        );
+    }
+
+    #[test]
+    fn attempt_number_try_from_accepts_nonzero() {
+        let one = AttemptNumber::try_from(1u64).unwrap();
+        assert_eq!(one.get(), 1);
+        let large = AttemptNumber::try_from(u64::MAX).unwrap();
+        assert_eq!(large.get(), u64::MAX);
+    }
+
+    #[test]
+    fn attempt_number_deserialize_rejects_zero() {
+        // P0-1: derived Deserialize bypass fix — custom Deserialize `0` JSON'dan reject eder.
+        let json = "0";
+        let result: Result<AttemptNumber, _> = serde_json::from_str(json);
+        assert!(
+            result.is_err(),
+            "Deserialize must reject zero (custom Deserialize invariant)"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("attempt number must be >= 1"),
+            "error must explain 1-based invariant, got: {err}"
+        );
+    }
+
+    #[test]
+    fn attempt_number_round_trips_nonzero() {
+        // Serialize → Deserialize round-trip nonzero değerle çalışır.
+        let original = AttemptNumber::try_from(42u64).unwrap();
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(json, "42", "transparent serialize as u64");
+        let restored: AttemptNumber = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn attempt_number_try_from_via_into() {
+        // TryFrom<u64> — `u64::into()` da çalışır.
+        let n: AttemptNumber = 7u64.try_into().unwrap();
+        assert_eq!(n.get(), 7);
+    }
+
+    // — SuspendedAttemptEvidence construction & wire-format —
+
+    /// Test helper: Held evidence fixture (Commit 1 — sadece Commit 1 testleri için).
+    fn sample_held_evidence() -> SuspendedAttemptEvidence {
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "5555555555555555555555555555555555555555555555555555555555555555",
+        )
+        .unwrap();
+        SuspendedAttemptEvidence::try_new(
+            TaskId::from(7u64),
+            ClaimId::from(42u64),
+            basis_digest,
+            AttemptNumber::try_from(3u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: WitnessHoldReason::QuorumInsufficient {
+                    support: 0.8,
+                    threshold: 1.5,
+                },
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 1,
+                    required_approvers: 2,
+                    support: 0.8,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap()
+    }
+
+    /// Test helper: Rejected evidence fixture.
+    fn sample_rejected_evidence() -> SuspendedAttemptEvidence {
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "6666666666666666666666666666666666666666666666666666666666666666",
+        )
+        .unwrap();
+        SuspendedAttemptEvidence::try_new(
+            TaskId::from(9u64),
+            ClaimId::from(99u64),
+            basis_digest,
+            AttemptNumber::try_from(2u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
+                    witness: 100u64,
+                    rationale: Some("predicate mismatch".to_string()),
+                }),
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn suspended_evidence_try_new_sets_schema_version() {
+        let ev = sample_held_evidence();
+        assert_eq!(
+            ev.schema_version(),
+            SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION
+        );
+        assert_eq!(ev.schema_version(), 1, "v1 byte contract");
+    }
+
+    #[test]
+    fn suspended_evidence_accessors_return_correct_values() {
+        let ev = sample_held_evidence();
+        assert_eq!(ev.task_id(), TaskId::from(7u64));
+        assert_eq!(ev.claim_id(), ClaimId::from(42u64));
+        assert_eq!(ev.attempt_num().get(), 3);
+        assert_eq!(ev.authorization_basis_digest().as_bytes(), &[0x55; 32]);
+        assert!(matches!(
+            ev.disposition(),
+            SuspendedAttemptDisposition::Held { .. }
+        ));
+    }
+
+    #[test]
+    fn suspended_evidence_round_trips_through_serde_held() {
+        let original = sample_held_evidence();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: SuspendedAttemptEvidence = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            restored, original,
+            "serde round-trip must preserve evidence"
+        );
+    }
+
+    #[test]
+    fn suspended_evidence_round_trips_through_serde_rejected() {
+        let original = sample_rejected_evidence();
+        let json = serde_json::to_string(&original).unwrap();
+        let restored: SuspendedAttemptEvidence = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, original);
+    }
+
+    #[test]
+    fn suspended_evidence_rejects_unknown_field() {
+        // P0-1: custom Deserialize + deny_unknown_fields — extra field reject.
+        let ev = sample_held_evidence();
+        let mut json = serde_json::to_value(&ev).unwrap();
+        // Bilinmeyen alan enjekte et.
+        json["unknown_field"] = serde_json::json!(42);
+        let json_str = serde_json::to_string(&json).unwrap();
+        let result: Result<SuspendedAttemptEvidence, _> = serde_json::from_str(&json_str);
+        assert!(
+            result.is_err(),
+            "unknown field must be rejected (deny_unknown_fields)"
+        );
+    }
+
+    #[test]
+    fn suspended_evidence_rejects_schema_version_mismatch() {
+        let ev = sample_held_evidence();
+        let mut json = serde_json::to_value(&ev).unwrap();
+        json["schema_version"] = serde_json::json!(999);
+        let json_str = serde_json::to_string(&json).unwrap();
+        let result: Result<SuspendedAttemptEvidence, _> = serde_json::from_str(&json_str);
+        assert!(
+            result.is_err(),
+            "schema version mismatch must be rejected on deserialize"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("schema version mismatch"),
+            "error must name schema mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn suspended_evidence_rejects_attempt_num_zero_on_deserialize() {
+        let ev = sample_held_evidence();
+        let mut json = serde_json::to_value(&ev).unwrap();
+        json["attempt_num"] = serde_json::json!(0);
+        let json_str = serde_json::to_string(&json).unwrap();
+        let result: Result<SuspendedAttemptEvidence, _> = serde_json::from_str(&json_str);
+        assert!(
+            result.is_err(),
+            "attempt_num=0 must be rejected via AttemptNumber custom Deserialize"
+        );
+    }
+
+    #[test]
+    fn suspended_evidence_disposition_tagged_enum_round_trips() {
+        // Serde tag = "kind", rename_all = "snake_case".
+        let held = sample_held_evidence();
+        let held_json = serde_json::to_value(&held).unwrap();
+        assert_eq!(held_json["disposition"]["kind"], "held");
+
+        let rejected = sample_rejected_evidence();
+        let rejected_json = serde_json::to_value(&rejected).unwrap();
+        assert_eq!(rejected_json["disposition"]["kind"], "rejected");
+    }
+
+    // — SuspendedAttemptEvidenceDigest determinism + golden vector —
+
+    #[test]
+    fn suspended_evidence_digest_is_deterministic() {
+        let ev = sample_held_evidence();
+        let d1 = SuspendedAttemptEvidenceDigest::compute(&ev).unwrap();
+        let d2 = SuspendedAttemptEvidenceDigest::compute(&ev).unwrap();
+        assert_eq!(d1.as_bytes(), d2.as_bytes(), "BLAKE3 deterministic");
+    }
+
+    #[test]
+    fn suspended_evidence_digest_differs_for_held_vs_rejected() {
+        // Aynı identity fields, farklı disposition → farklı digest.
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "7777777777777777777777777777777777777777777777777777777777777777",
+        )
+        .unwrap();
+        let held = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(1u64),
+            basis_digest.clone(),
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: WitnessHoldReason::MinApproversNotMet {
+                    distinct: 0,
+                    required: 2,
+                },
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let rejected = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(1u64),
+            basis_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
+                    witness: 5u64,
+                    rationale: None,
+                }),
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let dh = SuspendedAttemptEvidenceDigest::compute(&held).unwrap();
+        let dr = SuspendedAttemptEvidenceDigest::compute(&rejected).unwrap();
+        assert_ne!(
+            dh.as_bytes(),
+            dr.as_bytes(),
+            "Held vs Rejected must produce distinct digests (disposition tag binding)"
+        );
+    }
+
+    #[test]
+    fn suspended_evidence_digest_hex_round_trips() {
+        let ev = sample_held_evidence();
+        let d = SuspendedAttemptEvidenceDigest::compute(&ev).unwrap();
+        let hex = d.to_hex();
+        assert_eq!(hex.len(), 64, "32 bytes → 64 hex chars");
+        let restored = SuspendedAttemptEvidenceDigest::from_hex(&hex).unwrap();
+        assert_eq!(restored.as_bytes(), d.as_bytes());
+    }
+
+    // — Canonical rejection ordering (P1) —
+
+    #[test]
+    fn rejection_canonical_order_independent_of_input_order() {
+        // P1: aynı rejection kümesi farklı input sırasıyla aynı digest üretir.
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "8888888888888888888888888888888888888888888888888888888888888888",
+        )
+        .unwrap();
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let r1 = WitnessRejection {
+            witness: 10u64,
+            rationale: Some("a".to_string()),
+        };
+        let r2 = WitnessRejection {
+            witness: 20u64,
+            rationale: None,
+        };
+        // [r1, r2] sırasıyla.
+        let ev_a = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(1u64),
+            basis_digest.clone(),
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_vec(vec![r1.clone(), r2.clone()]),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .unwrap();
+        // [r2, r1] sırasıyla — aynı mantıksal küme.
+        let ev_b = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(1u64),
+            basis_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_vec(vec![r2, r1]),
+                snapshot,
+            },
+        )
+        .unwrap();
+        let da = SuspendedAttemptEvidenceDigest::compute(&ev_a).unwrap();
+        let db = SuspendedAttemptEvidenceDigest::compute(&ev_b).unwrap();
+        assert_eq!(
+            da.as_bytes(),
+            db.as_bytes(),
+            "canonical sort must make rejection order irrelevant to digest"
+        );
+    }
+
+    #[test]
+    fn rejection_canonical_rejects_duplicate_witness_rationale() {
+        // P1: aynı (witness, rationale) çifti iki kez → EncodingFailed.
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "9999999999999999999999999999999999999999999999999999999999999999",
+        )
+        .unwrap();
+        let dup = WitnessRejection {
+            witness: 7u64,
+            rationale: Some("same".to_string()),
+        };
+        let ev = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(1u64),
+            basis_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_vec(vec![dup.clone(), dup]),
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let result = SuspendedAttemptEvidenceDigest::compute(&ev);
+        assert!(
+            result.is_err(),
+            "duplicate (witness, rationale) must be rejected for digest determinism"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate witness rejection"),
+            "error must name the duplicate detection, got: {err}"
+        );
+    }
+
+    #[test]
+    fn rejection_canonical_accepts_same_witness_different_rationale() {
+        // Aynı witness farklı rationale → ayrı rejection (duplicate DEĞİL).
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        )
+        .unwrap();
+        let r1 = WitnessRejection {
+            witness: 7u64,
+            rationale: Some("reason_a".to_string()),
+        };
+        let r2 = WitnessRejection {
+            witness: 7u64,
+            rationale: Some("reason_b".to_string()),
+        };
+        let ev = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(1u64),
+            basis_digest,
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_vec(vec![r1, r2]),
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let result = SuspendedAttemptEvidenceDigest::compute(&ev);
+        assert!(
+            result.is_ok(),
+            "same witness different rationale is NOT a duplicate"
+        );
+    }
+
+    // — Canonical encoding preimage tests (byte-level) —
+
+    #[test]
+    fn encode_witness_rejection_to_vec_preimage() {
+        // Encoding: witness u64 LE + rationale Option tag.
+        use crate::witness::WitnessRejection;
+        let r_none = WitnessRejection {
+            witness: 1u64,
+            rationale: None,
+        };
+        let bytes = encode_witness_rejection_to_vec(&r_none).unwrap();
+        // witness 1u64 LE = [1,0,0,0,0,0,0,0] + rationale None = [0]
+        assert_eq!(bytes, vec![1u8, 0, 0, 0, 0, 0, 0, 0, 0]);
+
+        let r_some = WitnessRejection {
+            witness: 1u64,
+            rationale: Some("ab".to_string()),
+        };
+        let bytes = encode_witness_rejection_to_vec(&r_some).unwrap();
+        // witness 1u64 LE + tag 1 + len 2 u64 LE + "ab"
+        let mut expected = vec![1u8, 0, 0, 0, 0, 0, 0, 0, 1];
+        expected.extend_from_slice(&2u64.to_le_bytes());
+        expected.extend_from_slice(b"ab");
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encode_witness_hold_reason_preimage_tags() {
+        // Tag assignment: MinApproversNotMet=1, QuorumInsufficient=2,
+        // EvidenceNotLocallyObservable=3.
+        // (Bu test encoder'ın tag atamasını kilitler — `format!("{:?}")` değil.)
+        let reason_min = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        // Aynı evidence digest test'in farklı varyantları farklı tag üretir.
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .unwrap();
+        let make_ev = |reason| {
+            SuspendedAttemptEvidence::try_new(
+                TaskId::from(1u64),
+                ClaimId::from(1u64),
+                basis_digest.clone(),
+                AttemptNumber::try_from(1u64).unwrap(),
+                SuspendedAttemptDisposition::Held {
+                    hold_reason: reason,
+                    snapshot: WitnessQuorumSnapshot {
+                        approvers: 0,
+                        required_approvers: 2,
+                        support: 0.0,
+                        required_support: 1.5,
+                    },
+                },
+            )
+            .unwrap()
+        };
+        let d_min = SuspendedAttemptEvidenceDigest::compute(&make_ev(
+            WitnessHoldReason::MinApproversNotMet {
+                distinct: 0,
+                required: 2,
+            },
+        ))
+        .unwrap();
+        let d_quorum = SuspendedAttemptEvidenceDigest::compute(&make_ev(
+            WitnessHoldReason::QuorumInsufficient {
+                support: 0.0,
+                threshold: 1.5,
+            },
+        ))
+        .unwrap();
+        let d_evidence = SuspendedAttemptEvidenceDigest::compute(&make_ev(
+            WitnessHoldReason::EvidenceNotLocallyObservable {
+                hint: "x".to_string(),
+            },
+        ))
+        .unwrap();
+        // Üç farklı varyant üç farklı digest üretir (tag ayrımı çalışır).
+        assert_ne!(d_min.as_bytes(), d_quorum.as_bytes());
+        assert_ne!(d_min.as_bytes(), d_evidence.as_bytes());
+        assert_ne!(d_quorum.as_bytes(), d_evidence.as_bytes());
+        let _ = reason_min; // (tip referansı — test okunabilirliği için)
+    }
+
+    // — Golden vector (v1 byte contract lock) —
+
+    /// Golden evidence fixture — Held disposition, non-trivial değerlerle.
+    /// Nested digest (`AuthorizationBasisDigest`) explicit sentinel bytes —
+    /// evidence encoding değişikliği bu golden'ı kırar, nested digest değişikliği değil.
+    fn golden_suspended_attempt_evidence_fixture_held() -> SuspendedAttemptEvidence {
+        SuspendedAttemptEvidence::try_new(
+            TaskId::from(0x0A1Bu64),
+            ClaimId::from(0x0C1Du64),
+            AuthorizationBasisDigest::from_hex(
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            )
+            .unwrap(),
+            AttemptNumber::try_from(7u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: WitnessHoldReason::QuorumInsufficient {
+                    support: 0.8,
+                    threshold: 1.5,
+                },
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 1,
+                    required_approvers: 2,
+                    support: 0.8,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap()
+    }
+
+    /// Golden hex sabiti — ilk implementasyon doğrulanmış değer.
+    /// DO NOT update as routine test maintenance. A mismatch requires an explicit
+    /// compatibility/version decision: a canonical field/order/tag/encoding change
+    /// requires v2 domain separator (`osp.attempt-evidence.v2\0`).
+    const SUSPENDED_ATTEMPT_EVIDENCE_V1_GOLDEN_HEX: &str =
+        "3cfb984502df3382fec90111b5afd19a5d6543c071c98ba6c3fc3f7a0fe0052c";
+
+    #[test]
+    fn suspended_attempt_evidence_digest_v1_golden_vector() {
+        // **INV-T9 #72 v1 byte contract lock** — SuspendedAttemptEvidenceDigest.
+        // Encoding (field order, tag values, float canonicalization, rejection
+        // canonical ordering) bu testle kilitlenir. Nested AuthorizationBasisDigest
+        // sentinel bytes (0xEE) → evidence encoding değişikliği buradan gelir,
+        // nested digest değişikliğinden değil.
+        let ev = golden_suspended_attempt_evidence_fixture_held();
+        let actual = SuspendedAttemptEvidenceDigest::compute(&ev).unwrap();
+        assert_eq!(
+            actual.to_hex(),
+            SUSPENDED_ATTEMPT_EVIDENCE_V1_GOLDEN_HEX,
+            "SuspendedAttemptEvidence v1 byte contract changed — explicit version decision required"
+        );
     }
 }
