@@ -78,10 +78,10 @@ pub struct MetricValue {
 
 /// Metric'in kaynağı (provenance).
 ///
-/// **INV-T9 #70:** `Mixed` varyantı yalnız heterojen aggregation çıktısıdır (Commit 2
-/// `aggregate_source`). Doğrudan axis kaynağı olarak kabul edilemez —
+/// **INV-T9 #70:** `Mixed` varyantı yalnız heterojen aggregation çıktısıdır
+/// (`aggregate_source`). Doğrudan axis kaynağı olarak kabul edilemez —
 /// `validate_direct_source` ve axis constructor'larında `MixedCannotBeDeclaredDirectly`
-/// ile reddedilir.
+/// ile reddedilir; `validate_direct_axis_output` defensive re-validation (Commit 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum MetricSource {
     /// Tier 1 syntactic (tree-sitter).
@@ -212,8 +212,8 @@ pub struct CustomRawPosition {
 // AxisMeasurement + MeasuredRawPosition (INV-T9 #70 — provenance-native neutral layer)
 //
 // Neutral coords-layer per-axis ölçüm tipi. `value + source` pair; validation non-finite
-// + [0,1] range defensive. Authority/evidence yolları (Commit 2 `measured_position_of`)
-// her axis output'unu `validate_direct_axis_output()` ile defensive re-validate eder.
+// + [0,1] range defensive. Authority/evidence yolları (`measured_position_of`) her axis
+// output'unu `validate_direct_axis_output()` ile defensive re-validate eder.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// INV-T9 #70 — Tek eksen ölçümü (coords-layer neutral). `value + source` pair.
@@ -221,7 +221,7 @@ pub struct CustomRawPosition {
 /// **Validation contract:** `try_new` non-finite (NaN/±Inf) ve [0,1] range dışı değeri
 /// reddeder. Public fields ile struct literal bypass mümkün — wire-bypass `Deserialize`
 /// ile kapatıldı (P1-2: `try_new` validation guaranteed). Authority path defensive
-/// re-validate Commit 2 `measured_position_of` ile.
+/// re-validate `measured_position_of` → `validate_direct_axis_output` ile.
 ///
 /// **Source provenance:** `Mixed` yalnız aggregation çıktısıdır; doğrudan axis kaynağı
 /// olarak kabul edilemez (`AxisSourceError::MixedCannotBeDeclaredDirectly`).
@@ -245,10 +245,22 @@ impl AxisMeasurement {
         Ok(Self { value, source })
     }
 
-    /// Defensive re-validation (Commit 2 `measured_position_of` her axis output'ını
-    /// çağırır). Public field bypass'a karşı defensive.
+    /// Defensive re-validation (`measured_position_of` her axis output'ını çağırır).
+    /// Public field bypass'a karşı defensive.
     pub fn validate(&self) -> Result<(), AxisMeasurementError> {
         Self::try_new(self.value, self.source).map(|_| ())
+    }
+
+    /// **INV-T9 #70 Commit 2 (P2-3):** Defensive re-validation — `measured_position_of`
+    /// her axis output'ını çağırır. Mixed yalnız aggregation çıktısıdır; custom axis
+    /// doğrudan üretemez (constructor guard bypass struct literal'a karşı runtime guard).
+    /// `pub(crate)` — authority path internal kullanımı; public migration yüzeyi değil.
+    pub(crate) fn validate_direct_axis_output(&self) -> Result<(), AxisMeasurementError> {
+        self.validate()?;
+        if self.source == MetricSource::Mixed {
+            return Err(AxisMeasurementError::MixedDirectAxisSource);
+        }
+        Ok(())
     }
 }
 
@@ -283,10 +295,15 @@ pub enum AxisMeasurementError {
     NonFiniteValue,
     #[error("axis value out of range [0,1]: {0}")]
     OutOfRange(f64),
+    /// **INV-T9 #70 Commit 2:** Mixed doğrudan axis output olarak red — yalnız aggregation.
+    /// `AxisSourceError::MixedCannotBeDeclaredDirectly` (constructor guard) ayrı enum'da
+    /// yaşar; bu varyant axis output'unda struct literal bypass'a karşı runtime guard'dır.
+    #[error("Mixed source cannot be returned by a single axis (only by aggregation)")]
+    MixedDirectAxisSource,
 }
 
 /// INV-T9 #70 — Mixed doğrudan axis kaynağı olarak reddi. `Mixed` yalnız heterojen
-/// aggregation çıktısıdır (Commit 2 `aggregate_source`); axis constructor'larında
+/// aggregation çıktısıdır (`aggregate_source`); axis constructor'larında
 /// `validate_direct_source` ile derleme zamanı değil runtime guard.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AxisSourceError {
@@ -300,6 +317,88 @@ pub fn validate_direct_source(source: MetricSource) -> Result<MetricSource, Axis
         Err(AxisSourceError::MixedCannotBeDeclaredDirectly)
     } else {
         Ok(source)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CoordinateMeasurementError + aggregate_source (INV-T9 #70 Commit 2)
+//
+// Authority/evidence yollarının koordinat ölçümü hata yüzeyi. P1-1 structural
+// preflight (MissingCoreAxes) ölçümden ÖNCE; P1-2 per-axis measurement hatası
+// axis kimliğini korur (blanket #[from] YOK). aggregate_source heterojen
+// source aggregation semantics.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// INV-T9 #70 Commit 2 — Koordinat ölçümü hataları (measured_position_of /
+/// try_raw_position_of authority yüzeyi + aggregate_source).
+///
+/// **Error precedence (P1-1):**
+/// 1. Structural completeness (5 core raw axis) → `MissingCoreAxes { missing }`
+/// 2. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
+///
+/// **Axis identity preservation (P1-2):** Per-axis measurement hatası `axis_id`
+/// ile hangi axis'in failed olduğu korunur. Blanket `#[from] AxisMeasurementError`
+/// KULLANILMAZ — axis kimliği error boundary'de kaybolmasın.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum CoordinateMeasurementError {
+    /// `aggregate_source` boş iterator aldı.
+    #[error("empty measurement source set")]
+    EmptySourceSet,
+
+    /// **P1-1:** Eksik core raw axis — sentetik (0.0, Placeholder) DEĞİL.
+    /// `measured_position_of` tam 5-core-axis authority yüzeyidir; partial preset'ler
+    /// (default_raw_three) legacy `raw_position_of` kullanır. Preflight ölçümden ÖNCE.
+    /// `missing` `CORE_RAW_AXIS_IDS` sırasındadır.
+    #[error("missing core raw axes: {missing:?}")]
+    MissingCoreAxes { missing: Vec<&'static str> },
+
+    /// **P1-2:** Per-axis measurement hatası — axis kimliği korunur.
+    #[error("axis `{axis_id}` measurement failed: {source}")]
+    AxisMeasurementFailed {
+        axis_id: &'static str,
+        #[source]
+        source: AxisMeasurementError,
+    },
+}
+
+/// **INV-T9 #70 Commit 2** — Heterojen aggregation semantics (P2-2 doc).
+///
+/// `Mixed` doğrudan bir axis ölçümünün kaynağı olamaz. Aggregate input'ları daha önce
+/// aggregate edilmiş ve dolayısıyla `Mixed` olabilir. Herhangi bir `Mixed` input içeren
+/// üst aggregation da `Mixed` üretir; yalnız tamamen aynı non-Mixed source kümesi o
+/// source'u korur.
+///
+/// Table:
+/// ```text
+/// [Scip]                → Scip
+/// [Scip, Scip]          → Scip
+/// [Scip, TreeSitter]    → Mixed
+/// [Mixed]               → Mixed
+/// [Mixed, Mixed]        → Mixed
+/// [Mixed, Scip]         → Mixed
+/// []                    → EmptySourceSet
+/// ```
+///
+/// `pub(crate)` — Commit 3 `measure_task_delta` subject scope centroid aggregation için
+/// (Commit 2'de coords-layer test'leri çağırır).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "INV-T9 #70 Commit 3 measure_task_delta subject scope aggregation will consume"
+    )
+)]
+pub(crate) fn aggregate_source(
+    sources: impl IntoIterator<Item = MetricSource>,
+) -> Result<MetricSource, CoordinateMeasurementError> {
+    let mut sources = sources.into_iter();
+    let first = sources
+        .next()
+        .ok_or(CoordinateMeasurementError::EmptySourceSet)?;
+    if sources.all(|s| s == first) {
+        Ok(first)
+    } else {
+        Ok(MetricSource::Mixed)
     }
 }
 
@@ -548,7 +647,7 @@ impl AxisParameterEncoder {
 ///   Authority/evidence yolları yalnız bunu kullanmalı.
 /// - `try_compute()` fallible value projection (measure() üzerinden).
 /// - `compute()` legacy infallible value-only projection. `#[deprecated]` attribute
-///   Commit 4 cleanup'ta eklenecek (mevcut caller churn'ü Commit 1'de YOK).
+///   Commit 4'te — authority implementation migration tamamlandığında eklenir.
 pub trait Axis: Send + Sync {
     /// Eksen adı — `raw_position_of` isme göre mapler (sıra değil).
     /// Standart adlar: `"coupling"`, `"cohesion"`, `"instability"`, `"entropy"`, `"witness_depth"`.
@@ -570,8 +669,8 @@ pub trait Axis: Send + Sync {
     }
 
     /// **Legacy value-only projection.** Authority/evidence paths `measure()` kullanmalı.
-    /// (`#[deprecated]` attribute Commit 4 cleanup'ta eklenecek — mevcut caller churn'ü
-    /// Commit 1'de YOK.)
+    /// (`#[deprecated]` attribute Commit 4'te — authority implementation migration
+    /// tamamlandığında `raw_position_of` ile birlikte deprecate edilir.)
     fn compute(&self, node: &Node, space: &Space) -> f64;
 }
 
@@ -627,8 +726,16 @@ impl CoordinateSystem {
         self.axes.iter().map(|a| a.name()).collect()
     }
 
-    /// Generic: tüm eksen değerleri `Vec<f64>` olarak (eksen sırasına göre).
-    /// Custom axis kombinasyonları için. OSP preset için `raw_position_of` tercih edilir.
+    /// Legacy value-only projection for all registered axes, in registration order.
+    ///
+    /// Calls `Axis::compute()` and therefore does not preserve provenance or propagate
+    /// measurement errors. It does not require or synthesize the five core raw axes.
+    ///
+    /// Authority/evidence paths must use `measured_position_of()` or `try_raw_position_of()`.
+    /// Generic custom-axis compatibility projection — Commit 4 `#[deprecated]` boundary'si:
+    /// `raw_position_of` + `Axis::compute` authority path migration ile birlikte deprecate
+    /// edilir; `position_of` named/described provenance-aware generic replacement gelene
+    /// kadar korunur (diagnostic/custom-axis compat).
     pub fn position_of(&self, node: &Node, space: &Space) -> Vec<f64> {
         self.axes.iter().map(|a| a.compute(node, space)).collect()
     }
@@ -734,6 +841,155 @@ impl CoordinateSystem {
         }
         Ok(descriptors)
     }
+
+    /// **INV-T9 #70 Commit 2 (P1-1):** 5 core raw axis referanslarını tek geçişte bağlar.
+    ///
+    /// `measured_position_of` authority path iki-geçişli `name()` lookup kullanmaz;
+    /// `name()` ikinci kez okunmaz; preflight ile measurement arasında identity TOCTOU
+    /// oluşmaz. `unwrap()` YOK — match-validated tuple pattern ile ya `CoreAxisRefs` ya
+    /// `MissingCoreAxes { missing }` döner. `missing` `CORE_RAW_AXIS_IDS` sırasındadır.
+    ///
+    /// `pub(crate)` — authority path internal kullanımı; public migration yüzeyi değil.
+    pub(crate) fn bind_core_axes(&self) -> Result<CoreAxisRefs<'_>, CoordinateMeasurementError> {
+        let mut coupling = None;
+        let mut cohesion = None;
+        let mut instability = None;
+        let mut entropy = None;
+        let mut witness_depth = None;
+        for axis in &self.axes {
+            match axis.name() {
+                "coupling" => coupling = Some(axis.as_ref()),
+                "cohesion" => cohesion = Some(axis.as_ref()),
+                "instability" => instability = Some(axis.as_ref()),
+                "entropy" => entropy = Some(axis.as_ref()),
+                "witness_depth" => witness_depth = Some(axis.as_ref()),
+                _ => {} // custom axis — MeasuredRawPosition'a dahil değil
+            }
+        }
+        let mut missing = Vec::new();
+        if coupling.is_none() {
+            missing.push("coupling");
+        }
+        if cohesion.is_none() {
+            missing.push("cohesion");
+        }
+        if instability.is_none() {
+            missing.push("instability");
+        }
+        if entropy.is_none() {
+            missing.push("entropy");
+        }
+        if witness_depth.is_none() {
+            missing.push("witness_depth");
+        }
+        match (coupling, cohesion, instability, entropy, witness_depth) {
+            (
+                Some(coupling),
+                Some(cohesion),
+                Some(instability),
+                Some(entropy),
+                Some(witness_depth),
+            ) => Ok(CoreAxisRefs {
+                coupling,
+                cohesion,
+                instability,
+                entropy,
+                witness_depth,
+            }),
+            _ => Err(CoordinateMeasurementError::MissingCoreAxes { missing }),
+        }
+    }
+
+    /// **INV-T9 #70 Commit 2:** Provenance-preserving tam 5-core-axis authority ölçümü.
+    ///
+    /// Error precedence:
+    /// 1. Missing core axis preflight (structural) → `MissingCoreAxes` (P1-1 — ölçümden ÖNCE)
+    /// 2. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
+    ///    (P1-2 — axis kimliği `axis_id` ile korunur)
+    ///
+    /// Authority/evidence yollarının tek ölçüm yüzeyi. Legacy partial preset'ler
+    /// (`default_raw_three`) `raw_position_of` kullanmaya devam eder (Commit 4'e kadar).
+    pub fn measured_position_of(
+        &self,
+        node: &Node,
+        space: &Space,
+    ) -> Result<MeasuredRawPosition, CoordinateMeasurementError> {
+        // P1-1: tek-pass reference binding — name() ikinci kez okunmaz, unwrap YOK.
+        let refs = self.bind_core_axes()?;
+        // P1-2: axis kimliği error boundary'de korunur (blanket #[from] YOK).
+        let coupling = refs
+            .coupling
+            .measure(node, space)
+            .and_then(|m| m.validate_direct_axis_output().map(|_| m))
+            .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed {
+                axis_id: "coupling",
+                source,
+            })?;
+        let cohesion = refs
+            .cohesion
+            .measure(node, space)
+            .and_then(|m| m.validate_direct_axis_output().map(|_| m))
+            .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed {
+                axis_id: "cohesion",
+                source,
+            })?;
+        let instability = refs
+            .instability
+            .measure(node, space)
+            .and_then(|m| m.validate_direct_axis_output().map(|_| m))
+            .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed {
+                axis_id: "instability",
+                source,
+            })?;
+        let entropy = refs
+            .entropy
+            .measure(node, space)
+            .and_then(|m| m.validate_direct_axis_output().map(|_| m))
+            .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed {
+                axis_id: "entropy",
+                source,
+            })?;
+        let witness_depth = refs
+            .witness_depth
+            .measure(node, space)
+            .and_then(|m| m.validate_direct_axis_output().map(|_| m))
+            .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed {
+                axis_id: "witness_depth",
+                source,
+            })?;
+        Ok(MeasuredRawPosition {
+            coupling,
+            cohesion,
+            instability,
+            entropy,
+            witness_depth,
+        })
+    }
+
+    /// **INV-T9 #70 Commit 2:** Fallible value-only projection — `measured_position_of`
+    /// üzerinden `to_raw()`. Tek authority zinciri (kendi axis traversal yazmaz).
+    /// Commit 4'te `raw_position_of` deprecated edilince caller'ların migrate edeceği yüzey.
+    pub fn try_raw_position_of(
+        &self,
+        node: &Node,
+        space: &Space,
+    ) -> Result<RawPosition, CoordinateMeasurementError> {
+        self.measured_position_of(node, space).map(|m| m.to_raw())
+    }
+}
+
+/// **INV-T9 #70 Commit 2 (P1-1):** `bind_core_axes` tarafından tek geçişte bağlanan 5 core
+/// raw axis referansı. `measured_position_of` bunları consume eder — ikinci bir `name()`
+/// lookup yok, preflight ile measurement arasında TOCTOU yok.
+///
+/// `pub(crate)` — `bind_core_axes` return type exposure için; field'lar crate dışından
+/// erişilemez (CoordinateSystem modülü dışında construct edilemez).
+pub(crate) struct CoreAxisRefs<'a> {
+    coupling: &'a dyn Axis,
+    cohesion: &'a dyn Axis,
+    instability: &'a dyn Axis,
+    entropy: &'a dyn Axis,
+    witness_depth: &'a dyn Axis,
 }
 
 impl Default for CoordinateSystem {
@@ -1246,7 +1502,7 @@ mod tests {
     #[test]
     fn axis_measurement_try_new_accepts_mixed_source() {
         // Mixed constructor guard yalnız axis constructor'larında; AxisMeasurement
-        // aggregation çıktısı için Mixed kabul eder (Commit 2 `aggregate_source`).
+        // aggregation çıktısı için Mixed kabul eder (`aggregate_source`).
         let m = AxisMeasurement::try_new(0.5, MetricSource::Mixed).unwrap();
         assert_eq!(m.source, MetricSource::Mixed);
     }
@@ -1375,5 +1631,668 @@ mod tests {
         assert!((raw.z - 0.3).abs() < 1e-9);
         assert!((raw.w - 0.4).abs() < 1e-9);
         assert!((raw.v - 0.5).abs() < 1e-9);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 2 — measured_position_of / try_raw_position_of / aggregate_source
+    //
+    // P1-1: structural preflight ölçümden ÖNCE (PanicOnMeasureAxis sabitler).
+    // P1-2: AxisMeasurementFailed { axis_id, source } — axis kimliği korunur.
+    // P2-2: full-preset parity (measured_position_of().to_raw() == raw_position_of()).
+    // P2-3: ForgedValueAxis struct literal bypass + validate_direct_axis_output.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// SourcedConstantAxis — per-axis source preservation test fixture. Construct edilen
+    /// source `measure()` üzerinden `MeasuredRawPosition`'a ulaşmalı.
+    struct SourcedConstantAxis {
+        name: &'static str,
+        value: f64,
+        source: MetricSource,
+    }
+
+    impl Axis for SourcedConstantAxis {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            params.push_f64(self.value)?;
+            params.push_bytes(self.source.descriptor_id())?;
+            AxisDescriptor::try_new(self.name, 2, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(self.value, self.source)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            self.value
+        }
+    }
+
+    /// DivergentAxis — `try_raw_position_of` measure() değerini (0.9) kullanır kanıtı.
+    /// `compute()` 0.1 döner; eğer authority path compute() kullansaydı test fail ederdi.
+    struct DivergentAxis {
+        name: &'static str,
+    }
+
+    impl Axis for DivergentAxis {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new(self.name, 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.9, MetricSource::Heuristic)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.1
+        }
+    }
+
+    /// MixedReturningAxis — direct Mixed rejection. Axis constructor guard bypass
+    /// struct literal ile measure() Mixed döner; validate_direct_axis_output reddeder.
+    struct MixedReturningAxis;
+
+    impl Axis for MixedReturningAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            // P2-3: struct literal bypass — AxisMeasurement public fields.
+            Ok(AxisMeasurement {
+                value: 0.5,
+                source: MetricSource::Mixed,
+            })
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+    }
+
+    /// ForgedValueAxis — P2-2 parametric: struct literal bypass ile NaN/1.5 forged.
+    /// validate_direct_axis_output defensive re-validation bunu reddeder.
+    struct ForgedValueAxis {
+        value: f64,
+        source: MetricSource,
+    }
+
+    impl Axis for ForgedValueAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            // P2-3: struct literal bypass — AxisMeasurement::try_new hiç çağrılmaz.
+            Ok(AxisMeasurement {
+                value: self.value,
+                source: self.source,
+            })
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            self.value
+        }
+    }
+
+    /// FailingAxis — axis'in kendi Err(...) döndürmesi. P2-1 axis-own-error kategorisi:
+    /// validate_direct_axis_output öncesi measure() hatası AxisMeasurementFailed'a akar.
+    struct FailingAxis;
+
+    impl Axis for FailingAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            Err(AxisMeasurementError::NonFiniteValue)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.0
+        }
+    }
+
+    /// PanicOnMeasureAxis — P2-3: measure() çağrılırsa panic. Partial sistemde
+    /// preflight measure()'ı hiç çağırmadan MissingCoreAxes döndüğünü sabitler.
+    struct PanicOnMeasureAxis;
+
+    impl Axis for PanicOnMeasureAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            panic!("measure must not run before missing-axis preflight");
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.0
+        }
+    }
+
+    /// P1-2: AxisMeasurementFailed test'leri tam 5-core-axis system kurmalı.
+    /// Yalnız coupling değişkendir; diğer dört axis sabit sourced constant.
+    fn full_core_system_with_coupling<A: Axis + 'static>(coupling: A) -> CoordinateSystem {
+        CoordinateSystem::empty()
+            .try_with_axis(coupling)
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+    }
+
+    // --- measured_position_of: source preservation / mapping / custom-axis filter ---
+
+    #[test]
+    fn measured_position_of_preserves_each_axis_source() {
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(SourcedConstantAxis {
+                name: "coupling",
+                value: 0.1,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Placeholder,
+            })
+            .unwrap();
+        let mrp = cs.measured_position_of(&node(1), &Space::new()).unwrap();
+        assert_eq!(mrp.coupling.source, MetricSource::TreeSitter);
+        assert_eq!(mrp.cohesion.source, MetricSource::Scip);
+        assert_eq!(mrp.instability.source, MetricSource::TreeSitter);
+        assert_eq!(mrp.entropy.source, MetricSource::Heuristic);
+        assert_eq!(mrp.witness_depth.source, MetricSource::Placeholder);
+        assert!((mrp.coupling.value - 0.1).abs() < 1e-9);
+        assert!((mrp.cohesion.value - 0.2).abs() < 1e-9);
+        assert!((mrp.instability.value - 0.3).abs() < 1e-9);
+        assert!((mrp.entropy.value - 0.4).abs() < 1e-9);
+        assert!((mrp.witness_depth.value - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn measured_position_of_maps_by_axis_name_not_order() {
+        // Registration sırası karışık — isme göre doğru field'a maplenmeli.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Placeholder,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "coupling",
+                value: 0.1,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap();
+        let mrp = cs.measured_position_of(&node(1), &Space::new()).unwrap();
+        assert!((mrp.coupling.value - 0.1).abs() < 1e-9);
+        assert!((mrp.cohesion.value - 0.2).abs() < 1e-9);
+        assert!((mrp.instability.value - 0.3).abs() < 1e-9);
+        assert!((mrp.entropy.value - 0.4).abs() < 1e-9);
+        assert!((mrp.witness_depth.value - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn measured_position_of_ignores_custom_axes() {
+        // Custom axis "security" MeasuredRawPosition'a dahil edilmez.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(SourcedConstantAxis {
+                name: "coupling",
+                value: 0.1,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Placeholder,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "security",
+                value: 0.99,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap();
+        let mrp = cs.measured_position_of(&node(1), &Space::new()).unwrap();
+        // 5 core axis ölçüldü, custom "security" dahil edilmedi.
+        assert!((mrp.coupling.value - 0.1).abs() < 1e-9);
+        assert!((mrp.witness_depth.value - 0.5).abs() < 1e-9);
+    }
+
+    // --- measured_position_of: defensive rejection (full_core_system_with_coupling) ---
+
+    #[test]
+    fn measured_position_of_rejects_axis_returning_mixed_directly() {
+        let cs = full_core_system_with_coupling(MixedReturningAxis);
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(source, AxisMeasurementError::MixedDirectAxisSource);
+            }
+            other => panic!("expected AxisMeasurementFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn measured_position_of_rejects_forged_nan_axis_output() {
+        // P2-3: ForgedValueAxis struct literal bypass — NaN defensive re-validation.
+        let cs = full_core_system_with_coupling(ForgedValueAxis {
+            value: f64::NAN,
+            source: MetricSource::Scip,
+        });
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(source, AxisMeasurementError::NonFiniteValue);
+            }
+            other => panic!("expected AxisMeasurementFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn measured_position_of_rejects_forged_out_of_range_axis_output() {
+        // P2-3: ForgedValueAxis struct literal bypass — 1.5 defensive re-validation.
+        let cs = full_core_system_with_coupling(ForgedValueAxis {
+            value: 1.5,
+            source: MetricSource::Scip,
+        });
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source } => {
+                assert_eq!(axis_id, "coupling");
+                assert!(matches!(
+                    source,
+                    AxisMeasurementError::OutOfRange(v) if (v - 1.5).abs() < 1e-9
+                ));
+            }
+            other => panic!("expected AxisMeasurementFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn measured_position_of_propagates_axis_own_measurement_error() {
+        // P2-1: axis kendi Err(NonFiniteValue) döner — AxisMeasurementFailed'a akar.
+        let cs = full_core_system_with_coupling(FailingAxis);
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(source, AxisMeasurementError::NonFiniteValue);
+            }
+            other => panic!("expected AxisMeasurementFailed, got {other:?}"),
+        }
+    }
+
+    // --- measured_position_of: P1-1 structural preflight (partial system) ---
+
+    #[test]
+    fn measured_position_of_rejects_missing_core_axes() {
+        // Yalnız coupling registered — 4 core axis missing (CORE_RAW_AXIS_IDS sırasında).
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(SourcedConstantAxis {
+                name: "coupling",
+                value: 0.1,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap();
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::MissingCoreAxes { missing } => {
+                assert_eq!(
+                    missing,
+                    vec!["cohesion", "instability", "entropy", "witness_depth"]
+                );
+            }
+            other => panic!("expected MissingCoreAxes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn measured_position_of_missing_axis_error_lists_all_absent() {
+        // coupling + entropy registered — 3 missing.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(SourcedConstantAxis {
+                name: "coupling",
+                value: 0.1,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap();
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::MissingCoreAxes { missing } => {
+                assert_eq!(missing, vec!["cohesion", "instability", "witness_depth"]);
+            }
+            other => panic!("expected MissingCoreAxes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn measured_position_of_missing_axis_preflight_precedes_measurement_error() {
+        // P2-3: PanicOnMeasureAxis partial sistemde MissingCoreAxes dönmeli; measure()
+        // çağrılmadı (panic yok). Bu preflight'ın gerçekten hiçbir measure() çağrısından
+        // önce olduğunu sabitler.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(PanicOnMeasureAxis)
+            .unwrap();
+        let err = cs
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        // Eğer preflight önce çalışmazsa PanicOnMeasureAxis::measure() panic → test fail.
+        assert_eq!(
+            err,
+            CoordinateMeasurementError::MissingCoreAxes {
+                missing: vec!["cohesion", "instability", "entropy", "witness_depth"],
+            }
+        );
+    }
+
+    // --- try_raw_position_of: measure value / error propagation / parity ---
+
+    #[test]
+    fn try_raw_position_of_returns_measure_value_not_compute() {
+        // DivergentAxis: measure=0.9, compute=0.1. try_raw_position_of measure() kullanır.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(DivergentAxis { name: "coupling" })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Placeholder,
+            })
+            .unwrap();
+        let raw = cs.try_raw_position_of(&node(1), &Space::new()).unwrap();
+        // measure değerleri (DivergentAxis 0.9, diğerleri sabit) — compute değil.
+        assert!((raw.x - 0.9).abs() < 1e-9, "coupling measure = {}", raw.x);
+        assert!((raw.y - 0.2).abs() < 1e-9);
+        assert!((raw.z - 0.3).abs() < 1e-9);
+        assert!((raw.w - 0.4).abs() < 1e-9);
+        assert!((raw.v - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn try_raw_position_of_propagates_measurement_error() {
+        let cs = full_core_system_with_coupling(FailingAxis);
+        let err = cs.try_raw_position_of(&node(1), &Space::new()).unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(source, AxisMeasurementError::NonFiniteValue);
+            }
+            other => panic!("expected AxisMeasurementFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_raw_position_of_rejects_missing_core_axes() {
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(SourcedConstantAxis {
+                name: "coupling",
+                value: 0.1,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap();
+        let err = cs.try_raw_position_of(&node(1), &Space::new()).unwrap_err();
+        assert_eq!(
+            err,
+            CoordinateMeasurementError::MissingCoreAxes {
+                missing: vec!["cohesion", "instability", "entropy", "witness_depth"],
+            }
+        );
+    }
+
+    #[test]
+    fn try_raw_position_of_equals_measured_position_of_to_raw() {
+        // Tek authority zinciri: try_raw_position_of delegasyonu aynı sonucu vermeli.
+        let cs = full_core_system_with_coupling(SourcedConstantAxis {
+            name: "coupling",
+            value: 0.7,
+            source: MetricSource::TreeSitter,
+        });
+        let n = node(1);
+        let space = Space::new();
+        let direct = cs.try_raw_position_of(&n, &space).unwrap();
+        let via_measured = cs.measured_position_of(&n, &space).unwrap().to_raw();
+        assert_eq!(direct, via_measured);
+    }
+
+    #[test]
+    fn authoritative_value_projection_matches_legacy_raw_position_for_full_preset() {
+        // P2-2: real preset (default_raw_five) ile measured_position_of().to_raw()
+        // legacy raw_position_of() ile aynı değeri vermeli. Production preset parity.
+        use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+        let cs = CoordinateSystem::default_raw_five(
+            MetricSource::Placeholder,
+            CohesionAxis::try_from_normalized(0.3).unwrap(),
+            EntropyAxis::from_commit_entropy(6.5),
+            WitnessDepthAxis::from_witness(0.5, 3),
+        )
+        .unwrap();
+        let n = node(1);
+        let space = Space::new();
+        let authoritative = cs.measured_position_of(&n, &space).unwrap().to_raw();
+        let legacy = cs.raw_position_of(&n, &space);
+        assert_eq!(authoritative, legacy);
+    }
+
+    // --- aggregate_source: homojen / heterojen / single / empty / mixed ---
+
+    #[test]
+    fn aggregate_source_homogeneous_returns_that_source() {
+        let src =
+            aggregate_source([MetricSource::Scip, MetricSource::Scip, MetricSource::Scip]).unwrap();
+        assert_eq!(src, MetricSource::Scip);
+    }
+
+    #[test]
+    fn aggregate_source_heterogeneous_returns_mixed() {
+        let src = aggregate_source([MetricSource::Scip, MetricSource::TreeSitter]).unwrap();
+        assert_eq!(src, MetricSource::Mixed);
+    }
+
+    #[test]
+    fn aggregate_source_single_element_returns_that_source() {
+        let src = aggregate_source([MetricSource::Heuristic]).unwrap();
+        assert_eq!(src, MetricSource::Heuristic);
+    }
+
+    #[test]
+    fn aggregate_source_empty_returns_empty_source_set_error() {
+        let err = aggregate_source(std::iter::empty()).unwrap_err();
+        assert_eq!(err, CoordinateMeasurementError::EmptySourceSet);
+    }
+
+    #[test]
+    fn aggregate_source_mixed_inputs_propagate_to_mixed() {
+        // Nested aggregation: [Mixed, Mixed] ve [Mixed, Scip] → Mixed (P2-2 table).
+        let s1 = aggregate_source([MetricSource::Mixed, MetricSource::Mixed]).unwrap();
+        assert_eq!(s1, MetricSource::Mixed);
+        let s2 = aggregate_source([MetricSource::Mixed, MetricSource::Scip]).unwrap();
+        assert_eq!(s2, MetricSource::Mixed);
+    }
+
+    // --- validate_direct_axis_output: Mixed reject / valid sources ---
+
+    #[test]
+    fn validate_direct_axis_output_rejects_mixed() {
+        // Mixed yalnız aggregation çıktısıdır — axis output'unda red.
+        let m = AxisMeasurement::try_new(0.5, MetricSource::Mixed).unwrap();
+        assert_eq!(
+            m.validate_direct_axis_output().unwrap_err(),
+            AxisMeasurementError::MixedDirectAxisSource
+        );
+    }
+
+    #[test]
+    fn validate_direct_axis_output_accepts_valid_sources() {
+        for source in [
+            MetricSource::TreeSitter,
+            MetricSource::Scip,
+            MetricSource::Placeholder,
+            MetricSource::Heuristic,
+        ] {
+            let m = AxisMeasurement::try_new(0.5, source).unwrap();
+            assert!(
+                m.validate_direct_axis_output().is_ok(),
+                "source {source:?} must be accepted"
+            );
+        }
     }
 }
