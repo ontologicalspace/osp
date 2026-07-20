@@ -301,9 +301,34 @@ pub enum PredicateSetResult {
 }
 
 impl PredicateSet {
+    /// **INV-T9 #70 (review v7 P1):** Set-level preflight — `required_source = Mixed`
+    /// hiçbir predicate'te geçerli bir evidence requirement değildir. Predicate-level
+    /// rejection (`MetricPredicate::evaluate`) tek başına Any/Weighted mode kompozisyonunu
+    /// kapatmıyordu:
+    /// - **Any bypass:** `Satisfied` predicate + `Mixed` predicate → `any_satisfied=true`
+    ///   önce kontrol edilir, `Completed` döner.
+    /// - **Weighted bypass:** `Mixed` predicate `SourceInsufficient` → `all() == false`
+    ///   → `NotCompleted` (info loss). PredicateGate `NotCompleted`'i policy'ye göre
+    ///   `AcceptAsProgress`/`RequireOperatorApproval`'a çevirebilir → invalid config
+    ///   progress checkpoint'e girer.
+    ///
+    /// Bu guard mode evaluation'dan ÖNCE set-level `SourceInsufficient` döner — typed
+    /// `TaskValidationError::InvalidRequiredMetricSource` Commit 4 atomik migration'ta
+    /// commit-time guard olarak eklenecek.
+    fn has_invalid_mixed_source_requirement(&self) -> bool {
+        self.predicates
+            .iter()
+            .any(|wp| wp.predicate.required_source == Some(MetricSource::Mixed))
+    }
+
     /// Completion değerlendirmesi. `mode`'a göre All/Any/Weighted. Source yetersizse
     /// `SourceInsufficient` (task Done olamaz, INV-T4).
     pub fn evaluate_completion(&self, pos: &ProvenancedRawPosition) -> PredicateSetResult {
+        // INV-T9 #70 (review v7 P1): set-level preflight — Mixed requirement bypass
+        // Any completion + Weighted progress yollarını kapatır.
+        if self.has_invalid_mixed_source_requirement() {
+            return PredicateSetResult::SourceInsufficient;
+        }
         let mut any_source_insufficient = false;
         match self.mode {
             PredicateMode::All => {
@@ -1608,6 +1633,106 @@ mod tests {
         assert_eq!(
             set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
             PredicateSetResult::Completed
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 (review v7 P1) — Set-level Mixed requirement fail-closed
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn any_mode_with_satisfied_predicate_and_mixed_requirement_is_source_insufficient() {
+        // Bypass 1: Any mode'da bir predicate Satisfied, diğeri required_source=Mixed.
+        // Predicate-level guard Mixed'i SourceInsufficient yapar ama any_satisfied=true
+        // önce kontrol edilseydi Completed dönerdi. Set-level preflight bunu kapatır.
+        let set = PredicateSet {
+            mode: PredicateMode::Any,
+            predicates: vec![
+                // Bu predicate Satisfied olacak (coupling 0.40 ≤ 0.55)
+                WeightedPredicate {
+                    predicate: coupling_predicate(0.55, ComparisonOp::Le, None),
+                    weight: None,
+                },
+                // Bu predicate invalid Mixed requirement
+                WeightedPredicate {
+                    predicate: coupling_predicate(
+                        0.55,
+                        ComparisonOp::Le,
+                        Some(MetricSource::Mixed),
+                    ),
+                    weight: None,
+                },
+            ],
+            preferred_vector: None,
+        };
+        assert_eq!(
+            set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::SourceInsufficient,
+            "Any mode: invalid Mixed requirement set-level fail-closed olmalı (Completed değil)"
+        );
+    }
+
+    #[test]
+    fn weighted_mode_with_mixed_requirement_is_source_insufficient() {
+        // Bypass 2: Weighted mode'da Mixed predicate SourceInsufficient → all()==false
+        // → NotCompleted (info loss). PredicateGate NotCompleted'i policy'ye göre
+        // AcceptAsProgress'e çevirebilirdi. Set-level guard SourceInsufficient korur.
+        let set = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, Some(MetricSource::Mixed)),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        assert_eq!(
+            set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::SourceInsufficient,
+            "Weighted mode: invalid Mixed requirement NotCompleted değil SourceInsufficient olmalı"
+        );
+    }
+
+    #[test]
+    fn all_mode_with_mixed_requirement_is_source_insufficient() {
+        // All mode zaten predicate-level Mixed rejection ile SourceInsufficient veriyordu;
+        // set-level preflight bunu erken döndürür (early-exit, mode logic'i çalışmaz).
+        let set = PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, Some(MetricSource::Mixed)),
+                weight: None,
+            }],
+            preferred_vector: None,
+        };
+        assert_eq!(
+            set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::SourceInsufficient,
+        );
+    }
+
+    #[test]
+    fn predicate_set_without_mixed_requirement_evaluates_normally() {
+        // Regression: set-level guard normal predicate'leri etkilemiyor.
+        let set = PredicateSet {
+            mode: PredicateMode::Any,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, Some(MetricSource::Scip)),
+                weight: None,
+            }],
+            preferred_vector: None,
+        };
+        // measured Scip + threshold satisfied → Completed
+        let pos = ProvenancedRawPosition {
+            coupling: AxisMetric {
+                value: 0.40,
+                source: MetricSource::Scip,
+            },
+            ..placeholder_pos(0.40)
+        };
+        assert_eq!(
+            set.evaluate_completion(&pos),
+            PredicateSetResult::Completed,
+            "Scip requirement + Scip measured set hâlâ Completed olmalı"
         );
     }
 
