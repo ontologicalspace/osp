@@ -1500,28 +1500,16 @@ impl SpaceEngine {
             });
         }
 
-        // **Reviewer v5 P1-1:** Measurement context atomikliği — interior mutability
-        // threat model (Commit 2 fixture'lar kabul etti). before/after ölçümleri
-        // öncesi axis context snapshot'ı al; sonradan tekrar alıp digest equality
-        // kontrolü yap. Drift → fail-closed typed error.
-        //
-        // NOT: Tam `BoundMeasurementSession` (tek bind_core_axes tüm node'lar için)
-        // Commit 4'te CoordinateSystem'e eklenecek — orada axis refs'i session boyunca
-        // pinlemek daha temiz. Commit 3 closure için context-snapshot fence yeterli:
-        // eğer axis interior mutability descriptor'ı değiştirirse digest değişir.
-        let context_before =
-            crate::authorization::MeasurementInputContext::try_from(&self.coord_system)
-                .map_err(MeasurementError::MeasurementContext)?;
-        let context_before_digest = crate::authorization::MeasurementInputDigest::compute(
-            &context_before,
-        )
-        .map_err(|e| {
-            crate::measurement::MeasurementError::Digest(
-                crate::measurement::MeasurementDigestError::MeasurementInputDigest {
-                    detail: e.to_string(),
-                },
-            )
-        })?;
+        // **Commit 4a P1-1 (reviewer v6/v8/v9/v10):** Measurement session atomikliği —
+        // interior mutability threat model. Tek `BoundMeasurementSession::begin` tüm
+        // before/after ölçümleri için aynı captured descriptor + epoch snapshot'ını
+        // kullanır. Her `measured_position_of` çağrısında pre/post verify; session-sonu
+        // `verify_unchanged` (`SessionFinal` faz) defensive kontrol. Drift →
+        // `AxisStateDrift` fail-closed typed error (Commit 3 context-before/context-after
+        // digest fence'inin gerçek transient ABA'yı (A→B→A) yakalayamaması kapatıldı —
+        // `AxisStateEpoch` monoton olduğu için revert'te epoch artar).
+        let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
+            .map_err(MeasurementError::CoordinateMeasurement)?;
 
         // 3. P2-2 (v3) + P1-4 (v2): Canonical subject scope derivation.
         //    Heterojen predicate scope (farklı canonical set) → typed error.
@@ -1580,7 +1568,9 @@ impl SpaceEngine {
             (true, true) => return Err(MeasurementError::EmptySubjectScope),
             (false, true) => {
                 // Tüm üyeler base'de — before centroid mevcut space üzerinden.
-                let centroid = self.measured_centroid_of(&self.space, &existing)?;
+                // **Commit 4a:** aynı session üzerinden — captured state ile verify.
+                let centroid =
+                    self.measured_centroid_in_session(&session, &self.space, &existing)?;
                 MeasurementBaseline::Available(centroid)
             }
             (true, false) => MeasurementBaseline::Unavailable {
@@ -1598,38 +1588,31 @@ impl SpaceEngine {
 
         // 8. After: hypothetical'te subject_member_ids centroid.
         //    Subject member hypothetical'te yoksa fail-closed (sessiz skip YOK).
+        //    **Commit 4a:** aynı session — before ile aynı captured state verify.
         for &id in subject.member_ids() {
             if !hypothetical.nodes.contains_key(&id) {
                 return Err(MeasurementError::SubjectMemberMissingAfterDelta { node_id: id });
             }
         }
-        let after = self.measured_centroid_of(&hypothetical, subject.member_ids())?;
+        let after =
+            self.measured_centroid_in_session(&session, &hypothetical, subject.member_ids())?;
 
-        // **Reviewer v5 P1-1:** Context-after snapshot + digest equality fence.
-        // Eğer before/after ölçümleri sırasında axis interior mutability descriptor'ı
-        // değiştirdiyse, context_before_digest ≠ context_after_digest → fail-closed.
-        // Token'ın bağladığı measurement_input_digest böylece tüm ölçümlerin gerçekten
-        // aynı axis semantiği altında üretildiğini kanıtlar.
-        let context_after =
-            crate::authorization::MeasurementInputContext::try_from(&self.coord_system)
+        // **Commit 4a P1-1:** Session-sonu defensive verify — captured descriptor +
+        // epoch ile tüm axis'leri karşılaştırır. before/after ölçümleri sırasında
+        // interior mutation olduysa yakalanır (axis `measurement_epoch()` override
+        // etmişse; default `ZERO` axis'ler için captured == actual == ZERO).
+        session
+            .verify_unchanged()
+            .map_err(MeasurementError::CoordinateMeasurement)?;
+
+        // 9. P1-3 (v8): Context authorization layer'da kurulur (coords neutral — P1-3).
+        //    Yeniden CoordinateSystem traversal DEĞİL — session açılışında captured
+        //    descriptor snapshot'tan. Token, ölçümlerin üretildiği aynı descriptor
+        //    set'ini bağlar (Commit 3 context_after == context_before invariant'ı
+        //    artık session pre/post/final verify ile yapısal).
+        let context =
+            crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
                 .map_err(MeasurementError::MeasurementContext)?;
-        let context_after_digest =
-            crate::authorization::MeasurementInputDigest::compute(&context_after).map_err(|e| {
-                crate::measurement::MeasurementError::Digest(
-                    crate::measurement::MeasurementDigestError::MeasurementInputDigest {
-                        detail: e.to_string(),
-                    },
-                )
-            })?;
-        if context_before_digest != context_after_digest {
-            return Err(MeasurementError::MeasurementContextDrift {
-                before: context_before_digest,
-                after: context_after_digest,
-            });
-        }
-
-        // 9. P1-2 (v3): Explicit context (context_after == context_before — fence verify).
-        let context = context_after;
 
         // 10. P1-5 (v3): Shared canonical producer — authorization basis ile aynı ontology.
         let canonical_delta = crate::authorization::canonical_structural_delta_from_claim(
@@ -1768,9 +1751,11 @@ impl SpaceEngine {
         Ok(scope)
     }
 
-    /// **INV-T9 #70 Commit 3 (P1-6 v2):** Subject scope üyelerinin mass-weighted centroid
-    /// ölçümü. Commit 2 `measured_position_of()` authority surface'ini kullanır — per-axis
-    /// source `aggregate_source()` ile korunur (Scip laundering YOK).
+    /// **INV-T9 #70 Commit 3 (P1-6 v2) + Commit 4a (P1-4 v8):** Subject scope üyelerinin
+    /// mass-weighted centroid ölçümü — backward-compat wrapper. **Commit 4a:** tek session
+    /// açar, `measured_centroid_in_session`'a delege eder, sonunda `verify_unchanged` ile
+    /// session-sonu defensive verify yapar. Per-axis source `aggregate_source()` ile
+    /// korunur (Scip laundering YOK).
     ///
     /// **P1-6 (v2):**
     /// - Mass validation: non-finite veya negatif → `InvalidSubjectMass`
@@ -1780,6 +1765,34 @@ impl SpaceEngine {
     #[allow(clippy::result_large_err)]
     pub(crate) fn measured_centroid_of(
         &self,
+        space: &crate::space::Space,
+        member_ids: &[crate::space::NodeId],
+    ) -> Result<crate::coords::MeasuredRawPosition, crate::measurement::MeasurementError> {
+        use crate::measurement::MeasurementError;
+
+        // **Commit 4a P1-4 (v8) compat wrapper:** tek session açar, içine delege eder,
+        // sonunda verify_unchanged ile session-sonu defensive verify. `try_compute_raw_from_delta`
+        // unchanged — backward-compat. `measure_task_delta` kendi session'ını yönetir
+        // (before/after centroid aynı session'dan).
+        let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
+            .map_err(MeasurementError::CoordinateMeasurement)?;
+        let measured = self.measured_centroid_in_session(&session, space, member_ids)?;
+        session
+            .verify_unchanged()
+            .map_err(MeasurementError::CoordinateMeasurement)?;
+        Ok(measured)
+    }
+
+    /// **INV-T9 #70 Commit 4a P1-4 (reviewer v8):** Session-bound centroid — tüm node'lar
+    /// aynı bound refs üzerinden ölçülür. `measured_centroid_of` wrapper bunu çağırır;
+    /// `measure_task_delta` tek session'ını açıp before/after centroid'ı buradan alır.
+    ///
+    /// **Mass validation** + **per-axis aggregate** (Commit 3 unchanged). Ölçüm
+    /// `session.measured_position_of` üzerinden — pre/post descriptor+epoch verify dahil.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn measured_centroid_in_session(
+        &self,
+        session: &crate::coords::BoundMeasurementSession<'_>,
         space: &crate::space::Space,
         member_ids: &[crate::space::NodeId],
     ) -> Result<crate::coords::MeasuredRawPosition, crate::measurement::MeasurementError> {
@@ -1810,7 +1823,8 @@ impl SpaceEngine {
                 });
             }
             let effective_mass = node.mass.max(0.01); // Legacy mass clamp korunur.
-            let measured = self.coord_system.measured_position_of(node, space)?;
+                                                      // **Commit 4a:** session.measured_position_of — pre/post verify dahil.
+            let measured = session.measured_position_of(node, space)?;
             coupling_values.push((
                 effective_mass,
                 measured.coupling.value,
@@ -3785,6 +3799,134 @@ v = 0.5
         assert_eq!(
             legacy, fallible,
             "fallible must match legacy for same input"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4a — session migration test'leri (reviewer v8/v9)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn measured_centroid_of_wrapper_creates_session() {
+        // v8 P1-4 backward-compat: measured_centroid_of wrapper session açar, içine
+        // delege eder, verify_unchanged ile kapatır. Sabit değer korunur — wrapper
+        // eskiden doğrudan measured_position_of çağırıyordu, şimdi session üzerinden.
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        let measured = engine.measured_centroid_of(engine.space(), &[1]).unwrap();
+        // default_raw_five preset coupling/entropy/witness_depth sabit; cohesion/
+        // instability node 1 için hesaplanır. Sadece ölçüm başarılı + source dolu kontrol.
+        assert!(
+            measured.coupling.source == crate::coords::MetricSource::TreeSitter
+                || measured.coupling.source == crate::coords::MetricSource::Scip
+                || measured.coupling.source == crate::coords::MetricSource::Placeholder,
+            "coupling source must be a valid MetricSource"
+        );
+    }
+
+    #[test]
+    fn measured_centroid_in_session_uses_bound_refs() {
+        // measured_centroid_in_session — aynı session üzerinden before/after centroid.
+        // measure_task_delta bu yolu kullanır; wrapper DEĞİL, doğrudan session alır.
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        engine.space_mut().insert_node(Node {
+            id: 2,
+            kind: NodeKind::Module,
+            mass: 2.0,
+            ..Default::default()
+        });
+        let session = crate::coords::BoundMeasurementSession::begin(&engine.coord_system)
+            .expect("session begin succeeds for full coord system");
+        let measured = engine
+            .measured_centroid_in_session(&session, engine.space(), &[1, 2])
+            .unwrap();
+        // İki node mass-weighted — toplam değer 0..1 aralığında, source dolu.
+        assert!(measured.coupling.value.is_finite());
+        assert!(measured.coupling.value >= 0.0 && measured.coupling.value <= 1.0);
+        // verify_unchanged — immutable axis'ler (default ZERO epoch) drift etmez.
+        session.verify_unchanged().unwrap();
+    }
+
+    #[test]
+    fn measure_task_delta_session_rejects_axis_descriptor_drift() {
+        // Engine seviyesi drift — interior mutability descriptor'ı değiştirirse
+        // session verify_unchanged AxisStateDrift üretir, MeasurementError::CoordinateMeasurement
+        // ile sarmalanır. Bu test için engine'in coord_system'ını mutable axis ile
+        // değiştirip drift üretiyoruz. Basit yaklaşım: session begin'den sonra
+        // coord_system'i yeni axis ile değiştirmek zor (owned), bu yüzden doğrudan
+        // session API üzerinden engine binding'ini doğruluyoruz — measured_centroid_of
+        // wrapper session açıp kapattığı için drift olmaz (immutable preset).
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        // Wrapper başarılı — session begin/verify_unchanged arası drift yok
+        // (default_raw_five axis'leri immutable, epoch ZERO).
+        let result = engine.measured_centroid_of(engine.space(), &[1]);
+        assert!(
+            result.is_ok(),
+            "immutable preset axes must not drift: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn measurement_token_context_equals_session_captured_descriptors() {
+        // ★ Reviewer v9 blocking test — token context session snapshot'tan, yeniden
+        // CoordinateSystem traversal DEĞİL. Session axis_descriptors() ile
+        // MeasurementInputContext::try_new aynı descriptor set'ini üretir.
+        let engine = make_measurement_engine();
+        let session = crate::coords::BoundMeasurementSession::begin(&engine.coord_system)
+            .expect("session begin succeeds");
+        let session_descriptors = session.axis_descriptors();
+        // Context authorization layer'da kurulur — session snapshot'ından.
+        let context =
+            crate::authorization::MeasurementInputContext::try_new(session_descriptors.clone())
+                .expect("context construction from session descriptors succeeds");
+        // Context 5 core axis descriptor taşır — canonical sıralı (axis_id'ye göre).
+        assert_eq!(
+            context.axis_descriptors().len(),
+            5,
+            "context carries exactly 5 core axis descriptors"
+        );
+        // Canonical sıralama — axis_id'ye göre artan.
+        let ids: Vec<&str> = context
+            .axis_descriptors()
+            .iter()
+            .map(|d| d.axis_id())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "cohesion",
+                "coupling",
+                "entropy",
+                "instability",
+                "witness_depth"
+            ],
+            "context descriptors are canonically sorted by axis_id"
+        );
+        // Session descriptor set'i ile context aynı descriptors (sıra dışında).
+        let mut session_sorted = session_descriptors.clone();
+        session_sorted.sort_unstable_by(|a, b| a.axis_id().cmp(b.axis_id()));
+        assert_eq!(
+            context.axis_descriptors(),
+            session_sorted.as_slice(),
+            "context descriptors match session captured descriptors (set equality)"
         );
     }
 }

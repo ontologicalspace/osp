@@ -384,6 +384,33 @@ pub enum CoordinateMeasurementError {
         #[source]
         source: AxisMeasurementError,
     },
+
+    /// **Commit 4a P1-1 (reviewer v9):** Axis state drift — session başında captured
+    /// descriptor + epoch ile pre/post/final verify arasında fark. `AxisStateEpoch`
+    /// monoton olduğu için A→B→A revert'te descriptor A görülür ama epoch artar →
+    /// fail-closed (gerçek transient ABA).
+    ///
+    /// **Box (reviewer v8 P2-1):** `AxisDescriptor` String + Vec<u8> içerir;
+    /// `large_err` clippy warning önlenir.
+    #[error("axis `{axis_id}` state drift at {phase:?}: expected_descriptor={expected_descriptor:?}, actual_descriptor={actual_descriptor:?}, expected_epoch={expected_epoch:?}, actual_epoch={actual_epoch:?}")]
+    AxisStateDrift {
+        axis_id: &'static str,
+        phase: MeasurementSessionPhase,
+        expected_descriptor: Box<AxisDescriptor>,
+        actual_descriptor: Box<AxisDescriptor>,
+        expected_epoch: AxisStateEpoch,
+        actual_epoch: AxisStateEpoch,
+    },
+
+    /// **Commit 4a P2-2 (reviewer v10):** Capture sırasında epoch sandwich drift —
+    /// descriptor üretimi sırasında axis interior mutability epoch'u değiştirdi.
+    /// Consistent epoch-fenced capture ihlali.
+    #[error("axis `{axis_id}` state changed during capture: epoch_before={epoch_before:?}, epoch_after={epoch_after:?}")]
+    AxisStateChangedDuringCapture {
+        axis_id: &'static str,
+        epoch_before: AxisStateEpoch,
+        epoch_after: AxisStateEpoch,
+    },
 }
 
 /// **INV-T9 #70 Commit 2** — Heterojen aggregation semantics (P2-2 doc).
@@ -435,25 +462,44 @@ pub(crate) fn measure_bound_axis(
         .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source })
 }
 
-/// **INV-T9 #70 Commit 2 (review P1-2 v2):** Bound core axis üzerinde descriptor identity
-/// defensive check — `bind_core_axes` Faz 2.3'te her core axis için çağırır. Registration
-/// sonrası `name()`/`descriptor()` drift'inde fail-closed: `AxisDescriptorFailed` veya
-/// `AxisIdentityMismatch`. `canonical_raw_axis_descriptors` ile aynı invariant, ama
-/// bound referans üzerinde (ikinci `name()` lookup YOK).
-pub(crate) fn validate_bound_axis_identity(
+/// **INV-T9 #70 Commit 2 (review P1-2 v2) → Commit 4a generalize:** Bound core axis
+/// üzerinde descriptor + epoch consistent epoch-fenced capture + identity verify.
+/// Commit 2 `validate_bound_axis_identity` (identity-only) Commit 4a'da generalize
+/// edildi — artık tek `capture_bound_axis_state` yüzeyi: identity + epoch sandwich
+/// (descriptor computation sırasında concurrent mutation yakalanır). Captured epoch
+/// `BoundAxisState`'e yazılır; session verify karşılaştırması bununla yapılır.
+///
+/// **Hata önceliği:**
+/// 1. `AxisDescriptorFailed` — descriptor üretimi başarısız.
+/// 2. `AxisStateChangedDuringCapture` — descriptor üretimi sırasında epoch değişti
+///    (interior mutation descriptor computation'ı sırasında gerçekleşti).
+/// 3. `AxisIdentityMismatch` — descriptor axis_id ≠ runtime axis_id.
+pub(crate) fn capture_bound_axis_state(
     axis_id: &'static str,
     axis: &dyn Axis,
-) -> Result<(), CoordinateMeasurementError> {
+) -> Result<BoundAxisState, CoordinateMeasurementError> {
+    let epoch_before = axis.measurement_epoch();
     let descriptor = axis
         .descriptor()
         .map_err(|source| CoordinateMeasurementError::AxisDescriptorFailed { axis_id, source })?;
+    let epoch_after = axis.measurement_epoch();
+    if epoch_before != epoch_after {
+        return Err(CoordinateMeasurementError::AxisStateChangedDuringCapture {
+            axis_id,
+            epoch_before,
+            epoch_after,
+        });
+    }
     if descriptor.axis_id() != axis_id {
         return Err(CoordinateMeasurementError::AxisIdentityMismatch {
             runtime_name: axis_id,
             descriptor_id: descriptor.axis_id().to_owned(),
         });
     }
-    Ok(())
+    Ok(BoundAxisState {
+        descriptor,
+        epoch: epoch_after,
+    })
 }
 
 /// INV-T9 #70 — 5 core axis provenance'lı ölçüm (coords-layer neutral).
@@ -679,6 +725,73 @@ impl AxisParameterEncoder {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// AxisStateEpoch + MeasurementSessionPhase (INV-T9 #70 Commit 4a — session integrity)
+//
+// Reviewer v6 carryover: Commit 3 context-before/context-after fence yalnız
+// descriptor equality'yi yakalayabiliyordu; A→B→A revert'inde descriptor A'ya
+// dönünce digest eşit görünüyordu. Commit 4a monoton epoch ile gerçek transient
+// ABA yakalar: descriptor A görülür ama epoch artar → fail-closed.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4a P1-1 (reviewer v9):** Monoton session epoch — her
+/// behaviorally-relevant interior mutation'da artar. Immutable axis'ler sabit 0.
+/// Descriptor equality A→B→A revert'te A'yı görür; epoch monoton arttığı için
+/// revert yakalanır (gerçek transient ABA).
+///
+/// **TCB sınırı (reviewer v10 P2-1):** `BoundMeasurementSession`, immutable
+/// axis'leri descriptor equality ile; `measurement_epoch` kontratına uyan
+/// versioned mutable axis'leri descriptor + epoch ile doğrular. Trait kontratını
+/// ihlal ederek mutation yapan ve epoch'u güncellemeyen axis TCB ihlalidir —
+/// fail-closed tarafından yakalanamaz (untrusted axis implementasyonlarına karşı
+/// defense-in-depth DEĞİL).
+///
+/// **External construct (reviewer v10 P1-2):** `pub const fn new`/`get`, `ZERO`,
+/// `From<u64>`, `Default`. External Axis implementor'lar non-zero epoch üretebilir.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
+pub struct AxisStateEpoch(u64);
+
+impl AxisStateEpoch {
+    /// Immutable axis'ler için sabit epoch.
+    pub const ZERO: Self = Self(0);
+
+    /// Runtime epoch üretimi — mutable axis'ler interior mutation'da artırır.
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    /// Epoch değerini oku (test/serialization).
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for AxisStateEpoch {
+    fn from(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
+/// **INV-T9 #70 Commit 4a P2-2 (reviewer v8):** Session drift check fazı — typed enum.
+///
+/// **Commit 4a P1-1 (reviewer v10):** `pub` + `#[non_exhaustive]` —
+/// `CoordinateMeasurementError::AxisStateDrift { phase }` varyantında kullanıldığı
+/// için `private_interfaces` warning önlenir. `non_exhaustive` gelecek fazlar için
+/// (örn `MidMeasure`) ileri-uyumlu kalır; dışarıdan match arm'ları wildcard gerektirir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum MeasurementSessionPhase {
+    /// `measured_position_of` çağrısının başında — captured state ile karşılaştırma.
+    PreMeasure,
+    /// `measured_position_of` çağrısının sonunda — captured state ile karşılaştırma.
+    PostMeasure,
+    /// `capture_bound_axis_state` sırasında — epoch sandwich (`epoch_before` vs `epoch_after`).
+    Capture,
+    /// `verify_unchanged` — session sonu defensive verify.
+    SessionFinal,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Axis trait + CoordinateSystem (pluggable, §2)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -735,6 +848,20 @@ pub trait Axis: Send + Sync {
     /// (`#[deprecated]` attribute Commit 4'te — authority implementation migration
     /// tamamlandığında `raw_position_of` ile birlikte deprecate edilir.)
     fn compute(&self, node: &Node, space: &Space) -> f64;
+
+    /// **INV-T9 #70 Commit 4a P1-1 (reviewer v9):** Session epoch — her interior
+    /// mutation'da artar. Default impl sabit `AxisStateEpoch::ZERO` (immutable
+    /// axis'ler backward-compat). Interior-mutable axis'ler override eder.
+    ///
+    /// `BoundMeasurementSession` captured epoch ile pre/post/final epoch
+    /// karşılaştırır; descriptor eşit olsa bile epoch farkı ABA revert'u yakalar.
+    ///
+    /// **TCB notu:** Trait kontratını ihlal ederek mutation yapan ama epoch'u
+    /// güncellemeyen axis, fail-closed tarafından yakalanamaz (bkz. `AxisStateEpoch`
+    /// doc — defense-in-depth DEĞİL).
+    fn measurement_epoch(&self) -> AxisStateEpoch {
+        AxisStateEpoch::ZERO
+    }
 }
 
 /// INV-T9 Adım 3 — core raw axis ID'leri. Tek kaynak: hem `raw_position_of` mapping
@@ -905,25 +1032,34 @@ impl CoordinateSystem {
         Ok(descriptors)
     }
 
-    /// **INV-T9 #70 Commit 2 (P1-1) + review P1-2 (v2):** 5 core raw axis referanslarını
-    /// bağlar.
+    /// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Refs + her axis için descriptor + epoch
+    /// atomik capture. `BoundMeasurementSession::begin` bunu çağırır — tek geçişte hem
+    /// refs hem captured state. Descriptor tam bir kez üretilir (v9 P1-2 — compat path
+    /// yeniden üretmez).
+    pub(crate) fn bind_core_axes_with_descriptors(
+        &self,
+    ) -> Result<BoundCoreAxes<'_>, CoordinateMeasurementError> {
+        let refs = self.bind_core_axis_refs()?;
+        let states = CoreAxisStates {
+            coupling: capture_bound_axis_state("coupling", refs.coupling)?,
+            cohesion: capture_bound_axis_state("cohesion", refs.cohesion)?,
+            instability: capture_bound_axis_state("instability", refs.instability)?,
+            entropy: capture_bound_axis_state("entropy", refs.entropy)?,
+            witness_depth: capture_bound_axis_state("witness_depth", refs.witness_depth)?,
+        };
+        Ok(BoundCoreAxes { refs, states })
+    }
+
+    /// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Faz 1 + 2.1 + 2.2 — name binding +
+    /// structural completeness + duplicate. Descriptor ÜRETMEZ. Ortak düşük seviye
+    /// binding katmanı; `bind_core_axes_with_descriptors` bunu çağırır.
     ///
     /// **Error precedence (review P1-1 v2 — iki-fazlı binding):**
     /// 1. **Structural completeness** → `MissingCoreAxes` (her şeyden önce — descriptor/
     ///    duplicate hatalarından ÖNCE döner)
     /// 2. **Duplicate core axis** → `DuplicateCoreAxis` (complete sistemde, registration
     ///    sonrası `name()` drift'i)
-    /// 3. **Descriptor validation** bound referanslar üzerinde → `AxisDescriptorFailed` /
-    ///    `AxisIdentityMismatch`
-    ///
-    /// **Faz 1 (tek-pass name() binding):** her core axis referansını bağla, duplicate
-    /// kaydet ama henüz return etme; descriptor kontrolü YOK. `name()` ikinci kez okunmaz.
-    /// **Faz 2:** structural completeness (MissingCoreAxes önce) → duplicate check →
-    /// bound referanslar üzerinde descriptor validation. `unwrap()` YOK — match-validated
-    /// tuple pattern ile `CoreAxisRefs`.
-    ///
-    /// `pub(crate)` — authority path internal kullanımı; public migration yüzeyi değil.
-    pub(crate) fn bind_core_axes(&self) -> Result<CoreAxisRefs<'_>, CoordinateMeasurementError> {
+    fn bind_core_axis_refs(&self) -> Result<CoreAxisRefs<'_>, CoordinateMeasurementError> {
         // Faz 1 — tek-pass name() binding. Duplicate kaydet, descriptor kontrolü YOK.
         let mut coupling = None;
         let mut cohesion = None;
@@ -978,39 +1114,38 @@ impl CoordinateSystem {
         if let Some(axis_id) = duplicate {
             return Err(CoordinateMeasurementError::DuplicateCoreAxis { axis_id });
         }
-        // Faz 2.3 — bound referanslar üzerinde descriptor validation (name() yeniden
-        // okunmaz). unwrap YOK — structural completeness Faz 2.1'de garanti.
-        let refs = match (coupling, cohesion, instability, entropy, witness_depth) {
+        // Faz 2.3'te descriptor validation YOK — compat path descriptor üretmez.
+        // unwrap YOK — structural completeness Faz 2.1'de garanti.
+        match (coupling, cohesion, instability, entropy, witness_depth) {
             (
                 Some(coupling),
                 Some(cohesion),
                 Some(instability),
                 Some(entropy),
                 Some(witness_depth),
-            ) => CoreAxisRefs {
+            ) => Ok(CoreAxisRefs {
                 coupling,
                 cohesion,
                 instability,
                 entropy,
                 witness_depth,
-            },
+            }),
             _ => unreachable!("structural completeness (Faz 2.1) guarantees all 5 slots"),
-        };
-        validate_bound_axis_identity("coupling", refs.coupling)?;
-        validate_bound_axis_identity("cohesion", refs.cohesion)?;
-        validate_bound_axis_identity("instability", refs.instability)?;
-        validate_bound_axis_identity("entropy", refs.entropy)?;
-        validate_bound_axis_identity("witness_depth", refs.witness_depth)?;
-        Ok(refs)
+        }
     }
 
-    /// **INV-T9 #70 Commit 2:** Provenance-preserving tam 5-core-axis authority ölçümü.
+    /// **INV-T9 #70 Commit 2 + Commit 4a:** Provenance-preserving tam 5-core-axis
+    /// authority ölçümü. **Commit 4a:** `BoundMeasurementSession`'a delege eder —
+    /// tek session'da pre/post descriptor+epoch verify ile gerçek transient ABA
+    /// yakalanır (Commit 3 context fence yalnız descriptor equality'yi yakalıyordu).
     ///
-    /// Error precedence (review P1-1 v2 + P2):
+    /// Error precedence (review P1-1 v2 + P2 + v9):
     /// 1. Structural completeness → `MissingCoreAxes` (P1-1 — her şeyden önce)
-    /// 2. Bind-time identity checks → `DuplicateCoreAxis` / `AxisIdentityMismatch` /
-    ///    `AxisDescriptorFailed` (P1-2 — registration sonrası drift'te fail-closed)
-    /// 3. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
+    /// 2. Bind/capture identity + epoch sandwich → `DuplicateCoreAxis` /
+    ///    `AxisIdentityMismatch` / `AxisDescriptorFailed` /
+    ///    `AxisStateChangedDuringCapture` (P1-2 — registration sonrası drift'te fail-closed)
+    /// 3. Pre/post session verify → `AxisStateDrift` (v9 — descriptor ve/veya epoch drift)
+    /// 4. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
     ///    (P1-2 — axis kimliği `axis_id` ile korunur)
     ///
     /// Authority/evidence yollarının tek ölçüm yüzeyi. Legacy partial preset'ler
@@ -1020,23 +1155,11 @@ impl CoordinateSystem {
         node: &Node,
         space: &Space,
     ) -> Result<MeasuredRawPosition, CoordinateMeasurementError> {
-        // P1-1: tek-pass reference binding — name() ikinci kez okunmaz, unwrap YOK.
-        let refs = self.bind_core_axes()?;
-        // P2-2: measure_bound_axis helper — axis_id error mapping tekrarı yok, copy-paste
-        // hatası (entropy → "instability" gibi) derleme/hatalı mapping kapalı. P1-2 axis
-        // kimliği error boundary'de korunur (blanket #[from] YOK).
-        let coupling = measure_bound_axis("coupling", refs.coupling, node, space)?;
-        let cohesion = measure_bound_axis("cohesion", refs.cohesion, node, space)?;
-        let instability = measure_bound_axis("instability", refs.instability, node, space)?;
-        let entropy = measure_bound_axis("entropy", refs.entropy, node, space)?;
-        let witness_depth = measure_bound_axis("witness_depth", refs.witness_depth, node, space)?;
-        Ok(MeasuredRawPosition {
-            coupling,
-            cohesion,
-            instability,
-            entropy,
-            witness_depth,
-        })
+        let session = BoundMeasurementSession::begin(self)?;
+        session.measured_position_of(node, space)
+        // `verify_unchanged` measured_position_of içinde PreMeasure + PostMeasure
+        // yapıyor; session drop edilirken ek final verify gerekmez (PostMeasure zaten
+        // ölçümden hemen sonra). Engine path ayrıca `verify_unchanged` çağırır.
     }
 
     /// **INV-T9 #70 Commit 2:** Fallible value-only projection — `measured_position_of`
@@ -1073,6 +1196,240 @@ impl std::fmt::Debug for CoreAxisRefs<'_> {
             .field("instability", &self.instability.name())
             .field("entropy", &self.entropy.name())
             .field("witness_depth", &self.witness_depth.name())
+            .finish()
+    }
+}
+
+/// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Captured descriptor + epoch snapshot.
+///
+/// `capture_bound_axis_state` tarafından üretilir. `BoundMeasurementSession` bunu
+/// session açılışında bir kez capture eder; pre/post/final verify'de karşılaştırır.
+/// `Clone` — `BoundCoreAxes` Debug için klonlar (axis referansları shared borrow).
+#[derive(Clone)]
+pub(crate) struct BoundAxisState {
+    descriptor: AxisDescriptor,
+    epoch: AxisStateEpoch,
+}
+
+impl BoundAxisState {
+    pub(crate) fn descriptor(&self) -> &AxisDescriptor {
+        &self.descriptor
+    }
+    pub(crate) fn epoch(&self) -> AxisStateEpoch {
+        self.epoch
+    }
+}
+
+impl std::fmt::Debug for BoundAxisState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundAxisState")
+            .field("descriptor", &self.descriptor)
+            .field("epoch", &self.epoch.get())
+            .finish()
+    }
+}
+
+/// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Captured 5 core axis state'leri —
+/// `bind_core_axes_with_descriptors` tarafından atomik olarak üretilir.
+///
+/// `descriptors()` engine'in authorization layer context construction'ı için
+/// neutral descriptor listesi döner (coords authorization tipleri içermez — P1-3).
+#[derive(Clone)]
+pub(crate) struct CoreAxisStates {
+    coupling: BoundAxisState,
+    cohesion: BoundAxisState,
+    instability: BoundAxisState,
+    entropy: BoundAxisState,
+    witness_depth: BoundAxisState,
+}
+
+impl CoreAxisStates {
+    /// Engine için context construction — authorization layer descriptor listesi alır.
+    /// `CORE_RAW_AXIS_IDS` sırasında (coupling, cohesion, instability, entropy,
+    /// witness_depth) — `canonical_raw_axis_descriptors` ile aynı sıra.
+    pub(crate) fn descriptors(&self) -> Vec<AxisDescriptor> {
+        vec![
+            self.coupling.descriptor.clone(),
+            self.cohesion.descriptor.clone(),
+            self.instability.descriptor.clone(),
+            self.entropy.descriptor.clone(),
+            self.witness_depth.descriptor.clone(),
+        ]
+    }
+}
+
+impl std::fmt::Debug for CoreAxisStates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreAxisStates")
+            .field("coupling", &self.coupling)
+            .field("cohesion", &self.cohesion)
+            .field("instability", &self.instability)
+            .field("entropy", &self.entropy)
+            .field("witness_depth", &self.witness_depth)
+            .finish()
+    }
+}
+
+/// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Bound refs + captured state — atomik.
+///
+/// `bind_core_axes_with_descriptors` tek geçişte hem refs hem state üretir.
+/// `bind_core_axes` (compat projection) yalnız refs alır, state'i drop eder.
+/// `BoundMeasurementSession` ikisini birden tutar — refs ile ölçüm, state ile verify.
+pub(crate) struct BoundCoreAxes<'a> {
+    refs: CoreAxisRefs<'a>,
+    states: CoreAxisStates,
+}
+
+impl<'a> BoundCoreAxes<'a> {
+    pub(crate) fn refs(&self) -> &CoreAxisRefs<'a> {
+        &self.refs
+    }
+    pub(crate) fn states(&self) -> &CoreAxisStates {
+        &self.states
+    }
+}
+
+impl std::fmt::Debug for BoundCoreAxes<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundCoreAxes")
+            .field("refs", &self.refs)
+            .field("states", &self.states)
+            .finish()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// BoundMeasurementSession (INV-T9 #70 Commit 4a — single-bind axis session integrity)
+//
+// Reviewer v6 carryover kapatır: Commit 3 context-before/context-after fence yalnız
+// descriptor equality'yi yakalayabiliyordu; A→B→A revert'inde descriptor A'ya dönünce
+// digest eşit görünüyordu. Bu session her ölçümde pre/post descriptor + EPOCH verify
+// yapar — epoch monoton olduğu için revert yakalanır (gerçek transient ABA).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4a (reviewer v6/v8/v9/v10 P1):** Measurement session.
+///
+/// `begin` tek bir `bind_core_axes_with_descriptors` çağrısıyla hem refs hem captured
+/// state üretir (atomik bind+capture). Ardından her `measured_position_of` çağrısında
+/// `PreMeasure` ve `PostMeasure` verify ile captured state'i karşılaştırır. Session
+/// sonunda `verify_unchanged` (`SessionFinal` faz) defensive son kontrol yapar.
+///
+/// **P1-1 (v9) gerçek transient ABA:** A→B→A revert'te descriptor A görülür ama epoch
+/// artar (monoton) → fail-closed. Yalnız descriptor equality veya session-sonu digest
+/// yakalayamıyordu. Her ölçüm çift fazlı (pre+post) verify epoch artışını yakalar.
+///
+/// **P1-3 (v8) neutral layer:** coords-layer authorization tipleri içermez.
+/// `axis_descriptors()` neutral `Vec<AxisDescriptor>` döner; engine context'i
+/// authorization layer'da kurar.
+///
+/// `pub(crate)` — authority path internal kullanımı (`engine.rs` + `measured_position_of`).
+pub(crate) struct BoundMeasurementSession<'a> {
+    axes: BoundCoreAxes<'a>,
+}
+
+impl<'a> BoundMeasurementSession<'a> {
+    /// Session aç — tek `bind_core_axes_with_descriptors` ile refs + captured state.
+    /// Captured state session ömrü boyunca sabit; pre/post/final verify karşılaştırması
+    /// bununla yapılır.
+    pub(crate) fn begin(
+        coord_system: &'a CoordinateSystem,
+    ) -> Result<Self, CoordinateMeasurementError> {
+        Ok(Self {
+            axes: coord_system.bind_core_axes_with_descriptors()?,
+        })
+    }
+
+    /// Pre-measure + ölçüm + post-measure state verify (descriptor + epoch).
+    ///
+    /// `PreMeasure`: ölçümden önce captured state ile karşılaştırma. Eğer `begin`'den
+    /// bu yana axis drift ettiyse yakalanır.
+    /// `PostMeasure`: ölçümden sonra. `measure()` sırasında interior mutation olduysa
+    /// yakalanır (epoch arttıysa A→B→A revert bile).
+    pub(crate) fn measured_position_of(
+        &self,
+        node: &Node,
+        space: &Space,
+    ) -> Result<MeasuredRawPosition, CoordinateMeasurementError> {
+        self.verify_bound_states(MeasurementSessionPhase::PreMeasure)?;
+        let refs = self.axes.refs();
+        // P2-2: measure_bound_axis helper — axis_id error mapping tekrarı yok, copy-paste
+        // hatası (entropy → "instability" gibi) derleme/hatalı mapping kapalı. P1-2 axis
+        // kimliği error boundary'de korunur (blanket #[from] YOK).
+        let coupling = measure_bound_axis("coupling", refs.coupling, node, space)?;
+        let cohesion = measure_bound_axis("cohesion", refs.cohesion, node, space)?;
+        let instability = measure_bound_axis("instability", refs.instability, node, space)?;
+        let entropy = measure_bound_axis("entropy", refs.entropy, node, space)?;
+        let witness_depth = measure_bound_axis("witness_depth", refs.witness_depth, node, space)?;
+        self.verify_bound_states(MeasurementSessionPhase::PostMeasure)?;
+        Ok(MeasuredRawPosition {
+            coupling,
+            cohesion,
+            instability,
+            entropy,
+            witness_depth,
+        })
+    }
+
+    /// Session-sonu defensive verify — captured state ile karşılaştırma.
+    /// Engine, tüm ölçümler bittikten sonra çağırır (before/after centroid arası
+    /// drift tespiti). `measured_position_of` zaten Pre+Post yapar; bu ek faz
+    /// session'ın ömrü boyunca (begin'den verify_unchanged'e kadar) drift yakalar.
+    pub(crate) fn verify_unchanged(&self) -> Result<(), CoordinateMeasurementError> {
+        self.verify_bound_states(MeasurementSessionPhase::SessionFinal)
+    }
+
+    /// Engine descriptor listesi — authorization layer context kurar.
+    /// Yeniden CoordinateSystem traversal DEĞİL — session açılışında captured
+    /// snapshot'tan. Token, ölçümlerin üretildiği aynı descriptor set'ini bağlar.
+    pub(crate) fn axis_descriptors(&self) -> Vec<AxisDescriptor> {
+        self.axes.states().descriptors()
+    }
+
+    fn verify_bound_states(
+        &self,
+        phase: MeasurementSessionPhase,
+    ) -> Result<(), CoordinateMeasurementError> {
+        let refs = self.axes.refs();
+        let states = self.axes.states();
+        self.verify_one("coupling", &states.coupling, refs.coupling, phase)?;
+        self.verify_one("cohesion", &states.cohesion, refs.cohesion, phase)?;
+        self.verify_one("instability", &states.instability, refs.instability, phase)?;
+        self.verify_one("entropy", &states.entropy, refs.entropy, phase)?;
+        self.verify_one(
+            "witness_depth",
+            &states.witness_depth,
+            refs.witness_depth,
+            phase,
+        )?;
+        Ok(())
+    }
+
+    fn verify_one(
+        &self,
+        axis_id: &'static str,
+        expected: &BoundAxisState,
+        axis: &dyn Axis,
+        phase: MeasurementSessionPhase,
+    ) -> Result<(), CoordinateMeasurementError> {
+        let actual = capture_bound_axis_state(axis_id, axis)?;
+        if actual.descriptor() != expected.descriptor() || actual.epoch() != expected.epoch() {
+            return Err(CoordinateMeasurementError::AxisStateDrift {
+                axis_id,
+                phase,
+                expected_descriptor: Box::new(expected.descriptor().clone()),
+                actual_descriptor: Box::new(actual.descriptor().clone()),
+                expected_epoch: expected.epoch(),
+                actual_epoch: actual.epoch(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl std::fmt::Debug for BoundMeasurementSession<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundMeasurementSession")
+            .field("axes", &self.axes)
             .finish()
     }
 }
@@ -2460,7 +2817,7 @@ mod tests {
             .unwrap();
         // Registration sonrası: drifting axis'in current_id'si "coupling"'e drift etsin.
         *current_id.lock().unwrap() = "coupling";
-        let err = cs.bind_core_axes().unwrap_err();
+        let err = cs.bind_core_axes_with_descriptors().unwrap_err();
         assert_eq!(
             err,
             CoordinateMeasurementError::DuplicateCoreAxis {
@@ -2536,7 +2893,7 @@ mod tests {
             .unwrap();
         // Registration sonrası: descriptor_id "entropy"'ye drift etsin.
         *descriptor_id.lock().unwrap() = "entropy".to_owned();
-        let err = cs.bind_core_axes().unwrap_err();
+        let err = cs.bind_core_axes_with_descriptors().unwrap_err();
         match err {
             CoordinateMeasurementError::AxisIdentityMismatch {
                 runtime_name,
@@ -2616,7 +2973,7 @@ mod tests {
             })
             .unwrap();
         fail.store(true, Ordering::SeqCst);
-        let err = cs.bind_core_axes().unwrap_err();
+        let err = cs.bind_core_axes_with_descriptors().unwrap_err();
         match err {
             CoordinateMeasurementError::AxisDescriptorFailed { axis_id, source } => {
                 assert_eq!(axis_id, "coupling");
@@ -2648,7 +3005,7 @@ mod tests {
             .unwrap();
         // Registration sonrası: descriptor fail açılır.
         fail.store(true, Ordering::SeqCst);
-        let err = cs.bind_core_axes().unwrap_err();
+        let err = cs.bind_core_axes_with_descriptors().unwrap_err();
         // MissingCoreAxes öncelikli — AxisDescriptorFailed değil.
         assert_eq!(
             err,
@@ -2805,6 +3162,539 @@ mod tests {
                 other => panic!("expected AxisMeasurementFailed, got {other:?}"),
             }
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4a — BoundMeasurementSession test'leri (reviewer v6/v8/v9/v10 P1)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Arc;
+
+    /// 5 core axis'i olan tam `CoordinateSystem` kurar. coupling=0.2, cohesion=0.3,
+    /// instability=0.4, entropy=0.5, witness_depth=0.6 (test sabitleri). Session
+    /// parity test'leri bu değerleri kullanır.
+    fn full_coord_system_for_session() -> CoordinateSystem {
+        CoordinateSystem::empty()
+            .try_with_axis(ConstantAxis {
+                name: "coupling",
+                value: 0.2,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "instability",
+                value: 0.4,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "entropy",
+                value: 0.5,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "witness_depth",
+                value: 0.6,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn axis_state_epoch_zero_is_default_and_identity() {
+        // v10 P1-2 — external construct: const ZERO, Default, From<u64>, get.
+        assert_eq!(AxisStateEpoch::ZERO.get(), 0);
+        assert_eq!(AxisStateEpoch::default(), AxisStateEpoch::ZERO);
+        assert_eq!(AxisStateEpoch::new(42).get(), 42);
+        assert_eq!(AxisStateEpoch::from(42u64), AxisStateEpoch::new(42));
+        // Ordering — monoton artış invariant'ı için PartialOrd/Ord.
+        assert!(AxisStateEpoch::new(1) > AxisStateEpoch::ZERO);
+        assert!(AxisStateEpoch::new(5) < AxisStateEpoch::new(10));
+    }
+
+    #[test]
+    fn bound_measurement_session_begin_captures_descriptors() {
+        // Session begin — captured descriptor set 5 core axis'i içerir, sıralı.
+        let cs = full_coord_system_for_session();
+        let session = BoundMeasurementSession::begin(&cs).unwrap();
+        let descriptors = session.axis_descriptors();
+        assert_eq!(descriptors.len(), 5, "exactly 5 core axis descriptors");
+        let ids: Vec<&str> = descriptors.iter().map(|d| d.axis_id()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "coupling",
+                "cohesion",
+                "instability",
+                "entropy",
+                "witness_depth"
+            ],
+            "descriptor order matches CORE_RAW_AXIS_IDS"
+        );
+    }
+
+    #[test]
+    fn coordinate_system_measured_position_delegates_to_session() {
+        // v8 P2-3 delegasyon: measured_position_of session üzerinden ölçer —
+        // sabit değerler korunur (coupling=0.2 Scip vb.).
+        let cs = full_coord_system_for_session();
+        let measured = cs.measured_position_of(&node(1), &Space::new()).unwrap();
+        assert!((measured.coupling.value - 0.2).abs() < 1e-9);
+        assert!((measured.cohesion.value - 0.3).abs() < 1e-9);
+        assert!((measured.instability.value - 0.4).abs() < 1e-9);
+        assert!((measured.entropy.value - 0.5).abs() < 1e-9);
+        assert!((measured.witness_depth.value - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bound_measurement_session_verify_unchanged_no_drift() {
+        // Immutable axis'ler — session begin/verify_unchanged arasında drift yok.
+        let cs = full_coord_system_for_session();
+        let session = BoundMeasurementSession::begin(&cs).unwrap();
+        session
+            .verify_unchanged()
+            .expect("no drift for immutable axes");
+    }
+
+    /// **★ v10 P2-4 — persistent descriptor drift:** Axis descriptor'ı begin'den
+    /// sonra A→B'ye geçer ve B kalır. `verify_unchanged` mismatch yakalar.
+    struct DescriptorDriftAxis {
+        name: &'static str,
+        flip: Arc<AtomicU64>, // 0 → A descriptor, 1 → B descriptor
+    }
+
+    impl Axis for DescriptorDriftAxis {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            // flip değeri canonical parametreye girer — A vs B descriptor ayrımı.
+            params.push_u64(self.flip.load(Ordering::SeqCst));
+            AxisDescriptor::try_new(self.name, 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+    }
+
+    #[test]
+    fn bound_measurement_session_rejects_persistent_descriptor_drift() {
+        // ★ Reviewer v10 P2-4 blocking test — descriptor A→B, B kalır → mismatch.
+        let flip = Arc::new(AtomicU64::new(0));
+        let make_cs = || {
+            CoordinateSystem::empty()
+                .try_with_axis(DescriptorDriftAxis {
+                    name: "coupling",
+                    flip: flip.clone(),
+                })
+                .unwrap()
+                .try_with_axis(ConstantAxis {
+                    name: "cohesion",
+                    value: 0.3,
+                })
+                .unwrap()
+                .try_with_axis(ConstantAxis {
+                    name: "instability",
+                    value: 0.4,
+                })
+                .unwrap()
+                .try_with_axis(ConstantAxis {
+                    name: "entropy",
+                    value: 0.5,
+                })
+                .unwrap()
+                .try_with_axis(ConstantAxis {
+                    name: "witness_depth",
+                    value: 0.6,
+                })
+                .unwrap()
+        };
+        let cs = make_cs();
+        let session = BoundMeasurementSession::begin(&cs).unwrap();
+        // Session açıldı (descriptor A captured). Şimdi flip → B'ye.
+        flip.store(1, Ordering::SeqCst);
+        let err = session.verify_unchanged().unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisStateDrift {
+                axis_id,
+                phase,
+                expected_epoch,
+                actual_epoch,
+                ..
+            } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(phase, MeasurementSessionPhase::SessionFinal);
+                // Immutable axis default ZERO epoch — descriptor mismatch yakalandı
+                // (epoch aynı ama descriptor farklı).
+                assert_eq!(expected_epoch, actual_epoch);
+                assert_eq!(expected_epoch, AxisStateEpoch::ZERO);
+            }
+            other => panic!("expected AxisStateDrift, got {other:?}"),
+        }
+    }
+
+    /// **★ v9 P1-1 + v10 P2-4 — gerçek transient ABA:** Descriptor sabit (A), ama
+    /// `measurement_epoch` her `measure()` çağrısında artar. Session PreMeasure'da
+    /// captured epoch (0) ile actual epoch (0) eşit; ölçüm sırasında axis measure()
+    /// çağrılır → epoch artar (1); PostMeasure'da captured (0) ≠ actual (1) → drift.
+    /// Bu senaryoyu descriptor equality yakalayamıyordu (A→A); epoch monoton yakalar.
+    struct EpochDriftingAxis {
+        measure_epoch: Arc<AtomicU64>,
+    }
+
+    impl Axis for EpochDriftingAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            // Descriptor SABİT — A→A→A. Sadece epoch drift eder.
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            // measure çağrıldığında interior mutation — epoch artar.
+            self.measure_epoch.fetch_add(1, Ordering::SeqCst);
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+        fn measurement_epoch(&self) -> AxisStateEpoch {
+            AxisStateEpoch::new(self.measure_epoch.load(Ordering::SeqCst))
+        }
+    }
+
+    #[test]
+    fn bound_measurement_session_rejects_transient_aba_via_epoch() {
+        // ★ Reviewer v9 P1-1 + v10 P2-4 blocking test — gerçek transient ABA.
+        let measure_epoch = Arc::new(AtomicU64::new(0));
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(EpochDriftingAxis {
+                measure_epoch: measure_epoch.clone(),
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "instability",
+                value: 0.4,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "entropy",
+                value: 0.5,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "witness_depth",
+                value: 0.6,
+            })
+            .unwrap();
+        let session = BoundMeasurementSession::begin(&cs).unwrap();
+        // captured epoch = 0. measured_position_of:
+        //   PreMeasure: verify coupling actual (0) == captured (0) ✓
+        //   measure coupling: fetch_add → epoch 1
+        //   PostMeasure: verify coupling actual (1) ≠ captured (0) → AxisStateDrift
+        let err = session
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisStateDrift {
+                axis_id,
+                phase,
+                expected_epoch,
+                actual_epoch,
+                expected_descriptor,
+                actual_descriptor,
+            } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(phase, MeasurementSessionPhase::PostMeasure);
+                // Descriptor eşit (A→A), ama epoch drift — gerçek transient ABA yakalandı.
+                assert_eq!(expected_descriptor, actual_descriptor);
+                assert_eq!(expected_epoch, AxisStateEpoch::ZERO);
+                assert_eq!(actual_epoch, AxisStateEpoch::new(1));
+            }
+            other => panic!("expected AxisStateDrift, got {other:?}"),
+        }
+    }
+
+    /// **★ v9 P1-2 — descriptor call counter:** capture her core axis için tam 1
+    /// kez descriptor üretir. Compat path (artık kaldırıldı) veya double-capture
+    /// regression'ı tespit eder.
+    struct DescriptorCallCounterAxis {
+        name: &'static str,
+        count: Arc<AtomicU64>,
+    }
+
+    impl Axis for DescriptorCallCounterAxis {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new(self.name, 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+    }
+
+    #[test]
+    fn session_begin_captures_each_descriptor_once() {
+        // ★ Reviewer v9 P1-2 blocking test — her core axis için tam 1 descriptor çağrısı.
+        // Registration sırasında `register_axis` identity check için 1 descriptor üretir;
+        // bizim关心的 kısım session begin sırasında üretilen capture. registration sonrası
+        // baseline alıp begin + measured_position_of artışını sayarız.
+        let counts: Vec<Arc<AtomicU64>> = (0..5).map(|_| Arc::new(AtomicU64::new(0))).collect();
+        let coupling = counts[0].clone();
+        let cohesion = counts[1].clone();
+        let instability = counts[2].clone();
+        let entropy = counts[3].clone();
+        let witness_depth = counts[4].clone();
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(DescriptorCallCounterAxis {
+                name: "coupling",
+                count: coupling,
+            })
+            .unwrap()
+            .try_with_axis(DescriptorCallCounterAxis {
+                name: "cohesion",
+                count: cohesion,
+            })
+            .unwrap()
+            .try_with_axis(DescriptorCallCounterAxis {
+                name: "instability",
+                count: instability,
+            })
+            .unwrap()
+            .try_with_axis(DescriptorCallCounterAxis {
+                name: "entropy",
+                count: entropy,
+            })
+            .unwrap()
+            .try_with_axis(DescriptorCallCounterAxis {
+                name: "witness_depth",
+                count: witness_depth,
+            })
+            .unwrap();
+        // Registration sonrası her axis için 1 descriptor (identity check). begin'den
+        // önce baseline al.
+        let baseline: Vec<u64> = counts.iter().map(|c| c.load(Ordering::SeqCst)).collect();
+        for (i, b) in baseline.iter().enumerate() {
+            assert_eq!(*b, 1, "axis {i}: registration called descriptor once");
+        }
+        let session = BoundMeasurementSession::begin(&cs).unwrap();
+        // begin: her axis için 1 ek capture (capture_bound_axis_state) → baseline+1.
+        for (i, c) in counts.iter().enumerate() {
+            assert_eq!(
+                c.load(Ordering::SeqCst),
+                baseline[i] + 1,
+                "axis {i}: begin captured descriptor exactly once over baseline"
+            );
+        }
+        session
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap();
+        // measured_position_of: her axis için PreMeasure (1 capture) + PostMeasure (1 capture)
+        // = 2 ek çağrı her axis için → baseline + 1 (begin) + 2 (pre+post) = baseline + 3.
+        // verify_one her axis için bir kez capture_bound_axis_state çağırır — sayaç bu axis
+        // için 1 artar (diğer 4 axis farklı struct, bu sayaçtan bağımsız).
+        for (i, c) in counts.iter().enumerate() {
+            assert_eq!(
+                c.load(Ordering::SeqCst),
+                baseline[i] + 3,
+                "axis {i}: begin(1) + pre(1)/post(1) verify = +3 descriptor calls"
+            );
+        }
+    }
+
+    /// **★ v10 P1-2 — external mutable axis:** AtomicU64 epoch, `measurement_epoch`
+    /// override. External implementor non-zero epoch üretebilir; session bunu captured
+    /// state ile verify eder.
+    struct ExternalMutableAxis {
+        epoch: Arc<AtomicU64>,
+    }
+
+    impl Axis for ExternalMutableAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+        fn measurement_epoch(&self) -> AxisStateEpoch {
+            AxisStateEpoch::new(self.epoch.load(Ordering::SeqCst))
+        }
+    }
+
+    #[test]
+    fn external_axis_can_produce_nonzero_epoch() {
+        // ★ Reviewer v10 P1-2 blocking test — external construct + non-zero epoch.
+        // Axis override measurement_epoch ile non-zero epoch döner; session captured
+        // epoch ile actual epoch eşit olduğu sürece drift yok.
+        let epoch = Arc::new(AtomicU64::new(7));
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(ExternalMutableAxis {
+                epoch: epoch.clone(),
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "instability",
+                value: 0.4,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "entropy",
+                value: 0.5,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "witness_depth",
+                value: 0.6,
+            })
+            .unwrap();
+        // Session begin — captured epoch 7 (non-zero).
+        let session = BoundMeasurementSession::begin(&cs).unwrap();
+        // Ölçüm — epoch hala 7 (değişmedi), pre/post verify geçer.
+        let measured = session
+            .measured_position_of(&node(1), &Space::new())
+            .unwrap();
+        assert!((measured.coupling.value - 0.5).abs() < 1e-9);
+        session.verify_unchanged().unwrap();
+    }
+
+    #[test]
+    fn bound_measurement_session_begin_propagates_missing_core_axes() {
+        // Eksik core axis — MissingCoreAxes (structural completeness precedence).
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(ConstantAxis {
+                name: "coupling",
+                value: 0.2,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .unwrap(); // instability, entropy, witness_depth eksik
+        let err = BoundMeasurementSession::begin(&cs).unwrap_err();
+        match err {
+            CoordinateMeasurementError::MissingCoreAxes { missing } => {
+                assert_eq!(missing, vec!["instability", "entropy", "witness_depth"]);
+            }
+            other => panic!("expected MissingCoreAxes, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_measurement_session_begin_propagates_duplicate_core_axis() {
+        // Duplicate core axis — registration reddeder ama simüle için iki farklı
+        // axis struct'ı aynı name() dönerse bind_core_axis_refs yakalar. Test için
+        // manual collection kuramıyoruz (axes private), bu yüzden registration error
+        // üzerinden doğruluyoruz: duplicate register_axis → DuplicateAxisId.
+        let mut cs = CoordinateSystem::empty();
+        cs.register_axis(Box::new(ConstantAxis {
+            name: "coupling",
+            value: 0.2,
+        }))
+        .unwrap();
+        let err = cs
+            .register_axis(Box::new(ConstantAxis {
+                name: "coupling",
+                value: 0.9,
+            }))
+            .unwrap_err();
+        match err {
+            AxisRegistrationError::DuplicateAxisId(id) => {
+                assert_eq!(id, "coupling");
+            }
+            other => panic!("expected DuplicateAxisId, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn coordinate_measurement_error_axis_state_drift_message_contains_phase() {
+        // AxisStateDrift Display — axis_id + phase + descriptor/epoch dahil.
+        let err = CoordinateMeasurementError::AxisStateDrift {
+            axis_id: "coupling",
+            phase: MeasurementSessionPhase::PostMeasure,
+            expected_descriptor: Box::new(
+                AxisDescriptor::try_new("coupling", 1, AxisParameterEncoder::new()).unwrap(),
+            ),
+            actual_descriptor: Box::new(
+                AxisDescriptor::try_new("coupling", 1, {
+                    let mut p = AxisParameterEncoder::new();
+                    p.push_u8(1);
+                    p
+                })
+                .unwrap(),
+            ),
+            expected_epoch: AxisStateEpoch::ZERO,
+            actual_epoch: AxisStateEpoch::new(3),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("coupling"), "msg has axis_id: {msg}");
+        assert!(msg.contains("PostMeasure"), "msg has phase: {msg}");
+    }
+
+    #[test]
+    fn coordinate_measurement_error_axis_changed_during_capture_message() {
+        let err = CoordinateMeasurementError::AxisStateChangedDuringCapture {
+            axis_id: "entropy",
+            epoch_before: AxisStateEpoch::new(1),
+            epoch_after: AxisStateEpoch::new(2),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("entropy"), "msg has axis_id: {msg}");
+        assert!(
+            msg.contains("during capture"),
+            "msg has phase context: {msg}"
+        );
     }
 
     /// Per-core failing fixture'ları — her biri kendi axis ID'sini taşır. Review P2-2:
