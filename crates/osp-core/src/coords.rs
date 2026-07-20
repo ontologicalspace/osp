@@ -442,6 +442,27 @@ pub(crate) fn measure_bound_axis(
         .map_err(|source| CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source })
 }
 
+/// **INV-T9 #70 Commit 2 (review P1-2 v2):** Bound core axis üzerinde descriptor identity
+/// defensive check — `bind_core_axes` Faz 2.3'te her core axis için çağırır. Registration
+/// sonrası `name()`/`descriptor()` drift'inde fail-closed: `AxisDescriptorFailed` veya
+/// `AxisIdentityMismatch`. `canonical_raw_axis_descriptors` ile aynı invariant, ama
+/// bound referans üzerinde (ikinci `name()` lookup YOK).
+pub(crate) fn validate_bound_axis_identity(
+    axis_id: &'static str,
+    axis: &dyn Axis,
+) -> Result<(), CoordinateMeasurementError> {
+    let descriptor = axis
+        .descriptor()
+        .map_err(|source| CoordinateMeasurementError::AxisDescriptorFailed { axis_id, source })?;
+    if descriptor.axis_id() != axis_id {
+        return Err(CoordinateMeasurementError::AxisIdentityMismatch {
+            runtime_name: axis_id,
+            descriptor_id: descriptor.axis_id().to_owned(),
+        });
+    }
+    Ok(())
+}
+
 /// INV-T9 #70 — 5 core axis provenance'lı ölçüm (coords-layer neutral).
 ///
 /// `MeasuredRawPosition` `to_raw()` value-only projection sağlar; `axis()` PredicateAxis
@@ -891,55 +912,43 @@ impl CoordinateSystem {
         Ok(descriptors)
     }
 
-    /// **INV-T9 #70 Commit 2 (P1-1) + review P1-2:** 5 core raw axis referanslarını tek
-    /// geçişte bağlar.
+    /// **INV-T9 #70 Commit 2 (P1-1) + review P1-2 (v2):** 5 core raw axis referanslarını
+    /// bağlar.
     ///
-    /// `measured_position_of` authority path iki-geçişli `name()` lookup kullanmaz;
-    /// `name()` ikinci kez okunmaz; preflight ile measurement arasında identity TOCTOU
-    /// oluşmaz. `unwrap()` YOK — match-validated tuple pattern ile ya `CoreAxisRefs` ya
-    /// `MissingCoreAxes { missing }` döner. `missing` `CORE_RAW_AXIS_IDS` sırasındadır.
+    /// **Error precedence (review P1-1 v2 — iki-fazlı binding):**
+    /// 1. **Structural completeness** → `MissingCoreAxes` (her şeyden önce — descriptor/
+    ///    duplicate hatalarından ÖNCE döner)
+    /// 2. **Duplicate core axis** → `DuplicateCoreAxis` (complete sistemde, registration
+    ///    sonrası `name()` drift'i)
+    /// 3. **Descriptor validation** bound referanslar üzerinde → `AxisDescriptorFailed` /
+    ///    `AxisIdentityMismatch`
     ///
-    /// **Review P1-2 — fail-closed defensive checks:**
-    /// - **Duplicate core axis:** aynı core ID iki kez karşılaşırsa sessiz last-wins
-    ///   overwrite DEĞİL, `DuplicateCoreAxis` (registration sonrası `name()` drift'i).
-    /// - **Descriptor identity mismatch:** runtime name ↔ descriptor axis_id defensive
-    ///   tekrar (`canonical_raw_axis_descriptors` ile aynı invariant).
-    /// - **Descriptor failure:** axis `descriptor()` üretemezse `AxisDescriptorFailed`.
+    /// **Faz 1 (tek-pass name() binding):** her core axis referansını bağla, duplicate
+    /// kaydet ama henüz return etme; descriptor kontrolü YOK. `name()` ikinci kez okunmaz.
+    /// **Faz 2:** structural completeness (MissingCoreAxes önce) → duplicate check →
+    /// bound referanslar üzerinde descriptor validation. `unwrap()` YOK — match-validated
+    /// tuple pattern ile `CoreAxisRefs`.
     ///
     /// `pub(crate)` — authority path internal kullanımı; public migration yüzeyi değil.
     pub(crate) fn bind_core_axes(&self) -> Result<CoreAxisRefs<'_>, CoordinateMeasurementError> {
+        // Faz 1 — tek-pass name() binding. Duplicate kaydet, descriptor kontrolü YOK.
         let mut coupling = None;
         let mut cohesion = None;
         let mut instability = None;
         let mut entropy = None;
         let mut witness_depth = None;
+        let mut duplicate: Option<&'static str> = None;
         for axis in &self.axes {
             let runtime_name = axis.name();
             if !is_core_raw_axis_id(runtime_name) {
                 continue; // custom axis — MeasuredRawPosition'a dahil değil
             }
-            // Review P1-2: descriptor identity defensive check (canonical_raw_axis_descriptors
-            // ile aynı invariant). name() interior mutability drift'inde fail-closed.
-            let descriptor = axis.descriptor().map_err(|source| {
-                CoordinateMeasurementError::AxisDescriptorFailed {
-                    axis_id: runtime_name,
-                    source,
-                }
-            })?;
-            if descriptor.axis_id() != runtime_name {
-                return Err(CoordinateMeasurementError::AxisIdentityMismatch {
-                    runtime_name,
-                    descriptor_id: descriptor.axis_id().to_owned(),
-                });
-            }
             // Review P1-2: duplicate core axis — last-wins overwrite DEĞİL, fail-closed.
-            // `name()` interior mutability ile iki axis aynı ID'ye drift ederse yakalanır.
+            // Faz 1'de return ETME; structural completeness önce (precedence).
             macro_rules! assign_core {
                 ($slot:ident) => {{
                     if $slot.replace(axis.as_ref()).is_some() {
-                        return Err(CoordinateMeasurementError::DuplicateCoreAxis {
-                            axis_id: runtime_name,
-                        });
+                        duplicate.get_or_insert(runtime_name);
                     }
                 }};
             }
@@ -952,6 +961,7 @@ impl CoordinateSystem {
                 _ => unreachable!("is_core_raw_axis_id guarantees known name"),
             }
         }
+        // Faz 2.1 — structural completeness her şeyden önce (review P1-1 v2 precedence).
         let mut missing = Vec::new();
         if coupling.is_none() {
             missing.push("coupling");
@@ -968,29 +978,46 @@ impl CoordinateSystem {
         if witness_depth.is_none() {
             missing.push("witness_depth");
         }
-        match (coupling, cohesion, instability, entropy, witness_depth) {
+        if !missing.is_empty() {
+            return Err(CoordinateMeasurementError::MissingCoreAxes { missing });
+        }
+        // Faz 2.2 — complete sistemde duplicate check (structural'dan sonra).
+        if let Some(axis_id) = duplicate {
+            return Err(CoordinateMeasurementError::DuplicateCoreAxis { axis_id });
+        }
+        // Faz 2.3 — bound referanslar üzerinde descriptor validation (name() yeniden
+        // okunmaz). unwrap YOK — structural completeness Faz 2.1'de garanti.
+        let refs = match (coupling, cohesion, instability, entropy, witness_depth) {
             (
                 Some(coupling),
                 Some(cohesion),
                 Some(instability),
                 Some(entropy),
                 Some(witness_depth),
-            ) => Ok(CoreAxisRefs {
+            ) => CoreAxisRefs {
                 coupling,
                 cohesion,
                 instability,
                 entropy,
                 witness_depth,
-            }),
-            _ => Err(CoordinateMeasurementError::MissingCoreAxes { missing }),
-        }
+            },
+            _ => unreachable!("structural completeness (Faz 2.1) guarantees all 5 slots"),
+        };
+        validate_bound_axis_identity("coupling", refs.coupling)?;
+        validate_bound_axis_identity("cohesion", refs.cohesion)?;
+        validate_bound_axis_identity("instability", refs.instability)?;
+        validate_bound_axis_identity("entropy", refs.entropy)?;
+        validate_bound_axis_identity("witness_depth", refs.witness_depth)?;
+        Ok(refs)
     }
 
     /// **INV-T9 #70 Commit 2:** Provenance-preserving tam 5-core-axis authority ölçümü.
     ///
-    /// Error precedence:
-    /// 1. Missing core axis preflight (structural) → `MissingCoreAxes` (P1-1 — ölçümden ÖNCE)
-    /// 2. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
+    /// Error precedence (review P1-1 v2 + P2):
+    /// 1. Structural completeness → `MissingCoreAxes` (P1-1 — her şeyden önce)
+    /// 2. Bind-time identity checks → `DuplicateCoreAxis` / `AxisIdentityMismatch` /
+    ///    `AxisDescriptorFailed` (P1-2 — registration sonrası drift'te fail-closed)
+    /// 3. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
     ///    (P1-2 — axis kimliği `axis_id` ile korunur)
     ///
     /// Authority/evidence yollarının tek ölçüm yüzeyi. Legacy partial preset'ler
@@ -1043,6 +1070,18 @@ pub(crate) struct CoreAxisRefs<'a> {
     instability: &'a dyn Axis,
     entropy: &'a dyn Axis,
     witness_depth: &'a dyn Axis,
+}
+
+impl std::fmt::Debug for CoreAxisRefs<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CoreAxisRefs")
+            .field("coupling", &self.coupling.name())
+            .field("cohesion", &self.cohesion.name())
+            .field("instability", &self.instability.name())
+            .field("entropy", &self.entropy.name())
+            .field("witness_depth", &self.witness_depth.name())
+            .finish()
+    }
 }
 
 impl Default for CoordinateSystem {
@@ -2354,22 +2393,23 @@ mod tests {
     // axis measure() skip / P2-2 table-driven axis_id mapping
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// DriftingNameAxis — `name()` interior mutability ile registration sonrası core
-    /// axis ID'ye drift eden axis. Review P1-2: bind_core_axes runtime identity drift'inde
-    /// fail-closed davranmalı (last-wins sessiz overwrite DEĞİL).
-    struct DriftingNameAxis {
-        name_cell: std::sync::Mutex<&'static str>,
-        descriptor_id: &'static str,
+    /// DriftingIdentityAxis — `name()` + `descriptor()` interior mutability ile birlikte
+    /// drift eden axis. Review P1-2 v2: test dışından `Arc<Mutex<&'static str>>` handle'ı
+    /// üzerinden registration sonrası axis kimliği mutate edilebilir. bind_core_axes
+    /// runtime identity drift'inde fail-closed davranmalı (last-wins sessiz overwrite DEĞİL).
+    struct DriftingIdentityAxis {
+        current_id: std::sync::Arc<std::sync::Mutex<&'static str>>,
     }
 
-    impl Axis for DriftingNameAxis {
+    impl Axis for DriftingIdentityAxis {
         fn name(&self) -> &'static str {
-            *self.name_cell.lock().unwrap()
+            *self.current_id.lock().unwrap()
         }
         fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let current = *self.current_id.lock().unwrap();
             let mut params = AxisParameterEncoder::new();
             params.push_u8(0);
-            AxisDescriptor::try_new(self.descriptor_id, 1, params)
+            AxisDescriptor::try_new(current, 1, params)
         }
         fn measure(
             &self,
@@ -2385,12 +2425,12 @@ mod tests {
 
     #[test]
     fn bind_core_axes_rejects_duplicate_core_axis_via_name_drift() {
-        // Review P1-2: iki axis registration sırasında farklı ID'lerle (coupling +
-        // security) geçer; sonrasında security ID coupling'e drift eder. bind_core_axes
-        // DuplicateCoreAxis dönmeli — sessiz overwrite DEĞİL.
-        let security_axis = DriftingNameAxis {
-            name_cell: std::sync::Mutex::new("security"),
-            descriptor_id: "security",
+        // Review P1-2 v2: DriftingIdentityAxis "security" olarak register edilir;
+        // registration sonrası current_id "coupling"'e drift eder. İki axis (gerçek
+        // coupling + drifting) coupling slot'una yazılmaya çalışılır → DuplicateCoreAxis.
+        let current_id = std::sync::Arc::new(std::sync::Mutex::new("security"));
+        let drifting = DriftingIdentityAxis {
+            current_id: current_id.clone(),
         };
         let cs = CoordinateSystem::empty()
             .try_with_axis(SourcedConstantAxis {
@@ -2423,59 +2463,206 @@ mod tests {
                 source: MetricSource::Heuristic,
             })
             .unwrap()
-            .try_with_axis(security_axis)
+            .try_with_axis(drifting)
             .unwrap();
-        // Registration sonrası: security axis'in name()'i coupling'e drift etsin.
-        // axes private olduğundan bunu doğrudan yapamayız; bunun yerine descriptor_id
-        // mismatch üzerinden identity drift'ini test ederiz (bir sonraki test).
-        // Burada bind_core_axes normal 5-core-axis'te başarılı olmalı (drift YOK).
-        let refs = cs.bind_core_axes();
-        assert!(refs.is_ok(), "5 core axis + 1 custom should bind cleanly");
+        // Registration sonrası: drifting axis'in current_id'si "coupling"'e drift etsin.
+        *current_id.lock().unwrap() = "coupling";
+        let err = cs.bind_core_axes().unwrap_err();
+        assert_eq!(
+            err,
+            CoordinateMeasurementError::DuplicateCoreAxis {
+                axis_id: "coupling",
+            }
+        );
+    }
+
+    /// DescriptorIdAxis — `name()` sabit "coupling", `descriptor()` axis_id mutable.
+    /// Review P1-2 v2: registration sonrası descriptor_id drift ederse bind_core_axes
+    /// AxisIdentityMismatch döner (registration failure DEĞİL).
+    struct DescriptorIdAxis {
+        descriptor_id: std::sync::Arc<std::sync::Mutex<String>>,
+    }
+
+    impl Axis for DescriptorIdAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            let current = self.descriptor_id.lock().unwrap().clone();
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new(&current, 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
     }
 
     #[test]
-    fn bind_core_axes_rejects_axis_identity_mismatch_at_bind() {
-        // Review P1-2: axis runtime name ile descriptor axis_id uyuşmuyor.
-        // canonical_raw_axis_descriptors ile aynı defensive check.
-        struct MismatchedCoreAxis;
-        impl Axis for MismatchedCoreAxis {
-            fn name(&self) -> &'static str {
-                "coupling"
-            }
-            fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
-                // runtime "coupling" ama descriptor "entropy" beyan ediyor.
-                let mut params = AxisParameterEncoder::new();
-                params.push_u8(0);
-                AxisDescriptor::try_new("entropy", 1, params)
-            }
-            fn measure(
-                &self,
-                _: &Node,
-                _: &Space,
-            ) -> Result<AxisMeasurement, AxisMeasurementError> {
-                AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
-            }
-            fn compute(&self, _: &Node, _: &Space) -> f64 {
-                0.5
-            }
-        }
-        // MismatchedCoreAxis: runtime "coupling" → registration başarılı (axis_id=="coupling"
-        // beklerken descriptor "entropy" döner → registration AxisRegistrationError::IdentityMismatch
-        // verir). Yani bu senaryoyu registration'dan geçiremeyiz; bunun yerine test
-        // sadece registration failure'ını doğrular — bind_core_axes'e ulaşamaz.
-        let err = CoordinateSystem::empty()
-            .try_with_axis(MismatchedCoreAxis)
-            .unwrap_err();
+    fn bind_core_axes_rejects_axis_identity_mismatch_after_registration() {
+        // Review P1-2 v2: registration sırasında name="coupling", descriptor_id="coupling"
+        // (geçerli). Registration sonrası descriptor_id "entropy"'ye drift eder.
+        // bind_core_axes Faz 2.3'te AxisIdentityMismatch dönmeli.
+        let descriptor_id = std::sync::Arc::new(std::sync::Mutex::new("coupling".to_owned()));
+        let drifting = DescriptorIdAxis {
+            descriptor_id: descriptor_id.clone(),
+        };
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(drifting)
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap();
+        // Registration sonrası: descriptor_id "entropy"'ye drift etsin.
+        *descriptor_id.lock().unwrap() = "entropy".to_owned();
+        let err = cs.bind_core_axes().unwrap_err();
         match err {
-            AxisRegistrationError::IdentityMismatch {
+            CoordinateMeasurementError::AxisIdentityMismatch {
                 runtime_name,
                 descriptor_id,
             } => {
                 assert_eq!(runtime_name, "coupling");
                 assert_eq!(descriptor_id, "entropy");
             }
-            other => panic!("expected IdentityMismatch, got {other:?}"),
+            other => panic!("expected AxisIdentityMismatch, got {other:?}"),
         }
+    }
+
+    /// DescriptorFailureAxis — `descriptor()` AtomicBool flag ile Err döndürür.
+    /// Review P1-2 v2: registration sonrası flag açılırsa bind_core_axes Faz 2.3'te
+    /// AxisDescriptorFailed döner.
+    struct DescriptorFailureAxis {
+        fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl Axis for DescriptorFailureAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            use std::sync::atomic::Ordering;
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(AxisDescriptorError::EmptyAxisId);
+            }
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+    }
+
+    #[test]
+    fn bind_core_axes_rejects_axis_descriptor_failure_after_registration() {
+        // Review P1-2 v2: registration başarılı (flag false → descriptor OK). Flag
+        // açıldıktan sonra bind_core_axes Faz 2.3'te AxisDescriptorFailed döner.
+        use std::sync::atomic::Ordering;
+        let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failing = DescriptorFailureAxis { fail: fail.clone() };
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(failing)
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "instability",
+                value: 0.3,
+                source: MetricSource::TreeSitter,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "entropy",
+                value: 0.4,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "witness_depth",
+                value: 0.5,
+                source: MetricSource::Heuristic,
+            })
+            .unwrap();
+        fail.store(true, Ordering::SeqCst);
+        let err = cs.bind_core_axes().unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisDescriptorFailed { axis_id, source } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(source, AxisDescriptorError::EmptyAxisId);
+            }
+            other => panic!("expected AxisDescriptorFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bind_core_axes_missing_axes_precedence_precedes_descriptor_failure() {
+        // Review P1-1 v2: partial sistemde mevcut axis'in descriptor'ı fail ederse bile
+        // MissingCoreAxes dönmeli — AxisDescriptorFailed DEĞİL. Structural completeness
+        // Faz 2.1'de her şeyden önce. Contract ↔ implementation precedence sabitler.
+        use std::sync::atomic::Ordering;
+        // Registration sırasında fail=false (registration descriptor() çağırır). Flag
+        // registration sonrası açılır.
+        let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let failing = DescriptorFailureAxis { fail: fail.clone() };
+        // Yalnız coupling (failing descriptor) + cohesion registered — 3 core axis missing.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(failing)
+            .unwrap()
+            .try_with_axis(SourcedConstantAxis {
+                name: "cohesion",
+                value: 0.2,
+                source: MetricSource::Scip,
+            })
+            .unwrap();
+        // Registration sonrası: descriptor fail açılır.
+        fail.store(true, Ordering::SeqCst);
+        let err = cs.bind_core_axes().unwrap_err();
+        // MissingCoreAxes öncelikli — AxisDescriptorFailed değil.
+        assert_eq!(
+            err,
+            CoordinateMeasurementError::MissingCoreAxes {
+                missing: vec!["instability", "entropy", "witness_depth"],
+            }
+        );
     }
 
     /// PanicCustomAxis — Review P2-1: custom axis measure()'ı çağrılırsa panic.
