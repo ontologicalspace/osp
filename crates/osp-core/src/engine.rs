@@ -3859,14 +3859,139 @@ v = 0.5
     }
 
     #[test]
-    fn measure_task_delta_session_rejects_axis_descriptor_drift() {
-        // Engine seviyesi drift — interior mutability descriptor'ı değiştirirse
-        // session verify_unchanged AxisStateDrift üretir, MeasurementError::CoordinateMeasurement
-        // ile sarmalanır. Bu test için engine'in coord_system'ını mutable axis ile
-        // değiştirip drift üretiyoruz. Basit yaklaşım: session begin'den sonra
-        // coord_system'i yeni axis ile değiştirmek zor (owned), bu yüzden doğrudan
-        // session API üzerinden engine binding'ini doğruluyoruz — measured_centroid_of
-        // wrapper session açıp kapattığı için drift olmaz (immutable preset).
+    fn measure_task_delta_session_rejects_axis_drift() {
+        // ★ Reviewer v10/v11 P1 blocking test — gerçek production-path drift rejection.
+        // measure_task_delta → tek session açar → measured_centroid_in_session
+        // (before/after aynı session) → DriftDuringMeasurementAxis.measure() epoch artırır
+        // → PostMeasure verify captured(0) ≠ actual(1) → AxisStateDrift
+        // → MeasurementError::CoordinateMeasurement → EngineMeasurement token ÜRETİLMEZ.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        struct DriftDuringMeasurementAxis {
+            epoch: Arc<AtomicU64>,
+        }
+        impl crate::coords::Axis for DriftDuringMeasurementAxis {
+            fn name(&self) -> &'static str {
+                "coupling"
+            }
+            fn descriptor(
+                &self,
+            ) -> Result<crate::coords::AxisDescriptor, crate::coords::AxisDescriptorError>
+            {
+                // Descriptor SABİT — A→A. Sadece measure() çağrısında epoch drift eder.
+                let mut params = crate::coords::AxisParameterEncoder::new();
+                params.push_u8(0);
+                crate::coords::AxisDescriptor::try_new("coupling", 1, params)
+            }
+            fn measure(
+                &self,
+                _node: &Node,
+                _space: &Space,
+            ) -> Result<crate::coords::AxisMeasurement, crate::coords::AxisMeasurementError>
+            {
+                // measure() çağrısı interior mutation — epoch artar. Session PostMeasure
+                // verify captured(0) ≠ actual(1) → AxisStateDrift.
+                self.epoch.fetch_add(1, Ordering::SeqCst);
+                crate::coords::AxisMeasurement::try_new(
+                    0.5,
+                    crate::coords::MetricSource::Placeholder,
+                )
+            }
+            fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+                0.5
+            }
+            fn measurement_epoch(&self) -> crate::coords::AxisStateEpoch {
+                crate::coords::AxisStateEpoch::new(self.epoch.load(Ordering::SeqCst))
+            }
+        }
+
+        let drift_epoch = Arc::new(AtomicU64::new(0));
+        // Custom coord_system — coupling drifting axis, diğer 4 production axis.
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(DriftDuringMeasurementAxis {
+                epoch: drift_epoch.clone(),
+            })
+            .unwrap()
+            .try_with_axis(
+                crate::axes::CohesionAxis::try_with_observed_source(
+                    crate::coords::MetricSource::Scip,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .try_with_axis(
+                crate::axes::InstabilityAxis::try_with_source(
+                    crate::coords::MetricSource::TreeSitter,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .try_with_axis(crate::axes::EntropyAxis::from_commit_entropy(6.5))
+            .unwrap()
+            .try_with_axis(crate::axes::WitnessDepthAxis::from_witness(0.5, 3))
+            .unwrap();
+        let vision = VisionVector::new(RawPosition::default());
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            cs,
+            vision,
+            EngineConfig::default_calibrated(),
+        );
+
+        // Subject node — task_with_node_scope(1, 42) + claim_with_task_id(42).
+        // Node base space'de değil; delta_nodes ile introduced edilir.
+        let task = task_with_node_scope(1, 42);
+        let delta_node = Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        };
+        let claim = claim_with_task_id(42, vec![delta_node], vec![], vec![]);
+        let bound = crate::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &task,
+        };
+        let revision = engine.current_space_view_revision().unwrap();
+
+        // Gerçek production producer — measure_task_delta. Drifting coupling axis
+        // before centroid ölçümünde measure() çağrılır → epoch 1 → PostMeasure drift.
+        let error = engine
+            .measure_task_delta(&bound, &revision, None)
+            .unwrap_err();
+
+        // Token ÜRETİLMEDİ — AxisStateDrift MeasurementError::CoordinateMeasurement
+        // ile sarmalanır. Phase: PostMeasure (measure'dan sonra verify).
+        match error {
+            crate::measurement::MeasurementError::CoordinateMeasurement(
+                crate::coords::CoordinateMeasurementError::AxisStateDrift {
+                    axis_id,
+                    phase,
+                    expected_epoch,
+                    actual_epoch,
+                    ..
+                },
+            ) => {
+                assert_eq!(axis_id, "coupling", "drift axis must be coupling");
+                assert_eq!(
+                    phase,
+                    crate::coords::MeasurementSessionPhase::PostMeasure,
+                    "drift detected at post-measure verify"
+                );
+                assert_eq!(expected_epoch, crate::coords::AxisStateEpoch::ZERO);
+                assert_eq!(actual_epoch, crate::coords::AxisStateEpoch::new(1));
+            }
+            other => panic!("expected AxisStateDrift via CoordinateMeasurement, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn measurement_token_context_equals_session_captured_descriptors() {
+        // ★ Reviewer v11 P2-1 — gerçek EngineMeasurement token'ının context'i,
+        // session açılışında captured descriptor snapshot ile aynı. Manuel context
+        // kurulumu DEĞİL — measure_task_delta production yolu token üretir, token'ın
+        // context'i session snapshot'ından gelir.
         let mut engine = make_measurement_engine();
         engine.space_mut().insert_node(Node {
             id: 1,
@@ -3874,59 +3999,46 @@ v = 0.5
             mass: 1.0,
             ..Default::default()
         });
-        // Wrapper başarılı — session begin/verify_unchanged arası drift yok
-        // (default_raw_five axis'leri immutable, epoch ZERO).
-        let result = engine.measured_centroid_of(engine.space(), &[1]);
-        assert!(
-            result.is_ok(),
-            "immutable preset axes must not drift: {:?}",
-            result
-        );
-    }
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_task_id(42, vec![], vec![], vec![]);
+        let bound = crate::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &task,
+        };
+        let revision = engine.current_space_view_revision().unwrap();
 
-    #[test]
-    fn measurement_token_context_equals_session_captured_descriptors() {
-        // ★ Reviewer v9 blocking test — token context session snapshot'tan, yeniden
-        // CoordinateSystem traversal DEĞİL. Session axis_descriptors() ile
-        // MeasurementInputContext::try_new aynı descriptor set'ini üretir.
-        let engine = make_measurement_engine();
-        let session = crate::coords::BoundMeasurementSession::begin(&engine.coord_system)
-            .expect("session begin succeeds");
-        let session_descriptors = session.axis_descriptors();
-        // Context authorization layer'da kurulur — session snapshot'ından.
-        let context =
-            crate::authorization::MeasurementInputContext::try_new(session_descriptors.clone())
-                .expect("context construction from session descriptors succeeds");
-        // Context 5 core axis descriptor taşır — canonical sıralı (axis_id'ye göre).
-        assert_eq!(
-            context.axis_descriptors().len(),
-            5,
-            "context carries exactly 5 core axis descriptors"
-        );
-        // Canonical sıralama — axis_id'ye göre artan.
-        let ids: Vec<&str> = context
+        // Production token — measure_task_delta EngineMeasurement üretir.
+        let measurement = engine
+            .measure_task_delta(&bound, &revision, None)
+            .expect("production token for immutable preset must succeed");
+
+        // Token context'i — session captured snapshot'tan. Aynı engine için bağımsız
+        // session açıp captured descriptor'ı al, token context'i ile karşılaştır.
+        let independent_session =
+            crate::coords::BoundMeasurementSession::begin(&engine.coord_system)
+                .expect("independent session begin succeeds");
+        let mut expected_descriptors = independent_session.axis_descriptors();
+        expected_descriptors.sort_unstable_by(|a, b| a.axis_id().cmp(b.axis_id()));
+
+        let token_context_descriptors: Vec<String> = measurement
+            .context()
             .axis_descriptors()
             .iter()
-            .map(|d| d.axis_id())
+            .map(|d| d.axis_id().to_string())
+            .collect();
+        let expected_ids: Vec<String> = expected_descriptors
+            .iter()
+            .map(|d| d.axis_id().to_string())
             .collect();
         assert_eq!(
-            ids,
-            vec![
-                "cohesion",
-                "coupling",
-                "entropy",
-                "instability",
-                "witness_depth"
-            ],
-            "context descriptors are canonically sorted by axis_id"
+            token_context_descriptors, expected_ids,
+            "token context axis_id set must match session captured snapshot"
         );
-        // Session descriptor set'i ile context aynı descriptors (sıra dışında).
-        let mut session_sorted = session_descriptors.clone();
-        session_sorted.sort_unstable_by(|a, b| a.axis_id().cmp(b.axis_id()));
+        // Set equality — sıra canonical (axis_id sort) her ikisinde de aynı.
         assert_eq!(
-            context.axis_descriptors(),
-            session_sorted.as_slice(),
-            "context descriptors match session captured descriptors (set equality)"
+            measurement.context().axis_descriptors().len(),
+            5,
+            "token context carries exactly 5 core axis descriptors"
         );
     }
 }

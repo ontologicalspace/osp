@@ -9,15 +9,15 @@
 
 Paper 2 model–implementation conformance fix. INV-T9 — External-Evidence Suspension Isolation (Model B).
 
-## Kapsam durumu (Steps 1-6 done + #71 + #72 landed + #70 Commit 1-3 + closures landed — Commit 4-6 pending)
+## Kapsam durumu (Steps 1-6 done + #71 + #72 landed + #70 Commit 1-3 + Commit 4a implementation + closures landed — Commit 4a scoped review REQUEST CHANGES 9.6/10 → closure pending)
 
-Steps 1-6 + #71 (canonical decision-basis) + #72 (embedded attempt-evidence integrity) + #70 Commit 1-3 (provenance-aware axis measurement + position measurement + subject-bound EngineMeasurement tokens) implementation + closure commit'leri tamamlandı. **#70 Commit 3 + review v5/v6 closures landed (0d73801); Commit 4-6 pending.**
+Steps 1-6 + #71 (canonical decision-basis) + #72 (embedded attempt-evidence integrity) + #70 Commit 1-3 (provenance-aware axis measurement + position measurement + subject-bound EngineMeasurement tokens) + **#70 Commit 4a (BoundMeasurementSession — single-bind axis session integrity)** implementation + closure commit'leri tamamlandı. **#70 Commit 4a implementation landed (f72ed85); scoped review REQUEST CHANGES 9.6/10 → closure pending. Commit 4b-6 pending.**
 
 ### ✅ #72 — embedded attempt-evidence integrity (5 implementation commits + 5 closures)
 - Commit 1-5: canonical evidence model, navigator factory, envelope binding, dangling id removal, persisted tamper matrix
 - Closure 1-5: load/persist integrity, production mapper, conditional Held assertions, deterministic Held production-path, reviewer P2 cleanup
 
-### ✅ #70 — provenance-aware axis measurement + subject-bound tokens (Commit 1-3 + closures)
+### ✅ #70 — provenance-aware axis measurement + subject-bound tokens (Commit 1-3 + Commit 4a + closures)
 - **Commit 1** (a300d75): provenance-native axis measurement contract — MetricSource::Mixed, AxisMeasurement, MeasuredRawPosition, Axis::measure() authoritative, validate_direct_source, v6/v7 closure (6aaeb39 + 0d4eb51)
 - **Commit 2** (080009e): provenance-aware position measurement — measured_position_of/try_raw_position_of authority surface, CoordinateMeasurementError, aggregate_source, bind_core_axes (P1-1 tek-pass reference binding)
   - Closure v1 (059ed04): Axis descriptor contract, bind_core_axes defensive
@@ -25,10 +25,15 @@ Steps 1-6 + #71 (canonical decision-basis) + #72 (embedded attempt-evidence inte
 - **Commit 3** (22e3d93): subject-bound EngineMeasurement tokens — canonical_encoding.rs neutral layer, measurement.rs subject-bound token + MeasurementDeltaDigest (shared CanonicalStructuralDelta producer) + cross-field validated MeasurementRequest + EngineMeasurement context↔digest defensive verify + MeasurementDigestError public boundary + v1 goldens
   - Closure v1 (650c620): reviewer v5 (REQUEST CHANGES 9.2/10) — measurement context fence (interior mutability), shared producer authorization yoluna uygulandı, predicate scope duplicate bypass kaldırıldı, gerçek v1 golden sabitleri, error taxonomy categorization, heterogeneous diagnostic scopes
   - Closure v2 (0d73801): reviewer v6 (REQUEST CHANGES 9.6/10) conditional approval — P1 BoundMeasurementSession Commit 4 merge-blocker, P2-1 source-level producer contract test (include_str!), P2-2 trybuild Deserialize guards carryover, P2-3 PR body truth-surface
+- **Commit 4a** (f72ed85): BoundMeasurementSession — single-bind axis session integrity. Reviewer v6 carryover kapatıldı: AxisStateEpoch (pub, monoton), MeasurementSessionPhase (pub, non_exhaustive), Axis::measurement_epoch() default ZERO, capture_bound_axis_state (epoch sandwich), bind_core_axis_refs → bind_core_axes_with_descriptors, BoundMeasurementSession (begin/measured_position_of/verify_unchanged/axis_descriptors — pre/post/final verify), CoordinateMeasurementError::AxisStateDrift (Box, typed phase) + AxisStateChangedDuringCapture, measured_centroid_in_session + wrapper, measure_task_delta manuel context-before/context-after digest fence KALKTI — tek session + verify_unchanged, context authorization layer'da. 1017 → 1033 osp-core lib tests (+16).
+  - Scoped review REQUEST CHANGES 9.6/10: P1 (gerçek measure_task_delta → AxisStateDrift → token yok testi) + 4 P2 kapatıldı (closure pending commit)
 
-## Commits (current head 0d73801)
+## Commits (current head f72ed85)
 
 ```
+f72ed85  feat(coords): BoundMeasurementSession — single-bind axis session integrity (#70 commit 4a)
+c6b25f6  docs(inv-t9): #70 commit 4a plan + Commit 3 handoff truth-surface update
+389e7db  docs(inv-t9): #70 commit 3 review v3 closure — truth-surface head + producer contract hardening
 0d73801  #70 commit 3 review v2 closure — producer contract test + Commit 4 P1 merge-blocker
 650c620  #70 commit 3 review v1 closure — session fence + golden pin + producer parity
 22e3d93  feat(engine): subject-bound EngineMeasurement tokens (#70 commit 3)
@@ -43,13 +48,13 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
 ... (earlier #72 + Steps 1-6 commits)
 ```
 
-## Doğrulama (current head 0d73801 — #70 Commit 3 + review v5/v6 closure landed)
+## Doğrulama (current head f72ed85 — #70 Commit 4a implementation landed)
 
 - ✅ GitHub CI: Build & Test — pass
 - ✅ RUSTFLAGS="-D warnings" cargo build --workspace --examples --exclude osp-desktop — temiz
 - ✅ RUSTFLAGS="-D warnings" cargo test --workspace --exclude osp-desktop — tüm testler geçer
 - ✅ cargo fmt --all -- --check — temiz (workspace-wide)
-- ✅ **1017 osp-core lib tests** + full workspace tests (951 → +66: #70 Commit 3 +62, review v1 closure +4)
+- ✅ **1033 osp-core lib tests** (1017 → +16: Commit 4a session integrity + drift rejection) → closure +2 = 1035
 - ✅ cargo clippy -p osp-core --lib — 12 warnings (parent `3b4231f` parity)
 - ✅ INV-T9 conformance test matrisi + v1 golden vectors (5: AuthorizationBasis, MeasurementInput, EvaluationContext, SuspendedAttemptEvidence, MeasurementDelta + MeasurementRequest)
 
@@ -66,9 +71,19 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
 
 ## Kalan işler (merge-blocking)
 
-### #70 — EngineMeasurement pipeline (Commit 4-6 pending)
+### #70 — EngineMeasurement pipeline (Commit 4a scoped review → 4b-6 pending)
 
-- **Commit 4 — `refactor(inv-t4): require EngineMeasurement across authority and evidence paths` (ATOMIK)**
+- **Commit 4a — `feat(coords): BoundMeasurementSession — single-bind axis session integrity` (LANDED f72ed85)**
+  - Reviewer v6/v8/v9/v10 P1 merge-blocker closure: AxisStateEpoch + MeasurementSessionPhase + BoundMeasurementSession (pre/post/final verify — gerçek transient ABA epoch ile).
+  - Scoped review REQUEST CHANGES 9.6/10 (1 P1 + 4 P2):
+    - **P1 (KAPANDI):** gerçek `measure_task_delta → AxisStateDrift → token yok` production-path testi (`DriftDuringMeasurementAxis` fixture + gerçek producer).
+    - **P2-1 (KAPANDI):** token-context testi gerçek `EngineMeasurement.context()` ile.
+    - **P2-2 (KAPANDI):** epoch-sandwich gerçek fixture (`EpochChangesDuringDescriptorAxis` → `AxisStateChangedDuringCapture` capture + begin yolundan).
+    - **P2-3 (KAPANDI):** kod yorumları `bind_core_axes` (compat, kaldırıldı) referanslarını günceller — `bind_core_axis_refs → bind_core_axes_with_descriptors → BoundMeasurementSession` zinciri.
+    - **P2-4 (KAPANDI):** PR body truth-surface `f72ed85` durumuna güncellendi.
+  - Closure commit pending (P1 + 4 P2 tek commit'te).
+
+- **Commit 4b — `refactor(inv-t4): require EngineMeasurement across authority and evidence paths` (ATOMIK)**
   - `TaskCommitInput { claim, omega, task_resolver, measurement }` (subject_scope YOK — token'a taşındı)
   - `commit_task_claim` migration + `claim.computed_raw` ignore + Mixed validation
   - `AuthorizationBasis v2` (before+after single canonical + request digest + baseline/loss consistency)
@@ -78,29 +93,13 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
   - `provenanced_from_raw` production/evidence path'ten kaldır
   - `raw_position_of` + `position_of` + `Axis::compute()` `#[deprecated]`
   - Domain sep `osp.authorization-basis.v2\0`
-
-  **⚠️ P1 MERGE-BLOCKER — BoundMeasurementSession (reviewer v6 carryover):**
-
-  Commit 4, EngineMeasurement'ı herhangi bir authority/evidence caller'a bağlamadan önce:
-
-  1. Core axis referanslarını yalnız bir kez bind etmelidir (`BoundMeasurementSession`).
-  2. Before ve after ölçümlerinin tamamı aynı bound referanslarla yapılmalıdır.
-  3. Session başlangıcındaki measurement context token'a bağlanmalıdır.
-  4. Session sonunda descriptor/context drift fail-closed doğrulanmalıdır.
-  5. **A→B→A ABA descriptor fixture'ı token üretimini reddetmelidir** —
-     `bound_measurement_session_rejects_aba_descriptor_drift` blocking test.
-  6. Bu koşullar sağlanmadan legacy measured input migration'ı yapılamaz.
-
-  Commit 3 context-before/context-after fence kalıcı descriptor değişikliğini yakalar
-  ama ABA senaryosunu (node ölçümleri arası geçici descriptor drift) yakalamaz. Commit 3
-  add-only olduğu için (EngineMeasurement henüz production authority yoluna bağlanmıyor)
-  bu koşul Commit 4 migration ön koşulu olarak taşınır — "P1-1 tamamen kapandı" denmez.
+  - Issue #80 (osp-desktop Claim struct field migration) çözümü
 
   **P2 carryover — compile-fail Deserialize guards (reviewer v6):**
 
   `tests/ui/engine_measurement_deserialize_forbidden.rs` ve
   `tests/ui/measurement_request_deserialize_forbidden.rs` `trybuild` fixture'ları
-  Commit 4'te eklenmeli. Commit 3'te `Serialize`-only invariant manuel review ile korunur.
+  Commit 4b'de eklenmeli.
 
 - **Commit 5 — `test(inv-t4): adversarial measurement-binding regressions`** (19 regression test)
 - **Commit 6 — `docs(inv-t4): conformance + truth-surface`** (Conformance doc, #70 acceptance checklist, PR body sync)
@@ -108,15 +107,22 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
 ### #72 — embedded attempt-evidence integrity — closure landed, scoped review pending
 ### #73 — witness Q3 honest-reject production wiring — PR #69 merge decision requires governance call
 
-## Truth-surface (current head 0d73801)
+## Truth-surface (current head f72ed85)
 
 ```
-Current head: 0d73801
-osp-core lib tests: 1017 (951 → +66: Commit 3 +62, review v1 closure +4)
+Current head: f72ed85
+osp-core lib tests: 1033 (implementation) / 1035 (closure pending) (1017 → +16 Commit 4a, +2 closure)
 workspace tests (excl. osp-desktop): green
-cargo check -p osp-desktop --lib: parent parity (2 #80-originated errors, yeni hata yok)
+cargo check -p osp-desktop --lib: parent parity (2 #80-originated errors, Commit 4a'dan değil — Issue #80 Commit 4b)
 cargo clippy -p osp-core --lib: 12 warnings (parent `3b4231f` parity)
 
+#70 Commit 4a: implementation landed (f72ed85) — BoundMeasurementSession
+  scoped review: REQUEST CHANGES 9.6/10 (1 P1 + 4 P2 — closure pending)
+  P1 closed: measure_task_delta → AxisStateDrift → token yok (production-path)
+  P2-1 closed: token-context gerçek EngineMeasurement.context()
+  P2-2 closed: epoch-sandwich gerçek fixture (capture + begin)
+  P2-3 closed: bind_core_axes referanslı yorumlar güncellendi
+  P2-4 closed: PR body truth-surface f72ed85
 #70 Commit 3: landed (22e3d93) — subject-bound EngineMeasurement tokens
 #70 Commit 3 review v5 closure: landed (650c620) — session fence + golden pin + producer parity
 #70 Commit 3 review v6 closure: landed (0d73801) — producer contract test + Commit 4 P1 merge-blocker
@@ -124,12 +130,10 @@ cargo clippy -p osp-core --lib: 12 warnings (parent `3b4231f` parity)
 #70 Commit 2 + review v1/v2 closure: landed (eb9903b)
 #72 implementation + 5 closures: landed (920a1dc), scoped review pending
 
-Commit 4 carryover (P1 merge-blocker before authority migration):
-  - BoundMeasurementSession (tek core-axis binding, descriptor drift fail-closed, ABA fixture)
-Commit 4 carryover (P2):
-  - trybuild compile-fail Deserialize guards
+Commit 4 carryover (P1 merge-blocker): CLOSED (Commit 4a landed)
+Commit 4b carryover (P2): trybuild compile-fail Deserialize guards
 
-#70: Commit 4-6 pending
+#70: Commit 4a closure pending → Commit 4b-6 pending
 #73: Q3 wiring — PR #69 merge decision governance call required
 eligible independent review: still required (GOVERNANCE §3 high-risk)
 ```

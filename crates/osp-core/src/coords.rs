@@ -334,8 +334,12 @@ pub fn validate_direct_source(source: MetricSource) -> Result<MetricSource, Axis
 ///
 /// **Error precedence (P1-1):**
 /// 1. Structural completeness (5 core raw axis) → `MissingCoreAxes { missing }`
-/// 2. `bind_core_axes` defensive identity check → `DuplicateCoreAxis` /
-///    `AxisIdentityMismatch` / `AxisDescriptorFailed`
+///    (`bind_core_axis_refs` Faz 2.1 — `bind_core_axes_with_descriptors`'ın refs-only
+///    alt katmanı)
+/// 2. Duplicate core axis → `DuplicateCoreAxis` (`bind_core_axis_refs` Faz 2.2);
+///    capture identity + epoch sandwich → `AxisIdentityMismatch` /
+///    `AxisDescriptorFailed` / `AxisStateChangedDuringCapture` (`capture_bound_axis_state`,
+///    `bind_core_axes_with_descriptors`'dan çağrılır)
 /// 3. Per-axis `measure()` / `validate_direct_axis_output` → `AxisMeasurementFailed`
 ///
 /// **Axis identity preservation (P1-2):** Per-axis measurement hatası `axis_id`
@@ -356,7 +360,9 @@ pub enum CoordinateMeasurementError {
 
     /// **P1-2 (review P1-2):** Aynı core axis ID iki kez karşılaşıldı — registration
     /// sırasında reddedilir ama `name()` interior mutability ile drift ederse defensive
-    /// olarak `bind_core_axes` tekrar yakalar (last-wins sessiz overwrite DEĞİL).
+    /// olarak `bind_core_axis_refs` Faz 2.2 tekrar yakalar (last-wins sessiz overwrite
+    /// DEĞİL). `bind_core_axis_refs`, `bind_core_axes_with_descriptors`'ın refs-only
+    /// alt katmanıdır (descriptor capture'dan ÖNCE çalışır).
     #[error("duplicate core axis id at bind: {axis_id}")]
     DuplicateCoreAxis { axis_id: &'static str },
 
@@ -369,7 +375,8 @@ pub enum CoordinateMeasurementError {
         descriptor_id: String,
     },
 
-    /// **P1-2 (review P1-2):** `bind_core_axes` descriptor üretimi başarısız.
+    /// **P1-2 (review P1-2):** `capture_bound_axis_state` descriptor üretimi başarısız.
+    /// `bind_core_axes_with_descriptors` her core axis için çağırır.
     #[error("axis `{axis_id}` descriptor failed at bind: {source}")]
     AxisDescriptorFailed {
         axis_id: &'static str,
@@ -812,7 +819,8 @@ pub enum MeasurementSessionPhase {
 ///   `measure()` her çağrıda aynı sonucu döner. Axis interior mutability/nondeterministik
 ///   descriptor üretirse digest + provenance güvenilir olmaz.
 /// - **`name()` immutable:** Kayıtlı axis ömrü boyunca `name()` değişmez. Registration
-///   sırasında doğrulanan axis kimliği `bind_core_axes` defensive check'leriyle korunur.
+///   sırasında doğrulanan axis kimliği `bind_core_axis_refs` (duplicate, structural) +
+///   `capture_bound_axis_state` (identity + epoch sandwich) defensive check'leriyle korunur.
 ///
 /// **INV-T9 #70 — measure() authoritative:**
 /// - `measure()` ölçüm authority'sidir: value + source döner, fallible + validated.
@@ -1174,12 +1182,16 @@ impl CoordinateSystem {
     }
 }
 
-/// **INV-T9 #70 Commit 2 (P1-1):** `bind_core_axes` tarafından tek geçişte bağlanan 5 core
-/// raw axis referansı. `measured_position_of` bunları consume eder — ikinci bir `name()`
+/// **INV-T9 #70 Commit 2 (P1-1) + Commit 4a:** `bind_core_axis_refs` tarafından tek
+/// geçişte bağlanan 5 core raw axis referansı (name binding + structural completeness +
+/// duplicate). `bind_core_axes_with_descriptors` bu refs'i alır, her axis için
+/// `capture_bound_axis_state` çağırıp descriptor + epoch snapshot üretir → `BoundCoreAxes`.
+/// `BoundMeasurementSession` bu bound refs'i session boyunca tutar — ikinci bir `name()`
 /// lookup yok, preflight ile measurement arasında TOCTOU yok.
 ///
-/// `pub(crate)` — `bind_core_axes` return type exposure için; field'lar crate dışından
-/// erişilemez (CoordinateSystem modülü dışında construct edilemez).
+/// `pub(crate)` — `bind_core_axis_refs`/`bind_core_axes_with_descriptors` return type
+/// exposure için; field'lar crate dışından erişilemez (CoordinateSystem modülü dışında
+/// construct edilemez).
 pub(crate) struct CoreAxisRefs<'a> {
     coupling: &'a dyn Axis,
     cohesion: &'a dyn Axis,
@@ -1272,9 +1284,10 @@ impl std::fmt::Debug for CoreAxisStates {
 
 /// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Bound refs + captured state — atomik.
 ///
-/// `bind_core_axes_with_descriptors` tek geçişte hem refs hem state üretir.
-/// `bind_core_axes` (compat projection) yalnız refs alır, state'i drop eder.
-/// `BoundMeasurementSession` ikisini birden tutar — refs ile ölçüm, state ile verify.
+/// `bind_core_axes_with_descriptors` tek geçişte hem refs (name binding + completeness +
+/// duplicate, `bind_core_axis_refs` alt katmanı) hem captured state (her axis için
+/// `capture_bound_axis_state` → descriptor + epoch) üretir. `BoundMeasurementSession`
+/// ikisini birden tutar — refs ile ölçüm, state ile pre/post/final verify.
 pub(crate) struct BoundCoreAxes<'a> {
     refs: CoreAxisRefs<'a>,
     states: CoreAxisStates,
@@ -2739,14 +2752,16 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // INV-T9 #70 Commit 2 review closure — P1-2 bind_core_axes defensive / P2-1 custom
-    // axis measure() skip / P2-2 table-driven axis_id mapping
+    // INV-T9 #70 Commit 2 review closure — P1-2 binding defensive (Commit 4a:
+    // bind_core_axis_refs + capture_bound_axis_state) / P2-1 custom axis measure() skip /
+    // P2-2 table-driven axis_id mapping
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// DriftingIdentityAxis — `name()` + `descriptor()` interior mutability ile birlikte
     /// drift eden axis. Review P1-2 v2: test dışından `Arc<Mutex<&'static str>>` handle'ı
-    /// üzerinden registration sonrası axis kimliği mutate edilebilir. bind_core_axes
-    /// runtime identity drift'inde fail-closed davranmalı (last-wins sessiz overwrite DEĞİL).
+    /// üzerinden registration sonrası axis kimliği mutate edilebilir. `bind_core_axes_with_descriptors`
+    /// runtime identity drift'inde fail-closed davranmalı (last-wins sessiz overwrite DEĞİL) —
+    /// `bind_core_axis_refs` duplicate'i, `capture_bound_axis_state` identity mismatch'i yakalar.
     struct DriftingIdentityAxis {
         current_id: std::sync::Arc<std::sync::Mutex<&'static str>>,
     }
@@ -2827,8 +2842,9 @@ mod tests {
     }
 
     /// DescriptorIdAxis — `name()` sabit "coupling", `descriptor()` axis_id mutable.
-    /// Review P1-2 v2: registration sonrası descriptor_id drift ederse bind_core_axes
-    /// AxisIdentityMismatch döner (registration failure DEĞİL).
+    /// Review P1-2 v2: registration sonrası descriptor_id drift ederse
+    /// `bind_core_axes_with_descriptors` → `capture_bound_axis_state` → AxisIdentityMismatch
+    /// döner (registration failure DEĞİL).
     struct DescriptorIdAxis {
         descriptor_id: std::sync::Arc<std::sync::Mutex<String>>,
     }
@@ -2859,7 +2875,8 @@ mod tests {
     fn bind_core_axes_rejects_axis_identity_mismatch_after_registration() {
         // Review P1-2 v2: registration sırasında name="coupling", descriptor_id="coupling"
         // (geçerli). Registration sonrası descriptor_id "entropy"'ye drift eder.
-        // bind_core_axes Faz 2.3'te AxisIdentityMismatch dönmeli.
+        // bind_core_axes_with_descriptors → capture_bound_axis_state identity check
+        // → AxisIdentityMismatch dönmeli.
         let descriptor_id = std::sync::Arc::new(std::sync::Mutex::new("coupling".to_owned()));
         let drifting = DescriptorIdAxis {
             descriptor_id: descriptor_id.clone(),
@@ -2907,8 +2924,8 @@ mod tests {
     }
 
     /// DescriptorFailureAxis — `descriptor()` AtomicBool flag ile Err döndürür.
-    /// Review P1-2 v2: registration sonrası flag açılırsa bind_core_axes Faz 2.3'te
-    /// AxisDescriptorFailed döner.
+    /// Review P1-2 v2: registration sonrası flag açılırsa `bind_core_axes_with_descriptors`
+    /// → `capture_bound_axis_state` → AxisDescriptorFailed döner.
     struct DescriptorFailureAxis {
         fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
@@ -2941,7 +2958,8 @@ mod tests {
     #[test]
     fn bind_core_axes_rejects_axis_descriptor_failure_after_registration() {
         // Review P1-2 v2: registration başarılı (flag false → descriptor OK). Flag
-        // açıldıktan sonra bind_core_axes Faz 2.3'te AxisDescriptorFailed döner.
+        // açıldıktan sonra bind_core_axes_with_descriptors → capture_bound_axis_state
+        // → AxisDescriptorFailed döner.
         use std::sync::atomic::Ordering;
         let fail = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let failing = DescriptorFailureAxis { fail: fail.clone() };
@@ -3695,6 +3713,113 @@ mod tests {
             msg.contains("during capture"),
             "msg has phase context: {msg}"
         );
+    }
+
+    /// **★ Reviewer v11 P2-2 — gerçek epoch-sandwich fixture:** Axis `descriptor()`
+    /// çağrısı sırasında epoch'u değiştirir (interior mutation descriptor computation'ı
+    /// içinde). `capture_bound_axis_state` epoch_before → descriptor → epoch_after
+    /// sandwich yapar; fark → `AxisStateChangedDuringCapture`.
+    struct EpochChangesDuringDescriptorAxis {
+        epoch: Arc<AtomicU64>,
+    }
+
+    impl Axis for EpochChangesDuringDescriptorAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+            // descriptor() çağrısı epoch'u artırır — capture sandwich bunu yakalar.
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            let mut params = AxisParameterEncoder::new();
+            params.push_u8(0);
+            AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &Node,
+            _space: &Space,
+        ) -> Result<AxisMeasurement, AxisMeasurementError> {
+            AxisMeasurement::try_new(0.5, MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &Node, _space: &Space) -> f64 {
+            0.5
+        }
+        fn measurement_epoch(&self) -> AxisStateEpoch {
+            AxisStateEpoch::new(self.epoch.load(Ordering::SeqCst))
+        }
+    }
+
+    #[test]
+    fn capture_bound_axis_state_rejects_epoch_change_during_descriptor() {
+        // ★ Reviewer v11 P2-2 blocking test — gerçek capture_bound_axis_state yolu.
+        // capture_bound_axis_state: epoch_before(0) → descriptor() [epoch→1] →
+        // epoch_after(1) → mismatch → AxisStateChangedDuringCapture.
+        let axis = EpochChangesDuringDescriptorAxis {
+            epoch: Arc::new(AtomicU64::new(0)),
+        };
+        let err = capture_bound_axis_state("coupling", &axis).unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisStateChangedDuringCapture {
+                axis_id,
+                epoch_before,
+                epoch_after,
+            } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(epoch_before, AxisStateEpoch::ZERO);
+                assert_eq!(epoch_after, AxisStateEpoch::new(1));
+            }
+            other => panic!("expected AxisStateChangedDuringCapture, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bound_measurement_session_begin_rejects_epoch_change_during_capture() {
+        // ★ Reviewer v11 P2-2 — session begin yolu. bind_core_axes_with_descriptors
+        // coupling için capture_bound_axis_state çağırır; epoch sandwich drift'i
+        // begin'de fail-closed. Session açılmadan reddedilir.
+        let epoch = Arc::new(AtomicU64::new(0));
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(EpochChangesDuringDescriptorAxis {
+                epoch: epoch.clone(),
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "instability",
+                value: 0.4,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "entropy",
+                value: 0.5,
+            })
+            .unwrap()
+            .try_with_axis(ConstantAxis {
+                name: "witness_depth",
+                value: 0.6,
+            })
+            .unwrap();
+        // Registration sırasında descriptor() çağrıldı → epoch 0→1. begin çağrısında
+        // capture_bound_axis_state: epoch_before(1) → descriptor() [epoch→2] →
+        // epoch_after(2) → mismatch → AxisStateChangedDuringCapture.
+        let epoch_at_begin = epoch.load(Ordering::SeqCst);
+        let err = BoundMeasurementSession::begin(&cs).unwrap_err();
+        match err {
+            CoordinateMeasurementError::AxisStateChangedDuringCapture {
+                axis_id,
+                epoch_before,
+                epoch_after,
+            } => {
+                assert_eq!(axis_id, "coupling");
+                assert_eq!(epoch_before, AxisStateEpoch::new(epoch_at_begin));
+                assert_eq!(epoch_after, AxisStateEpoch::new(epoch_at_begin + 1));
+            }
+            other => panic!("expected AxisStateChangedDuringCapture at begin, got {other:?}"),
+        }
     }
 
     /// Per-core failing fixture'ları — her biri kendi axis ID'sini taşır. Review P2-2:
