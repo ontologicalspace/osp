@@ -3,7 +3,7 @@
 **Tarih:** 2026-07-21
 **Branch:** `fix/inv-t9-witness-suspension`
 **PR:** #69 (https://github.com/ontologicalspace/osp/pull/69)
-**Current head:** `650c620` (Commit 3 implementation + review v5 closure landed)
+**Current head:** `0d73801` (Commit 3 implementation + review v5/v6 closure landed)
 **Issue:** #70 (https://github.com/ontologicalspace/osp/issues/70)
 **Commit 3 review status:** Reviewer v6 REQUEST CHANGES 9.6/10 — **conditional approval** (P1 carryover to Commit 4)
 **Commit 2 closure:** Reviewer APPROVED 10/10 — scoped tamamlandı
@@ -15,7 +15,7 @@
 ```bash
 cd P:/Work/SoftwarePhysics
 git checkout fix/inv-t9-witness-suspension
-git pull  # 650c620 head olmalı
+git pull  # 0d73801 head olmalı
 git log --oneline -5
 RUSTFLAGS="-D warnings" cargo test -p osp-core --lib  # 1017 test geçmeli
 ```
@@ -24,11 +24,12 @@ Sonra Commit 4 planını uygula (aşağıda).
 
 ---
 
-## Commit 3 durumu (landed — reviewer v6 conditional approval)
+## Commit 3 durumu (landed — reviewer v7 CONDITIONAL APPROVE 9.8/10)
 
-**2 commit ile landed:**
+**3 commit ile landed:**
 - `22e3d93` — Commit 3: `feat(engine): subject-bound EngineMeasurement tokens`
 - `650c620` — review v5 closure: `test(inv-t9): session fence + golden pin + producer parity`
+- `0d73801` — review v6 closure: `docs(inv-t9): producer contract test + Commit 4 P1 merge-blocker`
 
 ### Commit 3 kazanımları
 
@@ -40,7 +41,7 @@ Sonra Commit 4 planını uygula (aşağıda).
 - 4 existing golden test byte-for-byte unchanged (AuthorizationBasis, MeasurementInput, EvaluationContext, SuspendedAttemptEvidence)
 - 2 yeni v1 golden: MeasurementDeltaDigest (`071b94001b33e714...`), MeasurementRequestDigest (`bcc98fc016a15062...`)
 
-### Reviewer v1→v6 turu (8.9 → 9.3 → 9.6 → 9.7 → 9.2 → 9.6)
+### Reviewer v1→v7 turu (8.9 → 9.3 → 9.6 → 9.7 → 9.2 → 9.6 → 9.8)
 
 24 P0/P1/P2 bulgusu kapatıldı. Tek açık konu: **measurement-session atomikliği (P1)**.
 

@@ -11,7 +11,7 @@ Paper 2 model–implementation conformance fix. INV-T9 — External-Evidence Sus
 
 ## Kapsam durumu (Steps 1-6 done + #71 + #72 landed + #70 Commit 1-3 + closures landed — Commit 4-6 pending)
 
-Steps 1-6 + #71 (canonical decision-basis) + #72 (embedded attempt-evidence integrity) + #70 Commit 1-3 (provenance-aware axis measurement + position measurement + subject-bound EngineMeasurement tokens) implementation + closure commit'leri tamamlandı. **#70 Commit 3 + review v5 closure landed (650c620); Commit 4-6 pending.**
+Steps 1-6 + #71 (canonical decision-basis) + #72 (embedded attempt-evidence integrity) + #70 Commit 1-3 (provenance-aware axis measurement + position measurement + subject-bound EngineMeasurement tokens) implementation + closure commit'leri tamamlandı. **#70 Commit 3 + review v5/v6 closures landed (0d73801); Commit 4-6 pending.**
 
 ### ✅ #72 — embedded attempt-evidence integrity (5 implementation commits + 5 closures)
 - Commit 1-5: canonical evidence model, navigator factory, envelope binding, dangling id removal, persisted tamper matrix
@@ -24,10 +24,12 @@ Steps 1-6 + #71 (canonical decision-basis) + #72 (embedded attempt-evidence inte
   - Closure v2 (eb9903b): MissingCoreAxes precedence iki-fazlı binding, gerçek mutable-state drift fixture'ları
 - **Commit 3** (22e3d93): subject-bound EngineMeasurement tokens — canonical_encoding.rs neutral layer, measurement.rs subject-bound token + MeasurementDeltaDigest (shared CanonicalStructuralDelta producer) + cross-field validated MeasurementRequest + EngineMeasurement context↔digest defensive verify + MeasurementDigestError public boundary + v1 goldens
   - Closure v1 (650c620): reviewer v5 (REQUEST CHANGES 9.2/10) — measurement context fence (interior mutability), shared producer authorization yoluna uygulandı, predicate scope duplicate bypass kaldırıldı, gerçek v1 golden sabitleri, error taxonomy categorization, heterogeneous diagnostic scopes
+  - Closure v2 (0d73801): reviewer v6 (REQUEST CHANGES 9.6/10) conditional approval — P1 BoundMeasurementSession Commit 4 merge-blocker, P2-1 source-level producer contract test (include_str!), P2-2 trybuild Deserialize guards carryover, P2-3 PR body truth-surface
 
-## Commits (current head 650c620)
+## Commits (current head 0d73801)
 
 ```
+0d73801  #70 commit 3 review v2 closure — producer contract test + Commit 4 P1 merge-blocker
 650c620  #70 commit 3 review v1 closure — session fence + golden pin + producer parity
 22e3d93  feat(engine): subject-bound EngineMeasurement tokens (#70 commit 3)
 3b4231f  docs(inv-t9): #70 Commit 3 handoff (Commit 2 reviewer 10/10 APPROVED)
@@ -41,7 +43,7 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
 ... (earlier #72 + Steps 1-6 commits)
 ```
 
-## Doğrulama (current head 650c620 — #70 Commit 3 + review v1 closure landed)
+## Doğrulama (current head 0d73801 — #70 Commit 3 + review v5/v6 closure landed)
 
 - ✅ GitHub CI: Build & Test — pass
 - ✅ RUSTFLAGS="-D warnings" cargo build --workspace --examples --exclude osp-desktop — temiz
@@ -106,10 +108,10 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
 ### #72 — embedded attempt-evidence integrity — closure landed, scoped review pending
 ### #73 — witness Q3 honest-reject production wiring — PR #69 merge decision requires governance call
 
-## Truth-surface (current head 650c620)
+## Truth-surface (current head 0d73801)
 
 ```
-Current head: 650c620
+Current head: 0d73801
 osp-core lib tests: 1017 (951 → +66: Commit 3 +62, review v1 closure +4)
 workspace tests (excl. osp-desktop): green
 cargo check -p osp-desktop --lib: parent parity (2 #80-originated errors, yeni hata yok)
@@ -117,6 +119,7 @@ cargo clippy -p osp-core --lib: 12 warnings (parent `3b4231f` parity)
 
 #70 Commit 3: landed (22e3d93) — subject-bound EngineMeasurement tokens
 #70 Commit 3 review v5 closure: landed (650c620) — session fence + golden pin + producer parity
+#70 Commit 3 review v6 closure: landed (0d73801) — producer contract test + Commit 4 P1 merge-blocker
 #70 Commit 1 + v6/v7 closure: landed (0d4eb51)
 #70 Commit 2 + review v1/v2 closure: landed (eb9903b)
 #72 implementation + 5 closures: landed (920a1dc), scoped review pending

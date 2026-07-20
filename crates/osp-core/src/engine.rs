@@ -3336,36 +3336,40 @@ v = 0.5
             "measurement digest aynı canonical identity'den üretiliyor"
         );
 
-        // **Reviewer v6 P2-1:** Shared-producer regression guard — `build_authorization_context`
-        // inline structural canonicalization'a geri dönerse (engine.rs:698'den eski inline blok),
-        // bu source-level contract test yakalar. Yukarıdaki iki-çağrı parity test inline'a
-        // dönüşü yakalayamazdı (aynı fonksiyonu iki kez çağırıyordu).
+        // **Reviewer v6/v7 P2-1:** Shared-producer regression guard — `build_authorization_context`
+        // inline structural canonicalization'a geri dönerse, bu source-level contract test yakalar.
         //
-        // `include_str!` engine.rs kaynak kodunu derleme zamanında gömer; `build_authorization_context`
-        // body'sinde `canonical_structural_delta_from_claim` çağrısı aranır. Inline node/edge
-        // dönüşümü (eski `canonicalize_node` + `CanonicalEdge { ... }` literal) geri dönerse
-        // test fail eder.
+        // **Reviewer v7 P2-2:** Tam üretim çağrı biçimi aranır (`let structural_delta = ...`),
+        // yorumlar geçmez. İki-çağrı parity test inline'a dönüşü yakalayamıyordu (aynı
+        // fonksiyonu çağırıyordu); bu guard gerçek production-path contract'ı doğrular.
+        //
+        // NOT: Tam semantic production-path test (build_authorization_context fixture'ı ile
+        // gerçek AuthorizationContext.basis.structural_delta karşılaştırması) ağırdır —
+        // builder 8 parametreli (outcome, vision_context, rule_context vb.). Commit 4'te
+        // CoordinateSystem refactor sırasında builder helper'a ayrılınca semantic test eklenebilir.
         let engine_source = include_str!("engine.rs");
-        // build_authorization_context body'sini bul.
+        // build_authorization_context body'sini bul (fn imzasından ilk kapanış `}`'a kadar).
         let builder_start = engine_source
             .find("fn build_authorization_context(")
             .expect("build_authorization_context must exist in engine.rs");
-        // İlk `}` ile biten bloğa kadar olan kısmı al (yaklaşık scope).
         let builder_end = engine_source[builder_start..]
             .find("\n    }\n")
             .map(|offset| builder_start + offset)
             .unwrap_or(engine_source.len());
         let builder_body = &engine_source[builder_start..builder_end];
+        // Tam üretim çağrı biçimi — yorumlarda bu syntax geçmez.
+        let shared_call = "let structural_delta =\n            crate::authorization::canonical_structural_delta_from_claim(claim)";
+        // fmt formatlamayı tolere etmek için whitespace-normalize edip substring ara.
+        let normalized: String = builder_body
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        let shared_call_normalized: String =
+            shared_call.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
-            builder_body.contains("canonical_structural_delta_from_claim"),
-            "build_authorization_context must call canonical_structural_delta_from_claim \
-             (shared producer). Inline structural canonicalization drift risk."
-        );
-        // Eski inline pattern gergelim — geri döndüğünde test fail etsin.
-        assert!(
-            !builder_body.contains(".iter()\n            .map(canonicalize_node)"),
-            "build_authorization_context must NOT use inline canonicalize_node mapping \
-             (use shared producer instead)"
+            normalized.contains(&shared_call_normalized),
+            "build_authorization_context must call canonical_structural_delta_from_claim via \
+             production statement (not comment). Inline structural canonicalization drift risk."
         );
     }
 
