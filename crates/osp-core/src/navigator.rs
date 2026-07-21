@@ -195,6 +195,10 @@ pub fn provenanced_from_raw(raw: RawPosition, source: MetricSource) -> Provenanc
 /// Tek noktada mapping — navigator reject-evidence sitesinde elle match yerine bu helper.
 /// **INV-T9:** Exhaustive match — catch-all YOK. Task binding hatası (PermissionDenied)
 /// Syntax'a gömülmez → `RejectedByTaskBinding`.
+///
+/// **INV-T9 #70 Commit 4b:** Yeni varyantlar — `TaskValidation` → `RejectedByTaskValidation`
+/// (append-only tag 7), `MeasurementBindingMismatch` → `RejectedByMeasurementBinding`
+/// (append-only tag 8), `MeasurementBindingFailed` → `Unknown` (system failure).
 pub fn gate_decision_from_engine_error(err: &crate::engine::EngineCommitError) -> GateDecision {
     use crate::engine::EngineCommitError;
     match err {
@@ -215,6 +219,18 @@ pub fn gate_decision_from_engine_error(err: &crate::engine::EngineCommitError) -
         // **INV-T9 Step 4b (reviewer P0-4):** VisionContextInvalid = terminal —
         // maneuver budget tüketmez, yeni LLM attempt başlatmaz, witness'a ulaşmaz.
         EngineCommitError::VisionContextInvalid(_) => GateDecision::Unknown,
+        // **INV-T9 #70 Commit 4b (reviewer v2 karar 2):** TaskValidation = terminal —
+        // geçersiz task declaration. append-only tag 7. Maneuver budget tüketmez.
+        EngineCommitError::TaskValidation(_) => GateDecision::RejectedByTaskValidation,
+        // **INV-T9 #70 Commit 4b (reviewer v4 P1-2/P1-3):** MeasurementBindingMismatch =
+        // presented authority token geçersiz (replay/tamper). append-only tag 8.
+        // Navigator disposition'a göre retry/reject kararı verir (inner mismatch varyantı).
+        EngineCommitError::MeasurementBindingMismatch(_) => {
+            GateDecision::RejectedByMeasurementBinding
+        }
+        // **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** MeasurementBindingFailed =
+        // engine derivation failure (system/operational fault) — gate değil, Unknown.
+        EngineCommitError::MeasurementBindingFailed(_) => GateDecision::Unknown,
     }
 }
 
@@ -960,6 +976,26 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         // terminal — maneuver budget tüketmez, yeni LLM attempt
                         // başlatmaz, witness'a ulaşmaz. SystemFailure olarak map'lenir.
                         EngineCommitError::VisionContextInvalid(err) => {
+                            return NavigatorResult::SystemFailure(err.to_string());
+                        }
+                        // **INV-T9 #70 Commit 4b (reviewer v2 karar 2):** TaskValidation
+                        // = terminal — geçersiz task declaration (Mixed source, non-finite
+                        // threshold/tolerance, geçersiz policy). Agent retry değil — task
+                        // config düzeltilmeli. Maneuver budget tüketmez, witness'a ulaşmaz.
+                        // Faz 8: disposition-aware navigation refine (şimdilik SystemFailure).
+                        EngineCommitError::TaskValidation(err) => {
+                            return NavigatorResult::SystemFailure(err.to_string());
+                        }
+                        // **INV-T9 #70 Commit 4b (reviewer v4 P1-3):** MeasurementBindingMismatch
+                        // — disposition: RegenerateMeasurement (stale → retry without LLM)
+                        // veya RejectPresentedAuthority (replay/tamper → terminal). Faz 8'de
+                        // disposition-aware retry; şimdilik terminal SystemFailure.
+                        EngineCommitError::MeasurementBindingMismatch(err) => {
+                            return NavigatorResult::SystemFailure(err.to_string());
+                        }
+                        // **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** MeasurementBindingFailed
+                        // = engine derivation failure (operational fault) — terminal SystemFailure.
+                        EngineCommitError::MeasurementBindingFailed(err) => {
                             return NavigatorResult::SystemFailure(err.to_string());
                         }
                     }

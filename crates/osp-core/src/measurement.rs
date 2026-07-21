@@ -526,6 +526,185 @@ impl EngineMeasurement {
 // restore edilemez. Commit 4'te `UnverifiedWire + verify_against` iki aşamalı model.
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// MeasurementBinding (INV-T9 #70 Commit 4b — token replay/binding guard)
+//
+// Reviewer v2 karar 4 (full binding) + v3 P1-4 (mismatch vs derivation ayrımı) +
+// v4 P1-2 (somut Rust error tipi) + P1-3 (disposition sınıflandırma).
+//
+// `verify_measurement_binding` (Faz 3 — engine.rs) presented `EngineMeasurement`
+// token'ını claim/task/subject/impact/delta/revision/context karşısında doğrular.
+// Token replay (claim A token'ı claim B'ye), stale measurement, ve tampered authority
+// üç farklı terminal sınıfa ayrılır:
+//
+//   RegenerateMeasurement — stale (Revision/CurrentContext) → yeni token üret
+//   RejectPresentedAuthority — replayed/tampered (Task/Subject/Impact/StructuralDelta/ContextDigest)
+//
+// Basis builder `VerifiedMeasurementBinding`'i consume eder — re-derivation yok (tek truth).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + v4 P1-3):** Mismatch disposition —
+/// navigator sonuç/retry davranışını inner mismatch varyantına göre belirler.
+///
+/// - `RegenerateMeasurement`: stale measurement (Revision/CurrentContext) → yeni
+///   `EngineMeasurement` üret, LLM yeniden çağrılmaz, maneuver budget tüketilmez.
+/// - `RejectPresentedAuthority`: replayed/tampered (Task/Subject/Impact/StructuralDelta/
+///   ContextDigest) → terminal presented-authority rejection, otomatik retry yok,
+///   maneuver budget tüketilmez.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasurementBindingDisposition {
+    /// Stale measurement — revision/context değişti, yeni token üretilebilir.
+    RegenerateMeasurement,
+    /// Presented authority token geçersiz (replay/tamper) — terminal reject.
+    RejectPresentedAuthority,
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4):** Presented `EngineMeasurement`
+/// token'ının claim/task/subject/impact/delta/revision/context ile uyuşmaması.
+/// 7 mismatch varyantı — her biri `disposition()` ile retry/reject sınıfına ayrılır.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MeasurementBindingMismatch {
+    /// `claim.task_id` resolved task.id ile uyuşmuyor.
+    #[error(
+        "measurement task binding mismatch: claim_task={claim_task_id:?}, resolved_task={resolved_task_id}"
+    )]
+    TaskMismatch {
+        claim_task_id: Option<crate::trajectory::TaskId>,
+        resolved_task_id: crate::trajectory::TaskId,
+    },
+
+    /// `measurement.request().subject()` task'tan yeniden derived subject ile uyuşmuyor.
+    #[error("measurement subject scope does not match resolved task")]
+    SubjectMismatch {
+        expected: crate::measurement::CanonicalSubjectScope,
+        presented: crate::measurement::CanonicalSubjectScope,
+    },
+
+    /// `measurement.request().impact()` claim'den yeniden derived impact ile uyuşmuyor.
+    #[error("measurement impact scope does not match claim delta")]
+    ImpactMismatch {
+        expected: crate::measurement::CanonicalImpactScope,
+        presented: crate::measurement::CanonicalImpactScope,
+    },
+
+    /// `measurement.request().structural_delta_digest()` claim canonical delta digest
+    /// ile uyuşmuyor.
+    #[error("measurement structural delta digest does not match claim")]
+    StructuralDeltaMismatch,
+
+    /// `measurement.request().base_revision()` current engine revision ile uyuşmuyor
+    /// (stale measurement — `RegenerateMeasurement` disposition).
+    #[error("measurement base revision does not match current engine revision")]
+    RevisionMismatch {
+        expected: SpaceViewRevision,
+        presented: SpaceViewRevision,
+    },
+
+    /// `MeasurementInputDigest::compute(measurement.context())` request içindeki input
+    /// digest ile uyuşmuyor (token içi tutarsızlık).
+    #[error("measurement input context does not match request digest")]
+    ContextDigestMismatch,
+
+    /// `BoundMeasurementSession` current context (Commit 4a yüzeyi) token context ile
+    /// uyuşmuyor (axis config drift — `RegenerateMeasurement` disposition).
+    #[error("measurement axis context does not match current engine context")]
+    CurrentContextMismatch,
+}
+
+impl MeasurementBindingMismatch {
+    /// **INV-T9 #70 Commit 4b (reviewer v4 P1-3):** Retry/reject disposition.
+    /// Navigator sonuç/retry davranışını bu değere göre belirler.
+    pub fn disposition(&self) -> MeasurementBindingDisposition {
+        match self {
+            // Stale measurement — yeni token üretilebilir, LLM retry yok, budget yok.
+            Self::RevisionMismatch { .. } | Self::CurrentContextMismatch { .. } => {
+                MeasurementBindingDisposition::RegenerateMeasurement
+            }
+            // Presented authority geçersiz (replay/tamper) — terminal reject, retry yok.
+            Self::TaskMismatch { .. }
+            | Self::SubjectMismatch { .. }
+            | Self::ImpactMismatch { .. }
+            | Self::StructuralDeltaMismatch { .. }
+            | Self::ContextDigestMismatch { .. } => {
+                MeasurementBindingDisposition::RejectPresentedAuthority
+            }
+        }
+    }
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** Engine derivation failure —
+/// `verify_measurement_binding` sırasında expected binding üretilemedi. Sistem hatası
+/// (operational fault), hallucination DEĞİL, agent retry DEĞİL. Navigator SystemFailure'a
+/// map'ler, maneuver budget tüketmez, witness'a ulaşmaz.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MeasurementBindingDerivationError {
+    /// `derive_task_subject_scope` başarısız (heterogeneous scope, module resolution, empty).
+    #[error("measurement subject derivation failed: {detail}")]
+    SubjectDerivationFailed { detail: String },
+
+    /// `derive_impact_scope` başarısız (canonicalization).
+    #[error("measurement impact derivation failed: {detail}")]
+    ImpactDerivationFailed { detail: String },
+
+    /// `canonical_structural_delta_from_claim` başarısız (duplicate/cross-list/non-finite).
+    #[error("measurement structural canonicalization failed: {detail}")]
+    StructuralCanonicalizationFailed { detail: String },
+
+    /// `current_space_view_revision` başarısız (structural digest computation).
+    #[error("measurement revision computation failed: {detail}")]
+    RevisionComputationFailed { detail: String },
+
+    /// `BoundMeasurementSession::begin` başarısız (coordinate measurement — axis drift).
+    #[error("measurement current context capture failed: {source:?}")]
+    CurrentContextCaptureFailed {
+        source: crate::coords::CoordinateMeasurementError,
+    },
+
+    /// `MeasurementInputContext::try_new` başarısız (canonicalization).
+    #[error("measurement context construction failed: {detail}")]
+    ContextConstructionFailed { detail: String },
+
+    /// `MeasurementRequestDigest::compute` başarısız (digest construction).
+    #[error("measurement request digest computation failed: {source}")]
+    RequestDigestComputationFailed {
+        #[source]
+        source: MeasurementDigestError,
+    },
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer v4 P1-2):** Somut Rust error tipi —
+/// `verify_measurement_binding` dönüş hatası. Mismatch (presented authority) ve
+/// Derivation (system failure) iki farklı terminal sınıf.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum MeasurementBindingVerificationError {
+    /// Presented token mismatch — caller'ın sunduğu authority geçersiz.
+    #[error(transparent)]
+    Mismatch(#[from] MeasurementBindingMismatch),
+    /// Engine derivation failure — sistem hatası (operational fault).
+    #[error(transparent)]
+    Derivation(#[from] MeasurementBindingDerivationError),
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4):** `verify_measurement_binding`
+/// tarafından üretilen doğrulanmış binding. Basis builder bunu consume eder —
+/// subject/impact/canonical_delta/revision/context/request_snapshot ikinci kez
+/// üretilmez (tek truth source).
+#[derive(Debug, Clone)]
+pub struct VerifiedMeasurementBinding {
+    /// Yeniden derived subject scope (task'tan).
+    pub subject: CanonicalSubjectScope,
+    /// Yeniden derived impact scope (claim'den).
+    pub impact: CanonicalImpactScope,
+    /// Yeniden derived canonical structural delta (claim'den).
+    pub canonical_delta: crate::authorization::CanonicalStructuralDelta,
+    /// Current engine revision (stale check için).
+    pub current_revision: SpaceViewRevision,
+    /// Current measurement context (BoundMeasurementSession'dan — Commit 4a yüzeyi).
+    pub current_context: crate::authorization::MeasurementInputContext,
+    /// Re-computed request digest (basis v2'ye taşınır — cross-field invariant).
+    pub request_digest: MeasurementRequestDigest,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Error taxonomy
 // ═══════════════════════════════════════════════════════════════════════════════
 

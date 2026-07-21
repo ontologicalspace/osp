@@ -947,6 +947,13 @@ impl Workspace {
             osp_core::trajectory::GateDecision::RejectedByRule => "RejectedByRule",
             osp_core::trajectory::GateDecision::RejectedByTaskBinding => "RejectedByTaskBinding",
             osp_core::trajectory::GateDecision::BlockedByManeuverLimit => "BlockedByManeuverLimit",
+            // **INV-T9 #70 Commit 4b (reviewer v4 P1-4 — append-only tag):**
+            osp_core::trajectory::GateDecision::RejectedByTaskValidation => {
+                "RejectedByTaskValidation"
+            }
+            osp_core::trajectory::GateDecision::RejectedByMeasurementBinding => {
+                "RejectedByMeasurementBinding"
+            }
             osp_core::trajectory::GateDecision::Unknown => "Unknown",
         };
         let pred_str = match result.outcome.predicate_completion {

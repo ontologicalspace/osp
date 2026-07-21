@@ -253,6 +253,33 @@ pub enum EngineCommitError {
     /// witness'a ulaşmaz. Navigator `GateDecision::Unknown`'a map'ler.
     #[error("vision context invalid (terminal — fail-closed): {0}")]
     VisionContextInvalid(#[from] crate::authorization::VisionContextError),
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 karar 2):** Task declaration validation
+    /// failure — `Task::validate_for_commit` terminal reject. Geçersiz task declaration
+    /// (Mixed source requirement, non-finite threshold/tolerance, geçersiz policy).
+    /// Guard sırası: Q4 syntax → task bind → **validate_for_commit** →
+    /// verify_measurement_binding → Q5 → gate → Q6 → witness.
+    /// Navigator `GateDecision::RejectedByTaskValidation`'a map'ler (append-only tag 7).
+    /// Maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
+    #[error("task validation failed: {0}")]
+    TaskValidation(#[from] crate::trajectory::TaskValidationError),
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + v4 P1-2/P1-3):** Presented
+    /// `EngineMeasurement` token'ı claim/task/subject/impact/delta/revision/context ile
+    /// uyuşmuyor — token replay/tamper detected. Disposition:
+    /// `RegenerateMeasurement` (stale — Revision/CurrentContext) veya
+    /// `RejectPresentedAuthority` (replay — Task/Subject/Impact/StructuralDelta/ContextDigest).
+    /// Navigator `GateDecision::RejectedByMeasurementBinding`'a map'ler (append-only tag 8).
+    /// Maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
+    #[error("measurement binding mismatch: {0}")]
+    MeasurementBindingMismatch(#[from] crate::measurement::MeasurementBindingMismatch),
+
+    /// **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** Engine derivation failure —
+    /// `verify_measurement_binding` sırasında expected binding üretilemedi. Sistem
+    /// hatası (operational fault), hallucination DEĞİL. Navigator SystemFailure'a
+    /// map'ler, `GateDecision::Unknown`. Maneuver budget tüketmez, witness'a ulaşmaz.
+    #[error("measurement binding derivation failed: {0}")]
+    MeasurementBindingFailed(#[from] crate::measurement::MeasurementBindingDerivationError),
 }
 
 /// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
