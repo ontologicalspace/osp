@@ -344,9 +344,47 @@ impl MeasurementRequest {
     pub fn measurement_input_digest(&self) -> &MeasurementInputDigest {
         &self.measurement_input_digest
     }
+
+    /// **INV-T9 #70 Commit 4b (reviewer scoped P2-1 / v2 P1-3):** Shared producer —
+    /// `CanonicalMeasurementRequestEvidence` snapshot. Basis builder (Faz 4) ve digest
+    /// encoder aynı helper'ı kullanır — field-by-field ikinci encoder YOK (tek truth source).
+    /// Digest cross-field invariant: `MeasurementRequestDigest::compute_from_canonical`
+    /// (Faz 4) bu snapshot'tan digest üretir, basis'teki stored digest ile karşılaştırır.
+    #[allow(dead_code)] // Faz 4: AuthorizationBasis v2 basis builder consume
+    pub(crate) fn canonical_evidence(&self) -> CanonicalMeasurementRequestEvidence {
+        CanonicalMeasurementRequestEvidence {
+            subject: self.subject.clone(),
+            impact: self.impact.clone(),
+            base_revision: self.base_revision.clone(),
+            structural_delta_digest: self.structural_delta_digest.clone(),
+            measurement_input_digest: self.measurement_input_digest.clone(),
+        }
+    }
 }
 // NOT: Deserialize intentionally absent (reviewer P1-4 v4). Wire restore Commit 4'te
 // iki aşamalı: `UnverifiedMeasurementRequestWire` + `verify_against(canonical_delta, context)`.
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CanonicalMeasurementRequestEvidence (INV-T9 #70 Commit 4b — basis v2 request snapshot)
+//
+// Reviewer v2 P1-1 / scoped P2-1: AuthorizationBasis v2 tam canonical request snapshot
+// taşır — yalnız digest değil. validate_v2 cross-field invariant için digest'i snapshot'tan
+// recompute edip stored digest ile karşılaştırır. Subject/impact/revision/digest'ler
+// deserialize sonrasında görülebilir → replay/tamper kanıtı.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b:** Canonical measurement request evidence — basis v2'de
+/// `measurement_request` field'ı. `MeasurementRequest::canonical_evidence()` shared
+/// producer'dan üretilir (tek truth source). Digest cross-field invariant için
+/// `MeasurementRequestDigest` ayrıca saklanır.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CanonicalMeasurementRequestEvidence {
+    pub subject: CanonicalSubjectScope,
+    pub impact: CanonicalImpactScope,
+    pub base_revision: SpaceViewRevision,
+    pub structural_delta_digest: MeasurementDeltaDigest,
+    pub measurement_input_digest: MeasurementInputDigest,
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // MeasurementRequestDigest — BLAKE3 canonical encoding over MeasurementRequest

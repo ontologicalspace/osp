@@ -98,15 +98,25 @@ pub struct CommitOutcome {
 ///
 /// **Prensip:** `commit() = legacy/standalone claim path; commit_task_claim() = trajectory/task-bound path.`
 /// Mevcut commit() korunur (Paper 1 uyumluluk); commit_task_claim Paper 2 için.
+///
+/// **INV-T9 #70 Commit 4b (reviewer v3 P1-1 — TODO Faz 8):** Bu struct atomik migration'da
+/// smart constructor'a çevrilecek: `{ claim, omega, task_resolver, measurement: EngineMeasurement }`.
+/// `target`/`loss_before`/`measured` kaldırılıp engine-owned derivation'a geçilecek (Faz 3).
+/// Public struct + private fields + `new()` smart constructor (external crate literal bypass
+/// kapalı). Şimdilik mevcut caller'lar (navigator, MCP, test) korunduğu için public field'lar
+/// kaldı — Faz 8 caller migration ile aynı commit'te smart constructor'a çevrilecek.
 pub struct TaskCommitInput<'a> {
     pub claim: &'a crate::witness::Claim,
     pub omega: &'a crate::witness::WitnessSet,
     pub task_resolver: &'a dyn crate::trajectory::TaskResolver,
     /// preferred_vector (loss/distance target — INV-T1 internal).
+    /// **TODO Faz 8:** kaldırılır, engine `task.target_predicate_set.preferred_vector`'den derive eder.
     pub target: crate::coords::RawPosition,
     /// Loss before (mevcut durumun preferred_vector'e uzaklığı).
+    /// **TODO Faz 8:** kaldırılır, engine-owned typed loss evidence (reviewer v4 P0).
     pub loss_before: f64,
     /// Engine-measured simulated_after (INV-T3 — claim.computed_raw'tan ProvenancedRawPosition).
+    /// **TODO Faz 8:** `measurement: EngineMeasurement` ile değiştirilir (token authority).
     pub measured: crate::trajectory::ProvenancedRawPosition,
 }
 

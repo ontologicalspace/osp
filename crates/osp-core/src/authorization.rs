@@ -1636,6 +1636,143 @@ pub struct ProvenancedMeasuredResult {
     pub witness_depth: CanonicalAxisMeasurement,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// CanonicalTrajectoryEvidenceBaseline + CanonicalTrajectoryLossEvidence
+// (INV-T9 #70 Commit 4b — reviewer v4 P0/P1-1)
+//
+// **Reviewer v4 P1-1 kesin schema:** baseline saf measurement evidence — sadece `before`
+// taşır, loss_before YOK. Loss evidence ayrı — sadece `target + loss_after`, baseline taşımaz.
+// İki truth source YOK. validate_v2 loss_before'u recompute eder (target'tan bağımsız before).
+//
+// **Reviewer v4 P0:** typed loss evidence downstream yayılımı — basis v2 bu canonical
+// formları taşır. Policy matrisi validate_v2'de (AcceptAsProgress+Unavailable→error).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b (reviewer v4 P1-1):** Canonical trajectory baseline evidence —
+/// saf measurement before-state. `loss_before` YOK — loss target'a bağlıdır, target yoksa
+/// before mevcut olsa bile loss hesaplanamaz. validate_v2 loss_before'u `trajectory_loss_canonical`
+/// ile recompute eder.
+///
+/// `CanonicalBaselineUnavailableReason` member listeleri sorted+unique+disjoint+union ==
+/// request subject (reviewer scoped P1-2 — sessiz dedup YOK, `try_new` request subject
+/// alır).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum CanonicalTrajectoryEvidenceBaseline {
+    /// Before-state measured — subject üyelerinin tamamı base snapshot'ta mevcut.
+    Available {
+        before: ProvenancedMeasuredResult,
+    },
+    /// Before-state unavailable — subject üyeleri tamamen/kısmen delta-introduced.
+    Unavailable {
+        reason: CanonicalBaselineUnavailableReason,
+    },
+}
+
+/// **INV-T9 #70 Commit 4b:** Canonical baseline unavailable reason. Member listeleri
+/// sorted + unique + disjoint + union == request subject (scoped P1-2). `try_new`
+/// request subject alır — sessiz dedup/normalize YOK.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum CanonicalBaselineUnavailableReason {
+    /// Tüm subject üyeleri delta ile eklenen node'lar — base'de hiçbiri yok.
+    AllMembersIntroducedByDelta {
+        members: Vec<crate::space::NodeId>,
+    },
+    /// Bazı üyeler base'de var, kalanların tümü delta ile ekleniyor.
+    PartialNewSubject {
+        existing: Vec<crate::space::NodeId>,
+        introduced: Vec<crate::space::NodeId>,
+    },
+}
+
+impl CanonicalBaselineUnavailableReason {
+    /// **INV-T9 #70 Commit 4b (reviewer scoped P1-2):** Validated smart constructor —
+    /// member listeleri non-empty + sorted + unique + disjoint + union == request subject.
+    /// Sessiz dedup YOK — malformed wire fail-closed reject. Faz 4'te basis builder
+    /// `MeasurementBaseline::Unavailable` → canonical reason dönüşümünde çağırır.
+    #[allow(dead_code)] // Faz 4: basis builder MeasurementBaseline → canonical dönüşüm
+    pub(crate) fn try_new(
+        raw_members: Vec<crate::space::NodeId>,
+        existing: Vec<crate::space::NodeId>,
+        introduced: Vec<crate::space::NodeId>,
+        request_subject: &crate::measurement::CanonicalSubjectScope,
+    ) -> Result<Self, String> {
+        let subject_members = request_subject.member_ids();
+        // AllMembersIntroducedByDelta: members == subject, non-empty, sorted+unique.
+        if !raw_members.is_empty() {
+            let mut sorted = raw_members.clone();
+            sorted.sort_unstable();
+            let mut deduped = sorted.clone();
+            deduped.dedup();
+            if deduped.len() != sorted.len() {
+                return Err("AllMembersIntroducedByDelta members contain duplicates".to_string());
+            }
+            if deduped.as_slice() != subject_members {
+                return Err(format!(
+                    "AllMembersIntroducedByDelta members {:?} != request subject {:?}",
+                    deduped, subject_members
+                ));
+            }
+            return Ok(Self::AllMembersIntroducedByDelta { members: deduped });
+        }
+        // PartialNewSubject: existing + introduced disjoint, union == subject, ikisi non-empty.
+        if existing.is_empty() || introduced.is_empty() {
+            return Err("PartialNewSubject requires non-empty existing and introduced".to_string());
+        }
+        let mut existing_sorted = existing.clone();
+        existing_sorted.sort_unstable();
+        existing_sorted.dedup();
+        let mut introduced_sorted = introduced.clone();
+        introduced_sorted.sort_unstable();
+        introduced_sorted.dedup();
+        // Disjoint check.
+        for id in &existing_sorted {
+            if introduced_sorted.contains(id) {
+                return Err(format!("Node {id} in both existing and introduced (not disjoint)"));
+            }
+        }
+        // Union == subject (sorted merge).
+        let mut union_merged: Vec<crate::space::NodeId> =
+            existing_sorted.iter().chain(introduced_sorted.iter()).copied().collect();
+        union_merged.sort_unstable();
+        union_merged.dedup();
+        if union_merged.as_slice() != subject_members {
+            return Err(format!(
+                "PartialNewSubject union {:?} != request subject {:?}",
+                union_merged, subject_members
+            ));
+        }
+        Ok(Self::PartialNewSubject {
+            existing: existing_sorted,
+            introduced: introduced_sorted,
+        })
+    }
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer v4 P0/P1-1):** Canonical trajectory loss evidence —
+/// sadece `target + loss_after`. Baseline taşımaz (baseline ayrı evidence). Unavailable
+/// ise `CanonicalTrajectoryLossUnavailableReason` (NoPreferredVector).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum CanonicalTrajectoryLossEvidence {
+    /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
+    Available {
+        target: CanonicalRawPosition,
+        loss_after: CanonicalF64,
+    },
+    /// Loss unavailable — preferred_vector None (reviewer v3 P0: geçerli task durumu).
+    Unavailable {
+        reason: CanonicalTrajectoryLossUnavailableReason,
+    },
+}
+
+/// **INV-T9 #70 Commit 4b:** Canonical loss unavailable reason. `NoPreferredVector`
+/// (preferred_vector=None → loss anlamsız). Serde wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalTrajectoryLossUnavailableReason {
+    /// Task'ta `preferred_vector` yok — loss/target anlamsız.
+    NoPreferredVector,
+}
+
 /// BLAKE3 tabanlı authorization basis digest.
 ///
 /// Domain separation: `"osp.authorization-basis.v1\0" || canonical_encoding`.

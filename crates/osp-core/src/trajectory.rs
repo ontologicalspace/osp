@@ -1162,6 +1162,86 @@ pub fn trajectory_loss(pos: &ProvenancedRawPosition, target: &RawPosition) -> f6
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Typed baseline + loss evidence (INV-T9 #70 Commit 4b — reviewer v4 P0/P1-1)
+//
+// Completion-first gate modeli: preferred_vector=None geçerli task durumu (MissingPreferredVector
+// YOK — reviewer v3 P0). Loss evidence typed enum — Available (target + loss_after) |
+// Unavailable (NoPreferredVector). Baseline bağımsız measurement evidence — loss_before
+// ayrı field DEĞIL, validate_v2 recompute eder.
+//
+// **Reviewer v4 P0:** typed loss evidence downstream yüzeylere yayılır — TaskCommitResult,
+// TrajectoryEvidence, navigator state (Faz 7).
+// **Reviewer v4 P1-1:** CanonicalTrajectoryEvidenceBaseline sadece `before` taşır;
+// CanonicalTrajectoryLossEvidence sadece `target + loss_after`. İkisi bağımsız.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Trajectory loss unavailable sebebi. `preferred_vector=None` → NoPreferredVector
+/// (loss anlamsız — target yok). Diğer sebepler ileride eklenebilir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrajectoryLossUnavailableReason {
+    /// Task'ta `preferred_vector` yok — loss/target anlamsız. AcceptImprovement policy'de
+    /// gate içinde Reject (MissingPreferredVector YOK — reviewer v3 P0).
+    NoPreferredVector,
+}
+
+/// **Borrowed gate input** — `PredicateGate::evaluate` loss evidence. Available ise
+/// target + loss_after taşır; Unavailable ise reason. Baseline ayrı parametre
+/// (`TrajectoryEvidenceBaseline<'a>`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrajectoryLossEvidence<'a> {
+    /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
+    Available {
+        target: &'a RawPosition,
+        loss_after: f64,
+    },
+    /// Loss unavailable — preferred_vector None veya hesap hatası.
+    Unavailable {
+        reason: TrajectoryLossUnavailableReason,
+    },
+}
+
+/// **Owned variant** — `TaskCommitResult.evaluation` ve navigator state (Faz 7) için.
+/// `TrajectoryLossEvidence<'a>` owned counterpart'i — target `RawPosition` (borrow değil).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum OwnedTrajectoryLossEvidence {
+    Available {
+        target: RawPosition,
+        loss_after: f64,
+    },
+    Unavailable {
+        reason: TrajectoryLossUnavailableReason,
+    },
+}
+
+/// **Borrowed gate input** — baseline (before-state) evidence. Subject scope üyelerinin
+/// tamamı base snapshot'ta mevcut ise Available; delta-introduced ise Unavailable.
+/// `MeasurementBaseline`'in (measurement.rs) trajectory-layer borrowed projection'ı.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TrajectoryEvidenceBaseline<'a> {
+    /// Before-state measured — loss_before gate içinde recompute edilir (target'tan bağımsız).
+    Available {
+        measured_before: &'a ProvenancedRawPosition,
+    },
+    /// Before-state unavailable — subject üyeleri tamamen/kısmen delta-introduced.
+    Unavailable {
+        reason: &'a crate::measurement::BaselineUnavailableReason,
+    },
+}
+
+/// **Trajectory evaluation evidence** — `TaskCommitResult.evaluation` field (reviewer v4 P0).
+/// Downstream typed loss yayılımı: measured_after + baseline + owned loss evidence.
+/// Navigator (Faz 6/7) bunu consume eder — AcceptAsProgress + Unavailable → unreachable!.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct TrajectoryEvaluationEvidence {
+    pub measured_after: ProvenancedRawPosition,
+    /// Navigator state-before (reviewer v4 P0: navigator global state, task subject baseline
+    /// değil — Faz 7'de typed MeasurementBaseline field ayrıştırması).
+    pub baseline: crate::measurement::MeasurementBaseline,
+    pub loss: OwnedTrajectoryLossEvidence,
+}
+
 /// INV-T6 — improved kontrolü. Loss azaldı mı + max_axis_regression aşılmadı mı.
 pub fn is_improved(
     pos_before: &ProvenancedRawPosition,
