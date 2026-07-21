@@ -1669,8 +1669,9 @@ pub enum CanonicalTrajectoryEvidenceBaseline {
 }
 
 /// **INV-T9 #70 Commit 4b:** Canonical baseline unavailable reason. Member listeleri
-/// sorted + unique + disjoint + union == request subject (scoped P1-2). `try_new`
-/// request subject alır — sessiz dedup/normalize YOK.
+/// sorted + unique + disjoint + union == request subject (scoped P1-2). `try_from_reason`
+/// raw enum + request subject alır — **sessiz dedup/normalize YOK** (reviewer Faz 2
+/// scoped P1-1: duplicate normalizasyondan ÖNCE typed error).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum CanonicalBaselineUnavailableReason {
     /// Tüm subject üyeleri delta ile eklenen node'lar — base'de hiçbiri yok.
@@ -1684,67 +1685,135 @@ pub enum CanonicalBaselineUnavailableReason {
     },
 }
 
+/// **INV-T9 #70 Commit 4b (reviewer Faz 2 scoped P1-1):** Typed canonical baseline
+/// validation error — `String` DEĞİL. Her ihlal ayrı varyant (telemetry + exact assertion).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CanonicalBaselineValidationError {
+    #[error("AllMembersIntroducedByDelta members contain duplicates: {members:?}")]
+    AllMembersDuplicate { members: Vec<crate::space::NodeId> },
+
+    #[error(
+        "AllMembersIntroducedByDelta members {members:?} != request subject {subject:?}"
+    )]
+    AllMembersSubjectMismatch {
+        members: Vec<crate::space::NodeId>,
+        subject: Vec<crate::space::NodeId>,
+    },
+
+    #[error("PartialNewSubject existing list contains duplicates: {existing:?}")]
+    PartialExistingDuplicate { existing: Vec<crate::space::NodeId> },
+
+    #[error("PartialNewSubject introduced list contains duplicates: {introduced:?}")]
+    PartialIntroducedDuplicate { introduced: Vec<crate::space::NodeId> },
+
+    #[error("PartialNewSubject requires non-empty existing and introduced")]
+    PartialEmptyList,
+
+    #[error("node {node_id} in both existing and introduced (not disjoint)")]
+    PartialNotDisjoint { node_id: crate::space::NodeId },
+
+    #[error(
+        "PartialNewSubject union {union:?} != request subject {subject:?}"
+    )]
+    PartialUnionSubjectMismatch {
+        union: Vec<crate::space::NodeId>,
+        subject: Vec<crate::space::NodeId>,
+    },
+}
+
 impl CanonicalBaselineUnavailableReason {
-    /// **INV-T9 #70 Commit 4b (reviewer scoped P1-2):** Validated smart constructor —
-    /// member listeleri non-empty + sorted + unique + disjoint + union == request subject.
-    /// Sessiz dedup YOK — malformed wire fail-closed reject. Faz 4'te basis builder
-    /// `MeasurementBaseline::Unavailable` → canonical reason dönüşümünde çağırır.
+    /// **INV-T9 #70 Commit 4b (reviewer Faz 2 scoped P1-1):** Validated smart constructor —
+    /// raw `BaselineUnavailableReason` enum + request subject alır. Member listeleri
+    /// non-empty + sorted + unique + disjoint + union == request subject. **Duplicate
+    /// kontrolü normalizasyondan ÖNCE** (sessiz dedup YOK — malformed wire fail-closed
+    /// reject). Tek-bir-liste API (3 paralel liste çelişkisi YOK — varyant üzerinden match).
+    /// Faz 4'te basis builder `MeasurementBaseline::Unavailable` → canonical dönüşümde çağırır.
     #[allow(dead_code)] // Faz 4: basis builder MeasurementBaseline → canonical dönüşüm
-    pub(crate) fn try_new(
-        raw_members: Vec<crate::space::NodeId>,
-        existing: Vec<crate::space::NodeId>,
-        introduced: Vec<crate::space::NodeId>,
+    pub(crate) fn try_from_reason(
+        reason: &crate::measurement::BaselineUnavailableReason,
         request_subject: &crate::measurement::CanonicalSubjectScope,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, CanonicalBaselineValidationError> {
         let subject_members = request_subject.member_ids();
-        // AllMembersIntroducedByDelta: members == subject, non-empty, sorted+unique.
-        if !raw_members.is_empty() {
-            let mut sorted = raw_members.clone();
-            sorted.sort_unstable();
-            let mut deduped = sorted.clone();
-            deduped.dedup();
-            if deduped.len() != sorted.len() {
-                return Err("AllMembersIntroducedByDelta members contain duplicates".to_string());
+        match reason {
+            crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members,
+            } => {
+                // Duplicate check BEFORE normalization (scoped P1-1).
+                let mut sorted = members.clone();
+                sorted.sort_unstable();
+                let mut deduped = sorted.clone();
+                deduped.dedup();
+                if deduped.len() != sorted.len() {
+                    return Err(CanonicalBaselineValidationError::AllMembersDuplicate {
+                        members: members.clone(),
+                    });
+                }
+                if deduped.as_slice() != subject_members {
+                    return Err(
+                        CanonicalBaselineValidationError::AllMembersSubjectMismatch {
+                            members: deduped,
+                            subject: subject_members.to_vec(),
+                        },
+                    );
+                }
+                Ok(Self::AllMembersIntroducedByDelta { members: deduped })
             }
-            if deduped.as_slice() != subject_members {
-                return Err(format!(
-                    "AllMembersIntroducedByDelta members {:?} != request subject {:?}",
-                    deduped, subject_members
-                ));
+            crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+                existing,
+                introduced,
+            } => {
+                if existing.is_empty() || introduced.is_empty() {
+                    return Err(CanonicalBaselineValidationError::PartialEmptyList);
+                }
+                // Duplicate check BEFORE normalization (scoped P1-1).
+                let mut existing_sorted = existing.clone();
+                existing_sorted.sort_unstable();
+                let mut existing_dedup = existing_sorted.clone();
+                existing_dedup.dedup();
+                if existing_dedup.len() != existing_sorted.len() {
+                    return Err(CanonicalBaselineValidationError::PartialExistingDuplicate {
+                        existing: existing.clone(),
+                    });
+                }
+                let mut introduced_sorted = introduced.clone();
+                introduced_sorted.sort_unstable();
+                let mut introduced_dedup = introduced_sorted.clone();
+                introduced_dedup.dedup();
+                if introduced_dedup.len() != introduced_sorted.len() {
+                    return Err(CanonicalBaselineValidationError::PartialIntroducedDuplicate {
+                        introduced: introduced.clone(),
+                    });
+                }
+                // Disjoint check.
+                for id in &existing_dedup {
+                    if introduced_dedup.contains(id) {
+                        return Err(CanonicalBaselineValidationError::PartialNotDisjoint {
+                            node_id: *id,
+                        });
+                    }
+                }
+                // Union == subject (sorted merge).
+                let mut union_merged: Vec<crate::space::NodeId> = existing_dedup
+                    .iter()
+                    .chain(introduced_dedup.iter())
+                    .copied()
+                    .collect();
+                union_merged.sort_unstable();
+                union_merged.dedup();
+                if union_merged.as_slice() != subject_members {
+                    return Err(
+                        CanonicalBaselineValidationError::PartialUnionSubjectMismatch {
+                            union: union_merged,
+                            subject: subject_members.to_vec(),
+                        },
+                    );
+                }
+                Ok(Self::PartialNewSubject {
+                    existing: existing_dedup,
+                    introduced: introduced_dedup,
+                })
             }
-            return Ok(Self::AllMembersIntroducedByDelta { members: deduped });
         }
-        // PartialNewSubject: existing + introduced disjoint, union == subject, ikisi non-empty.
-        if existing.is_empty() || introduced.is_empty() {
-            return Err("PartialNewSubject requires non-empty existing and introduced".to_string());
-        }
-        let mut existing_sorted = existing.clone();
-        existing_sorted.sort_unstable();
-        existing_sorted.dedup();
-        let mut introduced_sorted = introduced.clone();
-        introduced_sorted.sort_unstable();
-        introduced_sorted.dedup();
-        // Disjoint check.
-        for id in &existing_sorted {
-            if introduced_sorted.contains(id) {
-                return Err(format!("Node {id} in both existing and introduced (not disjoint)"));
-            }
-        }
-        // Union == subject (sorted merge).
-        let mut union_merged: Vec<crate::space::NodeId> =
-            existing_sorted.iter().chain(introduced_sorted.iter()).copied().collect();
-        union_merged.sort_unstable();
-        union_merged.dedup();
-        if union_merged.as_slice() != subject_members {
-            return Err(format!(
-                "PartialNewSubject union {:?} != request subject {:?}",
-                union_merged, subject_members
-            ));
-        }
-        Ok(Self::PartialNewSubject {
-            existing: existing_sorted,
-            introduced: introduced_sorted,
-        })
     }
 }
 
@@ -1920,7 +1989,7 @@ impl AuthorizationBasisDigest {
         // Outcome tags.
         encode_u8(
             &mut hasher,
-            gate_decision_tag(basis.deterministic_gate_result),
+            gate_decision_tag_v2(basis.deterministic_gate_result),
             "gate",
         );
         encode_u8(
@@ -2490,19 +2559,21 @@ fn validate_evidence_semantics(
     Ok(())
 }
 
-/// **INV-T9 #70 Commit 4b (reviewer v4 P1-4 + scoped P1-4):** v2 production
-/// GateDecision tag encoder. Mevcut tag'ler (0-6) ASLA değişmez (exact pin — golden
-/// vector lock). Yeni varyantlar append-only sıradaki tag'leri alır:
+/// **INV-T9 #70 Commit 4b (reviewer v4 P1-4 + Faz 2 scoped P1-2):** v2 production
+/// GateDecision tag encoder — **`gate_decision_tag_v2`** (yeniden adlandırıldı).
+/// Mevcut tag'ler (0-6) ASLA değişmez (exact pin — golden vector lock). Yeni varyantlar
+/// append-only sıradaki tag'leri alır:
 /// - `RejectedByTaskValidation` → 7
 /// - `RejectedByMeasurementBinding` → 8
 ///
-/// **v1 frozen encoder ayrımı (scoped P1-4):** `AuthorizationBasis` v1→v2 migration'ı
-/// (Faz 4) sırasında v1 golden re-producibility için ayrı `gate_decision_tag_v1_frozen`
-/// (0..=6, yeni varyantları temsil edemez) test-only eklenecek. Bu helper v2 encoder
-/// yüzeyi — production v2 basis bunu kullanır.
+/// **v1 frozen encoder ayrımı (scoped P1-2):** Bu helper v2 encoder yüzeyi — production
+/// v2 basis bunu kullanır. v1 golden re-producibility için ayrı `gate_decision_tag_v1_frozen`
+/// (0..=6, yeni varyantları temsil edemez) Faz 4'te test-only eklenecek. **v1 encoder
+/// v2-only kararları 7/8 olarak encode edemez** — fiziksel ayrı enum/function.
 ///
-/// `gate_decision_v2_tags_are_unique_and_append_only` testi bu invariant'ı korur.
-fn gate_decision_tag(gd: crate::trajectory::GateDecision) -> u8 {
+/// `gate_decision_v2_tags_are_unique_and_append_only` testi (authorization.rs test modülü)
+/// gerçek tag mapping'i çağırarak doğrular.
+fn gate_decision_tag_v2(gd: crate::trajectory::GateDecision) -> u8 {
     use crate::trajectory::GateDecision::*;
     match gd {
         Unknown => 0,
@@ -9337,6 +9408,58 @@ v = 0.5
         assert_ne!(
             receipt1.evidence_digest, receipt2.evidence_digest,
             "distinct attempt → distinct evidence digest"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b — GateDecision v2 append-only tag mapping test
+    // (reviewer Faz 2 scoped P1-2: gerçek tag mapping'i doğrudan çağırır)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn gate_decision_v2_tags_are_unique_and_append_only() {
+        // Reviewer v4 P1-4 + Faz 2 scoped P1-2: append-only canonical tag invariant.
+        // gate_decision_tag_v2 helper'ını doğrudan çağırarak gerçek tag mapping'i test eder.
+        use crate::trajectory::GateDecision::*;
+        // Mevcut tag'ler (0-6) exact pin — golden vector lock.
+        assert_eq!(gate_decision_tag_v2(Unknown), 0);
+        assert_eq!(gate_decision_tag_v2(PassedAll), 1);
+        assert_eq!(gate_decision_tag_v2(RejectedBySyntax), 2);
+        assert_eq!(gate_decision_tag_v2(RejectedByVision), 3);
+        assert_eq!(gate_decision_tag_v2(RejectedByRule), 4);
+        assert_eq!(gate_decision_tag_v2(RejectedByTaskBinding), 5);
+        assert_eq!(gate_decision_tag_v2(BlockedByManeuverLimit), 6);
+        // Commit 4b — append-only yeni tag'ler (7, 8).
+        assert_eq!(gate_decision_tag_v2(RejectedByTaskValidation), 7);
+        assert_eq!(gate_decision_tag_v2(RejectedByMeasurementBinding), 8);
+
+        // Uniqueness: tüm tag'ler distinct.
+        let all_tags: Vec<u8> = [
+            Unknown,
+            PassedAll,
+            RejectedBySyntax,
+            RejectedByVision,
+            RejectedByRule,
+            RejectedByTaskBinding,
+            BlockedByManeuverLimit,
+            RejectedByTaskValidation,
+            RejectedByMeasurementBinding,
+        ]
+        .iter()
+        .map(|gd| gate_decision_tag_v2(*gd))
+        .collect();
+        let mut sorted_tags = all_tags.clone();
+        sorted_tags.sort_unstable();
+        sorted_tags.dedup();
+        assert_eq!(
+            sorted_tags.len(),
+            all_tags.len(),
+            "all GateDecision v2 tags must be unique (no tag reuse)"
+        );
+        // Range: 0..=8 (append-only — hiçbir tag 8'in üstüne çıkmaz Commit 4b'de).
+        assert!(
+            all_tags.iter().all(|&t| t <= 8),
+            "Commit 4b GateDecision tags must be in range 0..=8"
         );
     }
 }

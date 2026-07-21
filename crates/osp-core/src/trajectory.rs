@@ -1189,6 +1189,11 @@ pub enum TrajectoryLossUnavailableReason {
 /// **Borrowed gate input** — `PredicateGate::evaluate` loss evidence. Available ise
 /// target + loss_after taşır; Unavailable ise reason. Baseline ayrı parametre
 /// (`TrajectoryEvidenceBaseline<'a>`).
+///
+/// **Reviewer Faz 2 scoped P2-3:** `Unavailable` yalnız `NoPreferredVector` anlamına
+/// gelir (preferred_vector=None → loss/target anlamsız). **Loss computation failure
+/// (canonicalization, non-finite) `Unavailable`'a dönüştürülmez** — terminal derivation
+/// error (`MeasurementBindingDerivationError` veya `EngineCommitError::Internal`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryLossEvidence<'a> {
     /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
@@ -1196,7 +1201,8 @@ pub enum TrajectoryLossEvidence<'a> {
         target: &'a RawPosition,
         loss_after: f64,
     },
-    /// Loss unavailable — preferred_vector None veya hesap hatası.
+    /// Loss unavailable — yalnız `NoPreferredVector` (preferred_vector None).
+    /// Computation failure ayrı terminal error — bu varyanta gömülmez.
     Unavailable {
         reason: TrajectoryLossUnavailableReason,
     },
@@ -1233,11 +1239,16 @@ pub enum TrajectoryEvidenceBaseline<'a> {
 /// **Trajectory evaluation evidence** — `TaskCommitResult.evaluation` field (reviewer v4 P0).
 /// Downstream typed loss yayılımı: measured_after + baseline + owned loss evidence.
 /// Navigator (Faz 6/7) bunu consume eder — AcceptAsProgress + Unavailable → unreachable!.
+///
+/// **Reviewer Faz 2 scoped P2-3:** `baseline` field task-subject baseline'dir
+/// (`MeasurementBaseline` — subject scope üyelerinin before-state). Navigator global
+/// state-before ayrı (`TrajectoryEvidence.before` — Faz 7 rename `navigator_state_before`).
+/// İki semantik karıştırılmaz.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TrajectoryEvaluationEvidence {
     pub measured_after: ProvenancedRawPosition,
-    /// Navigator state-before (reviewer v4 P0: navigator global state, task subject baseline
-    /// değil — Faz 7'de typed MeasurementBaseline field ayrıştırması).
+    /// Task-subject baseline (subject scope üyelerinin before-state — Available/Unavailable).
+    /// Navigator global state-before DEĞİL (Faz 7 ayrıştırma).
     pub baseline: crate::measurement::MeasurementBaseline,
     pub loss: OwnedTrajectoryLossEvidence,
 }
@@ -3095,50 +3106,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn gate_decision_v2_tags_are_append_only_and_unique() {
-        // Reviewer v4 P1-4: append-only canonical tag invariant.
-        // Mevcut tag'ler (0-6) exact pin; yeni varyantlar (7-8) unique ve reuse yok.
-        use crate::trajectory::GateDecision::*;
-        let tags = [
-            (Unknown, 0u8),
-            (PassedAll, 1),
-            (RejectedBySyntax, 2),
-            (RejectedByVision, 3),
-            (RejectedByRule, 4),
-            (RejectedByTaskBinding, 5),
-            (BlockedByManeuverLimit, 6),
-            // Commit 4b — append-only yeni tag'ler.
-            (RejectedByTaskValidation, 7),
-            (RejectedByMeasurementBinding, 8),
-        ];
-        // Exact pin: her varyant beklenen tag'i üretir.
-        for (decision, expected_tag) in tags {
-            // gate_decision_tag authorization.rs'te pub değil; burada invariant'ı
-            // serde tag representation üzerinden doğruluyoruz (wire format = tag).
-            // GateDecision unit enum → serde repr string, ama tag encoding authorization
-            // internal. Bu test varyant sayısının append-only olduğunu kanıtlar:
-            // 9 varyant (0-8), hiçbiri reuse değil.
-            let _ = decision;
-            let _ = expected_tag;
-        }
-        // Varyant sayısı invariant — yeni varyant eklenirse bu assertion güncellenmeli.
-        let all_variants = [
-            Unknown,
-            PassedAll,
-            RejectedBySyntax,
-            RejectedByVision,
-            RejectedByRule,
-            RejectedByTaskBinding,
-            BlockedByManeuverLimit,
-            RejectedByTaskValidation,
-            RejectedByMeasurementBinding,
-        ];
-        // 9 unique varyant — append-only (mevcut 7 + Commit 4b 2 yeni).
-        assert_eq!(
-            all_variants.len(),
-            9,
-            "GateDecision must have exactly 9 variants (7 historical + 2 Commit 4b append-only)"
-        );
-    }
+    // Not: gate_decision_v2_tags_are_unique_and_append_only test'i authorization.rs
+    // test modülünde — gate_decision_tag_v2 helper'ı authorization.rs'te private,
+    // gerçek tag mapping'i doğrudan çağırır (reviewer Faz 2 scoped P1-2).
 }

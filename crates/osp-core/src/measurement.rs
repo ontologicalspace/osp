@@ -741,71 +741,9 @@ pub enum MeasurementBindingVerificationError {
     Derivation(#[from] MeasurementBindingDerivationError),
 }
 
-/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + scoped P1-2):** `verify_measurement_binding`
-/// tarafından üretilen doğrulanmış binding capability. **Construction yalnız
-/// `verify_measurement_binding()` içinde** — external crate veya test bypass kapalı.
-/// Basis builder bunu consume eder — subject/impact/canonical_delta/revision/context/
-/// request_snapshot ikinci kez üretilmez (tek truth source).
-///
-/// **Capability encapsulation (scoped P1-2):** struct + alanlar `pub(crate)` private.
-/// Read-only accessor'lar basis builder (Faz 3/4) için. External tanılama gerekirse
-/// ayrı `MeasurementBindingView` DTO'su kullanılmalı.
-#[derive(Debug, Clone)]
-pub(crate) struct VerifiedMeasurementBinding {
-    subject: CanonicalSubjectScope,
-    impact: CanonicalImpactScope,
-    canonical_delta: crate::authorization::CanonicalStructuralDelta,
-    current_revision: SpaceViewRevision,
-    current_context: crate::authorization::MeasurementInputContext,
-    request_digest: MeasurementRequestDigest,
-}
-
-impl VerifiedMeasurementBinding {
-    /// **Faz 3:** yalnız `verify_measurement_binding` çağırır — tek construction site.
-    #[allow(dead_code)] // Faz 3: verify_measurement_binding + basis builder consume
-    pub(crate) fn new(
-        subject: CanonicalSubjectScope,
-        impact: CanonicalImpactScope,
-        canonical_delta: crate::authorization::CanonicalStructuralDelta,
-        current_revision: SpaceViewRevision,
-        current_context: crate::authorization::MeasurementInputContext,
-        request_digest: MeasurementRequestDigest,
-    ) -> Self {
-        Self {
-            subject,
-            impact,
-            canonical_delta,
-            current_revision,
-            current_context,
-            request_digest,
-        }
-    }
-
-    #[allow(dead_code)] // Faz 3/4: basis builder consume
-    pub(crate) fn subject(&self) -> &CanonicalSubjectScope {
-        &self.subject
-    }
-    #[allow(dead_code)] // Faz 3/4: basis builder consume
-    pub(crate) fn impact(&self) -> &CanonicalImpactScope {
-        &self.impact
-    }
-    #[allow(dead_code)] // Faz 3/4: basis builder consume
-    pub(crate) fn canonical_delta(&self) -> &crate::authorization::CanonicalStructuralDelta {
-        &self.canonical_delta
-    }
-    #[allow(dead_code)] // Faz 3/4: basis builder consume
-    pub(crate) fn current_revision(&self) -> &SpaceViewRevision {
-        &self.current_revision
-    }
-    #[allow(dead_code)] // Faz 3/4: basis builder consume
-    pub(crate) fn current_context(&self) -> &crate::authorization::MeasurementInputContext {
-        &self.current_context
-    }
-    #[allow(dead_code)] // Faz 3/4: basis builder consume
-    pub(crate) fn request_digest(&self) -> &MeasurementRequestDigest {
-        &self.request_digest
-    }
-}
+// Not: VerifiedMeasurementBinding engine.rs'te tanımlı (reviewer Faz 2 scoped P1-3) —
+// construction modül-private (`verify_measurement_binding` aynı modülde), accessor'lar
+// pub(crate) (authorization.rs basis builder Faz 4 için).
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Error taxonomy

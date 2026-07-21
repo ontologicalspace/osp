@@ -309,6 +309,80 @@ impl From<crate::measurement::MeasurementBindingVerificationError> for EngineCom
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// VerifiedMeasurementBinding (INV-T9 #70 Commit 4b — reviewer Faz 2 scoped P1-3)
+//
+// **Capability encapsulation:** tip engine.rs'te tanımlı — `new()` modül-private
+// (engine modülü içinde). `verify_measurement_binding` (Faz 3) aynı modülde olduğu
+// için construction private — measurement.rs veya başka crate/modül doğrudan
+// `VerifiedMeasurementBinding::new()` çağıramaz (gerçek verifier-only invariant).
+//
+// Accessor'lar `pub(crate)` — authorization.rs basis builder (Faz 4) consume eder.
+// External tanılama gerekirse ayrı DTO kullanılmalı.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + Faz 2 scoped P1-3):** `verify_measurement_binding`
+/// (Faz 3) tarafından üretilen doğrulanmış binding capability. **Construction yalnız
+/// `verify_measurement_binding()` içinde** — modül-private `new()` (engine.rs), external
+/// crate/test bypass tip seviyesinde kapalı. Basis builder consume eder — re-derivation yok.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedMeasurementBinding {
+    subject: crate::measurement::CanonicalSubjectScope,
+    impact: crate::measurement::CanonicalImpactScope,
+    canonical_delta: crate::authorization::CanonicalStructuralDelta,
+    current_revision: crate::authorization::SpaceViewRevision,
+    current_context: crate::authorization::MeasurementInputContext,
+    request_digest: crate::measurement::MeasurementRequestDigest,
+}
+
+impl VerifiedMeasurementBinding {
+    /// **Faz 3:** modül-private constructor — yalnız `verify_measurement_binding`
+    /// (engine.rs aynı modül) çağırır. measurement.rs veya test bypass kapalı.
+    #[allow(dead_code)] // Faz 3: verify_measurement_binding
+    fn new(
+        subject: crate::measurement::CanonicalSubjectScope,
+        impact: crate::measurement::CanonicalImpactScope,
+        canonical_delta: crate::authorization::CanonicalStructuralDelta,
+        current_revision: crate::authorization::SpaceViewRevision,
+        current_context: crate::authorization::MeasurementInputContext,
+        request_digest: crate::measurement::MeasurementRequestDigest,
+    ) -> Self {
+        Self {
+            subject,
+            impact,
+            canonical_delta,
+            current_revision,
+            current_context,
+            request_digest,
+        }
+    }
+
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn subject(&self) -> &crate::measurement::CanonicalSubjectScope {
+        &self.subject
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn impact(&self) -> &crate::measurement::CanonicalImpactScope {
+        &self.impact
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn canonical_delta(&self) -> &crate::authorization::CanonicalStructuralDelta {
+        &self.canonical_delta
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn current_revision(&self) -> &crate::authorization::SpaceViewRevision {
+        &self.current_revision
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn current_context(&self) -> &crate::authorization::MeasurementInputContext {
+        &self.current_context
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn request_digest(&self) -> &crate::measurement::MeasurementRequestDigest {
+        &self.request_digest
+    }
+}
+
 /// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
 ///
 /// `Evaluated` = commit pipeline tamamlandı (AcceptAsCompleted Mainline'e, AcceptAsProgress
@@ -890,7 +964,7 @@ impl SpaceEngine {
     /// Task-bound path (Faz 3) `measurement.after().to_raw()` ile finite-check yapar.
     fn check_claim_syntax(&self, claim: &Claim) -> Result<(), EngineCommitError> {
         self.check_claim_structure(claim)?;
-        self.check_raw_position_finite(claim.id, &claim.computed_raw)?;
+        self.check_raw_position_finite(claim.id, "computed_raw", &claim.computed_raw)?;
         Ok(())
     }
 
@@ -945,12 +1019,14 @@ impl SpaceEngine {
         Ok(())
     }
 
-    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** RawPosition finite-check —
-    /// flat x/y/z/w/v eksen değerleri finite. `claim.computed_raw`'dan ayrı parametre
-    /// (task-bound path `measurement.after().to_raw()` ile çağırır — Faz 3).
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3 + Faz 2 scoped P2-2):** RawPosition
+    /// finite-check — flat x/y/z/w/v eksen değerleri finite. `claim.computed_raw`'dan
+    /// ayrı parametre (task-bound path `measurement.after().to_raw()` ile çağırır — Faz 3).
+    /// `source_label` nötr — "computed_raw" (legacy) veya "measurement.after" (task-bound).
     fn check_raw_position_finite(
         &self,
         claim_id: crate::witness::ClaimId,
+        source_label: &str,
         raw: &crate::coords::RawPosition,
     ) -> Result<(), EngineCommitError> {
         let axes = [
@@ -965,7 +1041,7 @@ impl SpaceEngine {
                 return Err(EngineCommitError::SyntaxViolation {
                     violation: SyntaxViolation {
                         claim_id,
-                        detail: format!("computed_raw.{} is not finite: {}", name, val),
+                        detail: format!("{}.{} is not finite: {}", source_label, name, val),
                     },
                 });
             }
@@ -4127,5 +4203,98 @@ v = 0.5
             5,
             "token context carries exactly 5 core axis descriptors"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 2 — helper regression test'leri
+    // (reviewer Faz 2 scoped P2-1: provided raw bağımsız-parametre semantiği)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_raw_position_finite_rejects_provided_nan_independent_of_claim_computed_raw() {
+        // Reviewer Faz 2 scoped P2-1: claim.computed_raw finite olsa bile provided raw
+        // (measurement.after().to_raw()) NaN ise reddetmeli — bağımsız parametre.
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            CoordinateSystem::empty(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let claim_id: crate::witness::ClaimId = 42;
+        // claim.computed_raw finite (simüle) — provided raw NaN.
+        let provided_raw_nan = crate::coords::RawPosition {
+            x: f64::NAN,
+            ..RawPosition::default()
+        };
+        let result = engine.check_raw_position_finite(claim_id, "measurement.after", &provided_raw_nan);
+        match result {
+            Err(EngineCommitError::SyntaxViolation { violation }) => {
+                assert_eq!(violation.claim_id, claim_id);
+                assert!(
+                    violation.detail.contains("measurement.after.x"),
+                    "detail must reference provided source label, got: {}",
+                    violation.detail
+                );
+                assert!(
+                    violation.detail.contains("NaN"),
+                    "detail must report NaN, got: {}",
+                    violation.detail
+                );
+            }
+            other => panic!("expected SyntaxViolation for NaN provided raw, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_raw_position_finite_accepts_all_finite_provided_raw() {
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            CoordinateSystem::empty(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let finite_raw = RawPosition {
+            x: 0.3,
+            y: 0.5,
+            z: 0.7,
+            w: 0.2,
+            v: 0.1,
+        };
+        engine
+            .check_raw_position_finite(1, "measurement.after", &finite_raw)
+            .expect("all-finite provided raw must pass");
+    }
+
+    #[test]
+    fn check_raw_position_finite_source_label_appears_in_violation_detail() {
+        // Reviewer Faz 2 scoped P2-2: nötr source label — "computed_raw" DEĞİL.
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            CoordinateSystem::empty(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let raw = RawPosition {
+            z: f64::INFINITY,
+            ..RawPosition::default()
+        };
+        let err = engine
+            .check_raw_position_finite(7, "measurement.after", &raw)
+            .unwrap_err();
+        match err {
+            EngineCommitError::SyntaxViolation { violation } => {
+                assert!(
+                    violation.detail.contains("measurement.after.z"),
+                    "detail must use provided source label 'measurement.after', got: {}",
+                    violation.detail
+                );
+                assert!(
+                    !violation.detail.contains("computed_raw"),
+                    "detail must NOT hardcode 'computed_raw', got: {}",
+                    violation.detail
+                );
+            }
+            other => panic!("expected SyntaxViolation, got {other:?}"),
+        }
     }
 }
