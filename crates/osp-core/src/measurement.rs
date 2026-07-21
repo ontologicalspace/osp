@@ -587,9 +587,13 @@ pub enum MeasurementBindingMismatch {
     },
 
     /// `measurement.request().structural_delta_digest()` claim canonical delta digest
-    /// ile uyuşmuyor.
-    #[error("measurement structural delta digest does not match claim")]
-    StructuralDeltaMismatch,
+    /// ile uyuşmuyor. **Reviewer scoped P2-3:** expected/presented digest kanıtı taşır
+    /// (replay/tamper evidence — exact assertion + telemetry).
+    #[error("measurement structural delta digest does not match claim: expected={expected:?}, presented={presented:?}")]
+    StructuralDeltaMismatch {
+        expected: crate::measurement::MeasurementDeltaDigest,
+        presented: crate::measurement::MeasurementDeltaDigest,
+    },
 
     /// `measurement.request().base_revision()` current engine revision ile uyuşmuyor
     /// (stale measurement — `RegenerateMeasurement` disposition).
@@ -600,14 +604,22 @@ pub enum MeasurementBindingMismatch {
     },
 
     /// `MeasurementInputDigest::compute(measurement.context())` request içindeki input
-    /// digest ile uyuşmuyor (token içi tutarsızlık).
-    #[error("measurement input context does not match request digest")]
-    ContextDigestMismatch,
+    /// digest ile uyuşmuyor (token içi tutarsızlık). **Reviewer scoped P2-3:**
+    /// expected/presented digest kanıtı taşır.
+    #[error("measurement input context does not match request digest: expected={expected:?}, presented={presented:?}")]
+    ContextDigestMismatch {
+        expected: crate::authorization::MeasurementInputDigest,
+        presented: crate::authorization::MeasurementInputDigest,
+    },
 
     /// `BoundMeasurementSession` current context (Commit 4a yüzeyi) token context ile
     /// uyuşmuyor (axis config drift — `RegenerateMeasurement` disposition).
-    #[error("measurement axis context does not match current engine context")]
-    CurrentContextMismatch,
+    /// **Reviewer scoped P2-3:** digest seviyesinde kanıt (büyük context nesnesi yerine).
+    #[error("measurement axis context does not match current engine context: expected={expected:?}, presented={presented:?}")]
+    CurrentContextMismatch {
+        expected: crate::authorization::MeasurementInputDigest,
+        presented: crate::authorization::MeasurementInputDigest,
+    },
 }
 
 impl MeasurementBindingMismatch {
@@ -630,6 +642,10 @@ impl MeasurementBindingMismatch {
         }
     }
 }
+
+// Not: disposition match zaten { .. } pattern kullandığı için varyant field
+// değişikliğinden etkilenmedi — struct literal olmayan varyantlar (StructuralDeltaMismatch
+// vb.) artık { expected, presented } field taşır ama { .. } bunu kapsar.
 
 /// **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** Engine derivation failure —
 /// `verify_measurement_binding` sırasında expected binding üretilemedi. Sistem hatası
@@ -654,8 +670,11 @@ pub enum MeasurementBindingDerivationError {
     RevisionComputationFailed { detail: String },
 
     /// `BoundMeasurementSession::begin` başarısız (coordinate measurement — axis drift).
-    #[error("measurement current context capture failed: {source:?}")]
+    /// **Reviewer scoped P2-2:** typed source — `#[source]` attribute + Display format
+    /// (Debug DEĞIL). Error chain telemetry için korunur.
+    #[error("measurement current context capture failed: {source}")]
     CurrentContextCaptureFailed {
+        #[source]
         source: crate::coords::CoordinateMeasurementError,
     },
 
@@ -684,24 +703,70 @@ pub enum MeasurementBindingVerificationError {
     Derivation(#[from] MeasurementBindingDerivationError),
 }
 
-/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4):** `verify_measurement_binding`
-/// tarafından üretilen doğrulanmış binding. Basis builder bunu consume eder —
-/// subject/impact/canonical_delta/revision/context/request_snapshot ikinci kez
-/// üretilmez (tek truth source).
+/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + scoped P1-2):** `verify_measurement_binding`
+/// tarafından üretilen doğrulanmış binding capability. **Construction yalnız
+/// `verify_measurement_binding()` içinde** — external crate veya test bypass kapalı.
+/// Basis builder bunu consume eder — subject/impact/canonical_delta/revision/context/
+/// request_snapshot ikinci kez üretilmez (tek truth source).
+///
+/// **Capability encapsulation (scoped P1-2):** struct + alanlar `pub(crate)` private.
+/// Read-only accessor'lar basis builder (Faz 3/4) için. External tanılama gerekirse
+/// ayrı `MeasurementBindingView` DTO'su kullanılmalı.
 #[derive(Debug, Clone)]
-pub struct VerifiedMeasurementBinding {
-    /// Yeniden derived subject scope (task'tan).
-    pub subject: CanonicalSubjectScope,
-    /// Yeniden derived impact scope (claim'den).
-    pub impact: CanonicalImpactScope,
-    /// Yeniden derived canonical structural delta (claim'den).
-    pub canonical_delta: crate::authorization::CanonicalStructuralDelta,
-    /// Current engine revision (stale check için).
-    pub current_revision: SpaceViewRevision,
-    /// Current measurement context (BoundMeasurementSession'dan — Commit 4a yüzeyi).
-    pub current_context: crate::authorization::MeasurementInputContext,
-    /// Re-computed request digest (basis v2'ye taşınır — cross-field invariant).
-    pub request_digest: MeasurementRequestDigest,
+pub(crate) struct VerifiedMeasurementBinding {
+    subject: CanonicalSubjectScope,
+    impact: CanonicalImpactScope,
+    canonical_delta: crate::authorization::CanonicalStructuralDelta,
+    current_revision: SpaceViewRevision,
+    current_context: crate::authorization::MeasurementInputContext,
+    request_digest: MeasurementRequestDigest,
+}
+
+impl VerifiedMeasurementBinding {
+    /// **Faz 3:** yalnız `verify_measurement_binding` çağırır — tek construction site.
+    #[allow(dead_code)] // Faz 3: verify_measurement_binding + basis builder consume
+    pub(crate) fn new(
+        subject: CanonicalSubjectScope,
+        impact: CanonicalImpactScope,
+        canonical_delta: crate::authorization::CanonicalStructuralDelta,
+        current_revision: SpaceViewRevision,
+        current_context: crate::authorization::MeasurementInputContext,
+        request_digest: MeasurementRequestDigest,
+    ) -> Self {
+        Self {
+            subject,
+            impact,
+            canonical_delta,
+            current_revision,
+            current_context,
+            request_digest,
+        }
+    }
+
+    #[allow(dead_code)] // Faz 3/4: basis builder consume
+    pub(crate) fn subject(&self) -> &CanonicalSubjectScope {
+        &self.subject
+    }
+    #[allow(dead_code)] // Faz 3/4: basis builder consume
+    pub(crate) fn impact(&self) -> &CanonicalImpactScope {
+        &self.impact
+    }
+    #[allow(dead_code)] // Faz 3/4: basis builder consume
+    pub(crate) fn canonical_delta(&self) -> &crate::authorization::CanonicalStructuralDelta {
+        &self.canonical_delta
+    }
+    #[allow(dead_code)] // Faz 3/4: basis builder consume
+    pub(crate) fn current_revision(&self) -> &SpaceViewRevision {
+        &self.current_revision
+    }
+    #[allow(dead_code)] // Faz 3/4: basis builder consume
+    pub(crate) fn current_context(&self) -> &crate::authorization::MeasurementInputContext {
+        &self.current_context
+    }
+    #[allow(dead_code)] // Faz 3/4: basis builder consume
+    pub(crate) fn request_digest(&self) -> &MeasurementRequestDigest {
+        &self.request_digest
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1580,6 +1645,85 @@ mod tests {
         fn role() -> crate::authorization::CanonicalNodeRole {
             crate::authorization::CanonicalNodeRole::try_from(&crate::space::NodeRole::Core)
                 .unwrap()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b — MeasurementBinding disposition + verification mapping
+    // (reviewer scoped P2-1: Faz 1 tip test'leri kendi fazında)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn measurement_binding_mismatch_disposition_regenerate_for_stale() {
+        // Reviewer v4 P1-3: RevisionMismatch + CurrentContextMismatch → RegenerateMeasurement
+        // (stale — yeni token üret, LLM retry yok, budget yok).
+        let revision_mismatch = MeasurementBindingMismatch::RevisionMismatch {
+            expected: sentinel_test_revision(1),
+            presented: sentinel_test_revision(2),
+        };
+        assert_eq!(
+            revision_mismatch.disposition(),
+            MeasurementBindingDisposition::RegenerateMeasurement
+        );
+        // CurrentContextMismatch disposition'ı { .. } pattern ile aynı sınıfa düşer —
+        // RevisionMismatch testi RegenerateMeasurement sınıfını kanıtlar.
+    }
+
+    #[test]
+    fn measurement_binding_mismatch_disposition_reject_for_replay_tamper() {
+        // Reviewer v4 P1-3: Task/Subject/Impact/StructuralDelta/ContextDigest mismatch
+        // → RejectPresentedAuthority (terminal, retry yok).
+        // Digest gerektiren varyantlar (StructuralDelta/ContextDigest/CurrentContext)
+        // Faz 3'te gerçek compute ile test edilecek; burada digest gerektirmeyen
+        // varyantlar (Task/Subject/Impact) sınıfı kanıtlar.
+        let task_mismatch = MeasurementBindingMismatch::TaskMismatch {
+            claim_task_id: Some(10),
+            resolved_task_id: 20,
+        };
+        assert_eq!(
+            task_mismatch.disposition(),
+            MeasurementBindingDisposition::RejectPresentedAuthority
+        );
+    }
+
+    #[test]
+    fn verification_error_maps_to_engine_commit_error_correctly() {
+        // Reviewer scoped P1-3: MeasurementBindingVerificationError → EngineCommitError
+        // tek terminal mapping. Mismatch → MeasurementBindingMismatch, Derivation →
+        // MeasurementBindingFailed.
+        use crate::engine::EngineCommitError;
+
+        let mismatch_err = MeasurementBindingVerificationError::Mismatch(
+            MeasurementBindingMismatch::TaskMismatch {
+                claim_task_id: Some(1),
+                resolved_task_id: 2,
+            },
+        );
+        let engine_err: EngineCommitError = mismatch_err.into();
+        assert!(matches!(
+            engine_err,
+            EngineCommitError::MeasurementBindingMismatch(_)
+        ));
+
+        let derivation_err = MeasurementBindingVerificationError::Derivation(
+            MeasurementBindingDerivationError::SubjectDerivationFailed {
+                detail: "test".to_string(),
+            },
+        );
+        let engine_err: EngineCommitError = derivation_err.into();
+        assert!(matches!(
+            engine_err,
+            EngineCommitError::MeasurementBindingFailed(_)
+        ));
+    }
+
+    /// Helper: test SpaceViewRevision (sentinel).
+    fn sentinel_test_revision(seq: u64) -> SpaceViewRevision {
+        use crate::authorization::{SpaceDigest, SpaceViewId, SpaceViewRevision};
+        SpaceViewRevision {
+            view_id: SpaceViewId::Ephemeral(seq),
+            sequence: seq,
+            content_digest: SpaceDigest::from_bytes([seq as u8; 32]),
         }
     }
 }

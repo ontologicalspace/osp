@@ -282,6 +282,23 @@ pub enum EngineCommitError {
     MeasurementBindingFailed(#[from] crate::measurement::MeasurementBindingDerivationError),
 }
 
+/// **INV-T9 #70 Commit 4b (reviewer scoped P1-3):** Somut verification wrapper →
+/// `EngineCommitError` tek terminal mapping noktası. `commit_task_claim` içinde
+/// `verify_measurement_binding` `?` ile yayılır. Mismatch → presented authority
+/// rejection (retry/reject disposition), Derivation → system failure.
+impl From<crate::measurement::MeasurementBindingVerificationError> for EngineCommitError {
+    fn from(error: crate::measurement::MeasurementBindingVerificationError) -> Self {
+        match error {
+            crate::measurement::MeasurementBindingVerificationError::Mismatch(mismatch) => {
+                Self::MeasurementBindingMismatch(mismatch)
+            }
+            crate::measurement::MeasurementBindingVerificationError::Derivation(derivation) => {
+                Self::MeasurementBindingFailed(derivation)
+            }
+        }
+    }
+}
+
 /// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
 ///
 /// `Evaluated` = commit pipeline tamamlandı (AcceptAsCompleted Mainline'e, AcceptAsProgress

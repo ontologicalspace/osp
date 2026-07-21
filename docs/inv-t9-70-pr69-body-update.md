@@ -94,7 +94,7 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
   - **WIP branch:** `wip/inv-t9-70-commit4b` (review-only, non-mergeable) — [draft PR #81](https://github.com/ontologicalspace/osp/pull/81)
   - **Sözleşme:** WIP branch merge edilmeyecek; final tek squashed atomic commit `fix/inv-t9-witness-suspension`'a gelecek (bu PR)
   - **İlerleme (Faz bazlı):**
-    - ✅ Faz 1 (kısmen): TaskValidationError + validate_for_commit (reviewer v4 P2 exact matris), GateDecision v2 append-only tag'ler (RejectedByTaskValidation=7, RejectedByMeasurementBinding=8), MeasurementBinding hata sistemi (Mismatch 7 + Derivation 7 + Verification + Disposition), VerifiedMeasurementBinding, EngineCommitError +3 varyant, tüm exhaustive match migration
+    - ✅ Faz 1 (kısmen — reviewer scoped review #1/#2 P1/P2 kapandı): TaskValidationError + validate_for_commit (reviewer v4 P2 exact matris + scoped P1-1 mode/weight shape), GateDecision v2 append-only tag'ler (RejectedByTaskValidation=7, RejectedByMeasurementBinding=8 — scoped P1-4 v1/v2 encoder ayrım notu), MeasurementBinding hata sistemi (Mismatch 7 + Derivation 7 + Verification + Disposition + scoped P1-3 From conversion + P2-1 digest kanıtı + P2-2 #[source]), VerifiedMeasurementBinding (scoped P1-2 pub(crate) capability encapsulation), EngineCommitError +3 varyant. **Exhaustive compile-site coverage landed; disposition-aware navigator semantics pending Faz 8 (şimdilik SystemFailure); Hallucination mapping intentional non-hallucination catch-all.**
     - ⬜ Faz 1 kalanı: Canonical baseline/loss evidence enums, TrajectoryEvidenceBaseline/Loss, TrajectoryEvaluationEvidence, CanonicalMeasurementRequestEvidence, TaskCommitInput smart constructor
     - ⬜ Faz 2-13: helper ayrımı, binding derivation, AuthorizationBasis v1→v2, PredicateGate completion-first, navigator state, downstream typed loss, caller migration, deprecation + AST guard, trybuild, #80 osp-desktop, tests, CI + squash + push
   - **6 Mimari Karar:** (1) deprecation 2B authority-path + module-wide AST guard, (2) TaskValidationError typed guard, (3) tek atomik implementation commit, (4) full token binding + VerifiedMeasurementBinding + Mismatch/Derivation ayrımı + disposition, (5) baseline tek truth source (Available { before } — loss_before YOK), (6) typed loss evidence downstream + completion-first (MissingPreferredVectorForImprovement YOK — preferred_vector=None geçerli)
@@ -108,8 +108,6 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
   - trybuild compile-fail: engine_measurement_deserialize + measurement_request_deserialize + task_commit_input field rejection
   - #80 osp-desktop CLOSED (try_compute_raw_from_delta + Claim fields)
   - Domain sep `osp.authorization-basis.v2\0` (v1 frozen fixture ile golden re-producibility)
-  - Domain sep `osp.authorization-basis.v2\0`
-  - Issue #80 (osp-desktop Claim struct field migration) çözümü
 
   **P2 carryover — compile-fail Deserialize guards (reviewer v6):**
 

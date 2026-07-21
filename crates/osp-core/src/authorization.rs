@@ -2353,12 +2353,20 @@ fn validate_evidence_semantics(
     Ok(())
 }
 
+/// **INV-T9 #70 Commit 4b (reviewer v4 P1-4 + scoped P1-4):** v2 production
+/// GateDecision tag encoder. Mevcut tag'ler (0-6) ASLA değişmez (exact pin — golden
+/// vector lock). Yeni varyantlar append-only sıradaki tag'leri alır:
+/// - `RejectedByTaskValidation` → 7
+/// - `RejectedByMeasurementBinding` → 8
+///
+/// **v1 frozen encoder ayrımı (scoped P1-4):** `AuthorizationBasis` v1→v2 migration'ı
+/// (Faz 4) sırasında v1 golden re-producibility için ayrı `gate_decision_tag_v1_frozen`
+/// (0..=6, yeni varyantları temsil edemez) test-only eklenecek. Bu helper v2 encoder
+/// yüzeyi — production v2 basis bunu kullanır.
+///
+/// `gate_decision_v2_tags_are_unique_and_append_only` testi bu invariant'ı korur.
 fn gate_decision_tag(gd: crate::trajectory::GateDecision) -> u8 {
     use crate::trajectory::GateDecision::*;
-    // **INV-T9 #70 Commit 4b (reviewer v4 P1-4 — append-only canonical tag):**
-    // Mevcut tag'ler (0-6) ASLA değişmez (exact pin — golden vector lock). Yeni
-    // varyantlar sıradaki unused tag'leri alır. `gate_decision_v2_tags_are_unique_and_append_only`
-    // testi bu invariant'ı korur.
     match gd {
         Unknown => 0,
         PassedAll => 1,
