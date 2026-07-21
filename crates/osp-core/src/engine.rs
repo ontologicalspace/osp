@@ -884,7 +884,20 @@ impl SpaceEngine {
     /// 2. delta_edges: Imports self-loop reddi, geçerli EdgeKind, from/to ≥ 0
     /// 3. delta_nodes içinde duplicate ID yok
     /// 4. computed_raw: tüm core eksen değerleri finite
+    ///
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Artık ayrılmış helper'lara delegasyon —
+    /// `check_claim_structure` (structural 1-3) + `check_raw_position_finite` (computed_raw 4).
+    /// Task-bound path (Faz 3) `measurement.after().to_raw()` ile finite-check yapar.
     fn check_claim_syntax(&self, claim: &Claim) -> Result<(), EngineCommitError> {
+        self.check_claim_structure(claim)?;
+        self.check_raw_position_finite(claim.id, &claim.computed_raw)?;
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Structural syntax validation —
+    /// node mass/kind, duplicate ID, edge self-import. `claim.computed_raw`'a dokunmaz
+    /// (finite-check ayrı). Legacy `commit()` + task-bound path ortak kullanır.
+    fn check_claim_structure(&self, claim: &Claim) -> Result<(), EngineCommitError> {
         // 1. Node validation
         for node in &claim.delta_nodes {
             if node.id == 0 && !claim.delta_nodes.is_empty() {
@@ -929,8 +942,17 @@ impl SpaceEngine {
             }
         }
 
-        // 4. computed_raw finite check (flat RawPosition: x,y,z,w,v)
-        let raw = &claim.computed_raw;
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** RawPosition finite-check —
+    /// flat x/y/z/w/v eksen değerleri finite. `claim.computed_raw`'dan ayrı parametre
+    /// (task-bound path `measurement.after().to_raw()` ile çağırır — Faz 3).
+    fn check_raw_position_finite(
+        &self,
+        claim_id: crate::witness::ClaimId,
+        raw: &crate::coords::RawPosition,
+    ) -> Result<(), EngineCommitError> {
         let axes = [
             ("x", raw.x),
             ("y", raw.y),
@@ -942,13 +964,12 @@ impl SpaceEngine {
             if !val.is_finite() {
                 return Err(EngineCommitError::SyntaxViolation {
                     violation: SyntaxViolation {
-                        claim_id: claim.id,
+                        claim_id,
                         detail: format!("computed_raw.{} is not finite: {}", name, val),
                     },
                 });
             }
         }
-
         Ok(())
     }
 
@@ -963,32 +984,49 @@ impl SpaceEngine {
     /// **INV-T9 Step 4b (reviewer P0-1):** Artık captured `EffectiveVisionGateContext`
     /// kullanır — `effective_vision_gate_context(claim)` bir kez üretilir, Q5 + digest
     /// paylaşır. `vision_for_claim` wrapper'ı legacy/test yüzeylerinde kalır.
+    ///
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** `claim.computed_raw`'a delegasyon —
+    /// `check_vision_raw_with_context`. Task-bound path (Faz 3) `measurement.after().to_raw()`
+    /// ile çağırır.
     fn check_claim_vision_with_context(
         &self,
         claim: &Claim,
         vision_context: &crate::authorization::EffectiveVisionGateContext,
     ) -> Result<(), EngineCommitError> {
+        self.check_vision_raw_with_context(claim.id, &claim.computed_raw, vision_context)
+    }
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Vision gate — ayrı raw parametre.
+    /// `claim.computed_raw`'dan bağımsız — task-bound path `measurement.after().to_raw()`
+    /// ile çağırır (token authority). Violation evidence `raw` field'ı authority-tied.
+    fn check_vision_raw_with_context(
+        &self,
+        claim_id: crate::witness::ClaimId,
+        raw: &crate::coords::RawPosition,
+        vision_context: &crate::authorization::EffectiveVisionGateContext,
+    ) -> Result<(), EngineCommitError> {
         // Effective vision captured context'ten — yeniden infer YOK.
         let vision = vision_context.selection.effective_vision;
-        let theta = CosineDeviation.theta(&claim.computed_raw, &vision, &self.space);
+        let theta = CosineDeviation.theta(raw, &vision, &self.space);
         if theta > vision_context.theta_bound {
             tracing::warn!(
-                claim_id = claim.id,
+                claim_id,
                 theta,
                 bound = vision_context.theta_bound,
                 "Q5 vision violation — claim rejected (negatif-uzay)"
             );
             return Err(EngineCommitError::VisionViolation {
                 violation: VisionViolation {
-                    claim_id: claim.id,
+                    claim_id,
                     theta,
-                    raw: claim.computed_raw,
+                    raw: *raw,
                 },
                 bound: vision_context.theta_bound,
             });
         }
         Ok(())
     }
+
 
     /// **INV-T9 Step 4b (reviewer P0-1):** Tek karar ağacı — role inference + vision
     /// selection AYNI fonksiyonda. Subject + effective vector + source birlikte üretilir.
