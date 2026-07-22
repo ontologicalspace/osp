@@ -1,7 +1,7 @@
 # INV-T9 #70 Commit 4b Faz 3 — Engine Binding & Derivation Plan (v5 APPROVED)
 
 **Tarih:** 2026-07-21 (ilk), 2026-07-22 (v8 closure sync)
-**WIP branch:** `wip/inv-t9-70-commit4b` (head: pending — Commit 5 review-fix sonrası)
+**WIP branch:** `wip/inv-t9-70-commit4b` (head: `c0bc206`)
 **Base:** `baa90a8` (Commit 4a APPROVED 9.9/10)
 **Draft PR:** #81 (review-only, non-mergeable)
 **Önceki:** Faz 1+2 TAMAM (scoped review #1→#4, 1067 osp-core test green)
@@ -77,7 +77,7 @@ Faz 5 contract docs + trybuild non-forgeability + workspace closure.
 Reviewer v7 REQUEST CHANGES closure: error taxonomy (MeasurementResultDigestComputationFailed),
 real SubjectDerivationFailed test, drift combiner tests, AST fail-closed + struct literal.
 
-### Commit 5: `wip(4b-faz3-review-fix-v2)` (pending)
+### Commit 5: `wip(4b-faz3-review-fix-v2)` (c0bc206)
 
 Reviewer v8 REQUEST CHANGES closure:
 - **combine_verification_results** refactor — pure decision function (finalize_verification
@@ -200,4 +200,4 @@ Production enforcement Faz 8'e bırakılmıştır.
 
 *Bu belge INV-T9 #70 Commit 4b Faz 3 v5 APPROVED implementation planıdır. Reviewer turları
 #6 APPROVE, #7 REQUEST CHANGES, #8 REQUEST CHANGES ile güncellendi. Gerçek implementation
-commit 1-4 (`96ca02c`..`ccdc55c`) + commit 5 (pending) aralığındadır.*
+commit 1-5 (`96ca02c`..`c0bc206`) aralığındadır.*
