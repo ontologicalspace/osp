@@ -399,54 +399,90 @@ impl MeasurementRequestDigest {
     const DOMAIN_SEPARATOR: &'static [u8] = b"osp.measurement-request.v1\0";
     const DIGEST_NAME: &'static str = "MeasurementRequestDigest";
 
-    pub fn compute(request: &MeasurementRequest) -> Result<Self, MeasurementDigestError> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(Self::DOMAIN_SEPARATOR);
-
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-2):** Shared request encoder — tek truth
+    /// source. Hem `compute(&MeasurementRequest)` hem `compute_from_canonical` bu helper'ı
+    /// çağırır. Drift risk kapalı: iki ayrı field-by-field encoder YOK.
+    fn write_request_commitment(
+        hasher: &mut blake3::Hasher,
+        subject: &CanonicalSubjectScope,
+        impact: &CanonicalImpactScope,
+        base_revision: &SpaceViewRevision,
+        structural_delta_digest: &MeasurementDeltaDigest,
+        measurement_input_digest: &MeasurementInputDigest,
+    ) {
         // subject_count + sorted subject ids
         encode_u64(
-            &mut hasher,
-            request.subject.member_ids().len() as u64,
+            hasher,
+            subject.member_ids().len() as u64,
             "mr_subject_count",
         );
-        for id in request.subject.member_ids() {
-            encode_u64(&mut hasher, *id, "mr_subject_node_id");
+        for id in subject.member_ids() {
+            encode_u64(hasher, *id, "mr_subject_node_id");
         }
 
         // impact_node_count + sorted impact node ids
         encode_u64(
-            &mut hasher,
-            request.impact.node_ids().len() as u64,
+            hasher,
+            impact.node_ids().len() as u64,
             "mr_impact_node_count",
         );
-        for id in request.impact.node_ids() {
-            encode_u64(&mut hasher, *id, "mr_impact_node_id");
+        for id in impact.node_ids() {
+            encode_u64(hasher, *id, "mr_impact_node_id");
         }
 
         // impact_edge_count + sorted impact edges (canonical identity)
         encode_u64(
-            &mut hasher,
-            request.impact.edge_ids().len() as u64,
+            hasher,
+            impact.edge_ids().len() as u64,
             "mr_impact_edge_count",
         );
-        for edge in request.impact.edge_ids() {
+        for edge in impact.edge_ids() {
             hasher.update(&encode_canonical_edge_identity_to_vec(edge));
         }
 
         // base_revision: view_id variant + sequence + content_digest (32 raw bytes)
-        encode_space_view_id(&mut hasher, &request.base_revision.view_id);
-        encode_u64(
-            &mut hasher,
-            request.base_revision.sequence,
-            "mr_revision_sequence",
-        );
-        hasher.update(request.base_revision.content_digest.as_bytes());
+        encode_space_view_id(hasher, &base_revision.view_id);
+        encode_u64(hasher, base_revision.sequence, "mr_revision_sequence");
+        hasher.update(base_revision.content_digest.as_bytes());
 
         // structural_delta_digest (32 raw bytes)
-        hasher.update(request.structural_delta_digest.as_bytes());
+        hasher.update(structural_delta_digest.as_bytes());
         // measurement_input_digest (32 raw bytes)
-        hasher.update(request.measurement_input_digest.as_bytes());
+        hasher.update(measurement_input_digest.as_bytes());
+    }
 
+    pub fn compute(request: &MeasurementRequest) -> Result<Self, MeasurementDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_request_commitment(
+            &mut hasher,
+            &request.subject,
+            &request.impact,
+            &request.base_revision,
+            &request.structural_delta_digest,
+            &request.measurement_input_digest,
+        );
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-2):** Canonical evidence üzerinden
+    /// digest üretir — `AuthorizationBasisV2::validate_semantics` snapshot → digest
+    /// reverify için kullanır. Shared encoder (`write_request_commitment`) — `compute`
+    /// ile aynı byte format (tek truth source). `CanonicalMeasurementRequestEvidence`
+    /// field'ları `MeasurementRequest` ile birebir aynı.
+    pub(crate) fn compute_from_canonical(
+        evidence: &CanonicalMeasurementRequestEvidence,
+    ) -> Result<Self, MeasurementDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_request_commitment(
+            &mut hasher,
+            &evidence.subject,
+            &evidence.impact,
+            &evidence.base_revision,
+            &evidence.structural_delta_digest,
+            &evidence.measurement_input_digest,
+        );
         Ok(Self(hasher.finalize().into()))
     }
 
@@ -839,47 +875,80 @@ impl MeasurementBaselineDigest {
             }
             MeasurementBaseline::Unavailable { reason } => {
                 encode_u8(hasher, 1, "baseline_unavailable_tag");
-                // reason canonicalization — member listeleri sorted + unique (CanonicalBaselineUnavailableReason
-                // zaten canonicalize eder; burada raw reason'ı encode ediyoruz çünkü
-                // MeasurementBaseline Unavailable reason'ı raw BaselineUnavailableReason).
-                match reason {
-                    BaselineUnavailableReason::AllMembersIntroducedByDelta { members } => {
-                        encode_u8(hasher, 0, "baseline_reason_all_introduced_tag");
-                        encode_u64(
-                            hasher,
-                            members.len() as u64,
-                            "baseline_reason_members_count",
-                        );
-                        for id in members {
-                            encode_u64(hasher, *id, "baseline_reason_member_id");
-                        }
-                    }
-                    BaselineUnavailableReason::PartialNewSubject {
-                        existing,
-                        introduced,
-                    } => {
-                        encode_u8(hasher, 1, "baseline_reason_partial_tag");
-                        encode_u64(
-                            hasher,
-                            existing.len() as u64,
-                            "baseline_reason_existing_count",
-                        );
-                        for id in existing {
-                            encode_u64(hasher, *id, "baseline_reason_existing_id");
-                        }
-                        encode_u64(
-                            hasher,
-                            introduced.len() as u64,
-                            "baseline_reason_introduced_count",
-                        );
-                        for id in introduced {
-                            encode_u64(hasher, *id, "baseline_reason_introduced_id");
-                        }
-                    }
+                // **Reviewer P1-3:** reason canonicalization — member listeleri sorted +
+                // unique (CanonicalBaselineUnavailableReason ile aynı sözleşme). Raw
+                // BaselineUnavailableReason unsorted/duplicate içerebilir; encoder
+                // defensive olarak sort + duplicate reject uygular (canonical evidence
+                // `try_from_reason` ile aynı invariant).
+                Self::write_unavailable_reason_commitment(hasher, reason)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// **Reviewer P1-3:** Shared unavailable reason encoder — member listeleri sorted +
+    /// unique. Raw `BaselineUnavailableReason` ve `CanonicalBaselineUnavailableReason`
+    /// aynı byte format üretir (drift risk kapalı). Duplicate reject — canonical evidence
+    /// `try_from_reason` ile aynı invariant.
+    fn write_unavailable_reason_commitment(
+        hasher: &mut blake3::Hasher,
+        reason: &BaselineUnavailableReason,
+    ) -> Result<(), EngineMeasurementDigestError> {
+        use crate::canonical_encoding::{encode_u64, encode_u8};
+        match reason {
+            BaselineUnavailableReason::AllMembersIntroducedByDelta { members } => {
+                let sorted = Self::canonicalize_member_list(members)?;
+                encode_u8(hasher, 0, "baseline_reason_all_introduced_tag");
+                encode_u64(hasher, sorted.len() as u64, "baseline_reason_members_count");
+                for id in &sorted {
+                    encode_u64(hasher, *id, "baseline_reason_member_id");
+                }
+            }
+            BaselineUnavailableReason::PartialNewSubject {
+                existing,
+                introduced,
+            } => {
+                let existing_sorted = Self::canonicalize_member_list(existing)?;
+                let introduced_sorted = Self::canonicalize_member_list(introduced)?;
+                encode_u8(hasher, 1, "baseline_reason_partial_tag");
+                encode_u64(
+                    hasher,
+                    existing_sorted.len() as u64,
+                    "baseline_reason_existing_count",
+                );
+                for id in &existing_sorted {
+                    encode_u64(hasher, *id, "baseline_reason_existing_id");
+                }
+                encode_u64(
+                    hasher,
+                    introduced_sorted.len() as u64,
+                    "baseline_reason_introduced_count",
+                );
+                for id in &introduced_sorted {
+                    encode_u64(hasher, *id, "baseline_reason_introduced_id");
                 }
             }
         }
         Ok(())
+    }
+
+    /// **Reviewer P1-3:** Member listesi canonicalization — sort + duplicate reject.
+    /// `CanonicalBaselineUnavailableReason::try_from_reason` ile aynı invariant:
+    /// unsorted → sorted (meşru canonicalization), duplicate → typed error (sessiz
+    /// dedup YOK).
+    fn canonicalize_member_list(
+        members: &[NodeId],
+    ) -> Result<Vec<NodeId>, EngineMeasurementDigestError> {
+        let mut sorted = members.to_vec();
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            if pair[0] == pair[1] {
+                return Err(EngineMeasurementDigestError::StructuralCanonicalization {
+                    detail: format!("duplicate baseline member node id: {}", pair[0]),
+                });
+            }
+        }
+        Ok(sorted)
     }
 
     #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
@@ -1192,9 +1261,21 @@ impl TaskGoalDigest {
             }
             crate::trajectory::PredicateScope::Subgraph(ids) => {
                 push_u8(buf, 2);
-                // Subgraph: sorted + length-prefix + per-id. Canonical sıra garantisi.
+                // **Reviewer P1-4:** Subgraph: sorted + duplicate reject + length-prefix
+                // + per-id. Canonical sıra + unique garanti. `[1,1,2]` → reject (defense-
+                // in-depth — validate_for_commit da reject eder). Sessiz dedup YOK.
                 let mut sorted = ids.clone();
                 sorted.sort_unstable();
+                for pair in sorted.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(EngineMeasurementDigestError::StructuralCanonicalization {
+                            detail: format!(
+                                "duplicate subgraph scope node id in TaskGoalDigest: {}",
+                                pair[0]
+                            ),
+                        });
+                    }
+                }
                 push_u64(buf, sorted.len() as u64);
                 for id in &sorted {
                     push_u64(buf, *id);
@@ -3090,5 +3171,98 @@ pub(crate) mod tests {
         assert_eq!(err.to_string(), "non-finite canonical float rejected");
         let err = EngineMeasurementDigestError::LengthOverflow { field: "test" };
         assert!(err.to_string().contains("test"));
+    }
+
+    #[test]
+    fn faz4_task_goal_digest_rejects_duplicate_subgraph_scope() {
+        // **Reviewer P1-4:** TaskGoalDigest defensive — Subgraph duplicate node id reject.
+        // validate_for_commit da reject eder; digest katmanı defense-in-depth.
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
+            PredicateSet, Task, TaskPolicy, TaskStatus, WeightedPredicate,
+        };
+        let mk_task = |scope: PredicateScope| Task {
+            id: 42,
+            milestone_id: 0,
+            label: "test".to_string(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Coupling,
+                        operator: ComparisonOp::Le,
+                        threshold: 0.5,
+                        scope,
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                }],
+                preferred_vector: None,
+            },
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        };
+        // Duplicate subgraph → digest reject.
+        let err = TaskGoalDigest::compute(&mk_task(PredicateScope::Subgraph(vec![1, 1, 2])))
+            .expect_err("duplicate subgraph scope reject");
+        assert!(
+            matches!(
+                err,
+                EngineMeasurementDigestError::StructuralCanonicalization { .. }
+            ),
+            "duplicate subgraph → StructuralCanonicalization, got {err:?}"
+        );
+        // Unique subgraph → Ok.
+        TaskGoalDigest::compute(&mk_task(PredicateScope::Subgraph(vec![1, 2, 3])))
+            .expect("unique subgraph scope valid");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 4 (reviewer P2-2) — V2 digest golden vector pinleme
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn faz4_task_goal_digest_golden_vector() {
+        // **Reviewer P2-2:** Frozen golden hex — canonical byte contract pin.
+        use crate::trajectory::{PredicateMode, PredicateSet, Task, TaskPolicy, TaskStatus};
+        let task = Task {
+            id: 42,
+            milestone_id: 0,
+            label: "golden".to_string(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![],
+                preferred_vector: None,
+            },
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        };
+        let digest = TaskGoalDigest::compute(&task).expect("digest");
+        const FAZ4_TASK_GOAL_V1_GOLDEN_HEX: &str =
+            "062e36dd65c8a53c83fa2508293f27d0c7df67f77faed2114e3a856e70ef5ef4";
+        assert_eq!(
+            digest.to_hex(),
+            FAZ4_TASK_GOAL_V1_GOLDEN_HEX,
+            "TaskGoalDigest golden byte contract changed (OSP/TASK-GOAL/V1)"
+        );
+    }
+
+    #[test]
+    fn faz4_engine_measurement_digest_golden_vector() {
+        // **Reviewer P2-2:** Frozen golden hex — canonical byte contract pin.
+        let m = faz4_engine_measurement(0.5);
+        let digest = m.compute_digest().expect("digest");
+        const FAZ4_ENGINE_MEASUREMENT_V1_GOLDEN_HEX: &str =
+            "4b255b084f5783d233791dd33e7bf127350413fe59a0d7e61b46617a1047c40c";
+        assert_eq!(
+            digest.to_hex(),
+            FAZ4_ENGINE_MEASUREMENT_V1_GOLDEN_HEX,
+            "EngineMeasurementDigest golden byte contract changed (OSP/ENGINE-MEASUREMENT/V1)"
+        );
     }
 }

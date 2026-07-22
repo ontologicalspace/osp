@@ -693,6 +693,19 @@ pub enum TaskValidationError {
     /// TaskPolicy.maneuver_limit sıfır (INV-T7 — ardışık reject limiti en az 1 olmalı).
     #[error("task {task_id} policy has invalid maneuver_limit: {value} (must be > 0)")]
     InvalidManeuverLimit { task_id: TaskId, value: u32 },
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** PredicateScope::Subgraph member
+    /// listesi duplicate node id içeriyor. `[1,1,2]` iki farklı digest üretürken aynı
+    /// ontolojik subgraph'ı ifade edebilir — canonical representation invariant.
+    /// Sessiz dedup YOK — typed reject.
+    #[error(
+        "task {task_id} predicate[{predicate_index}] subgraph scope has duplicate node id: {node_id}"
+    )]
+    DuplicateSubgraphScopeNode {
+        task_id: TaskId,
+        predicate_index: usize,
+        node_id: NodeId,
+    },
 }
 
 impl Task {
@@ -772,6 +785,23 @@ impl Task {
                     });
                 }
                 _ => {}
+            }
+            // **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** Subgraph scope duplicate
+            // node id kontrolü. `[1,1,2]` iki farklı digest üretürken aynı ontolojik
+            // subgraph'ı ifade edebilir. Canonical representation invariant — sessiz
+            // dedup YOK, typed reject.
+            if let PredicateScope::Subgraph(ids) = &pred.scope {
+                let mut sorted = ids.clone();
+                sorted.sort_unstable();
+                for pair in sorted.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(TaskValidationError::DuplicateSubgraphScopeNode {
+                            task_id,
+                            predicate_index,
+                            node_id: pair[0],
+                        });
+                    }
+                }
             }
         }
 
@@ -2954,6 +2984,34 @@ mod tests {
             err,
             TaskValidationError::EmptyPredicateSet { task_id: 1 }
         ));
+    }
+
+    #[test]
+    fn validate_for_commit_rejects_duplicate_subgraph_scope() {
+        // **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** Subgraph scope duplicate node id
+        // → typed reject. `[1,1,2]` iki farklı digest üretürken aynı ontolojik subgraph.
+        let mut task = valid_task_for_validation();
+        task.target_predicate_set.predicates[0].predicate.scope =
+            PredicateScope::Subgraph(vec![1, 1, 2]);
+        let err = task.validate_for_commit().unwrap_err();
+        assert!(matches!(
+            err,
+            TaskValidationError::DuplicateSubgraphScopeNode {
+                task_id: 1,
+                predicate_index: 0,
+                node_id: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn validate_for_commit_accepts_unique_subgraph_scope() {
+        // Unique subgraph scope → Ok (no duplicate).
+        let mut task = valid_task_for_validation();
+        task.target_predicate_set.predicates[0].predicate.scope =
+            PredicateScope::Subgraph(vec![3, 1, 2]); // unsorted ama unique
+        task.validate_for_commit()
+            .expect("unique subgraph scope valid");
     }
 
     #[test]
