@@ -1678,12 +1678,17 @@ pub enum CanonicalTrajectoryEvidenceBaseline {
 /// edilir** (unsorted → sorted — meşru canonicalization). + disjoint + union == request
 /// subject (scoped P1-2 + Faz 2 scoped P2-1). `try_from_reason` raw enum + request
 /// subject alır — duplicate normalizasyondan ÖNCE typed error (reviewer Faz 2 scoped P1-1).
-/// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-2 v3):** Canonical baseline unavailable
-/// reason — opaque struct. Private repr; tek creation yolu checked `try_from_reason`
-/// (local invalid state üretilemez: sort + dedup + non-empty + disjoint + union == subject).
-/// Struct literal bypass imkânsız. Cross-object tutarsızlık `validate_against_subject`
-/// ile tüketim sınırında yeniden doğrulanır (defense-in-depth).
+/// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-2 v3, P2-3 v4):** Canonical baseline
+/// unavailable reason — opaque struct. Private repr; tek creation yolu checked
+/// `try_from_reason` (local invalid state üretilemez: sort + dedup + non-empty + disjoint
+/// + union == subject). Struct literal bypass imkânsız. Cross-object tutarsızlık
+/// `validate_against_subject` ile tüketim sınırında yeniden doğrulanır (defense-in-depth).
+///
+/// **Serialization (reviewer P2-3 v4):** `#[serde(transparent)]` — wrapper iç repr enum
+/// gibi serialize olur (eski public enum wire shape korunur). Wire format Commit 1b'de
+/// explicit DTO ile finalize edilir.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(transparent)]
 pub struct CanonicalBaselineUnavailableReason {
     repr: CanonicalBaselineUnavailableReasonRepr,
 }
@@ -1700,31 +1705,23 @@ enum CanonicalBaselineUnavailableReasonRepr {
 }
 
 impl CanonicalBaselineUnavailableReason {
-    /// Accessor — member listesi (AllMembers varyantı).
-    pub fn members(&self) -> &[crate::space::NodeId] {
+    /// **Reviewer P1-2 v4:** Safe view accessor — public discriminator ile varyant bilgisi.
+    /// Panic YOK — geçerli nesnede yanlış accessor çağrımı imkânsız. Caller `view()` ile
+    /// match yapar (tüm varyantlar typed).
+    pub fn view(&self) -> CanonicalBaselineUnavailableReasonView<'_> {
         match &self.repr {
             CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta { members } => {
-                members
+                CanonicalBaselineUnavailableReasonView::AllMembersIntroducedByDelta {
+                    members: members.as_slice(),
+                }
             }
-            _ => panic!("members() called on non-AllMembers variant"),
-        }
-    }
-
-    /// Accessor — existing listesi (PartialNewSubject varyantı).
-    pub fn existing(&self) -> &[crate::space::NodeId] {
-        match &self.repr {
-            CanonicalBaselineUnavailableReasonRepr::PartialNewSubject { existing, .. } => existing,
-            _ => panic!("existing() called on non-PartialNewSubject variant"),
-        }
-    }
-
-    /// Accessor — introduced listesi (PartialNewSubject varyantı).
-    pub fn introduced(&self) -> &[crate::space::NodeId] {
-        match &self.repr {
-            CanonicalBaselineUnavailableReasonRepr::PartialNewSubject { introduced, .. } => {
-                introduced
-            }
-            _ => panic!("introduced() called on non-PartialNewSubject variant"),
+            CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                existing,
+                introduced,
+            } => CanonicalBaselineUnavailableReasonView::PartialNewSubject {
+                existing: existing.as_slice(),
+                introduced: introduced.as_slice(),
+            },
         }
     }
 
@@ -1734,12 +1731,29 @@ impl CanonicalBaselineUnavailableReason {
     }
 }
 
+/// **Reviewer P1-2 v4:** Safe public view — panic accessor'lar yerine. Caller `view()` ile
+/// match yapar; geçerli nesnede yanlış varyant çağrımı imkânsız.
+#[derive(Debug, Clone, Copy)]
+pub enum CanonicalBaselineUnavailableReasonView<'a> {
+    AllMembersIntroducedByDelta {
+        members: &'a [crate::space::NodeId],
+    },
+    PartialNewSubject {
+        existing: &'a [crate::space::NodeId],
+        introduced: &'a [crate::space::NodeId],
+    },
+}
+
 /// **INV-T9 #70 Commit 4b (reviewer Faz 2 scoped P1-1):** Typed canonical baseline
 /// validation error — `String` DEĞİL. Her ihlal ayrı varyant (telemetry + exact assertion).
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CanonicalBaselineValidationError {
     #[error("AllMembersIntroducedByDelta members contain duplicates: {members:?}")]
     AllMembersDuplicate { members: Vec<crate::space::NodeId> },
+
+    /// **Reviewer P2-2 v4:** AllMembers list canonical sıralı değil (strict ascending).
+    #[error("AllMembersIntroducedByDelta members not in canonical order: {members:?}")]
+    AllMembersUnsorted { members: Vec<crate::space::NodeId> },
 
     #[error("AllMembersIntroducedByDelta members {members:?} != request subject {subject:?}")]
     AllMembersSubjectMismatch {
@@ -1750,8 +1764,18 @@ pub enum CanonicalBaselineValidationError {
     #[error("PartialNewSubject existing list contains duplicates: {existing:?}")]
     PartialExistingDuplicate { existing: Vec<crate::space::NodeId> },
 
+    /// **Reviewer P2-2 v4:** Partial existing list canonical sıralı değil.
+    #[error("PartialNewSubject existing list not in canonical order: {existing:?}")]
+    PartialExistingUnsorted { existing: Vec<crate::space::NodeId> },
+
     #[error("PartialNewSubject introduced list contains duplicates: {introduced:?}")]
     PartialIntroducedDuplicate {
+        introduced: Vec<crate::space::NodeId>,
+    },
+
+    /// **Reviewer P2-2 v4:** Partial introduced list canonical sıralı değil.
+    #[error("PartialNewSubject introduced list not in canonical order: {introduced:?}")]
+    PartialIntroducedUnsorted {
         introduced: Vec<crate::space::NodeId>,
     },
 
@@ -1884,8 +1908,19 @@ impl CanonicalBaselineUnavailableReason {
         let subject_members = request_subject.member_ids();
         match &self.repr {
             CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta { members } => {
-                // Non-normalizing: sorted + unique olmalı (canonical invariant).
-                Self::validate_strictly_sorted_unique(members)?;
+                // Non-normalizing: sorted (strict ascending) + unique (canonical invariant).
+                for pair in members.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(CanonicalBaselineValidationError::AllMembersDuplicate {
+                            members: members.clone(),
+                        });
+                    }
+                    if pair[0] > pair[1] {
+                        return Err(CanonicalBaselineValidationError::AllMembersUnsorted {
+                            members: members.clone(),
+                        });
+                    }
+                }
                 if members.as_slice() != subject_members {
                     return Err(
                         CanonicalBaselineValidationError::AllMembersSubjectMismatch {
@@ -1903,9 +1938,36 @@ impl CanonicalBaselineUnavailableReason {
                 if existing.is_empty() || introduced.is_empty() {
                     return Err(CanonicalBaselineValidationError::PartialEmptyList);
                 }
-                // Non-normalizing: sorted + unique.
-                Self::validate_strictly_sorted_unique(existing)?;
-                Self::validate_strictly_sorted_unique(introduced)?;
+                // Non-normalizing: existing sorted (strict ascending) + unique.
+                for pair in existing.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(CanonicalBaselineValidationError::PartialExistingDuplicate {
+                            existing: existing.clone(),
+                        });
+                    }
+                    if pair[0] > pair[1] {
+                        return Err(CanonicalBaselineValidationError::PartialExistingUnsorted {
+                            existing: existing.clone(),
+                        });
+                    }
+                }
+                // Non-normalizing: introduced sorted + unique.
+                for pair in introduced.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(
+                            CanonicalBaselineValidationError::PartialIntroducedDuplicate {
+                                introduced: introduced.clone(),
+                            },
+                        );
+                    }
+                    if pair[0] > pair[1] {
+                        return Err(
+                            CanonicalBaselineValidationError::PartialIntroducedUnsorted {
+                                introduced: introduced.clone(),
+                            },
+                        );
+                    }
+                }
                 // Disjoint.
                 for id in existing {
                     if introduced.contains(id) {
@@ -1927,26 +1989,6 @@ impl CanonicalBaselineUnavailableReason {
                         },
                     );
                 }
-            }
-        }
-        Ok(())
-    }
-
-    /// Non-normalizing canonical check — sorted (strict ascending) + unique (no duplicates).
-    /// Bozuk persisted state reject (sessiz düzeltme YOK).
-    fn validate_strictly_sorted_unique(
-        members: &[crate::space::NodeId],
-    ) -> Result<(), CanonicalBaselineValidationError> {
-        for pair in members.windows(2) {
-            if pair[0] == pair[1] {
-                return Err(CanonicalBaselineValidationError::AllMembersDuplicate {
-                    members: members.to_vec(),
-                });
-            }
-            if pair[0] > pair[1] {
-                return Err(CanonicalBaselineValidationError::AllMembersDuplicate {
-                    members: members.to_vec(),
-                });
             }
         }
         Ok(())
@@ -2096,6 +2138,11 @@ pub enum AuthorizationBasisV2Error {
     /// digest ile basis canonical_delta_digest tutarsız. İki commitment aynı kaynak.
     #[error("canonical delta digest mismatch: request={request:?}, basis={basis:?}")]
     CanonicalDeltaDigestMismatch { request: String, basis: String },
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-3 v4):** Baseline evidence typed validation
+    /// hatası — `CanonicalBaselineValidationError` typed wrapper (duplicate/subject-mismatch/
+    /// empty/overlap/union ayrımı korunur, string'e düşürülmez).
+    #[error("baseline evidence validation failed: {0}")]
+    BaselineValidation(#[from] CanonicalBaselineValidationError),
     #[error("basis construction failed: {detail}")]
     Construction { detail: String },
 }
@@ -2190,14 +2237,12 @@ impl AuthorizationBasisV2 {
         // **Reviewer P1-2 v3:** Baseline reason ↔ request subject doğrulaması — digest
         // hesaplamasından ÖNCE. Cross-object substitution/tutarsızlık reject. Defense-in-
         // depth: checked constructor zaten validated ama basis katmanında reverify.
+        // **Reviewer P1-3 v4:** typed error — `BaselineValidation(#[from])` ile string'e
+        // düşürülmez (telemetry + exact assertion seviyesi korunur).
         if let CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } =
             &self.trajectory_baseline
         {
-            reason
-                .validate_against_subject(&self.measurement_request.subject)
-                .map_err(|e| AuthorizationBasisV2Error::Construction {
-                    detail: e.to_string(),
-                })?;
+            reason.validate_against_subject(&self.measurement_request.subject)?;
         }
         // Baseline digest reverify — shared encoder (plan md:207).
         let recomputed_baseline = self
@@ -11639,10 +11684,9 @@ v = 0.5
         let trajectory_baseline = CanonicalTrajectoryEvidenceBaseline::Available {
             before: faz4_provenanced_measured_result(),
         };
-        // **Reviewer P1-3:** Loss evidence Available — preferred_vector Some ile tutarlı.
-        // target, faz4_golden_task preferred_vector ile birebir aynı. loss_after measured-
-        // after (0.5 uniform) ile preferred_vector arasındaki L2 mesafe (basit loss helper —
-        // gerçek producer Faz 8 ama golden için deterministic pinned değer).
+        // **Reviewer P1-1 v4:** Loss evidence Available — preferred_vector Some ile tutarlı.
+        // target, faz4_golden_task preferred_vector ile birebir aynı. loss_after production
+        // `trajectory::trajectory_loss` ile hesaplanır (x/y/z 3 eksen — production semantiği).
         let golden_task = crate::measurement::tests::faz4_golden_task_with_id(task_id);
         let preferred = golden_task
             .target_predicate_set
@@ -11655,7 +11699,7 @@ v = 0.5
             w: preferred.w,
             v: preferred.v,
         };
-        let loss_after = faz4_compute_loss_after(&preferred, 0.5);
+        let loss_after = crate::trajectory::trajectory_loss(engine_meas.after(), &preferred);
         let trajectory_loss = CanonicalTrajectoryLossEvidence::Available { target, loss_after };
 
         Faz4BasisV2RawParts {
@@ -11708,22 +11752,6 @@ v = 0.5
             task_id: Some(_task_id),
             removed_edges: vec![],
         }
-    }
-
-    /// **Reviewer P1-3:** Loss-after helper — preferred_vector ile uniform measured-after
-    /// arasındaki L2 mesafe. Gerçek loss producer Faz 8'de; golden fixture için deterministic
-    /// pinned değer. `faz4_golden_task` preferred_vector {0.20, 0.80, 0.15, 0.30, 0.60} ile
-    /// measured 0.5 arası L2 mesafe.
-    fn faz4_compute_loss_after(
-        preferred: &crate::coords::RawPosition,
-        measured_uniform: f64,
-    ) -> CanonicalF64 {
-        let dx = preferred.x - measured_uniform;
-        let dy = preferred.y - measured_uniform;
-        let dz = preferred.z - measured_uniform;
-        let dw = preferred.w - measured_uniform;
-        let dv = preferred.v - measured_uniform;
-        (dx * dx + dy * dy + dz * dz + dw * dw + dv * dv).sqrt()
     }
 
     fn faz4_provenanced_measured_result() -> ProvenancedMeasuredResult {
@@ -12207,7 +12235,7 @@ v = 0.5
         let basis = faz4_basis_v2_fixture();
         let digest = basis.compute_digest().expect("V2 basis digest");
         const FAZ4_BASIS_V2_GOLDEN_HEX: &str =
-            "ba9067534a922989f6dadc2bdd66bfc2bdcfe115eb97013ecf5e648dcf7c6130";
+            "ee3e78c4b5c3df71752d58cb94cf772816014c3709009a44a98dd1d57fe2bc64";
         assert_eq!(
             digest.to_hex(),
             FAZ4_BASIS_V2_GOLDEN_HEX,
@@ -12233,7 +12261,7 @@ v = 0.5
         let context = AuthorizationContextV2::new(basis, verified, witness_req).unwrap();
         let digest = context.compute_digest().expect("V2 context digest");
         const FAZ4_CONTEXT_V2_GOLDEN_HEX: &str =
-            "a7d23895fe87bd129183f8079a3c10644df96037073efc409de267d9cfe9a8eb";
+            "3000ccb37928868e2506869aeb6a13f1c823e61977cdf60603b645123380d8a0";
         assert_eq!(
             digest.to_hex(),
             FAZ4_CONTEXT_V2_GOLDEN_HEX,

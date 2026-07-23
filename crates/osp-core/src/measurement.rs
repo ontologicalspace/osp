@@ -1013,6 +1013,13 @@ impl MeasurementBaseline {
     ) -> Result<BaselineUnavailableReasonView<'_>, EngineMeasurementDigestError> {
         match reason {
             BaselineUnavailableReason::AllMembersIntroducedByDelta { members } => {
+                // **Reviewer P2-1 v4:** Empty rejection — CanonicalSubjectScope non-empty,
+                // AllMembers boş liste hiçbir geçerli subject temsil edemez.
+                if members.is_empty() {
+                    return Err(EngineMeasurementDigestError::StructuralCanonicalization {
+                        detail: "AllMembersIntroducedByDelta members must be non-empty".to_string(),
+                    });
+                }
                 let sorted = Self::canonicalize_member_list(members)?;
                 Ok(BaselineUnavailableReasonView::AllMembersIntroducedByDelta {
                     members: sorted,
@@ -3266,6 +3273,23 @@ pub(crate) mod tests {
             ),
             "duplicate members → StructuralCanonicalization"
         );
+    }
+
+    #[test]
+    fn faz4_shared_baseline_encoder_rejects_all_members_empty() {
+        // **Reviewer P2-1 v4:** AllMembersIntroducedByDelta empty → reject
+        // (CanonicalSubjectScope non-empty, boş liste hiçbir geçerli subject temsil edemez).
+        use crate::measurement::BaselineUnavailableReason;
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::AllMembersIntroducedByDelta { members: vec![] },
+        };
+        let err = raw_baseline
+            .compute_digest()
+            .expect_err("empty AllMembers reject");
+        assert!(matches!(
+            err,
+            EngineMeasurementDigestError::StructuralCanonicalization { .. }
+        ));
     }
 
     #[test]
