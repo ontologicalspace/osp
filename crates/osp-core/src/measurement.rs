@@ -1023,8 +1023,26 @@ impl MeasurementBaseline {
                 existing,
                 introduced,
             } => {
+                // **Reviewer P1-2 v3:** Non-empty kontrolü (canonical constructor ile aynı).
+                if existing.is_empty() || introduced.is_empty() {
+                    return Err(EngineMeasurementDigestError::StructuralCanonicalization {
+                        detail: "PartialNewSubject requires non-empty existing and introduced"
+                            .to_string(),
+                    });
+                }
                 let existing_sorted = Self::canonicalize_member_list(existing)?;
                 let introduced_sorted = Self::canonicalize_member_list(introduced)?;
+                // **Reviewer P1-2 v3:** Disjoint kontrolü (existing ∩ introduced = ∅).
+                for id in &existing_sorted {
+                    if introduced_sorted.contains(id) {
+                        return Err(EngineMeasurementDigestError::StructuralCanonicalization {
+                            detail: format!(
+                                "PartialNewSubject existing/introduced overlap at node id: {}",
+                                id
+                            ),
+                        });
+                    }
+                }
                 Ok(BaselineUnavailableReasonView::PartialNewSubject {
                     existing: existing_sorted,
                     introduced: introduced_sorted,
@@ -3171,11 +3189,17 @@ pub(crate) mod tests {
             },
         };
         let raw_digest = raw_baseline.compute_digest().expect("raw baseline digest");
-        // Canonical sorted member list.
-        let canonical_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
-            reason: CanonicalBaselineUnavailableReason::AllMembersIntroducedByDelta {
+        // Canonical reason via checked constructor (subject scope — union == subject).
+        let subject = crate::measurement::CanonicalSubjectScope::try_new(vec![1, 2, 3]).unwrap();
+        let canonical_reason = CanonicalBaselineUnavailableReason::try_from_reason(
+            &BaselineUnavailableReason::AllMembersIntroducedByDelta {
                 members: vec![1, 2, 3],
             },
+            &subject,
+        )
+        .expect("valid canonical reason");
+        let canonical_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
+            reason: canonical_reason,
         };
         let canonical_digest = canonical_baseline
             .compute_measurement_baseline_digest()
@@ -3201,11 +3225,19 @@ pub(crate) mod tests {
             },
         };
         let raw_digest = raw_baseline.compute_digest().expect("raw baseline digest");
-        let canonical_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
-            reason: CanonicalBaselineUnavailableReason::PartialNewSubject {
+        // Canonical reason via checked constructor (subject scope — union == subject).
+        let subject =
+            crate::measurement::CanonicalSubjectScope::try_new(vec![1, 2, 3, 4, 5]).unwrap();
+        let canonical_reason = CanonicalBaselineUnavailableReason::try_from_reason(
+            &BaselineUnavailableReason::PartialNewSubject {
                 existing: vec![1, 3, 5],
                 introduced: vec![2, 4],
             },
+            &subject,
+        )
+        .expect("valid canonical reason");
+        let canonical_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
+            reason: canonical_reason,
         };
         let canonical_digest = canonical_baseline
             .compute_measurement_baseline_digest()
@@ -3234,6 +3266,61 @@ pub(crate) mod tests {
             ),
             "duplicate members → StructuralCanonicalization"
         );
+    }
+
+    #[test]
+    fn faz4_shared_baseline_encoder_rejects_partial_existing_empty() {
+        // **Reviewer P1-2 v3:** PartialNewSubject existing empty → reject.
+        use crate::measurement::BaselineUnavailableReason;
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::PartialNewSubject {
+                existing: vec![],
+                introduced: vec![1, 2],
+            },
+        };
+        let err = raw_baseline
+            .compute_digest()
+            .expect_err("existing empty reject");
+        assert!(matches!(
+            err,
+            EngineMeasurementDigestError::StructuralCanonicalization { .. }
+        ));
+    }
+
+    #[test]
+    fn faz4_shared_baseline_encoder_rejects_partial_introduced_empty() {
+        // **Reviewer P1-2 v3:** PartialNewSubject introduced empty → reject.
+        use crate::measurement::BaselineUnavailableReason;
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::PartialNewSubject {
+                existing: vec![1, 2],
+                introduced: vec![],
+            },
+        };
+        let err = raw_baseline
+            .compute_digest()
+            .expect_err("introduced empty reject");
+        assert!(matches!(
+            err,
+            EngineMeasurementDigestError::StructuralCanonicalization { .. }
+        ));
+    }
+
+    #[test]
+    fn faz4_shared_baseline_encoder_rejects_partial_overlap() {
+        // **Reviewer P1-2 v3:** PartialNewSubject existing ∩ introduced != ∅ → reject.
+        use crate::measurement::BaselineUnavailableReason;
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::PartialNewSubject {
+                existing: vec![1],
+                introduced: vec![1, 2],
+            },
+        };
+        let err = raw_baseline.compute_digest().expect_err("overlap reject");
+        assert!(matches!(
+            err,
+            EngineMeasurementDigestError::StructuralCanonicalization { .. }
+        ));
     }
 
     #[test]
