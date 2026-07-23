@@ -772,6 +772,46 @@ impl EngineMeasurementDigest {
     }
 }
 
+/// **Reviewer P1-2 (neutral writer):** Baseline commitment view — iki domain tipinin
+/// (`MeasurementBaseline` ve `CanonicalTrajectoryEvidenceBaseline`) ortak intermediate
+/// representation. Neutral writer (`write_measurement_baseline_commitment`) bunu alır.
+/// Drift risk yapısal olarak kapalı — iki ayrı encoder YOK.
+#[derive(Debug, Clone)]
+pub(crate) enum BaselineCommitmentView<'a> {
+    /// Before-state measured — 5 axis (value + source tag).
+    Available { axes: BaselineAxesView },
+    /// Before-state unavailable — sorted + deduped member lists.
+    Unavailable {
+        reason: BaselineUnavailableReasonView<'a>,
+    },
+}
+
+/// 5 axis commitment view — (value, CanonicalMetricSourceTag) pairs.
+#[derive(Debug, Clone)]
+pub(crate) struct BaselineAxesView {
+    pub coupling: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+    pub cohesion: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+    pub instability: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+    pub entropy: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+    pub witness_depth: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+}
+
+/// Unavailable reason view — sorted + deduped member lists (validated projection).
+/// Owned Vec çünkü raw `BaselineUnavailableReason` unsorted olabilir; canonicalization
+/// yeni sorted Vec üretir.
+#[derive(Debug, Clone)]
+pub(crate) enum BaselineUnavailableReasonView<'a> {
+    AllMembersIntroducedByDelta {
+        members: Vec<NodeId>,
+        _phantom: std::marker::PhantomData<&'a ()>,
+    },
+    PartialNewSubject {
+        existing: Vec<NodeId>,
+        introduced: Vec<NodeId>,
+        _phantom: std::marker::PhantomData<&'a ()>,
+    },
+}
+
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:143):** `MeasurementBaseline` commitment
 /// (before-state). `MeasurementBaseline::compute_digest()` ve
 /// `CanonicalTrajectoryEvidenceBaseline::compute_measurement_baseline_digest()` aynı
@@ -806,103 +846,178 @@ impl MeasurementBaselineDigest {
         Self(bytes)
     }
 
-    /// Shared canonical encoder — hem `MeasurementBaseline::compute_digest()` hem
-    /// `CanonicalTrajectoryEvidenceBaseline::compute_measurement_baseline_digest()`
-    /// çağırır (non-blocking notu plan md:207 — drift risk kapalı).
-    fn write_commitment(
+    /// **Reviewer P1-2 (neutral writer):** Tek canonical preimage writer. Hem
+    /// `MeasurementBaseline` hem `CanonicalTrajectoryEvidenceBaseline` bu fonksiyonu
+    /// çağırır (validated projection üzerinden). Drift risk yapısal olarak kapalı —
+    /// iki ayrı field-by-field encoder YOK.
+    pub(crate) fn write_measurement_baseline_commitment(
         hasher: &mut blake3::Hasher,
-        baseline: &MeasurementBaseline,
+        view: BaselineCommitmentView<'_>,
     ) -> Result<(), EngineMeasurementDigestError> {
-        use crate::canonical_encoding::encode_axis_components;
         use crate::canonical_encoding::{
-            encode_u8, AXIS_DISCRIM_COHESION, AXIS_DISCRIM_COUPLING, AXIS_DISCRIM_ENTROPY,
-            AXIS_DISCRIM_INSTABILITY, AXIS_DISCRIM_WITNESS_DEPTH,
+            encode_axis_components, encode_u64, encode_u8, AXIS_DISCRIM_COHESION,
+            AXIS_DISCRIM_COUPLING, AXIS_DISCRIM_ENTROPY, AXIS_DISCRIM_INSTABILITY,
+            AXIS_DISCRIM_WITNESS_DEPTH,
         };
-        use crate::canonical_tags::CanonicalMetricSourceTag;
-        match baseline {
-            MeasurementBaseline::Available(measured) => {
+        match view {
+            BaselineCommitmentView::Available { axes } => {
                 encode_u8(hasher, 0, "baseline_available_tag");
                 encode_axis_components(
                     hasher,
-                    measured.coupling.value,
-                    CanonicalMetricSourceTag::try_from(&measured.coupling.source).map_err(|e| {
-                        EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: e.to_string(),
-                        }
-                    })?,
+                    axes.coupling.0,
+                    axes.coupling.1,
                     AXIS_DISCRIM_COUPLING,
                 )?;
                 encode_axis_components(
                     hasher,
-                    measured.cohesion.value,
-                    CanonicalMetricSourceTag::try_from(&measured.cohesion.source).map_err(|e| {
-                        EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: e.to_string(),
-                        }
-                    })?,
+                    axes.cohesion.0,
+                    axes.cohesion.1,
                     AXIS_DISCRIM_COHESION,
                 )?;
                 encode_axis_components(
                     hasher,
-                    measured.instability.value,
-                    CanonicalMetricSourceTag::try_from(&measured.instability.source).map_err(
-                        |e| EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: e.to_string(),
-                        },
-                    )?,
+                    axes.instability.0,
+                    axes.instability.1,
                     AXIS_DISCRIM_INSTABILITY,
                 )?;
                 encode_axis_components(
                     hasher,
-                    measured.entropy.value,
-                    CanonicalMetricSourceTag::try_from(&measured.entropy.source).map_err(|e| {
-                        EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: e.to_string(),
-                        }
-                    })?,
+                    axes.entropy.0,
+                    axes.entropy.1,
                     AXIS_DISCRIM_ENTROPY,
                 )?;
                 encode_axis_components(
                     hasher,
-                    measured.witness_depth.value,
-                    CanonicalMetricSourceTag::try_from(&measured.witness_depth.source).map_err(
-                        |e| EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: e.to_string(),
-                        },
-                    )?,
+                    axes.witness_depth.0,
+                    axes.witness_depth.1,
                     AXIS_DISCRIM_WITNESS_DEPTH,
                 )?;
             }
-            MeasurementBaseline::Unavailable { reason } => {
+            BaselineCommitmentView::Unavailable { reason } => {
                 encode_u8(hasher, 1, "baseline_unavailable_tag");
-                // **Reviewer P1-3:** reason canonicalization — member listeleri sorted +
-                // unique (CanonicalBaselineUnavailableReason ile aynı sözleşme). Raw
-                // BaselineUnavailableReason unsorted/duplicate içerebilir; encoder
-                // defensive olarak sort + duplicate reject uygular (canonical evidence
-                // `try_from_reason` ile aynı invariant).
-                Self::write_unavailable_reason_commitment(hasher, reason)?;
+                match reason {
+                    BaselineUnavailableReasonView::AllMembersIntroducedByDelta {
+                        members, ..
+                    } => {
+                        encode_u8(hasher, 0, "baseline_reason_all_introduced_tag");
+                        encode_u64(
+                            hasher,
+                            members.len() as u64,
+                            "baseline_reason_members_count",
+                        );
+                        for id in members.iter() {
+                            encode_u64(hasher, *id, "baseline_reason_member_id");
+                        }
+                    }
+                    BaselineUnavailableReasonView::PartialNewSubject {
+                        existing,
+                        introduced,
+                        ..
+                    } => {
+                        encode_u8(hasher, 1, "baseline_reason_partial_tag");
+                        encode_u64(
+                            hasher,
+                            existing.len() as u64,
+                            "baseline_reason_existing_count",
+                        );
+                        for id in existing.iter() {
+                            encode_u64(hasher, *id, "baseline_reason_existing_id");
+                        }
+                        encode_u64(
+                            hasher,
+                            introduced.len() as u64,
+                            "baseline_reason_introduced_count",
+                        );
+                        for id in introduced.iter() {
+                            encode_u64(hasher, *id, "baseline_reason_introduced_id");
+                        }
+                    }
+                }
             }
         }
         Ok(())
     }
 
-    /// **Reviewer P1-3:** Shared unavailable reason encoder — member listeleri sorted +
-    /// unique. Raw `BaselineUnavailableReason` ve `CanonicalBaselineUnavailableReason`
-    /// aynı byte format üretir (drift risk kapalı). Duplicate reject — canonical evidence
-    /// `try_from_reason` ile aynı invariant.
-    fn write_unavailable_reason_commitment(
-        hasher: &mut blake3::Hasher,
+    /// Shared canonical encoder — hem `MeasurementBaseline::compute_digest()` hem
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+impl MeasurementBaseline {
+    /// **Reviewer P1-2 (neutral writer):** `MeasurementBaseline` → `BaselineCommitmentView`
+    /// projection. Raw `MetricSource` → `CanonicalMetricSourceTag` dönüşümü. Unavailable
+    /// reason member listeleri sort + duplicate reject (validated projection).
+    fn to_commitment_view(
+        &self,
+    ) -> Result<BaselineCommitmentView<'_>, EngineMeasurementDigestError> {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        match self {
+            MeasurementBaseline::Available(measured) => {
+                let mk = |v: f64, src: &crate::coords::MetricSource| {
+                    CanonicalMetricSourceTag::try_from(src).map(|tag| (v, tag))
+                };
+                Ok(BaselineCommitmentView::Available {
+                    axes: BaselineAxesView {
+                        coupling: mk(measured.coupling.value, &measured.coupling.source).map_err(
+                            |e| EngineMeasurementDigestError::StructuralCanonicalization {
+                                detail: e.to_string(),
+                            },
+                        )?,
+                        cohesion: mk(measured.cohesion.value, &measured.cohesion.source).map_err(
+                            |e| EngineMeasurementDigestError::StructuralCanonicalization {
+                                detail: e.to_string(),
+                            },
+                        )?,
+                        instability: mk(measured.instability.value, &measured.instability.source)
+                            .map_err(|e| {
+                            EngineMeasurementDigestError::StructuralCanonicalization {
+                                detail: e.to_string(),
+                            }
+                        })?,
+                        entropy: mk(measured.entropy.value, &measured.entropy.source).map_err(
+                            |e| EngineMeasurementDigestError::StructuralCanonicalization {
+                                detail: e.to_string(),
+                            },
+                        )?,
+                        witness_depth: mk(
+                            measured.witness_depth.value,
+                            &measured.witness_depth.source,
+                        )
+                        .map_err(|e| {
+                            EngineMeasurementDigestError::StructuralCanonicalization {
+                                detail: e.to_string(),
+                            }
+                        })?,
+                    },
+                })
+            }
+            MeasurementBaseline::Unavailable { reason } => {
+                Ok(BaselineCommitmentView::Unavailable {
+                    reason: Self::project_unavailable_reason(reason)?,
+                })
+            }
+        }
+    }
+
+    /// Raw `BaselineUnavailableReason` → validated view projection. Member listeleri
+    /// sort + duplicate reject (canonical evidence `try_from_reason` ile aynı invariant).
+    fn project_unavailable_reason(
         reason: &BaselineUnavailableReason,
-    ) -> Result<(), EngineMeasurementDigestError> {
-        use crate::canonical_encoding::{encode_u64, encode_u8};
+    ) -> Result<BaselineUnavailableReasonView<'_>, EngineMeasurementDigestError> {
         match reason {
             BaselineUnavailableReason::AllMembersIntroducedByDelta { members } => {
                 let sorted = Self::canonicalize_member_list(members)?;
-                encode_u8(hasher, 0, "baseline_reason_all_introduced_tag");
-                encode_u64(hasher, sorted.len() as u64, "baseline_reason_members_count");
-                for id in &sorted {
-                    encode_u64(hasher, *id, "baseline_reason_member_id");
-                }
+                Ok(BaselineUnavailableReasonView::AllMembersIntroducedByDelta {
+                    members: sorted,
+                    _phantom: std::marker::PhantomData,
+                })
             }
             BaselineUnavailableReason::PartialNewSubject {
                 existing,
@@ -910,32 +1025,16 @@ impl MeasurementBaselineDigest {
             } => {
                 let existing_sorted = Self::canonicalize_member_list(existing)?;
                 let introduced_sorted = Self::canonicalize_member_list(introduced)?;
-                encode_u8(hasher, 1, "baseline_reason_partial_tag");
-                encode_u64(
-                    hasher,
-                    existing_sorted.len() as u64,
-                    "baseline_reason_existing_count",
-                );
-                for id in &existing_sorted {
-                    encode_u64(hasher, *id, "baseline_reason_existing_id");
-                }
-                encode_u64(
-                    hasher,
-                    introduced_sorted.len() as u64,
-                    "baseline_reason_introduced_count",
-                );
-                for id in &introduced_sorted {
-                    encode_u64(hasher, *id, "baseline_reason_introduced_id");
-                }
+                Ok(BaselineUnavailableReasonView::PartialNewSubject {
+                    existing: existing_sorted,
+                    introduced: introduced_sorted,
+                    _phantom: std::marker::PhantomData,
+                })
             }
         }
-        Ok(())
     }
 
-    /// **Reviewer P1-3:** Member listesi canonicalization — sort + duplicate reject.
-    /// `CanonicalBaselineUnavailableReason::try_from_reason` ile aynı invariant:
-    /// unsorted → sorted (meşru canonicalization), duplicate → typed error (sessiz
-    /// dedup YOK).
+    /// Member listesi canonicalization — sort + duplicate reject (sessiz dedup YOK).
     fn canonicalize_member_list(
         members: &[NodeId],
     ) -> Result<Vec<NodeId>, EngineMeasurementDigestError> {
@@ -951,29 +1050,20 @@ impl MeasurementBaselineDigest {
         Ok(sorted)
     }
 
-    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
-    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
-    pub(crate) fn to_hex(&self) -> String {
-        hex::encode(self.0)
-    }
-}
-
-impl MeasurementBaseline {
-    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:143):** `MeasurementBaseline` commitment.
-    /// Shared encoder kullanır (`MeasurementBaselineDigest::write_commitment`) — drift
-    /// risk kapalı (non-blocking notu plan md:207).
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:143, reviewer P1-2):** `MeasurementBaseline`
+    /// commitment. Neutral writer (`write_measurement_baseline_commitment`) — drift risk
+    /// yapısal olarak kapalı.
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
     pub(crate) fn compute_digest(
         &self,
     ) -> Result<MeasurementBaselineDigest, EngineMeasurementDigestError> {
         let mut hasher = blake3::Hasher::new();
-        hasher.update(MeasurementBaselineDigest::DOMAIN_SEPARATOR);
-        MeasurementBaselineDigest::write_commitment(&mut hasher, self)?;
-        Ok(MeasurementBaselineDigest(hasher.finalize().into()))
+        hasher.update(MeasurementBaselineDigest::domain_separator());
+        let view = self.to_commitment_view()?;
+        MeasurementBaselineDigest::write_measurement_baseline_commitment(&mut hasher, view)?;
+        Ok(MeasurementBaselineDigest::from_hasher_finalized(
+            hasher.finalize().into(),
+        ))
     }
 }
 
@@ -3066,6 +3156,87 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn faz4_shared_baseline_encoder_unavailable_all_members_raw_matches_canonical() {
+        // **Reviewer P1-2:** AllMembersIntroducedByDelta — raw unsorted == canonical sorted
+        // (tek neutral writer projection).
+        use crate::authorization::{
+            CanonicalBaselineUnavailableReason, CanonicalTrajectoryEvidenceBaseline,
+        };
+        use crate::measurement::BaselineUnavailableReason;
+        // Raw unsorted member list.
+        let raw_members = vec![3u64, 1, 2];
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members: raw_members,
+            },
+        };
+        let raw_digest = raw_baseline.compute_digest().expect("raw baseline digest");
+        // Canonical sorted member list.
+        let canonical_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
+            reason: CanonicalBaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members: vec![1, 2, 3],
+            },
+        };
+        let canonical_digest = canonical_baseline
+            .compute_measurement_baseline_digest()
+            .expect("canonical baseline digest");
+        assert_eq!(
+            raw_digest.as_bytes(),
+            canonical_digest.as_bytes(),
+            "AllMembers raw unsorted == canonical sorted (neutral writer projection)"
+        );
+    }
+
+    #[test]
+    fn faz4_shared_baseline_encoder_unavailable_partial_raw_matches_canonical() {
+        // **Reviewer P1-2:** PartialNewSubject — raw unsorted == canonical sorted.
+        use crate::authorization::{
+            CanonicalBaselineUnavailableReason, CanonicalTrajectoryEvidenceBaseline,
+        };
+        use crate::measurement::BaselineUnavailableReason;
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::PartialNewSubject {
+                existing: vec![5, 1, 3],
+                introduced: vec![4, 2],
+            },
+        };
+        let raw_digest = raw_baseline.compute_digest().expect("raw baseline digest");
+        let canonical_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
+            reason: CanonicalBaselineUnavailableReason::PartialNewSubject {
+                existing: vec![1, 3, 5],
+                introduced: vec![2, 4],
+            },
+        };
+        let canonical_digest = canonical_baseline
+            .compute_measurement_baseline_digest()
+            .expect("canonical baseline digest");
+        assert_eq!(
+            raw_digest.as_bytes(),
+            canonical_digest.as_bytes(),
+            "PartialNewSubject raw unsorted == canonical sorted (neutral writer projection)"
+        );
+    }
+
+    #[test]
+    fn faz4_shared_baseline_encoder_rejects_duplicate_members() {
+        // **Reviewer P1-2:** Duplicate member → reject (sessiz dedup YOK).
+        use crate::measurement::BaselineUnavailableReason;
+        let raw_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members: vec![1, 1, 2],
+            },
+        };
+        let err = raw_baseline.compute_digest().expect_err("duplicate reject");
+        assert!(
+            matches!(
+                err,
+                EngineMeasurementDigestError::StructuralCanonicalization { .. }
+            ),
+            "duplicate members → StructuralCanonicalization"
+        );
+    }
+
+    #[test]
     fn faz4_measurement_context_digest_deterministic() {
         // Aynı context → aynı digest (canonical axis descriptor encoding).
         let ctx = sample_measurement_input_context();
@@ -3224,27 +3395,79 @@ pub(crate) mod tests {
     // INV-T9 #70 Commit 4b Faz 4 (reviewer P2-2) — V2 digest golden vector pinleme
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    #[test]
-    fn faz4_task_goal_digest_golden_vector() {
-        // **Reviewer P2-2:** Frozen golden hex — canonical byte contract pin.
-        use crate::trajectory::{PredicateMode, PredicateSet, Task, TaskPolicy, TaskStatus};
-        let task = Task {
-            id: 42,
+    /// **Reviewer P2:** Zengin golden task fixture — encoding yüzeyinin geniş bölümünü
+    /// pinler: weighted mode, predicate sorting, axis/op tag'leri, canonical f64,
+    /// Subgraph sorting, Module string, required source None/Some, weight option,
+    /// tolerance, preferred-vector option ve 5 eksen. Aynı fixture authorization.rs
+    /// basis/context golden'larında da kullanılır (tek commitment zinciri).
+    pub(crate) fn faz4_golden_task() -> crate::trajectory::Task {
+        faz4_golden_task_with_id(42)
+    }
+
+    /// **Reviewer P2:** Parametreli golden task — basis fixture farklı task_id ile
+    /// aynı zengin predicate set kullanır (tek commitment zinciri).
+    pub(crate) fn faz4_golden_task_with_id(
+        task_id: crate::trajectory::TaskId,
+    ) -> crate::trajectory::Task {
+        use crate::coords::{MetricSource, RawPosition};
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
+            PredicateSet, Task, TaskPolicy, TaskStatus, WeightedPredicate,
+        };
+        Task {
+            id: task_id,
             milestone_id: 0,
-            label: "golden".to_string(),
+            label: "golden-task".to_string(),
             target_predicate_set: PredicateSet {
-                mode: PredicateMode::All,
-                predicates: vec![],
-                preferred_vector: None,
+                mode: PredicateMode::Weighted,
+                predicates: vec![
+                    WeightedPredicate {
+                        predicate: MetricPredicate {
+                            metric: PredicateAxis::Coupling,
+                            operator: ComparisonOp::Le,
+                            threshold: 0.55,
+                            scope: PredicateScope::Subgraph(vec![3, 1, 2]),
+                            required_source: Some(MetricSource::Scip),
+                            tolerance: 0.02,
+                        },
+                        weight: Some(1.25),
+                    },
+                    WeightedPredicate {
+                        predicate: MetricPredicate {
+                            metric: PredicateAxis::Entropy,
+                            operator: ComparisonOp::Lt,
+                            threshold: 0.40,
+                            scope: PredicateScope::Module("osp-core".to_string()),
+                            required_source: None,
+                            tolerance: 0.01,
+                        },
+                        weight: Some(0.75),
+                    },
+                ],
+                preferred_vector: Some(RawPosition {
+                    x: 0.20,
+                    y: 0.80,
+                    z: 0.15,
+                    w: 0.30,
+                    v: 0.60,
+                }),
             },
             policy: TaskPolicy::default(),
             allowed_operations: vec![],
             constraints: vec![],
             status: TaskStatus::Pending,
-        };
+        }
+    }
+
+    #[test]
+    fn faz4_task_goal_digest_golden_vector() {
+        // **Reviewer P2-2/P2:** Frozen golden hex — zengin task fixture ile canonical byte
+        // contract pin. encoding yüzeyinin geniş bölümünü kapsar (weighted, sorting,
+        // axis/op tag, f64, subgraph, module, source, weight, tolerance, preferred_vector).
+        let task = faz4_golden_task();
         let digest = TaskGoalDigest::compute(&task).expect("digest");
         const FAZ4_TASK_GOAL_V1_GOLDEN_HEX: &str =
-            "062e36dd65c8a53c83fa2508293f27d0c7df67f77faed2114e3a856e70ef5ef4";
+            "03a3ad384d2dff383974a301ed68a52d932439f18e3c08cc4cb8a8b9c7c8201c";
         assert_eq!(
             digest.to_hex(),
             FAZ4_TASK_GOAL_V1_GOLDEN_HEX,

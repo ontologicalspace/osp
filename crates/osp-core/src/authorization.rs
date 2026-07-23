@@ -1836,6 +1836,51 @@ impl CanonicalTrajectoryEvidenceBaseline {
     /// aynı measured değerleri için aynı digest üretir (5-axis canonical encoding,
     /// source tag dahil). Unavailable varyantları için reason member listeleri sorted +
     /// length-prefix + per-id (aynı canonical format).
+    /// **Reviewer P1-2 (neutral writer):** `CanonicalTrajectoryEvidenceBaseline` →
+    /// `BaselineCommitmentView` projection. Infallible: `ProvenancedMeasuredResult` zaten
+    /// canonical tag'ler, `CanonicalBaselineUnavailableReason` zaten validated.
+    fn to_commitment_view(&self) -> crate::measurement::BaselineCommitmentView<'_> {
+        use crate::measurement::{
+            BaselineAxesView, BaselineCommitmentView, BaselineUnavailableReasonView,
+        };
+        match self {
+            CanonicalTrajectoryEvidenceBaseline::Available { before } => {
+                BaselineCommitmentView::Available {
+                    axes: BaselineAxesView {
+                        coupling: (before.coupling.value, before.coupling.source),
+                        cohesion: (before.cohesion.value, before.cohesion.source),
+                        instability: (before.instability.value, before.instability.source),
+                        entropy: (before.entropy.value, before.entropy.source),
+                        witness_depth: (before.witness_depth.value, before.witness_depth.source),
+                    },
+                }
+            }
+            CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } => {
+                BaselineCommitmentView::Unavailable {
+                    reason: match reason {
+                        CanonicalBaselineUnavailableReason::AllMembersIntroducedByDelta {
+                            members,
+                        } => BaselineUnavailableReasonView::AllMembersIntroducedByDelta {
+                            members: members.clone(),
+                            _phantom: std::marker::PhantomData,
+                        },
+                        CanonicalBaselineUnavailableReason::PartialNewSubject {
+                            existing,
+                            introduced,
+                        } => BaselineUnavailableReasonView::PartialNewSubject {
+                            existing: existing.clone(),
+                            introduced: introduced.clone(),
+                            _phantom: std::marker::PhantomData,
+                        },
+                    },
+                }
+            }
+        }
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:143, reviewer P1-2):** `MeasurementBaselineDigest`
+    /// üretir — neutral writer (`write_measurement_baseline_commitment`) ile `MeasurementBaseline`
+    /// ile aynı byte format. Drift risk yapısal olarak kapalı (tek encoder).
     #[allow(
         dead_code,
         reason = "Faz 4 basis builder / validate_semantics consumer"
@@ -1846,88 +1891,11 @@ impl CanonicalTrajectoryEvidenceBaseline {
         crate::measurement::MeasurementBaselineDigest,
         crate::measurement::EngineMeasurementDigestError,
     > {
-        use crate::canonical_encoding::{
-            encode_axis_components, encode_u64, encode_u8, AXIS_DISCRIM_COHESION,
-            AXIS_DISCRIM_COUPLING, AXIS_DISCRIM_ENTROPY, AXIS_DISCRIM_INSTABILITY,
-            AXIS_DISCRIM_WITNESS_DEPTH,
-        };
         use crate::measurement::MeasurementBaselineDigest;
-
         let mut hasher = blake3::Hasher::new();
         hasher.update(MeasurementBaselineDigest::domain_separator());
-        match self {
-            CanonicalTrajectoryEvidenceBaseline::Available { before } => {
-                encode_u8(&mut hasher, 0, "baseline_available_tag");
-                encode_axis_components(
-                    &mut hasher,
-                    before.coupling.value,
-                    before.coupling.source,
-                    AXIS_DISCRIM_COUPLING,
-                )?;
-                encode_axis_components(
-                    &mut hasher,
-                    before.cohesion.value,
-                    before.cohesion.source,
-                    AXIS_DISCRIM_COHESION,
-                )?;
-                encode_axis_components(
-                    &mut hasher,
-                    before.instability.value,
-                    before.instability.source,
-                    AXIS_DISCRIM_INSTABILITY,
-                )?;
-                encode_axis_components(
-                    &mut hasher,
-                    before.entropy.value,
-                    before.entropy.source,
-                    AXIS_DISCRIM_ENTROPY,
-                )?;
-                encode_axis_components(
-                    &mut hasher,
-                    before.witness_depth.value,
-                    before.witness_depth.source,
-                    AXIS_DISCRIM_WITNESS_DEPTH,
-                )?;
-            }
-            CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } => {
-                encode_u8(&mut hasher, 1, "baseline_unavailable_tag");
-                match reason {
-                    CanonicalBaselineUnavailableReason::AllMembersIntroducedByDelta { members } => {
-                        encode_u8(&mut hasher, 0, "baseline_reason_all_introduced_tag");
-                        encode_u64(
-                            &mut hasher,
-                            members.len() as u64,
-                            "baseline_reason_members_count",
-                        );
-                        for id in members {
-                            encode_u64(&mut hasher, *id, "baseline_reason_member_id");
-                        }
-                    }
-                    CanonicalBaselineUnavailableReason::PartialNewSubject {
-                        existing,
-                        introduced,
-                    } => {
-                        encode_u8(&mut hasher, 1, "baseline_reason_partial_tag");
-                        encode_u64(
-                            &mut hasher,
-                            existing.len() as u64,
-                            "baseline_reason_existing_count",
-                        );
-                        for id in existing {
-                            encode_u64(&mut hasher, *id, "baseline_reason_existing_id");
-                        }
-                        encode_u64(
-                            &mut hasher,
-                            introduced.len() as u64,
-                            "baseline_reason_introduced_count",
-                        );
-                        for id in introduced {
-                            encode_u64(&mut hasher, *id, "baseline_reason_introduced_id");
-                        }
-                    }
-                }
-            }
-        }
+        let view = self.to_commitment_view();
+        MeasurementBaselineDigest::write_measurement_baseline_commitment(&mut hasher, view)?;
         Ok(MeasurementBaselineDigest::from_hasher_finalized(
             hasher.finalize().into(),
         ))
@@ -4167,74 +4135,132 @@ pub enum CanonicalWitnessRequirementV2Error {
 // `VerifiedGateEvaluationV2` tüketir; `CanonicalGateEvaluationV2` reddedilir (compile error).
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// **INV-T9 #70 Commit 4b Faz 4 (plan md:164):** Gate disposition V2 structural
-/// validation error. Faz 4 structural-only; Faz 5 gerçek evaluator producer.
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:164, reviewer P1-1 v2):** Gate disposition V2
+/// error. Illegal-state matrisi + rejected gate decision validation.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GateDispositionError {
     #[error("invalid gate disposition: {detail}")]
     Invalid { detail: String },
+    /// **Reviewer P1-1 v2:** `GateDecision::PassedAll`/`Unknown` rejected gate decision
+    /// olarak geçersiz — bu varyantlar deterministic gate zincirinin geçtiğini/bilinmediğini
+    /// belirtir, reddetmedi.
+    #[error("GateDecision {value:?} is not a rejected gate decision")]
+    NotARejectedGateDecision {
+        value: crate::trajectory::GateDecision,
+    },
 }
 
-/// **INV-T9 #70 Commit 4b Faz 4 (plan md:30, reviewer P1-1):** Canonical gate evaluation
-/// V2 — persisted snapshot. `VerifiedGateEvaluationV2`'den extract edilir (Faz 5 producer).
-/// Faz 4 structural-only placeholder: disposition + mutation_decision tanımlı ama gerçek
-/// evaluator Faz 5.
+/// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-1 v2):** Checked rejection gate decision.
+/// `GateDecision`'ın rejection alt kümesi — `PassedAll`/`Unknown` reject (illegal state
+/// yapısal olarak imkânsız). Rejected gate → apply_target NotApplied → witness NotRequired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RejectedGateDecisionV2(crate::trajectory::GateDecision);
+
+impl RejectedGateDecisionV2 {
+    /// Rejection gate decision tag — `GateDecisionTag` pinned numeric tag.
+    pub(crate) fn tag(&self) -> GateDecisionTag {
+        GateDecisionTag::from(&self.0)
+    }
+}
+
+impl TryFrom<crate::trajectory::GateDecision> for RejectedGateDecisionV2 {
+    type Error = GateDispositionError;
+
+    fn try_from(value: crate::trajectory::GateDecision) -> Result<Self, Self::Error> {
+        use crate::trajectory::GateDecision;
+        match value {
+            GateDecision::PassedAll | GateDecision::Unknown => {
+                Err(GateDispositionError::NotARejectedGateDecision { value })
+            }
+            // Tüm rejection varyantları geçerli (RejectedBySyntax/Vision/Rule/TaskBinding/
+            // BlockedByManeuverLimit/RejectedByTaskValidation/RejectedByMeasurementBinding).
+            rejected => Ok(Self(rejected)),
+        }
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:30, reviewer P1-1 v2):** Canonical gate
+/// evaluation V2 — persisted snapshot enum. Illegal state yapısal olarak imkânsız:
 ///
-/// **mutation_decision field (reviewer P1-1):** `apply_target` field DEĞİL (plan md:62) —
-/// `mutation_decision`'dan deterministic türetilir (INV-T8). Context constructor
-/// `apply_target()` üzerinden witness requirement validation yapar.
+/// - `RejectedByGate` — deterministic gate zinciri sonlandırdı → apply_target NotApplied,
+///   witness NotRequired. `RejectedGateDecisionV2` checked (PassedAll/Unknown reject).
+/// - `GatePassed` — deterministic gate'ler geçti → mutation policy ayrı karar verdi.
+///   `MutationDecision::Reject` geçerli (predicate/policy sonucu uygulanmama).
+///
+/// **vs önceki struct model (reviewer P1-1 v1):** struct `disposition + mutation_decision`
+/// iki bağımsız field taşıyordu — `REJECTED + AcceptAsCompleted` illegal state üretilebiliyordu.
+/// Enum modeli bu state'i yapısal olarak imkânsız kılar.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct CanonicalGateEvaluationV2 {
-    disposition: GateDispositionV2Tag,
-    /// **Reviewer P1-1:** Mutation decision — `apply_target()` türetimi için. Canonical
-    /// encoding `MutationDecisionTag` pinned numeric tag kullanır (plan md:115).
-    mutation_decision: crate::trajectory::MutationDecision,
+pub enum CanonicalGateEvaluationV2 {
+    /// Deterministic gate zinciri reddetti — authorization sonlanır.
+    /// apply_target = NotApplied, witness = NotRequired.
+    RejectedByGate { decision: RejectedGateDecisionV2 },
+    /// Deterministic gate'ler geçti — mutation policy karar verdi.
+    /// apply_target = mutation_decision.apply_target() (INV-T8).
+    GatePassed {
+        mutation_decision: crate::trajectory::MutationDecision,
+    },
 }
 
 impl CanonicalGateEvaluationV2 {
-    /// **pub(crate) constructor (plan md:71, reviewer P1-1):** `try_from_parts` — ama
-    /// context constructor proof-gated. `CanonicalGateEvaluationV2::try_from_parts`
-    /// pub(crate) ama `AuthorizationContextV2::new` `VerifiedGateEvaluationV2` ister →
-    /// bypass imkânsız (farklı tip).
+    /// **Reviewer P1-1 v2:** Rejected gate constructor — checked `RejectedGateDecisionV2`.
     #[allow(
         dead_code,
         reason = "Faz 5 gate evaluator producer / cfg(test) fixture"
     )]
-    pub(crate) fn try_from_parts(
-        disposition: GateDispositionV2Tag,
-        mutation_decision: crate::trajectory::MutationDecision,
+    pub(crate) fn rejected_by_gate(
+        decision: crate::trajectory::GateDecision,
     ) -> Result<Self, GateDispositionError> {
-        Ok(Self {
-            disposition,
-            mutation_decision,
+        Ok(Self::RejectedByGate {
+            decision: RejectedGateDecisionV2::try_from(decision)?,
         })
     }
 
-    /// Disposition accessor.
-    #[allow(dead_code, reason = "Faz 4 context digest / Commit 2 consumer")]
-    pub(crate) fn disposition(&self) -> GateDispositionV2Tag {
-        self.disposition
+    /// **Reviewer P1-1 v2:** Gate passed constructor — mutation decision (tüm varyantlar
+    /// geçerli, Reject dahil — predicate/policy sonucu uygulanmama).
+    #[allow(
+        dead_code,
+        reason = "Faz 5 gate evaluator producer / cfg(test) fixture"
+    )]
+    pub(crate) fn gate_passed(
+        mutation_decision: crate::trajectory::MutationDecision,
+    ) -> Result<Self, GateDispositionError> {
+        Ok(Self::GatePassed { mutation_decision })
     }
 
-    /// **Reviewer P1-1:** Mutation decision accessor — context constructor `apply_target()`
-    /// türetimi için kullanır.
-    pub(crate) fn mutation_decision(&self) -> crate::trajectory::MutationDecision {
-        self.mutation_decision
+    /// **Reviewer P1-1 v2:** Apply target — disposition'a göre deterministic türetim.
+    /// `RejectedByGate` → NotApplied; `GatePassed` → mutation_decision.apply_target() (INV-T8).
+    /// apply_target field olarak saklanmaz (plan md:62).
+    pub(crate) fn apply_target(&self) -> crate::trajectory::ApplyTarget {
+        use crate::trajectory::ApplyTarget;
+        match self {
+            Self::RejectedByGate { .. } => ApplyTarget::NotApplied,
+            Self::GatePassed { mutation_decision } => mutation_decision.apply_target(),
+        }
     }
 
-    /// **Canonical byte encoding (plan md:115):** GateDispositionV2Tag + MutationDecisionTag
-    /// pinned numeric tag. `AuthorizationContextDigestV2` bunu çağırır.
+    /// **Canonical byte encoding (plan md:115, reviewer P1-1 v2):** Enum varyant tag +
+    /// payload. Illegal state yapısal olarak imkânsız olduğu için encoder state kontrolü
+    /// yapmaz. `AuthorizationContextDigestV2` bunu çağırır.
     pub(crate) fn encode_canonical(
         &self,
         hasher: &mut blake3::Hasher,
     ) -> Result<(), CanonicalDigestError> {
         use crate::canonical_encoding::encode_u8;
-        encode_u8(hasher, self.disposition.as_u8(), "gate_disposition_v2_tag");
-        encode_u8(
-            hasher,
-            MutationDecisionTag::from(&self.mutation_decision).as_u8(),
-            "gate_mutation_decision_tag",
-        );
+        match self {
+            Self::RejectedByGate { decision } => {
+                encode_u8(hasher, 0, "gate_evaluation_rejected_by_gate");
+                encode_u8(hasher, decision.tag().as_u8(), "rejected_gate_decision_tag");
+            }
+            Self::GatePassed { mutation_decision } => {
+                encode_u8(hasher, 1, "gate_evaluation_gate_passed");
+                encode_u8(
+                    hasher,
+                    MutationDecisionTag::from(mutation_decision).as_u8(),
+                    "gate_passed_mutation_decision_tag",
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -4332,9 +4358,10 @@ impl AuthorizationContextV2 {
     ) -> Result<Self, AuthorizationContextV2BuildError> {
         // Verified proof'u canonical snapshot'a indirge (tek yol — field private).
         let canonical_gate = gate_evaluation.into_canonical();
-        // **Reviewer P1-1:** mutation_decision → apply_target → witness requirement validation.
-        // apply_target field olarak saklanmaz (plan md:62) — mutation_decision'dan türetilir.
-        let apply_target = canonical_gate.mutation_decision().apply_target();
+        // **Reviewer P1-1 v2:** enum model — apply_target disposition'a göre deterministic
+        // türetim. RejectedByGate → NotApplied → witness NotRequired beklenir. GatePassed →
+        // mutation_decision.apply_target(). Illegal state yapısal olarak imkânsız.
+        let apply_target = canonical_gate.apply_target();
         witness_requirement.validate_for(&apply_target)?;
         Ok(Self {
             basis,
@@ -11289,46 +11316,76 @@ v = 0.5
     use crate::trajectory::MutationDecision;
 
     #[test]
-    fn faz4_canonical_gate_evaluation_try_from_parts() {
-        let gate = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .expect("structural construct");
-        assert_eq!(gate.disposition().as_u8(), 0);
+    fn faz4_canonical_gate_evaluation_gate_passed_constructor() {
+        // **Reviewer P1-1 v2:** GatePassed constructor — tüm MutationDecision varyantları
+        // geçerli (Reject dahil — predicate/policy sonucu uygulanmama).
+        let gate = CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted)
+            .expect("structural construct");
+        assert!(matches!(gate, CanonicalGateEvaluationV2::GatePassed { .. }));
         assert_eq!(
-            gate.mutation_decision(),
-            MutationDecision::AcceptAsCompleted
+            gate.apply_target(),
+            crate::trajectory::ApplyTarget::Lane(crate::trajectory::CommitLane::Mainline)
+        );
+    }
+
+    #[test]
+    fn faz4_canonical_gate_evaluation_rejected_by_gate_constructor() {
+        // **Reviewer P1-1 v2:** RejectedByGate constructor — checked RejectedGateDecisionV2.
+        let gate = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedBySyntax,
+        )
+        .expect("rejection gate decision valid");
+        assert!(matches!(
+            gate,
+            CanonicalGateEvaluationV2::RejectedByGate { .. }
+        ));
+        assert_eq!(
+            gate.apply_target(),
+            crate::trajectory::ApplyTarget::NotApplied
+        );
+    }
+
+    #[test]
+    fn faz4_canonical_gate_evaluation_rejected_decision_rejects_non_rejection() {
+        // **Reviewer P1-1 v2:** PassedAll/Unknown rejected gate decision olarak geçersiz.
+        let err =
+            CanonicalGateEvaluationV2::rejected_by_gate(crate::trajectory::GateDecision::PassedAll)
+                .expect_err("PassedAll is not a rejection");
+        assert!(
+            matches!(err, GateDispositionError::NotARejectedGateDecision { .. }),
+            "PassedAll → NotARejectedGateDecision"
+        );
+        let err =
+            CanonicalGateEvaluationV2::rejected_by_gate(crate::trajectory::GateDecision::Unknown)
+                .expect_err("Unknown is not a rejection");
+        assert!(
+            matches!(err, GateDispositionError::NotARejectedGateDecision { .. }),
+            "Unknown → NotARejectedGateDecision"
         );
     }
 
     #[test]
     fn faz4_verified_gate_evaluation_fixture_cfg_test_only() {
         // cfg(test) fixture — production build'de constructor YOK.
-        let canonical = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::REJECTED,
-            MutationDecision::Reject,
+        let canonical = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedByRule,
         )
         .unwrap();
         let verified = VerifiedGateEvaluationV2::fixture(canonical);
         // into_canonical — tek yol (field private).
         let recovered = verified.into_canonical();
-        assert_eq!(recovered.disposition().as_u8(), 1);
-        assert_eq!(recovered.mutation_decision(), MutationDecision::Reject);
+        assert!(matches!(
+            recovered,
+            CanonicalGateEvaluationV2::RejectedByGate { .. }
+        ));
     }
 
     #[test]
     fn faz4_gate_evaluation_encode_canonical_deterministic() {
-        let gate1 = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .unwrap();
-        let gate2 = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .unwrap();
+        let gate1 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let gate2 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
         let mut h1 = blake3::Hasher::new();
         let mut h2 = blake3::Hasher::new();
         gate1.encode_canonical(&mut h1).unwrap();
@@ -11413,8 +11470,9 @@ v = 0.5
             MeasurementContextDigest::compute(engine_meas.context()).unwrap();
         let canonical_delta_digest = request.structural_delta_digest().clone();
 
-        // Task goal digest — minimal task.
-        let task = faz4_minimal_task(task_id);
+        // **Reviewer P2:** Task goal digest — zengin golden task (tek commitment zinciri
+        // measurement.rs golden ile aynı).
+        let task = crate::measurement::tests::faz4_golden_task_with_id(task_id);
         let task_goal_digest = TaskGoalDigest::compute(&task).unwrap();
 
         // Task claim digest — minimal claim.
@@ -11480,24 +11538,6 @@ v = 0.5
             delta_edges: vec![],
             task_id: Some(_task_id),
             removed_edges: vec![],
-        }
-    }
-
-    fn faz4_minimal_task(task_id: u64) -> crate::trajectory::Task {
-        use crate::trajectory::{PredicateMode, PredicateSet, Task, TaskPolicy, TaskStatus};
-        Task {
-            id: task_id,
-            milestone_id: 0,
-            label: "faz4-test".to_string(),
-            target_predicate_set: PredicateSet {
-                mode: PredicateMode::All,
-                predicates: vec![],
-                preferred_vector: None,
-            },
-            policy: TaskPolicy::default(),
-            allowed_operations: vec![],
-            constraints: vec![],
-            status: TaskStatus::Pending,
         }
     }
 
@@ -11600,16 +11640,200 @@ v = 0.5
         );
     }
 
+    // ── P1-3: Request snapshot mutation matrisi (reviewer) ──────────────────────────
+
+    /// Helper: raw parts + bozuk request evidence ile new() çağır → error type assert.
+    fn faz4_basis_v2_with_bad_request_evidence(
+        bad_evidence: crate::measurement::CanonicalMeasurementRequestEvidence,
+    ) -> Result<AuthorizationBasisV2, AuthorizationBasisV2Error> {
+        let parts = faz4_basis_v2_raw_parts(42);
+        AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            parts.engine_measurement_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            bad_evidence,
+            parts.measurement_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest,
+        )
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_subject_mismatch() {
+        // **Reviewer P1-3:** measurement_request.subject değişir → MeasurementRequestDigestMismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        // Subject'e yeni node ekle (farklı subject → farklı digest).
+        let mut new_members = bad_evidence.subject.member_ids().to_vec();
+        new_members.push(999);
+        bad_evidence.subject =
+            crate::measurement::CanonicalSubjectScope::try_new(new_members).unwrap();
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "subject mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_impact_mismatch() {
+        // **Reviewer P1-3:** measurement_request.impact değişir → mismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.impact =
+            crate::measurement::CanonicalImpactScope::try_new(vec![888], vec![]).unwrap();
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "impact mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_base_revision_mismatch() {
+        // **Reviewer P1-3:** measurement_request.base_revision değişir → mismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.base_revision.sequence = bad_evidence.base_revision.sequence + 1;
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "base_revision mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_structural_delta_digest_mismatch() {
+        // **Reviewer P1-3:** measurement_request.structural_delta_digest değişir → mismatch.
+        // Aynı zamanda canonical_delta_digest != request.structural_delta_digest olur.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.structural_delta_digest =
+            crate::measurement::MeasurementDeltaDigest::compute_from_canonical(
+                &crate::authorization::CanonicalStructuralDelta::try_new(vec![], vec![], vec![])
+                    .unwrap(),
+            )
+            .unwrap();
+        // Önce MeasurementRequestDigestMismatch (structural_delta_digest evidence'da değişti).
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(err, AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }),
+            "structural_delta_digest evidence mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_measurement_input_digest_mismatch() {
+        // **Reviewer P1-3:** measurement_request.measurement_input_digest değişir → mismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.measurement_input_digest = MeasurementInputDigest::from_bytes([0xFE; 32]);
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "measurement_input_digest mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_canonical_delta_digest_mismatch() {
+        // **Reviewer P1-3:** Request digest tutarlı ama canonical_delta_digest eski →
+        // CanonicalDeltaDigestMismatch. measurement_request.structural_delta_digest ile
+        // basis canonical_delta_digest farklı.
+        let parts = faz4_basis_v2_raw_parts(42);
+        // Yeni structural_delta_digest üret — hem evidence'da hem canonical_delta_digest'te
+        // tutarlı olmalı ama eski canonical_delta_digest ile uyuşmaz.
+        let new_delta = crate::measurement::MeasurementDeltaDigest::compute_from_canonical(
+            &crate::authorization::CanonicalStructuralDelta::try_new(vec![], vec![], vec![])
+                .unwrap(),
+        )
+        .unwrap();
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.structural_delta_digest = new_delta.clone();
+        // measurement_request_digest de yeni delta'ya göre recompute — tutarlı olsun ki
+        // sadece canonical_delta_digest ile çelişsin.
+        bad_evidence.measurement_input_digest =
+            parts.measurement_request.measurement_input_digest.clone();
+        let new_request_digest =
+            crate::measurement::MeasurementRequestDigest::compute_from_canonical(&bad_evidence)
+                .unwrap();
+        // engine_measurement_digest de recompute — tutarlı zincir.
+        let new_engine_digest =
+            crate::measurement::EngineMeasurementDigest::compute_from_commitments(
+                &new_request_digest,
+                &parts.measurement_baseline_digest,
+                &parts.measurement_digest,
+                &parts.measurement_context_digest,
+            )
+            .unwrap();
+        let err = AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            new_engine_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            bad_evidence,
+            new_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest, // eski — yeni delta ile çelişir
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::CanonicalDeltaDigestMismatch { .. }
+            ),
+            "canonical_delta_digest mismatch → CanonicalDeltaDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_measurement_request_digest_compute_equals_compute_from_canonical() {
+        // **Reviewer P1-3:** MeasurementRequestDigest::compute(request) ==
+        // compute_from_canonical(request.canonical_evidence()) (shared encoder).
+        let request = crate::measurement::tests::sample_measurement_request();
+        let digest_via_compute =
+            crate::measurement::MeasurementRequestDigest::compute(&request).unwrap();
+        let evidence = request.canonical_evidence();
+        let digest_via_canonical =
+            crate::measurement::MeasurementRequestDigest::compute_from_canonical(&evidence)
+                .unwrap();
+        assert_eq!(
+            digest_via_compute.as_bytes(),
+            digest_via_canonical.as_bytes(),
+            "compute(request) == compute_from_canonical(evidence) — shared encoder"
+        );
+    }
+
     // ── AuthorizationContextV2 proof-gated constructor (plan md:69-72) ────────────
 
     #[test]
     fn faz4_context_v2_new_consumes_verified_gate_evaluation() {
         let basis = faz4_basis_v2_fixture();
-        let gate = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .unwrap();
+        let gate =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
         let verified = VerifiedGateEvaluationV2::fixture(gate);
         let policy = faz4_witness_policy();
         use crate::trajectory::{ApplyTarget, CommitLane};
@@ -11622,25 +11846,23 @@ v = 0.5
             .expect("proof-gated context construction");
         // Accessors çalışır.
         assert_eq!(context.basis().task_id(), 42);
-        assert_eq!(context.gate_evaluation().disposition().as_u8(), 0);
+        assert!(matches!(
+            context.gate_evaluation(),
+            CanonicalGateEvaluationV2::GatePassed { .. }
+        ));
         let _ = context.witness_requirement();
     }
 
     #[test]
     fn faz4_context_v2_new_rejects_witness_mismatch() {
-        // **Reviewer P1-1:** gate PASSED + Reject → apply_target NotApplied,
+        // **Reviewer P1-1:** GatePassed + Reject → apply_target NotApplied,
         // ama witness Required → tutarsız → WitnessRequirement err.
         let basis = faz4_basis_v2_fixture();
-        let gate = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::Reject,
-        )
-        .unwrap();
+        let gate = CanonicalGateEvaluationV2::gate_passed(MutationDecision::Reject).unwrap();
         let verified = VerifiedGateEvaluationV2::fixture(gate);
         let policy = faz4_witness_policy();
         use crate::trajectory::{ApplyTarget, CommitLane};
         // witness_req = Required (Mainline lane), ama mutation_decision = Reject → NotApplied.
-        // validate_for(NotApplied) ile Required → tutarsız.
         let witness_req = CanonicalWitnessRequirementV2::try_from((
             &policy,
             &ApplyTarget::Lane(CommitLane::Mainline),
@@ -11656,11 +11878,30 @@ v = 0.5
 
     #[test]
     fn faz4_context_v2_new_accepts_consistent_not_required() {
-        // **Reviewer P1-1:** gate PASSED + Reject → NotApplied + witness NotRequired → Ok.
+        // **Reviewer P1-1:** GatePassed + Reject → NotApplied + witness NotRequired → Ok.
         let basis = faz4_basis_v2_fixture();
-        let gate = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::Reject,
+        let gate = CanonicalGateEvaluationV2::gate_passed(MutationDecision::Reject).unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::ApplyTarget;
+        let witness_req =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        let context = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect("consistent NotRequired + NotApplied → Ok");
+        assert!(matches!(
+            context.gate_evaluation(),
+            CanonicalGateEvaluationV2::GatePassed {
+                mutation_decision: MutationDecision::Reject
+            }
+        ));
+    }
+
+    #[test]
+    fn faz4_context_v2_new_accepts_rejected_gate_not_required() {
+        // **Reviewer P1-1 v2:** RejectedByGate → NotApplied + witness NotRequired → Ok.
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedBySyntax,
         )
         .unwrap();
         let verified = VerifiedGateEvaluationV2::fixture(gate);
@@ -11669,26 +11910,44 @@ v = 0.5
         let witness_req =
             CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
         let context = AuthorizationContextV2::new(basis, verified, witness_req)
-            .expect("consistent NotRequired + NotApplied → Ok");
-        assert_eq!(
-            context.gate_evaluation().mutation_decision(),
-            MutationDecision::Reject
+            .expect("RejectedByGate + NotRequired → Ok");
+        assert!(matches!(
+            context.gate_evaluation(),
+            CanonicalGateEvaluationV2::RejectedByGate { .. }
+        ));
+    }
+
+    #[test]
+    fn faz4_context_v2_new_rejects_rejected_gate_required() {
+        // **Reviewer P1-1 v2:** RejectedByGate → NotApplied, ama witness Required → tutarsız.
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedByRule,
+        )
+        .unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let err = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect_err("RejectedByGate + Required must reject");
+        assert!(
+            matches!(err, AuthorizationContextV2BuildError::WitnessRequirement(_)),
+            "RejectedByGate + Required → WitnessRequirement error"
         );
     }
 
     #[test]
     fn faz4_context_v2_digest_is_deterministic() {
         let basis = faz4_basis_v2_fixture();
-        let gate1 = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .unwrap();
-        let gate2 = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .unwrap();
+        let gate1 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let gate2 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
         let policy = faz4_witness_policy();
         use crate::trajectory::{ApplyTarget, CommitLane};
         let wr1 = CanonicalWitnessRequirementV2::try_from((
@@ -11715,6 +11974,48 @@ v = 0.5
         assert_eq!(d1.as_bytes(), d2.as_bytes(), "same context → same digest");
     }
 
+    #[test]
+    fn faz4_context_v2_digest_mutates_on_variant() {
+        // **Reviewer P1-1 v2:** GatePassed vs RejectedByGate → farklı digest (enum varyant tag).
+        let basis = faz4_basis_v2_fixture();
+        let policy = faz4_witness_policy();
+        use crate::trajectory::ApplyTarget;
+        // GatePassed + AcceptAsCompleted → Mainline + Required.
+        let gate_passed =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let wr_lane = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(crate::trajectory::CommitLane::Mainline),
+        ))
+        .unwrap();
+        let ctx_passed = AuthorizationContextV2::new(
+            basis.clone(),
+            VerifiedGateEvaluationV2::fixture(gate_passed),
+            wr_lane,
+        )
+        .unwrap();
+        // RejectedByGate → NotApplied + NotRequired.
+        let gate_rejected = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedBySyntax,
+        )
+        .unwrap();
+        let wr_not_req =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        let ctx_rejected = AuthorizationContextV2::new(
+            basis,
+            VerifiedGateEvaluationV2::fixture(gate_rejected),
+            wr_not_req,
+        )
+        .unwrap();
+        let d_passed = ctx_passed.compute_digest().unwrap();
+        let d_rejected = ctx_rejected.compute_digest().unwrap();
+        assert_ne!(
+            d_passed.as_bytes(),
+            d_rejected.as_bytes(),
+            "GatePassed vs RejectedByGate → different digest"
+        );
+    }
+
     // ── V2 digest golden vector pinleme (reviewer P2-2) ──────────────────────────────
 
     #[test]
@@ -11724,7 +12025,7 @@ v = 0.5
         let basis = faz4_basis_v2_fixture();
         let digest = basis.compute_digest().expect("V2 basis digest");
         const FAZ4_BASIS_V2_GOLDEN_HEX: &str =
-            "1517e35341fe42785f435406cbf4af91d43ac0d018f4c120632d4f24330c26c7";
+            "be16bb82d6a0e3b8bbf34ffef9504692b13e22dd9e2b0c0c9cb239c427f3428d";
         assert_eq!(
             digest.to_hex(),
             FAZ4_BASIS_V2_GOLDEN_HEX,
@@ -11737,11 +12038,8 @@ v = 0.5
         // **Reviewer P2-2:** Frozen golden hex — AuthorizationContextDigestV2 canonical byte
         // contract pin (OSP/AUTHORIZATION-CONTEXT/V2).
         let basis = faz4_basis_v2_fixture();
-        let gate = CanonicalGateEvaluationV2::try_from_parts(
-            GateDispositionV2Tag::PASSED,
-            MutationDecision::AcceptAsCompleted,
-        )
-        .unwrap();
+        let gate =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
         let verified = VerifiedGateEvaluationV2::fixture(gate);
         let policy = faz4_witness_policy();
         use crate::trajectory::{ApplyTarget, CommitLane};
@@ -11753,7 +12051,7 @@ v = 0.5
         let context = AuthorizationContextV2::new(basis, verified, witness_req).unwrap();
         let digest = context.compute_digest().expect("V2 context digest");
         const FAZ4_CONTEXT_V2_GOLDEN_HEX: &str =
-            "17f66f08b987833db6c027fc369ff9e387493169fa8625892993204994688c4f";
+            "561fb370faa9d66942fd6002069b3133ade0b79b11eb9e8148a2ae3453eca270";
         assert_eq!(
             digest.to_hex(),
             FAZ4_CONTEXT_V2_GOLDEN_HEX,
