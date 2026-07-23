@@ -419,7 +419,11 @@ impl HallucinationType {
                     h
                 })
             }
-            _ => None, // PermissionDenied, NoPersistence, Persistence, Internal — not hallucination
+            _ => None, // PermissionDenied, NoPersistence, Persistence, Internal,
+                       // VisionContextInvalid, TaskValidation, MeasurementBindingMismatch,
+                       // MeasurementBindingFailed — not hallucination (operational/system/binding fault).
+                       // INV-T9 #70 Commit 4b: TaskValidation (task declaration geçersiz) ve
+                       // MeasurementBinding (token replay/derivation) agent hallucination DEĞİL.
         }
     }
 

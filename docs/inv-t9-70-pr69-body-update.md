@@ -89,17 +89,28 @@ a300d75  feat(coords): provenance-native axis measurement contract (#70 commit 1
     - **P2-2 (TRUTH-SURFACE v12):** body-update doc `5c271f5`/APPROVED durumuna + `tests/ui/` → `tests/compile_fail/` yolu düzeltmesi + gerçek GitHub PR body sync.
   - **P1 BoundMeasurementSession merge-blocker: CLOSED** — Commit 4b authority migration'unu bloke etmiyor.
 
-- **Commit 4b — `refactor(inv-t4): require EngineMeasurement across authority and evidence paths` (ATOMIK)**
-  - `TaskCommitInput { claim, omega, task_resolver, measurement }` (subject_scope YOK — token'a taşındı)
-  - `commit_task_claim` migration + `claim.computed_raw` ignore + Mixed validation
-  - `AuthorizationBasis v2` (before+after single canonical + request digest + baseline/loss consistency)
-  - `PredicateGateInput` → token baseline/after
-  - `TrajectoryEvidenceBaseline` enum
+- **Commit 4b — `refactor(inv-t4): require EngineMeasurement across authority and evidence paths` (ATOMIK)** — **IN PROGRESS**
+  - **Plan v5 APPROVED** (reviewer v1→v4 turu: 8.8/10 → 9.2/10 → 9.5/10 → 9.7/10, hedef 9.9/10 implementation-ready)
+  - **WIP branch:** `wip/inv-t9-70-commit4b` (review-only, non-mergeable) — [draft PR #81](https://github.com/ontologicalspace/osp/pull/81)
+  - **Sözleşme:** WIP branch merge edilmeyecek; final tek squashed atomic commit `fix/inv-t9-witness-suspension`'a gelecek (bu PR)
+  - **İlerleme (Faz bazlı):**
+    - ✅ **Faz 1 TAMAM** (tip tanımları + reviewer scoped #1/#2/#3/#4 P1/P2 kapandı): TaskValidationError + validate_for_commit (exact matris + mode/weight shape), GateDecision v2 append-only tag'ler + `gate_decision_tag_v2` rename + **v1 frozen encoder fiziksel ayrım** (`GateDecisionV1Frozen` enum + `gate_decision_tag_v1_frozen`, scoped P1), MeasurementBinding hata sistemi (Mismatch 7 + Derivation 7 + Verification + Disposition + From conversion + digest kanıtı + #[source]), VerifiedMeasurementBinding engine.rs'e taşındı (scoped P1-3 modül-private constructor + P2-4 dürüst invariant + Faz 9 AST guard notu), EngineCommitError +3 varyant, CanonicalMeasurementRequestEvidence + canonical_evidence() shared producer, TrajectoryEvidenceBaseline/LossEvidence/OwnedLossEvidence/TrajectoryEvaluationEvidence, CanonicalTrajectoryEvidenceBaseline + `try_from_reason` (scoped P1-1 raw enum + duplicate normalize-öncesi + typed error + doc "sessiz dedup YOK; ordering canonicalize edilir" netleştirme P2-1), CanonicalTrajectoryLossEvidence, TaskCommitInput smart constructor TODO Faz 8.
+    - ✅ **Faz 2 TAMAM** (engine helper ayrımı): check_claim_structure + check_raw_position_finite (nötr source label — scoped P2-2) + check_vision_raw_with_context. Legacy commit()/check_all_gates() backward-compat delegasyon. Helper regression test'leri (scoped P2-1: provided raw NaN + source label + **Q5 provided-raw VisionViolation.raw == provided** P2-3). Canonical baseline validation test matrisi (scoped P2-2: 9 test — duplicate/subject-mismatch/empty/not-disjoint/union-mismatch + 2 success).
+    - ⬜ Faz 3-13: binding derivation, AuthorizationBasis v1→v2, PredicateGate completion-first, navigator state, downstream typed loss, caller migration, deprecation + AST guard, trybuild, #80 osp-desktop, tests, CI + squash + push
+    - **Exhaustive compile-site coverage landed; disposition-aware navigator semantics pending Faz 8 (şimdilik SystemFailure); Hallucination mapping intentional non-hallucination catch-all.**
+    - **Local validation:** 1067 osp-core lib tests green + workspace build clean (RUSTFLAGS="-D warnings").
+    - **Remote GitHub CI:** WIP branch için çalıştırılmadı / status check yok (draft PR #81 review-only; final squashed atomic commit fix/inv-t9-witness-suspension'da CI çalışacak).
+  - **6 Mimari Karar:** (1) deprecation 2B authority-path + module-wide AST guard, (2) TaskValidationError typed guard, (3) tek atomik implementation commit, (4) full token binding + VerifiedMeasurementBinding + Mismatch/Derivation ayrımı + disposition, (5) baseline tek truth source (Available { before } — loss_before YOK), (6) typed loss evidence downstream + completion-first (MissingPreferredVectorForImprovement YOK — preferred_vector=None geçerli)
+  - `TaskCommitInput { claim, omega, task_resolver, measurement }` (public struct + private fields + smart constructor — target/loss_before/measured kaldırıldı)
+  - `commit_task_claim` refactor + `claim.computed_raw` ignore + Mixed validation + verify_measurement_binding
+  - `AuthorizationBasis v2` (before+after canonical + request snapshot + digest cross-field + baseline/loss enum + validate_v2)
+  - `PredicateGateInput` → typed TrajectoryLossEvidence gate input (completion-first)
   - Tüm caller migration atomik: Navigator, MCP, CLI, g2c, test construction site'ları
-  - `provenanced_from_raw` production/evidence path'ten kaldır
-  - `raw_position_of` + `position_of` + `Axis::compute()` `#[deprecated]`
-  - Domain sep `osp.authorization-basis.v2\0`
-  - Issue #80 (osp-desktop Claim struct field migration) çözümü
+  - `provenanced_from_raw` + `compute_raw_from_delta` `#[deprecated]` (authority-path; raw_position_of/position_of/Axis::compute korunur — AST source-contract ile)
+  - `legacy_projection.rs` ayrı modül + module-wide syn AST guard (indirect bypass red-test)
+  - trybuild compile-fail: engine_measurement_deserialize + measurement_request_deserialize + task_commit_input field rejection
+  - #80 osp-desktop CLOSED (try_compute_raw_from_delta + Claim fields)
+  - Domain sep `osp.authorization-basis.v2\0` (v1 frozen fixture ile golden re-producibility)
 
   **P2 carryover — compile-fail Deserialize guards (reviewer v6):**
 

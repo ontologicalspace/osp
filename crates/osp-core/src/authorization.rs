@@ -792,6 +792,20 @@ pub struct CanonicalRawPosition {
     pub v: CanonicalF64,
 }
 
+/// **P1-1 (reviewer):** RawPosition → CanonicalRawPosition projection.
+/// 5 alan elle kopyalama yerine tek yerde pinlenir.
+impl From<crate::coords::RawPosition> for CanonicalRawPosition {
+    fn from(pos: crate::coords::RawPosition) -> Self {
+        Self {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            w: pos.w,
+            v: pos.v,
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // SpaceViewId + SpaceViewRevision (reviewer P0-2 — lifecycle tam)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1611,6 +1625,12 @@ pub struct AuthorizationBasis {
     pub base_space_view_revision: SpaceViewRevision,
 }
 
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:43):** V1 type alias — mevcut
+/// `AuthorizationBasis`, Faz 1-3 frozen. Serialization/digest/golden byte'ları HİÇ
+/// değişmez. V2 (`AuthorizationBasisV2`) canonical redesign — additive DEĞİL, duplicate
+/// field yok. Backward compat = V1'i okuyabilmek (V1 field'larını V2'ye kopyalamak DEĞİL).
+pub type AuthorizationBasisV1 = AuthorizationBasis;
+
 /// **reviewer P0-1 (bloklayıcı):** Tek eksen ölçümü — value + source.
 ///
 /// INV-T4 kararının evidence basis'i için her eksenin provenance'ı ayrı bağlanır.
@@ -1634,6 +1654,775 @@ pub struct ProvenancedMeasuredResult {
     pub instability: CanonicalAxisMeasurement,
     pub entropy: CanonicalAxisMeasurement,
     pub witness_depth: CanonicalAxisMeasurement,
+}
+
+/// **P1-1 (reviewer):** MeasuredRawPosition → ProvenancedMeasuredResult projection.
+/// 5-axis mapping (value + CanonicalMetricSourceTag) tek yerde pinlenir — engine
+/// orchestration canonical tag ayrıntısını bilmez. Axis unutma/yanlış eşleme riski
+/// ayrı unit test ile kapanır.
+impl TryFrom<&crate::coords::MeasuredRawPosition> for ProvenancedMeasuredResult {
+    type Error = CanonicalizationError;
+
+    fn try_from(measured: &crate::coords::MeasuredRawPosition) -> Result<Self, Self::Error> {
+        let convert = |axis: &crate::coords::AxisMeasurement|
+         -> Result<CanonicalAxisMeasurement, CanonicalizationError> {
+            Ok(CanonicalAxisMeasurement {
+                value: axis.value,
+                source: crate::canonical_tags::CanonicalMetricSourceTag::try_from(&axis.source)?,
+            })
+        };
+        Ok(Self {
+            coupling: convert(&measured.coupling)?,
+            cohesion: convert(&measured.cohesion)?,
+            instability: convert(&measured.instability)?,
+            entropy: convert(&measured.entropy)?,
+            witness_depth: convert(&measured.witness_depth)?,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// CanonicalTrajectoryEvidenceBaseline + CanonicalTrajectoryLossEvidence
+// (INV-T9 #70 Commit 4b — reviewer v4 P0/P1-1)
+//
+// **Reviewer v4 P1-1 kesin schema:** baseline saf measurement evidence — sadece `before`
+// taşır, loss_before YOK. Loss evidence ayrı — sadece `target + loss_after`, baseline taşımaz.
+// İki truth source YOK. validate_v2 loss_before'u recompute eder (target'tan bağımsız before).
+//
+// **Reviewer v4 P0:** typed loss evidence downstream yayılımı — basis v2 bu canonical
+// formları taşır. Policy matrisi validate_v2'de (AcceptAsProgress+Unavailable→error).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b (reviewer v4 P1-1):** Canonical trajectory baseline evidence —
+/// saf measurement before-state. `loss_before` YOK — loss target'a bağlıdır, target yoksa
+/// before mevcut olsa bile loss hesaplanamaz. validate_v2 loss_before'u `trajectory_loss_canonical`
+/// ile recompute eder.
+///
+/// `CanonicalBaselineUnavailableReason` member listeleri: **sessiz dedup YOK** (duplicate
+/// input fail-closed typed error); **ordering canonicalize edilir** (unsorted input →
+/// sorted canonical sıraya normalize — bu meşru canonicalization, data kaybı DEĞİL).
+/// + disjoint + union == request subject (reviewer scoped P1-2 + Faz 2 scoped P2-1).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum CanonicalTrajectoryEvidenceBaseline {
+    /// Before-state measured — subject üyelerinin tamamı base snapshot'ta mevcut.
+    Available { before: ProvenancedMeasuredResult },
+    /// Before-state unavailable — subject üyeleri tamamen/kısmen delta-introduced.
+    Unavailable {
+        reason: CanonicalBaselineUnavailableReason,
+    },
+}
+
+/// **INV-T9 #70 Commit 4b:** Canonical baseline unavailable reason. Member listeleri:
+/// **sessiz dedup YOK** (duplicate fail-closed typed error); **ordering canonicalize
+/// edilir** (unsorted → sorted — meşru canonicalization). + disjoint + union == request
+/// subject (scoped P1-2 + Faz 2 scoped P2-1). `try_from_reason` raw enum + request
+/// subject alır — duplicate normalizasyondan ÖNCE typed error (reviewer Faz 2 scoped P1-1).
+/// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-2 v3, P2-3 v4):** Canonical baseline
+/// unavailable reason — opaque struct. Private repr; tek creation yolu checked
+/// `try_from_reason` (local invalid state üretilemez: sort + dedup + non-empty + disjoint
+/// + union == subject). Struct literal bypass imkânsız. Cross-object tutarsızlık
+/// `validate_against_subject` ile tüketim sınırında yeniden doğrulanır (defense-in-depth).
+///
+/// **Serialization (reviewer P2-3 v4):** `#[serde(transparent)]` — wrapper iç repr enum
+/// gibi serialize olur (eski public enum wire shape korunur). Wire format Commit 1b'de
+/// explicit DTO ile finalize edilir.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(transparent)]
+pub struct CanonicalBaselineUnavailableReason {
+    repr: CanonicalBaselineUnavailableReasonRepr,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+enum CanonicalBaselineUnavailableReasonRepr {
+    /// Tüm subject üyeleri delta ile eklenen node'lar — base'de hiçbiri yok.
+    AllMembersIntroducedByDelta { members: Vec<crate::space::NodeId> },
+    /// Bazı üyeler base'de var, kalanların tümü delta ile ekleniyor.
+    PartialNewSubject {
+        existing: Vec<crate::space::NodeId>,
+        introduced: Vec<crate::space::NodeId>,
+    },
+}
+
+impl CanonicalBaselineUnavailableReason {
+    /// **Reviewer P1-2 v4:** Safe view accessor — public discriminator ile varyant bilgisi.
+    /// Panic YOK — geçerli nesnede yanlış accessor çağrımı imkânsız. Caller `view()` ile
+    /// match yapar (tüm varyantlar typed).
+    pub fn view(&self) -> CanonicalBaselineUnavailableReasonView<'_> {
+        match &self.repr {
+            CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta { members } => {
+                CanonicalBaselineUnavailableReasonView::AllMembersIntroducedByDelta {
+                    members: members.as_slice(),
+                }
+            }
+            CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                existing,
+                introduced,
+            } => CanonicalBaselineUnavailableReasonView::PartialNewSubject {
+                existing: existing.as_slice(),
+                introduced: introduced.as_slice(),
+            },
+        }
+    }
+
+    /// Varyant bilgisi — projection/encoding için (modül içi).
+    fn repr(&self) -> &CanonicalBaselineUnavailableReasonRepr {
+        &self.repr
+    }
+}
+
+/// **Reviewer P1-2 v4:** Safe public view — panic accessor'lar yerine. Caller `view()` ile
+/// match yapar; geçerli nesnede yanlış varyant çağrımı imkânsız.
+#[derive(Debug, Clone, Copy)]
+pub enum CanonicalBaselineUnavailableReasonView<'a> {
+    AllMembersIntroducedByDelta {
+        members: &'a [crate::space::NodeId],
+    },
+    PartialNewSubject {
+        existing: &'a [crate::space::NodeId],
+        introduced: &'a [crate::space::NodeId],
+    },
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer Faz 2 scoped P1-1):** Typed canonical baseline
+/// validation error — `String` DEĞİL. Her ihlal ayrı varyant (telemetry + exact assertion).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CanonicalBaselineValidationError {
+    #[error("AllMembersIntroducedByDelta members contain duplicates: {members:?}")]
+    AllMembersDuplicate { members: Vec<crate::space::NodeId> },
+
+    /// **Reviewer P2-2 v4:** AllMembers list canonical sıralı değil (strict ascending).
+    #[error("AllMembersIntroducedByDelta members not in canonical order: {members:?}")]
+    AllMembersUnsorted { members: Vec<crate::space::NodeId> },
+
+    #[error("AllMembersIntroducedByDelta members {members:?} != request subject {subject:?}")]
+    AllMembersSubjectMismatch {
+        members: Vec<crate::space::NodeId>,
+        subject: Vec<crate::space::NodeId>,
+    },
+
+    #[error("PartialNewSubject existing list contains duplicates: {existing:?}")]
+    PartialExistingDuplicate { existing: Vec<crate::space::NodeId> },
+
+    /// **Reviewer P2-2 v4:** Partial existing list canonical sıralı değil.
+    #[error("PartialNewSubject existing list not in canonical order: {existing:?}")]
+    PartialExistingUnsorted { existing: Vec<crate::space::NodeId> },
+
+    #[error("PartialNewSubject introduced list contains duplicates: {introduced:?}")]
+    PartialIntroducedDuplicate {
+        introduced: Vec<crate::space::NodeId>,
+    },
+
+    /// **Reviewer P2-2 v4:** Partial introduced list canonical sıralı değil.
+    #[error("PartialNewSubject introduced list not in canonical order: {introduced:?}")]
+    PartialIntroducedUnsorted {
+        introduced: Vec<crate::space::NodeId>,
+    },
+
+    #[error("PartialNewSubject requires non-empty existing and introduced")]
+    PartialEmptyList,
+
+    #[error("node {node_id} in both existing and introduced (not disjoint)")]
+    PartialNotDisjoint { node_id: crate::space::NodeId },
+
+    #[error("PartialNewSubject union {union:?} != request subject {subject:?}")]
+    PartialUnionSubjectMismatch {
+        union: Vec<crate::space::NodeId>,
+        subject: Vec<crate::space::NodeId>,
+    },
+}
+
+impl CanonicalBaselineUnavailableReason {
+    /// **INV-T9 #70 Commit 4b (reviewer Faz 2 scoped P1-1):** Validated smart constructor —
+    /// raw `BaselineUnavailableReason` enum + request subject alır. Member listeleri
+    /// non-empty + sorted + unique + disjoint + union == request subject. **Duplicate
+    /// kontrolü normalizasyondan ÖNCE** (sessiz dedup YOK — malformed wire fail-closed
+    /// reject). Tek-bir-liste API (3 paralel liste çelişkisi YOK — varyant üzerinden match).
+    /// Faz 4'te basis builder `MeasurementBaseline::Unavailable` → canonical dönüşümde çağırır.
+    #[allow(dead_code)] // Faz 4: basis builder MeasurementBaseline → canonical dönüşüm
+    pub(crate) fn try_from_reason(
+        reason: &crate::measurement::BaselineUnavailableReason,
+        request_subject: &crate::measurement::CanonicalSubjectScope,
+    ) -> Result<Self, CanonicalBaselineValidationError> {
+        let subject_members = request_subject.member_ids();
+        match reason {
+            crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members,
+            } => {
+                // Duplicate check BEFORE normalization (scoped P1-1).
+                let mut sorted = members.clone();
+                sorted.sort_unstable();
+                let mut deduped = sorted.clone();
+                deduped.dedup();
+                if deduped.len() != sorted.len() {
+                    return Err(CanonicalBaselineValidationError::AllMembersDuplicate {
+                        members: members.clone(),
+                    });
+                }
+                if deduped.as_slice() != subject_members {
+                    return Err(
+                        CanonicalBaselineValidationError::AllMembersSubjectMismatch {
+                            members: deduped,
+                            subject: subject_members.to_vec(),
+                        },
+                    );
+                }
+                Ok(Self {
+                    repr: CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta {
+                        members: deduped,
+                    },
+                })
+            }
+            crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+                existing,
+                introduced,
+            } => {
+                if existing.is_empty() || introduced.is_empty() {
+                    return Err(CanonicalBaselineValidationError::PartialEmptyList);
+                }
+                // Duplicate check BEFORE normalization (scoped P1-1).
+                let mut existing_sorted = existing.clone();
+                existing_sorted.sort_unstable();
+                let mut existing_dedup = existing_sorted.clone();
+                existing_dedup.dedup();
+                if existing_dedup.len() != existing_sorted.len() {
+                    return Err(CanonicalBaselineValidationError::PartialExistingDuplicate {
+                        existing: existing.clone(),
+                    });
+                }
+                let mut introduced_sorted = introduced.clone();
+                introduced_sorted.sort_unstable();
+                let mut introduced_dedup = introduced_sorted.clone();
+                introduced_dedup.dedup();
+                if introduced_dedup.len() != introduced_sorted.len() {
+                    return Err(
+                        CanonicalBaselineValidationError::PartialIntroducedDuplicate {
+                            introduced: introduced.clone(),
+                        },
+                    );
+                }
+                // Disjoint check.
+                for id in &existing_dedup {
+                    if introduced_dedup.contains(id) {
+                        return Err(CanonicalBaselineValidationError::PartialNotDisjoint {
+                            node_id: *id,
+                        });
+                    }
+                }
+                // Union == subject (sorted merge).
+                let mut union_merged: Vec<crate::space::NodeId> = existing_dedup
+                    .iter()
+                    .chain(introduced_dedup.iter())
+                    .copied()
+                    .collect();
+                union_merged.sort_unstable();
+                union_merged.dedup();
+                if union_merged.as_slice() != subject_members {
+                    return Err(
+                        CanonicalBaselineValidationError::PartialUnionSubjectMismatch {
+                            union: union_merged,
+                            subject: subject_members.to_vec(),
+                        },
+                    );
+                }
+                Ok(Self {
+                    repr: CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                        existing: existing_dedup,
+                        introduced: introduced_dedup,
+                    },
+                })
+            }
+        }
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-2 v3):** Cross-object defense-in-depth
+    /// doğrulaması — reason'ı request subject'e karşı yeniden doğrular. Non-normalizing:
+    /// mevcut canonical state'i olduğu haliyle doğrular (sorted/unique/non-empty/disjoint/
+    /// union == subject). Bozuk persisted/migrated state sessizce düzeltilmez.
+    ///
+    /// `AuthorizationBasisV2::validate_semantics` digest hesaplamasından ÖNCE çağırır.
+    pub(crate) fn validate_against_subject(
+        &self,
+        request_subject: &crate::measurement::CanonicalSubjectScope,
+    ) -> Result<(), CanonicalBaselineValidationError> {
+        let subject_members = request_subject.member_ids();
+        match &self.repr {
+            CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta { members } => {
+                // Non-normalizing: sorted (strict ascending) + unique (canonical invariant).
+                for pair in members.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(CanonicalBaselineValidationError::AllMembersDuplicate {
+                            members: members.clone(),
+                        });
+                    }
+                    if pair[0] > pair[1] {
+                        return Err(CanonicalBaselineValidationError::AllMembersUnsorted {
+                            members: members.clone(),
+                        });
+                    }
+                }
+                if members.as_slice() != subject_members {
+                    return Err(
+                        CanonicalBaselineValidationError::AllMembersSubjectMismatch {
+                            members: members.clone(),
+                            subject: subject_members.to_vec(),
+                        },
+                    );
+                }
+            }
+            CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                existing,
+                introduced,
+            } => {
+                // Non-empty.
+                if existing.is_empty() || introduced.is_empty() {
+                    return Err(CanonicalBaselineValidationError::PartialEmptyList);
+                }
+                // Non-normalizing: existing sorted (strict ascending) + unique.
+                for pair in existing.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(CanonicalBaselineValidationError::PartialExistingDuplicate {
+                            existing: existing.clone(),
+                        });
+                    }
+                    if pair[0] > pair[1] {
+                        return Err(CanonicalBaselineValidationError::PartialExistingUnsorted {
+                            existing: existing.clone(),
+                        });
+                    }
+                }
+                // Non-normalizing: introduced sorted + unique.
+                for pair in introduced.windows(2) {
+                    if pair[0] == pair[1] {
+                        return Err(
+                            CanonicalBaselineValidationError::PartialIntroducedDuplicate {
+                                introduced: introduced.clone(),
+                            },
+                        );
+                    }
+                    if pair[0] > pair[1] {
+                        return Err(
+                            CanonicalBaselineValidationError::PartialIntroducedUnsorted {
+                                introduced: introduced.clone(),
+                            },
+                        );
+                    }
+                }
+                // Disjoint.
+                for id in existing {
+                    if introduced.contains(id) {
+                        return Err(CanonicalBaselineValidationError::PartialNotDisjoint {
+                            node_id: *id,
+                        });
+                    }
+                }
+                // Union == subject (non-normalizing sorted merge).
+                let mut union_merged: Vec<crate::space::NodeId> =
+                    existing.iter().chain(introduced.iter()).copied().collect();
+                union_merged.sort_unstable();
+                union_merged.dedup();
+                if union_merged.as_slice() != subject_members {
+                    return Err(
+                        CanonicalBaselineValidationError::PartialUnionSubjectMismatch {
+                            union: union_merged,
+                            subject: subject_members.to_vec(),
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:207 non-blocking notu):** Shared baseline
+/// encoder — `MeasurementBaseline::compute_digest()` (measurement.rs) ve bu metod aynı
+/// canonical byte format'ını üretir. Drift risk kapalı: Available/Unavailable raw
+/// measurement baseline digest == canonical trajectory evidence baseline digest.
+impl CanonicalTrajectoryEvidenceBaseline {
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:143, 207):** `MeasurementBaselineDigest`
+    /// üretir — `MeasurementBaseline::compute_digest()` ile aynı byte format. Shared
+    /// encoder (`MeasurementBaselineDigest::write_commitment` equivalent) — drift risk
+    /// kapalı. Test: Available/Unavailable raw digest == canonical evidence digest.
+    ///
+    /// **Preimage eşitliği:** `MeasurementBaseline::Available(MeasuredRawPosition)` ile
+    /// `CanonicalTrajectoryEvidenceBaseline::Available { before: ProvenancedMeasuredResult }`
+    /// aynı measured değerleri için aynı digest üretir (5-axis canonical encoding,
+    /// source tag dahil). Unavailable varyantları için reason member listeleri sorted +
+    /// length-prefix + per-id (aynı canonical format).
+    /// **Reviewer P1-2 (neutral writer):** `CanonicalTrajectoryEvidenceBaseline` →
+    /// `BaselineCommitmentView` projection. Infallible: `ProvenancedMeasuredResult` zaten
+    /// canonical tag'ler, `CanonicalBaselineUnavailableReason` zaten validated.
+    fn to_commitment_view(&self) -> crate::measurement::BaselineCommitmentView<'_> {
+        use crate::measurement::{
+            BaselineAxesView, BaselineCommitmentView, BaselineUnavailableReasonView,
+        };
+        match self {
+            CanonicalTrajectoryEvidenceBaseline::Available { before } => {
+                BaselineCommitmentView::Available {
+                    axes: BaselineAxesView {
+                        coupling: (before.coupling.value, before.coupling.source),
+                        cohesion: (before.cohesion.value, before.cohesion.source),
+                        instability: (before.instability.value, before.instability.source),
+                        entropy: (before.entropy.value, before.entropy.source),
+                        witness_depth: (before.witness_depth.value, before.witness_depth.source),
+                    },
+                }
+            }
+            CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } => {
+                BaselineCommitmentView::Unavailable {
+                    reason: match reason.repr() {
+                        CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta {
+                            members,
+                        } => BaselineUnavailableReasonView::AllMembersIntroducedByDelta {
+                            members: members.clone(),
+                            _phantom: std::marker::PhantomData,
+                        },
+                        CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                            existing,
+                            introduced,
+                        } => BaselineUnavailableReasonView::PartialNewSubject {
+                            existing: existing.clone(),
+                            introduced: introduced.clone(),
+                            _phantom: std::marker::PhantomData,
+                        },
+                    },
+                }
+            }
+        }
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:143, reviewer P1-2):** `MeasurementBaselineDigest`
+    /// üretir — neutral writer (`write_measurement_baseline_commitment`) ile `MeasurementBaseline`
+    /// ile aynı byte format. Drift risk yapısal olarak kapalı (tek encoder).
+    #[allow(
+        dead_code,
+        reason = "Faz 4 basis builder / validate_semantics consumer"
+    )]
+    pub(crate) fn compute_measurement_baseline_digest(
+        &self,
+    ) -> Result<
+        crate::measurement::MeasurementBaselineDigest,
+        crate::measurement::EngineMeasurementDigestError,
+    > {
+        use crate::measurement::MeasurementBaselineDigest;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(MeasurementBaselineDigest::domain_separator());
+        let view = self.to_commitment_view();
+        MeasurementBaselineDigest::write_measurement_baseline_commitment(&mut hasher, view)?;
+        Ok(MeasurementBaselineDigest::from_hasher_finalized(
+            hasher.finalize().into(),
+        ))
+    }
+}
+
+/// **INV-T9 #70 Commit 4b (reviewer v4 P0/P1-1):** Canonical trajectory loss evidence —
+/// sadece `target + loss_after`. Baseline taşımaz (baseline ayrı evidence). Unavailable
+/// ise `CanonicalTrajectoryLossUnavailableReason` (NoPreferredVector).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum CanonicalTrajectoryLossEvidence {
+    /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
+    Available {
+        target: CanonicalRawPosition,
+        loss_after: CanonicalF64,
+    },
+    /// Loss unavailable — preferred_vector None (reviewer v3 P0: geçerli task durumu).
+    Unavailable {
+        reason: CanonicalTrajectoryLossUnavailableReason,
+    },
+}
+
+/// **INV-T9 #70 Commit 4b:** Canonical loss unavailable reason. `NoPreferredVector`
+/// (preferred_vector=None → loss anlamsız). Serde wire format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalTrajectoryLossUnavailableReason {
+    /// Task'ta `preferred_vector` yok — loss/target anlamsız.
+    NoPreferredVector,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — AuthorizationBasisV2 (canonical redesign, plan md:46-60)
+//
+// **3 katman ayrımı (plan md:27-32, duplicate field YOK):**
+// - Basis (`AuthorizationBasisV2`) = kanıtsal zemin — identity + evidence + artifact
+//   commitments + delta/goal digests. Gate/witness YOK.
+// - GateEvaluation — `CanonicalGateEvaluationV2` persisted snapshot +
+//   `VerifiedGateEvaluationV2` opaque producer proof. Faz 4 structural; Faz 5 evaluator.
+// - Context (`AuthorizationContextV2`) = basis + verified gate snapshot + canonical
+//   witness requirement — checked constructor proof-gated.
+//
+// **V2 canonical redesign (additive DEĞİL, plan md:48-52):**
+// - `loss_before/after` → `CanonicalTrajectoryLossEvidence`
+// - `measurement_input_digest` → `CanonicalMeasurementRequestEvidence +
+//   MeasurementRequestDigest`
+// - `measured_result` → `measurement_digest + canonical evidence`
+// - Backward compat = V1'i okuyabilmek (V1 field'larını V2'ye kopyalamak DEĞİL)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:164):** `AuthorizationBasisV2` validation
+/// hatası. Basis construction + `validate_semantics` (nested evidence + baseline digest
+/// reverify + engine_measurement_digest reverify).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum AuthorizationBasisV2Error {
+    #[error("measurement baseline digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    MeasurementBaselineDigestMismatch { stored: String, recomputed: String },
+    #[error("engine measurement digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    EngineMeasurementDigestMismatch { stored: String, recomputed: String },
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-2):** Measurement request snapshot →
+    /// digest reverify mismatch. `measurement_request` (okunabilir evidence) ile
+    /// `measurement_request_digest` (commitment) farklı gerçeklikleri temsil edemez.
+    #[error("measurement request digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    MeasurementRequestDigestMismatch { stored: String, recomputed: String },
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-2):** Request evidence structural delta
+    /// digest ile basis canonical_delta_digest tutarsız. İki commitment aynı kaynak.
+    #[error("canonical delta digest mismatch: request={request:?}, basis={basis:?}")]
+    CanonicalDeltaDigestMismatch { request: String, basis: String },
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-3 v4):** Baseline evidence typed validation
+    /// hatası — `CanonicalBaselineValidationError` typed wrapper (duplicate/subject-mismatch/
+    /// empty/overlap/union ayrımı korunur, string'e düşürülmez).
+    #[error("baseline evidence validation failed: {0}")]
+    BaselineValidation(#[from] CanonicalBaselineValidationError),
+    #[error("basis construction failed: {detail}")]
+    Construction { detail: String },
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:146-160, reviewer P1-2):** Canonical V2
+/// authorization basis — kanıtsal zemin. Identity + evidence + artifact commitments +
+/// delta/goal digests. Gate/witness YOK (3 katman ayrımı). Duplicate field YOK —
+/// additive DEĞİL, canonical redesign.
+///
+/// **Reverify zinciri (plan md:87):** `measurement_baseline_digest` +
+/// `measurement_context_digest` basis'te saklanır — `validate_semantics` bunları shared
+/// encoder ile recompute eder, stored digest ile karşılaştırır (defense-in-depth).
+///
+/// **Field visibility (reviewer P1-2):** Tüm field'lar PRIVATE. Tek creation yolu
+/// `new()` (checked constructor — `validate_semantics` çağırır). Struct literal bypass
+/// imkânsız. Erasure/mutation imkânsız. Accessor'lar read-only.
+///
+/// **P0-1 v3 (reviewer):** `serde::Serialize` intentionally absent — tek dış
+/// serialization yolu `VersionedAuthorizationBasis::V2` (explicit envelope + LowerHex32).
+/// Direct `serde_json::to_string(&basis_v2)` compile error — wire bypass kapalı.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthorizationBasisV2 {
+    /// Task identity.
+    task_id: crate::trajectory::TaskId,
+    /// Claim identity.
+    claim_id: crate::witness::ClaimId,
+    /// Claim binding commitment (claim_id + task_id + author + structural_delta_digest).
+    task_claim_digest: crate::measurement::TaskClaimDigest,
+    /// Task goal commitment (task_id + predicate body + preferred_vector).
+    task_goal_digest: crate::measurement::TaskGoalDigest,
+    /// Measured result commitment — 5-axis değer + source (after).
+    measurement_digest: crate::measurement::MeasurementDigest,
+    /// Tam artifact commitment (request + baseline + after + context).
+    engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
+    /// Trajectory baseline evidence — saf measurement before-state (loss_before YOK).
+    trajectory_baseline: CanonicalTrajectoryEvidenceBaseline,
+    /// Baseline digest — reverify zinciri (shared encoder ile recompute).
+    measurement_baseline_digest: crate::measurement::MeasurementBaselineDigest,
+    /// Trajectory loss evidence — sadece target + loss_after (baseline taşımaz).
+    trajectory_loss: CanonicalTrajectoryLossEvidence,
+    /// Measurement request evidence — tam canonical snapshot (subject/impact/revision/digest).
+    measurement_request: crate::measurement::CanonicalMeasurementRequestEvidence,
+    /// Measurement request digest — reverify zinciri.
+    measurement_request_digest: crate::measurement::MeasurementRequestDigest,
+    /// Measurement context digest — reverify zinciri (shared encoder ile recompute).
+    measurement_context_digest: crate::measurement::MeasurementContextDigest,
+    /// Canonical structural delta digest — claim → structural delta commitment.
+    canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+}
+
+impl AuthorizationBasisV2 {
+    /// **Checked constructor (plan md:157, reviewer P1-2):** `validate_semantics` çağırır
+    /// — nested evidence + baseline digest reverify + engine_measurement_digest reverify
+    /// + request snapshot → digest reverify (reviewer P0-2). Başarısızsa basis doğmaz.
+    /// Tek creation yolu (field'lar private). Builder (Commit 2) bu constructor'ı çağırır.
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn new(
+        task_id: crate::trajectory::TaskId,
+        claim_id: crate::witness::ClaimId,
+        task_claim_digest: crate::measurement::TaskClaimDigest,
+        task_goal_digest: crate::measurement::TaskGoalDigest,
+        measurement_digest: crate::measurement::MeasurementDigest,
+        engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
+        trajectory_baseline: CanonicalTrajectoryEvidenceBaseline,
+        measurement_baseline_digest: crate::measurement::MeasurementBaselineDigest,
+        trajectory_loss: CanonicalTrajectoryLossEvidence,
+        measurement_request: crate::measurement::CanonicalMeasurementRequestEvidence,
+        measurement_request_digest: crate::measurement::MeasurementRequestDigest,
+        measurement_context_digest: crate::measurement::MeasurementContextDigest,
+        canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+    ) -> Result<Self, AuthorizationBasisV2Error> {
+        let basis = Self {
+            task_id,
+            claim_id,
+            task_claim_digest,
+            task_goal_digest,
+            measurement_digest,
+            engine_measurement_digest,
+            trajectory_baseline: trajectory_baseline.clone(),
+            measurement_baseline_digest,
+            trajectory_loss,
+            measurement_request,
+            measurement_request_digest,
+            measurement_context_digest,
+            canonical_delta_digest,
+        };
+        basis.validate_semantics()?;
+        Ok(basis)
+    }
+
+    /// **validate_semantics (plan md:158):** Nested evidence + baseline digest reverify
+    /// (shared encoder `compute_measurement_baseline_digest`) + engine_measurement_digest
+    /// reverify (`compute_from_commitments` shared encoder). Defense-in-depth — stored
+    /// digest'ler canonical evidence ile tutarlı olmalı.
+    fn validate_semantics(&self) -> Result<(), AuthorizationBasisV2Error> {
+        // **Reviewer P1-2 v3:** Baseline reason ↔ request subject doğrulaması — digest
+        // hesaplamasından ÖNCE. Cross-object substitution/tutarsızlık reject. Defense-in-
+        // depth: checked constructor zaten validated ama basis katmanında reverify.
+        // **Reviewer P1-3 v4:** typed error — `BaselineValidation(#[from])` ile string'e
+        // düşürülmez (telemetry + exact assertion seviyesi korunur).
+        if let CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } =
+            &self.trajectory_baseline
+        {
+            reason.validate_against_subject(&self.measurement_request.subject)?;
+        }
+        // Baseline digest reverify — shared encoder (plan md:207).
+        let recomputed_baseline = self
+            .trajectory_baseline
+            .compute_measurement_baseline_digest()
+            .map_err(|e| AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            })?;
+        if recomputed_baseline.as_bytes() != self.measurement_baseline_digest.as_bytes() {
+            return Err(
+                AuthorizationBasisV2Error::MeasurementBaselineDigestMismatch {
+                    stored: self.measurement_baseline_digest.to_hex(),
+                    recomputed: recomputed_baseline.to_hex(),
+                },
+            );
+        }
+        // Engine measurement digest reverify — compute_from_commitments shared encoder.
+        // Stored digest, request + baseline + after + context'ten recompute edilmeli.
+        let recomputed_engine =
+            crate::measurement::EngineMeasurementDigest::compute_from_commitments(
+                &self.measurement_request_digest,
+                &self.measurement_baseline_digest,
+                &self.measurement_digest,
+                &self.measurement_context_digest,
+            )
+            .map_err(|e| AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            })?;
+        if recomputed_engine.as_bytes() != self.engine_measurement_digest.as_bytes() {
+            return Err(AuthorizationBasisV2Error::EngineMeasurementDigestMismatch {
+                stored: self.engine_measurement_digest.to_hex(),
+                recomputed: recomputed_engine.to_hex(),
+            });
+        }
+        // **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-2):** Request snapshot → digest reverify.
+        // `measurement_request` (okunabilir evidence) ile `measurement_request_digest`
+        // (commitment) aynı gerçekliği temsil etmeli. `compute_from_canonical` shared
+        // encoder — `MeasurementRequestDigest::compute` ile aynı byte format.
+        let recomputed_request =
+            crate::measurement::MeasurementRequestDigest::compute_from_canonical(
+                &self.measurement_request,
+            )
+            .map_err(|e| AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            })?;
+        if recomputed_request.as_bytes() != self.measurement_request_digest.as_bytes() {
+            return Err(
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch {
+                    stored: self.measurement_request_digest.to_hex(),
+                    recomputed: recomputed_request.to_hex(),
+                },
+            );
+        }
+        // **Reviewer P0-2:** Request evidence structural_delta_digest ile basis
+        // canonical_delta_digest tutarlı olmalı — iki commitment aynı kaynak (claim → delta).
+        if self.measurement_request.structural_delta_digest.as_bytes()
+            != self.canonical_delta_digest.as_bytes()
+        {
+            return Err(AuthorizationBasisV2Error::CanonicalDeltaDigestMismatch {
+                request: self.measurement_request.structural_delta_digest.to_hex(),
+                basis: self.canonical_delta_digest.to_hex(),
+            });
+        }
+        Ok(())
+    }
+
+    /// **Reviewer P1-2:** Read-only accessor'lar — field'lar private, mutation imkânsız.
+    /// Builder (Commit 2) ve test'ler bu accessor'ları kullanır. `pub(crate)` — digest
+    /// newtype'lar `pub(crate)` (plan md:59).
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn claim_id(&self) -> crate::witness::ClaimId {
+        self.claim_id
+    }
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn measurement_request(
+        &self,
+    ) -> &crate::measurement::CanonicalMeasurementRequestEvidence {
+        &self.measurement_request
+    }
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn measurement_request_digest(
+        &self,
+    ) -> &crate::measurement::MeasurementRequestDigest {
+        &self.measurement_request_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn engine_measurement_digest(&self) -> &crate::measurement::EngineMeasurementDigest {
+        &self.engine_measurement_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub(crate) fn canonical_delta_digest(&self) -> &crate::measurement::MeasurementDeltaDigest {
+        &self.canonical_delta_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn task_claim_digest(&self) -> &crate::measurement::TaskClaimDigest {
+        &self.task_claim_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn task_goal_digest(&self) -> &crate::measurement::TaskGoalDigest {
+        &self.task_goal_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn measurement_digest(&self) -> &crate::measurement::MeasurementDigest {
+        &self.measurement_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn trajectory_baseline(&self) -> &CanonicalTrajectoryEvidenceBaseline {
+        &self.trajectory_baseline
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn measurement_baseline_digest(
+        &self,
+    ) -> &crate::measurement::MeasurementBaselineDigest {
+        &self.measurement_baseline_digest
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn trajectory_loss(&self) -> &CanonicalTrajectoryLossEvidence {
+        &self.trajectory_loss
+    }
+    #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
+    pub(crate) fn measurement_context_digest(
+        &self,
+    ) -> &crate::measurement::MeasurementContextDigest {
+        &self.measurement_context_digest
+    }
+
+    /// **AuthorizationBasisDigestV2 (plan md:55):** V2 canonical digest. Ayrı domain
+    /// separator (`OSP/AUTHORIZATION-BASIS/V2`) — V1 frozen. Builder (Commit 2) bu
+    /// digest'i `AuthorizationContextV2` zincirinde kullanır.
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub fn compute_digest(&self) -> Result<AuthorizationBasisDigestV2, CanonicalDigestError> {
+        AuthorizationBasisDigestV2::compute(self)
+    }
 }
 
 /// BLAKE3 tabanlı authorization basis digest.
@@ -1766,24 +2555,20 @@ impl AuthorizationBasisDigest {
         encode_u32(&mut hasher, ip.semantics_version, "improvement_semver");
 
         // Measured result — 5 eksen value + source (INV-T4 per-axis provenance).
-        encode_axis_measurement(&mut hasher, &basis.measured_result.coupling, "coupling")?;
-        encode_axis_measurement(&mut hasher, &basis.measured_result.cohesion, "cohesion")?;
-        encode_axis_measurement(
-            &mut hasher,
-            &basis.measured_result.instability,
-            "instability",
-        )?;
-        encode_axis_measurement(&mut hasher, &basis.measured_result.entropy, "entropy")?;
-        encode_axis_measurement(
-            &mut hasher,
-            &basis.measured_result.witness_depth,
-            "witness_depth",
-        )?;
+        // **Faz 3:** axis sırası structural (sabit çağrı sırası). Byte format v1 ile uyumlu.
+        encode_axis_measurement(&mut hasher, &basis.measured_result.coupling)?;
+        encode_axis_measurement(&mut hasher, &basis.measured_result.cohesion)?;
+        encode_axis_measurement(&mut hasher, &basis.measured_result.instability)?;
+        encode_axis_measurement(&mut hasher, &basis.measured_result.entropy)?;
+        encode_axis_measurement(&mut hasher, &basis.measured_result.witness_depth)?;
 
         // Outcome tags.
+        // **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-1):** V1 production encoder fallible
+        // `gate_decision_tag_v1` kullanır — V2-only kararlar (7, 8) reject. V1 byte contract
+        // frozen; V2-only GateDecision'ların V1 artifact'lerine sızması imkânsız.
         encode_u8(
             &mut hasher,
-            gate_decision_tag(basis.deterministic_gate_result),
+            gate_decision_tag_v1(basis.deterministic_gate_result)?,
             "gate",
         );
         encode_u8(
@@ -1863,6 +2648,289 @@ impl AuthorizationBasisDigest {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — AuthorizationBasisDigestV2 + AuthorizationContextDigestV2
+// (plan md:54-59)
+//
+// **Ayrı digest newtype + domain separator + canonical encoding (JSON DEĞİL) + hex wire:**
+// - `AuthorizationBasisDigestV2` (`OSP/AUTHORIZATION-BASIS/V2`) — V1 frozen ayrı
+// - `AuthorizationContextDigestV2` (`OSP/AUTHORIZATION-CONTEXT/V2`) — basis + gate eval +
+//   witness requirement commitment
+//
+// **DigestBytes private repr (plan md:59):** constructor `pub(crate)`, sadece
+// `as_bytes()`/`to_hex()` public. Canonical encoding — `serde_json::to_vec` YASAK.
+// Hex wire format: 64 lowercase.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:55):** V2 authorization basis digest. Ayrı
+/// domain separator (`OSP/AUTHORIZATION-BASIS/V2`) — V1 (`osp.authorization-basis.v1\0`)
+/// frozen. Canonical encoding (JSON DEĞİL) + hex wire format (64 lowercase).
+///
+/// **P0-1 v3 (reviewer):** Custom Serialize — yalnız 64 lowercase hex string üretir
+/// (derived Serialize byte array üretir, wire format ile çelişir).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthorizationBasisDigestV2([u8; 32]);
+
+impl serde::Serialize for AuthorizationBasisDigestV2 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl AuthorizationBasisDigestV2 {
+    /// Faz 4 V2 convention domain separator (compile-time ayrım — V1 frozen).
+    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/AUTHORIZATION-BASIS/V2";
+
+    /// **V2 canonical encoder (plan md:55):** Tüm basis field'ları canonical byte olarak
+    /// encode eder. Digest newtype'lar raw byte (32), evidence tipleri nested encode.
+    /// Sıra sabit (structural guarantee).
+    pub(crate) fn compute(basis: &AuthorizationBasisV2) -> Result<Self, CanonicalDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+
+        // Identity.
+        encode_u64(&mut hasher, basis.task_id, "v2_task_id");
+        encode_u64(&mut hasher, basis.claim_id.into(), "v2_claim_id");
+
+        // Commitment digests — raw 32 bytes each.
+        hasher.update(basis.task_claim_digest.as_bytes());
+        hasher.update(basis.task_goal_digest.as_bytes());
+        hasher.update(basis.measurement_digest.as_bytes());
+        hasher.update(basis.engine_measurement_digest.as_bytes());
+        hasher.update(basis.measurement_baseline_digest.as_bytes());
+        hasher.update(basis.measurement_request_digest.as_bytes());
+        hasher.update(basis.measurement_context_digest.as_bytes());
+        hasher.update(basis.canonical_delta_digest.as_bytes());
+
+        // Nested evidence — trajectory baseline (Available/Unavailable canonical).
+        encode_canonical_trajectory_baseline_v2(&mut hasher, &basis.trajectory_baseline)?;
+
+        // Nested evidence — trajectory loss (Available/Unavailable canonical).
+        encode_canonical_trajectory_loss_v2(&mut hasher, &basis.trajectory_loss)?;
+
+        // Nested evidence — measurement request evidence (subject/impact/revision/digest).
+        encode_canonical_measurement_request_evidence_v2(&mut hasher, &basis.measurement_request)?;
+
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[allow(dead_code, reason = "Faz 4 wire dispatch / Commit 1b consumer")]
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:55):** V2 authorization context digest.
+/// Basis + verified gate evaluation + canonical witness requirement commitment.
+/// Ayrı domain separator (`OSP/AUTHORIZATION-CONTEXT/V2`).
+///
+/// **P0-1 v3 (reviewer):** Custom Serialize — yalnız 64 lowercase hex string üretir.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AuthorizationContextDigestV2([u8; 32]);
+
+impl serde::Serialize for AuthorizationContextDigestV2 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+impl AuthorizationContextDigestV2 {
+    /// Faz 4 V2 convention domain separator.
+    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/AUTHORIZATION-CONTEXT/V2";
+
+    /// **V2 canonical encoder (plan md:55):** basis digest + gate evaluation + witness
+    /// requirement canonical byte'ları. Context'in tüm kanıtsal zeminini bağlar.
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub(crate) fn compute(
+        basis_digest: &AuthorizationBasisDigestV2,
+        gate_evaluation: &CanonicalGateEvaluationV2,
+        witness_requirement: &CanonicalWitnessRequirementV2,
+    ) -> Result<Self, CanonicalDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        hasher.update(basis_digest.as_bytes());
+        gate_evaluation.encode_canonical(&mut hasher)?;
+        witness_requirement.encode_canonical(&mut hasher)?;
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    #[allow(dead_code, reason = "Faz 4 wire dispatch / Commit 1b consumer")]
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[allow(dead_code, reason = "Faz 4 wire dispatch / Commit 1b consumer")]
+    pub fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4:** `CanonicalTrajectoryEvidenceBaseline` → canonical
+/// byte encoding for V2 basis digest. Available/Unavailable varyant tag + nested fields.
+fn encode_canonical_trajectory_baseline_v2(
+    hasher: &mut blake3::Hasher,
+    baseline: &CanonicalTrajectoryEvidenceBaseline,
+) -> Result<(), CanonicalDigestError> {
+    use crate::canonical_encoding::{
+        encode_axis_components, encode_u64, encode_u8, AXIS_DISCRIM_COHESION,
+        AXIS_DISCRIM_COUPLING, AXIS_DISCRIM_ENTROPY, AXIS_DISCRIM_INSTABILITY,
+        AXIS_DISCRIM_WITNESS_DEPTH,
+    };
+    match baseline {
+        CanonicalTrajectoryEvidenceBaseline::Available { before } => {
+            encode_u8(hasher, 0, "v2_baseline_available_tag");
+            encode_axis_components(
+                hasher,
+                before.coupling.value,
+                before.coupling.source,
+                AXIS_DISCRIM_COUPLING,
+            )?;
+            encode_axis_components(
+                hasher,
+                before.cohesion.value,
+                before.cohesion.source,
+                AXIS_DISCRIM_COHESION,
+            )?;
+            encode_axis_components(
+                hasher,
+                before.instability.value,
+                before.instability.source,
+                AXIS_DISCRIM_INSTABILITY,
+            )?;
+            encode_axis_components(
+                hasher,
+                before.entropy.value,
+                before.entropy.source,
+                AXIS_DISCRIM_ENTROPY,
+            )?;
+            encode_axis_components(
+                hasher,
+                before.witness_depth.value,
+                before.witness_depth.source,
+                AXIS_DISCRIM_WITNESS_DEPTH,
+            )?;
+        }
+        CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } => {
+            encode_u8(hasher, 1, "v2_baseline_unavailable_tag");
+            match reason.repr() {
+                CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta { members } => {
+                    encode_u8(hasher, 0, "v2_baseline_reason_all_tag");
+                    encode_u64(hasher, members.len() as u64, "v2_baseline_members_count");
+                    for id in members {
+                        encode_u64(hasher, *id, "v2_baseline_member_id");
+                    }
+                }
+                CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                    existing,
+                    introduced,
+                } => {
+                    encode_u8(hasher, 1, "v2_baseline_reason_partial_tag");
+                    encode_u64(hasher, existing.len() as u64, "v2_baseline_existing_count");
+                    for id in existing {
+                        encode_u64(hasher, *id, "v2_baseline_existing_id");
+                    }
+                    encode_u64(
+                        hasher,
+                        introduced.len() as u64,
+                        "v2_baseline_introduced_count",
+                    );
+                    for id in introduced {
+                        encode_u64(hasher, *id, "v2_baseline_introduced_id");
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4:** `CanonicalTrajectoryLossEvidence` → canonical byte
+/// encoding for V2 basis digest. Available/Unavailable varyant tag + nested fields.
+fn encode_canonical_trajectory_loss_v2(
+    hasher: &mut blake3::Hasher,
+    loss: &CanonicalTrajectoryLossEvidence,
+) -> Result<(), CanonicalDigestError> {
+    use crate::canonical_encoding::{encode_f64, encode_u8};
+    match loss {
+        CanonicalTrajectoryLossEvidence::Available { target, loss_after } => {
+            encode_u8(hasher, 0, "v2_loss_available_tag");
+            encode_f64(hasher, target.x, "v2_loss_target_x")?;
+            encode_f64(hasher, target.y, "v2_loss_target_y")?;
+            encode_f64(hasher, target.z, "v2_loss_target_z")?;
+            encode_f64(hasher, target.w, "v2_loss_target_w")?;
+            encode_f64(hasher, target.v, "v2_loss_target_v")?;
+            encode_f64(hasher, *loss_after, "v2_loss_after")?;
+        }
+        CanonicalTrajectoryLossEvidence::Unavailable { reason } => {
+            encode_u8(hasher, 1, "v2_loss_unavailable_tag");
+            match reason {
+                CanonicalTrajectoryLossUnavailableReason::NoPreferredVector => {
+                    encode_u8(hasher, 0, "v2_loss_reason_no_preferred_vector");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4:** `CanonicalMeasurementRequestEvidence` → canonical
+/// byte encoding for V2 basis digest. Subject + impact + revision + digest'ler.
+fn encode_canonical_measurement_request_evidence_v2(
+    hasher: &mut blake3::Hasher,
+    evidence: &crate::measurement::CanonicalMeasurementRequestEvidence,
+) -> Result<(), CanonicalDigestError> {
+    use crate::canonical_encoding::encode_u64;
+    // Subject — sorted member ids.
+    encode_u64(
+        hasher,
+        evidence.subject.member_ids().len() as u64,
+        "v2_mr_subject_count",
+    );
+    for id in evidence.subject.member_ids() {
+        encode_u64(hasher, *id, "v2_mr_subject_id");
+    }
+    // Impact — node ids + edge identities.
+    encode_u64(
+        hasher,
+        evidence.impact.node_ids().len() as u64,
+        "v2_mr_impact_node_count",
+    );
+    for id in evidence.impact.node_ids() {
+        encode_u64(hasher, *id, "v2_mr_impact_node_id");
+    }
+    encode_u64(
+        hasher,
+        evidence.impact.edge_ids().len() as u64,
+        "v2_mr_impact_edge_count",
+    );
+    for edge in evidence.impact.edge_ids() {
+        hasher.update(&encode_canonical_edge_identity_to_vec(edge));
+    }
+    // Base revision — view_id variant + sequence + content_digest.
+    encode_space_view_id(hasher, &evidence.base_revision.view_id);
+    encode_u64(
+        hasher,
+        evidence.base_revision.sequence,
+        "v2_mr_revision_sequence",
+    );
+    hasher.update(evidence.base_revision.content_digest.as_bytes());
+    // Structural delta digest + measurement input digest — raw 32 bytes.
+    hasher.update(evidence.structural_delta_digest.as_bytes());
+    hasher.update(evidence.measurement_input_digest.as_bytes());
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Canonical binary encoding — domain-specific encoder'lar (review P1-3).
 //
 // **INV-T9 #70 Commit 3 (reviewer v4 P1-2):** Düşük seviyeli framing primitive'leri
@@ -1931,13 +2999,18 @@ impl CanonicalTag for crate::canonical_tags::WitnessIndependencePolicyTag {
 }
 
 /// **reviewer P0-1:** Per-axis measurement encoder — value + source tag.
+///
+/// **INV-T9 #70 Commit 4b Faz 3:** `field` parametresi kaldırıldı (axis sırası
+/// caller'ın sabit çağrı sırasıyla structural guarantee — coupling→cohesion→
+/// instability→entropy→witness_depth). Byte format DEĞİŞMEDİ — v1 golden korunur.
+/// Nötr encoder (`encode_axis_components` axis discriminator ile) yalnız yeni
+/// `MeasurementDigest` tarafından kullanılır (Faz 3 yeni commitment, ayrı byte contract).
 fn encode_axis_measurement(
     hasher: &mut blake3::Hasher,
     m: &CanonicalAxisMeasurement,
-    field: &str,
 ) -> Result<(), CanonicalDigestError> {
-    encode_f64(hasher, m.value, field)?;
-    encode_tag(hasher, m.source, field);
+    encode_f64(hasher, m.value, "axis_value")?;
+    encode_tag(hasher, m.source, "axis_source");
     Ok(())
 }
 
@@ -2353,47 +3426,442 @@ fn validate_evidence_semantics(
     Ok(())
 }
 
-fn gate_decision_tag(gd: crate::trajectory::GateDecision) -> u8 {
+/// **INV-T9 #70 Commit 4b (reviewer v4 P1-4 + Faz 2 scoped P1-2):** v2 production
+/// GateDecision tag encoder — **`gate_decision_tag_v2`** (yeniden adlandırıldı).
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — Pinned canonical tag newtype'ları (plan md:115)
+//
+// **Reviewer kararı (Faz 4 review #2):** Her domain için ayrı private-inner checked
+// newtype. Domain enum'ları korunur (rewrite yok); newtype yalnızca canonical tag alanını
+// temsil eder. `new_unchecked` / `From<u8>` / `pub fn new` YASAK — sadece checked
+// `TryFrom<u8>` + `as_u8()` getter. Ayrı domain'ler ontolojik karışmayı compile-time
+// engeller: `GateDecisionTag` ile `MutationDecisionTag` karıştırılamaz.
+//
+// **Geçiş dönemi (reviewer notu):** Mevcut `*_tag()` helper fonksiyonları newtype'a
+// delege eder — çağıranları tek commit'te kırmamak için. Helper'lar daha sonra
+// kaldırılabilir. Mapping değerleri KORUNUR → V1 digest byte'ları HİÇ DEĞİŞMEZ (golden
+// test green kalır).
+//
+// **Ontolojik ayrım (reviewer notu):** `GateDecisionTag` (deterministic gate sonucu)
+// ile `GateDispositionV2Tag` (V2 gate evaluation disposition) ayrı newtype — ontolojik
+// kategori kanıtlanmadıkça tag alanı paylaşılmaz. Aynı şekilde `WitnessRequirementTag`
+// ile `WitnessNotRequiredReasonTag` ayrı (karar durumu vs açıklama kategorisi).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:115):** Pinned canonical tag for
+/// `GateDecision`. Append-only: mevcut tag'ler (0-6) ASLA değişmez (exact pin — golden
+/// vector lock). Yeni varyantlar append-only sıradaki tag'leri alır (7, 8).
+///
+/// `gate_decision_v2_tags_are_unique_and_append_only` testi bu mapping'i çağırarak
+/// doğrular. v1 frozen encoder ayrımı (`gate_decision_tag_v1_frozen`, 0..=6) test-only
+/// korunur — v1 encoder v2-only kararları 7/8 olarak encode edemez.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct GateDecisionTag(u8);
+
+impl GateDecisionTag {
+    pub(crate) const UNKNOWN: Self = Self(0);
+    pub(crate) const PASSED_ALL: Self = Self(1);
+    pub(crate) const REJECTED_BY_SYNTAX: Self = Self(2);
+    pub(crate) const REJECTED_BY_VISION: Self = Self(3);
+    pub(crate) const REJECTED_BY_RULE: Self = Self(4);
+    pub(crate) const REJECTED_BY_TASK_BINDING: Self = Self(5);
+    pub(crate) const BLOCKED_BY_MANEUVER_LIMIT: Self = Self(6);
+    /// Commit 4b — append-only yeni tag'ler.
+    pub(crate) const REJECTED_BY_TASK_VALIDATION: Self = Self(7);
+    pub(crate) const REJECTED_BY_MEASUREMENT_BINDING: Self = Self(8);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8];
+
+    #[allow(dead_code)]
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl From<&crate::trajectory::GateDecision> for GateDecisionTag {
+    fn from(gd: &crate::trajectory::GateDecision) -> Self {
+        use crate::trajectory::GateDecision::*;
+        match gd {
+            Unknown => Self::UNKNOWN,
+            PassedAll => Self::PASSED_ALL,
+            RejectedBySyntax => Self::REJECTED_BY_SYNTAX,
+            RejectedByVision => Self::REJECTED_BY_VISION,
+            RejectedByRule => Self::REJECTED_BY_RULE,
+            RejectedByTaskBinding => Self::REJECTED_BY_TASK_BINDING,
+            BlockedByManeuverLimit => Self::BLOCKED_BY_MANEUVER_LIMIT,
+            RejectedByTaskValidation => Self::REJECTED_BY_TASK_VALIDATION,
+            RejectedByMeasurementBinding => Self::REJECTED_BY_MEASUREMENT_BINDING,
+        }
+    }
+}
+
+impl TryFrom<u8> for GateDecisionTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "GateDecisionTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for GateDecisionTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:115):** Pinned canonical tag for
+/// `PredicateCompletion`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct PredicateCompletionTag(u8);
+
+impl PredicateCompletionTag {
+    pub(crate) const NOT_COMPLETED: Self = Self(0);
+    pub(crate) const COMPLETED: Self = Self(1);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1];
+
+    #[allow(dead_code)]
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl From<&crate::trajectory::PredicateCompletion> for PredicateCompletionTag {
+    fn from(pc: &crate::trajectory::PredicateCompletion) -> Self {
+        use crate::trajectory::PredicateCompletion::*;
+        match pc {
+            NotCompleted => Self::NOT_COMPLETED,
+            Completed => Self::COMPLETED,
+        }
+    }
+}
+
+impl TryFrom<u8> for PredicateCompletionTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "PredicateCompletionTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for PredicateCompletionTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:115):** Pinned canonical tag for
+/// `MutationDecision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct MutationDecisionTag(u8);
+
+impl MutationDecisionTag {
+    pub(crate) const REJECT: Self = Self(0);
+    pub(crate) const ACCEPT_AS_PROGRESS: Self = Self(1);
+    pub(crate) const ACCEPT_AS_COMPLETED: Self = Self(2);
+    pub(crate) const REQUIRE_OPERATOR_APPROVAL: Self = Self(3);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3];
+
+    #[allow(dead_code)]
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl From<&crate::trajectory::MutationDecision> for MutationDecisionTag {
+    fn from(md: &crate::trajectory::MutationDecision) -> Self {
+        use crate::trajectory::MutationDecision::*;
+        match md {
+            Reject => Self::REJECT,
+            AcceptAsProgress => Self::ACCEPT_AS_PROGRESS,
+            AcceptAsCompleted => Self::ACCEPT_AS_COMPLETED,
+            RequireOperatorApproval => Self::REQUIRE_OPERATOR_APPROVAL,
+        }
+    }
+}
+
+impl TryFrom<u8> for MutationDecisionTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "MutationDecisionTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for MutationDecisionTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:115):** Pinned canonical tag for
+/// `ApplyTarget`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ApplyTargetTag(u8);
+
+impl ApplyTargetTag {
+    pub(crate) const NOT_APPLIED: Self = Self(0);
+    pub(crate) const LANE_MAINLINE: Self = Self(1);
+    pub(crate) const LANE_TRAJECTORY_CHECKPOINT: Self = Self(2);
+    pub(crate) const LANE_SANDBOX: Self = Self(3);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3];
+
+    #[allow(dead_code)]
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl From<&crate::trajectory::ApplyTarget> for ApplyTargetTag {
+    fn from(at: &crate::trajectory::ApplyTarget) -> Self {
+        use crate::trajectory::ApplyTarget::*;
+        match at {
+            NotApplied => Self::NOT_APPLIED,
+            Lane(lane) => match lane {
+                crate::trajectory::CommitLane::Mainline => Self::LANE_MAINLINE,
+                crate::trajectory::CommitLane::TrajectoryCheckpoint => {
+                    Self::LANE_TRAJECTORY_CHECKPOINT
+                }
+                crate::trajectory::CommitLane::Sandbox => Self::LANE_SANDBOX,
+            },
+        }
+    }
+}
+
+impl TryFrom<u8> for ApplyTargetTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "ApplyTargetTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for ApplyTargetTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:101, 115):** Pinned canonical tag for
+/// witness requirement disposition (`Required` / `NotRequired`). Wire serde adı DEĞİL —
+/// pinned numeric tag.
+#[allow(dead_code, reason = "Faz 4 CanonicalWitnessRequirementV2 consumer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct WitnessRequirementTag(u8);
+
+#[allow(dead_code, reason = "Faz 4 CanonicalWitnessRequirementV2 consumer")]
+impl WitnessRequirementTag {
+    pub(crate) const REQUIRED: Self = Self(0);
+    pub(crate) const NOT_REQUIRED: Self = Self(1);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1];
+
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for WitnessRequirementTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "WitnessRequirementTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for WitnessRequirementTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:101, 115):** Pinned canonical tag for
+/// witness-not-required reason. Ontolojik olarak `WitnessRequirementTag`'ten AYRI —
+/// karar durumu vs açıklama kategorisi (reviewer notu). Sayısal çakışma olsa bile
+/// ontolojik karışma engellenir.
+#[allow(dead_code, reason = "Faz 4 CanonicalWitnessRequirementV2 consumer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct WitnessNotRequiredReasonTag(u8);
+
+#[allow(dead_code, reason = "Faz 4 CanonicalWitnessRequirementV2 consumer")]
+impl WitnessNotRequiredReasonTag {
+    /// Reject → NotApplied: witness aşaması çalışmaz (plan md:100).
+    pub(crate) const REJECTED_BEFORE_WITNESS: Self = Self(0);
+
+    const VALID_TAGS: &'static [u8] = &[0];
+
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for WitnessNotRequiredReasonTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "WitnessNotRequiredReasonTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for WitnessNotRequiredReasonTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:30, 115):** Pinned canonical tag for V2 gate
+/// evaluation disposition. `GateDecisionTag` ile AYRI newtype — ontolojik kategori
+/// (deterministic gate sonucu vs V2 gate evaluation disposition) kanıtlanmadıkça tag
+/// alanı paylaşılmaz. Faz 4 structural-only placeholder; gerçek evaluator Faz 5.
+#[allow(dead_code, reason = "Faz 4 CanonicalGateEvaluationV2 consumer")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+pub(crate) struct GateDispositionV2Tag(u8);
+
+#[allow(dead_code, reason = "Faz 4 CanonicalGateEvaluationV2 consumer")]
+impl GateDispositionV2Tag {
+    /// Tüm deterministic gate'ler geçti — authorization'a devam.
+    pub(crate) const PASSED: Self = Self(0);
+    /// Bir veya daha fazla deterministic gate reddetti — authorization sonlanır.
+    pub(crate) const REJECTED: Self = Self(1);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1];
+
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for GateDispositionV2Tag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "GateDispositionV2Tag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for GateDispositionV2Tag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+/// Mevcut tag'ler (0-6) ASLA değişmez (exact pin — golden vector lock). Yeni varyantlar
+/// append-only sıradaki tag'leri alır:
+/// - `RejectedByTaskValidation` → 7
+/// - `RejectedByMeasurementBinding` → 8
+///
+/// **v1 frozen encoder ayrımı (scoped P1-2):** Bu helper v2 encoder yüzeyi — production
+/// v2 basis bunu kullanır. v1 golden re-producibility için ayrı `gate_decision_tag_v1_frozen`
+/// (0..=6, yeni varyantları temsil edemez) Faz 4'te test-only eklenecek. **v1 encoder
+/// v2-only kararları 7/8 olarak encode edemez** — fiziksel ayrı enum/function.
+///
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:115):** Helper artık `GateDecisionTag`
+/// newtype'ına delege eder (pinned tag invariant tip seviyesinde taşınır — caller
+/// discipline değil). Mapping değerleri KORUNUR → V1 digest byte'ları HİÇ DEĞİŞMEZ.
+///
+/// `gate_decision_v2_tags_are_unique_and_append_only` testi (authorization.rs test modülü)
+/// gerçek tag mapping'i çağırarak doğrular.
+/// V2 gate decision tag encoder — infallible (tüm 9 varyant). V2 basis encoder
+/// (Commit 1b/2) ve testler bunu kullanır. V1 production encoder `gate_decision_tag_v1`
+/// (fallible) kullanır — V2-only kararların V1 artifact'lerine sızması imkânsız.
+#[allow(dead_code, reason = "V2 basis encoder Commit 1b/2 + test consumer")]
+fn gate_decision_tag_v2(gd: crate::trajectory::GateDecision) -> u8 {
+    GateDecisionTag::from(&gd).as_u8()
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-1):** V1 production encoder için fallible
+/// gate decision tag mapping. Mevcut 7 varyant (0-6) `Ok` döner; V2-only varyantlar
+/// (`RejectedByTaskValidation`=7, `RejectedByMeasurementBinding`=8) `Err` döner — V1
+/// byte contract frozen.
+///
+/// `AuthorizationBasisDigest::compute` (V1 production encoder) bu fonksiyonu kullanır.
+/// V2-only kararların V1 artifact'lerine sızması imkânsız — V1 golden byte'ları HİÇ
+/// değişmez.
+///
+/// **vs `gate_decision_tag_v2`:** v2 helper infallible (tüm 9 varyant); v1 helper fallible
+/// (sadece legacy 7 varyant). Test-only paralel enum (`GateDecisionV1Frozen`) artık
+/// gerekmez — production fn gerçek V1 encoder'ı kullanır.
+fn gate_decision_tag_v1(gd: crate::trajectory::GateDecision) -> Result<u8, CanonicalDigestError> {
     use crate::trajectory::GateDecision::*;
     match gd {
-        Unknown => 0,
-        PassedAll => 1,
-        RejectedBySyntax => 2,
-        RejectedByVision => 3,
-        RejectedByRule => 4,
-        RejectedByTaskBinding => 5,
-        BlockedByManeuverLimit => 6,
+        Unknown => Ok(0),
+        PassedAll => Ok(1),
+        RejectedBySyntax => Ok(2),
+        RejectedByVision => Ok(3),
+        RejectedByRule => Ok(4),
+        RejectedByTaskBinding => Ok(5),
+        BlockedByManeuverLimit => Ok(6),
+        // V2-only varyantlar — V1 encoder bunları temsil edemez.
+        RejectedByTaskValidation => Err(CanonicalDigestError::UnsupportedV1GateDecision {
+            tag: GateDecisionTag::REJECTED_BY_TASK_VALIDATION.as_u8(),
+        }),
+        RejectedByMeasurementBinding => Err(CanonicalDigestError::UnsupportedV1GateDecision {
+            tag: GateDecisionTag::REJECTED_BY_MEASUREMENT_BINDING.as_u8(),
+        }),
     }
 }
 
 fn predicate_completion_tag(pc: crate::trajectory::PredicateCompletion) -> u8 {
-    use crate::trajectory::PredicateCompletion::*;
-    match pc {
-        NotCompleted => 0,
-        Completed => 1,
-    }
+    PredicateCompletionTag::from(&pc).as_u8()
 }
 
 fn mutation_decision_tag(md: crate::trajectory::MutationDecision) -> u8 {
-    use crate::trajectory::MutationDecision::*;
-    match md {
-        Reject => 0,
-        AcceptAsProgress => 1,
-        AcceptAsCompleted => 2,
-        RequireOperatorApproval => 3,
-    }
+    MutationDecisionTag::from(&md).as_u8()
 }
 
 fn apply_target_tag(at: &crate::trajectory::ApplyTarget) -> u8 {
-    use crate::trajectory::ApplyTarget::*;
-    match at {
-        NotApplied => 0,
-        Lane(lane) => match lane {
-            crate::trajectory::CommitLane::Mainline => 1,
-            crate::trajectory::CommitLane::TrajectoryCheckpoint => 2,
-            crate::trajectory::CommitLane::Sandbox => 3,
-        },
-    }
+    ApplyTargetTag::from(at).as_u8()
 }
 
 /// Canonical digest hesaplama hataları — tüm BLAKE3 domain-separated digest'ler için
@@ -2414,6 +3882,12 @@ pub enum CanonicalDigestError {
     /// **INV-T9 Adım 3 (P1-a):** canonical length overflow (checked u64 conversion).
     #[error("canonical length overflow in {field}")]
     LengthOverflow { field: &'static str },
+    /// **INV-T9 #70 Commit 4b Faz 4 (reviewer P0-1):** V1 encoder V2-only GateDecision
+    /// varyantlarını (RejectedByTaskValidation=7, RejectedByMeasurementBinding=8) encode
+    /// edemez — V1 byte contract frozen. Production V1 encoder (`AuthorizationBasisDigest::compute`)
+    /// `gate_decision_tag_v1` (fallible) kullanır; bu varyantlar Err döndürür.
+    #[error("V1 encoder cannot encode V2-only GateDecision variant (tag {tag}) — V1 byte contract frozen")]
+    UnsupportedV1GateDecision { tag: u8 },
 }
 
 /// Backward-compat alias — eski call site'lar çalışmaya devam eder. Yeni kod
@@ -2766,6 +4240,479 @@ pub struct AuthorizationContext {
     pub basis: AuthorizationBasis,
     /// `WitnessRequirement::from(omega)` — gerçek witness değerlendirmesiyle aynı kaynak.
     pub witness_requirement: WitnessRequirement,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — CanonicalWitnessRequirementV2 (plan md:96-102)
+//
+// **Reviewer v4 P1-1 (plan md:96-101):** Private repr — direct construct edilemez.
+// Tek creation yolu: `TryFrom<(&CanonicalWitnessPolicy, ApplyTarget)>`. Witness
+// requirement varyant/reason pinned numeric tag (wire serde adı digest girdisi DEĞİL).
+//
+// **apply_target field DEĞİL (plan md:62):** `apply_target` `mutation_decision`'dan
+// deterministic türetilir. CanonicalWitnessRequirementV2 apply_target taşımaz —
+// `TryFrom` apply_target alır ama requirement içinde saklamaz (lane/witness uyumu
+// `validate_for(apply_target)` ile runtime check).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:100):** Witness-not-required reason.
+/// Reject → NotApplied: witness aşaması çalışmaz (delta hiç uygulanmadı).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub enum WitnessNotRequiredReason {
+    /// `MutationDecision::Reject` → `ApplyTarget::NotApplied` — delta uygulanmadı,
+    /// witness aşaması çalışmaz.
+    RejectedBeforeWitness,
+}
+
+impl WitnessNotRequiredReason {
+    /// Pinned numeric tag — wire serde adı DEĞİL, digest girdisi (plan md:101).
+    pub(crate) fn tag(&self) -> WitnessNotRequiredReasonTag {
+        match self {
+            WitnessNotRequiredReason::RejectedBeforeWitness => {
+                WitnessNotRequiredReasonTag::REJECTED_BEFORE_WITNESS
+            }
+        }
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:97-99):** Canonical witness requirement V2.
+/// Private repr — direct construct edilemez. Tek creation yolu:
+/// `TryFrom<(&CanonicalWitnessPolicy, ApplyTarget)>`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CanonicalWitnessRequirementV2 {
+    repr: CanonicalWitnessRequirementRepr,
+}
+
+/// Private repr — direct construct edilemez (struct field private).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+enum CanonicalWitnessRequirementRepr {
+    /// Witness gerekmez — Reject → NotApplied (witness aşaması çalışmaz).
+    NotRequired { reason: WitnessNotRequiredReason },
+    /// Witness gerekir — min_approvers + quorum + independence policy.
+    Required {
+        min_approvers: u32,
+        quorum_threshold: CanonicalF64,
+        independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag,
+    },
+}
+
+impl CanonicalWitnessRequirementV2 {
+    /// Pinned numeric tag — `WitnessRequirementTag` (Required=0, NotRequired=1).
+    /// Wire serde adı DEĞİL, digest girdisi (plan md:101).
+    #[allow(dead_code, reason = "Faz 4 wire dispatch / Commit 1b consumer")]
+    pub(crate) fn tag(&self) -> WitnessRequirementTag {
+        match &self.repr {
+            CanonicalWitnessRequirementRepr::Required { .. } => WitnessRequirementTag::REQUIRED,
+            CanonicalWitnessRequirementRepr::NotRequired { .. } => {
+                WitnessRequirementTag::NOT_REQUIRED
+            }
+        }
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:102):** Lane/witness requirement uyumu.
+    /// `validate_for(apply_target)` — apply_target'a göre requirement geçerliliğini
+    /// kontrol eder. Reject → NotApplied için NotRequired beklenir; diğer lane'ler için
+    /// Required beklenir.
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub(crate) fn validate_for(
+        &self,
+        apply_target: &ApplyTarget,
+    ) -> Result<(), CanonicalWitnessRequirementV2Error> {
+        match (&self.repr, apply_target) {
+            // Reject → NotApplied: witness aşaması çalışmaz → NotRequired beklenir.
+            (CanonicalWitnessRequirementRepr::NotRequired { .. }, ApplyTarget::NotApplied) => {
+                Ok(())
+            }
+            // NotApplied ama Required → tutarsız (delta uygulanmadı, witness gereksiz).
+            (CanonicalWitnessRequirementRepr::Required { .. }, ApplyTarget::NotApplied) => {
+                Err(CanonicalWitnessRequirementV2Error::RequiredForNotApplied)
+            }
+            // Lane (Mainline/TrajectoryCheckpoint/Sandbox): witness gerekir → Required beklenir.
+            (CanonicalWitnessRequirementRepr::Required { .. }, ApplyTarget::Lane(_)) => Ok(()),
+            // Lane ama NotRequired → tutarsız (delta uygulandı, witness gerekir).
+            (CanonicalWitnessRequirementRepr::NotRequired { .. }, ApplyTarget::Lane(_)) => {
+                Err(CanonicalWitnessRequirementV2Error::NotRequiredForLane)
+            }
+        }
+    }
+
+    /// **Canonical byte encoding (plan md:101):** Witness requirement varyant/reason
+    /// pinned numeric tag. `AuthorizationContextDigestV2` bunu çağırır.
+    pub(crate) fn encode_canonical(
+        &self,
+        hasher: &mut blake3::Hasher,
+    ) -> Result<(), CanonicalDigestError> {
+        use crate::canonical_encoding::{encode_f64, encode_tag, encode_u32, encode_u8};
+        match &self.repr {
+            CanonicalWitnessRequirementRepr::Required {
+                min_approvers,
+                quorum_threshold,
+                independence_policy,
+            } => {
+                encode_u8(
+                    hasher,
+                    WitnessRequirementTag::REQUIRED.as_u8(),
+                    "wr_required_tag",
+                );
+                encode_u32(hasher, *min_approvers, "wr_min_approvers");
+                encode_f64(hasher, *quorum_threshold, "wr_quorum")?;
+                encode_tag(hasher, *independence_policy, "wr_independence");
+            }
+            CanonicalWitnessRequirementRepr::NotRequired { reason } => {
+                encode_u8(
+                    hasher,
+                    WitnessRequirementTag::NOT_REQUIRED.as_u8(),
+                    "wr_not_required_tag",
+                );
+                encode_u8(hasher, reason.tag().as_u8(), "wr_reason_tag");
+            }
+        }
+        Ok(())
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:99):** Tek creation yolu — policy + apply_target.
+/// `Reject → NotApplied` → `NotRequired { RejectedBeforeWitness }`. Diğer lane'ler →
+/// `Required { policy fields }`.
+impl TryFrom<(&CanonicalWitnessPolicy, &ApplyTarget)> for CanonicalWitnessRequirementV2 {
+    type Error = CanonicalWitnessRequirementV2Error;
+
+    fn try_from(
+        (policy, apply_target): (&CanonicalWitnessPolicy, &ApplyTarget),
+    ) -> Result<Self, Self::Error> {
+        let repr = match apply_target {
+            ApplyTarget::NotApplied => CanonicalWitnessRequirementRepr::NotRequired {
+                reason: WitnessNotRequiredReason::RejectedBeforeWitness,
+            },
+            ApplyTarget::Lane(_) => CanonicalWitnessRequirementRepr::Required {
+                min_approvers: policy.min_approvers,
+                quorum_threshold: policy.quorum_threshold,
+                independence_policy: policy.independence_policy,
+            },
+        };
+        Ok(Self { repr })
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4:** CanonicalWitnessRequirementV2 validation error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CanonicalWitnessRequirementV2Error {
+    #[error("witness required for NotApplied (Reject should produce NotRequired)")]
+    RequiredForNotApplied,
+    #[error("witness not required for Lane (applied delta requires witness)")]
+    NotRequiredForLane,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — CanonicalGateEvaluationV2 + VerifiedGateEvaluationV2
+// (plan md:30, 74-79)
+//
+// **3 katman ayrımı (plan md:30):** GateEvaluation — `CanonicalGateEvaluationV2`
+// persisted snapshot + `VerifiedGateEvaluationV2` opaque producer proof. Faz 4
+// structural consistency only; Faz 5 gerçek evaluator producer.
+//
+// **VerifiedGateEvaluationV2 opaque proof (plan md:75-79):**
+// - `pub(crate) struct { canonical: CanonicalGateEvaluationV2 }` — field private
+// - Serialize/Deserialize/Clone YOK
+// - Production build'de constructor YOK — Faz 5 gerçek evaluator producer
+// - `into_canonical(self) -> CanonicalGateEvaluationV2` pub(crate)
+// - `#[cfg(test)] impl { pub(crate) fn fixture(canonical) -> Self }` — authorization.rs'te
+//
+// **Proof-gated context constructor (plan md:69-72):** `AuthorizationContextV2::new`
+// `VerifiedGateEvaluationV2` tüketir; `CanonicalGateEvaluationV2` reddedilir (compile error).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:164, reviewer P1-1 v2):** Gate disposition V2
+/// error. Illegal-state matrisi + rejected gate decision validation.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum GateDispositionError {
+    #[error("invalid gate disposition: {detail}")]
+    Invalid { detail: String },
+    /// **Reviewer P1-1 v2:** `GateDecision::PassedAll`/`Unknown` rejected gate decision
+    /// olarak geçersiz — bu varyantlar deterministic gate zincirinin geçtiğini/bilinmediğini
+    /// belirtir, reddetmedi.
+    #[error("GateDecision {value:?} is not a rejected gate decision")]
+    NotARejectedGateDecision {
+        value: crate::trajectory::GateDecision,
+    },
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-1 v2):** Checked rejection gate decision.
+/// `GateDecision`'ın rejection alt kümesi — `PassedAll`/`Unknown` reject (illegal state
+/// yapısal olarak imkânsız). Rejected gate → apply_target NotApplied → witness NotRequired.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct RejectedGateDecisionV2(crate::trajectory::GateDecision);
+
+impl RejectedGateDecisionV2 {
+    /// Rejection gate decision tag — `GateDecisionTag` pinned numeric tag.
+    pub(crate) fn tag(&self) -> GateDecisionTag {
+        GateDecisionTag::from(&self.0)
+    }
+}
+
+impl TryFrom<crate::trajectory::GateDecision> for RejectedGateDecisionV2 {
+    type Error = GateDispositionError;
+
+    fn try_from(value: crate::trajectory::GateDecision) -> Result<Self, Self::Error> {
+        use crate::trajectory::GateDecision;
+        match value {
+            GateDecision::PassedAll | GateDecision::Unknown => {
+                Err(GateDispositionError::NotARejectedGateDecision { value })
+            }
+            // Tüm rejection varyantları geçerli (RejectedBySyntax/Vision/Rule/TaskBinding/
+            // BlockedByManeuverLimit/RejectedByTaskValidation/RejectedByMeasurementBinding).
+            rejected => Ok(Self(rejected)),
+        }
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:30, reviewer P1-1 v2):** Canonical gate
+/// evaluation V2 — persisted snapshot enum. Illegal state yapısal olarak imkânsız:
+///
+/// - `RejectedByGate` — deterministic gate zinciri sonlandırdı → apply_target NotApplied,
+///   witness NotRequired. `RejectedGateDecisionV2` checked (PassedAll/Unknown reject).
+/// - `GatePassed` — deterministic gate'ler geçti → mutation policy ayrı karar verdi.
+///   `MutationDecision::Reject` geçerli (predicate/policy sonucu uygulanmama).
+///
+/// **vs önceki struct model (reviewer P1-1 v1):** struct `disposition + mutation_decision`
+/// iki bağımsız field taşıyordu — `REJECTED + AcceptAsCompleted` illegal state üretilebiliyordu.
+/// Enum modeli bu state'i yapısal olarak imkânsız kılar.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum CanonicalGateEvaluationV2 {
+    /// Deterministic gate zinciri reddetti — authorization sonlanır.
+    /// apply_target = NotApplied, witness = NotRequired.
+    RejectedByGate { decision: RejectedGateDecisionV2 },
+    /// Deterministic gate'ler geçti — mutation policy karar verdi.
+    /// apply_target = mutation_decision.apply_target() (INV-T8).
+    GatePassed {
+        mutation_decision: crate::trajectory::MutationDecision,
+    },
+}
+
+impl CanonicalGateEvaluationV2 {
+    /// **Reviewer P1-1 v2:** Rejected gate constructor — checked `RejectedGateDecisionV2`.
+    #[allow(
+        dead_code,
+        reason = "Faz 5 gate evaluator producer / cfg(test) fixture"
+    )]
+    pub(crate) fn rejected_by_gate(
+        decision: crate::trajectory::GateDecision,
+    ) -> Result<Self, GateDispositionError> {
+        Ok(Self::RejectedByGate {
+            decision: RejectedGateDecisionV2::try_from(decision)?,
+        })
+    }
+
+    /// **Reviewer P1-1 v2:** Gate passed constructor — mutation decision (tüm varyantlar
+    /// geçerli, Reject dahil — predicate/policy sonucu uygulanmama).
+    #[allow(
+        dead_code,
+        reason = "Faz 5 gate evaluator producer / cfg(test) fixture"
+    )]
+    pub(crate) fn gate_passed(
+        mutation_decision: crate::trajectory::MutationDecision,
+    ) -> Result<Self, GateDispositionError> {
+        Ok(Self::GatePassed { mutation_decision })
+    }
+
+    /// **Reviewer P1-1 v2:** Apply target — disposition'a göre deterministic türetim.
+    /// `RejectedByGate` → NotApplied; `GatePassed` → mutation_decision.apply_target() (INV-T8).
+    /// apply_target field olarak saklanmaz (plan md:62).
+    pub(crate) fn apply_target(&self) -> crate::trajectory::ApplyTarget {
+        use crate::trajectory::ApplyTarget;
+        match self {
+            Self::RejectedByGate { .. } => ApplyTarget::NotApplied,
+            Self::GatePassed { mutation_decision } => mutation_decision.apply_target(),
+        }
+    }
+
+    /// **Canonical byte encoding (plan md:115, reviewer P1-1 v2):** Enum varyant tag +
+    /// payload. Illegal state yapısal olarak imkânsız olduğu için encoder state kontrolü
+    /// yapmaz. `AuthorizationContextDigestV2` bunu çağırır.
+    pub(crate) fn encode_canonical(
+        &self,
+        hasher: &mut blake3::Hasher,
+    ) -> Result<(), CanonicalDigestError> {
+        use crate::canonical_encoding::encode_u8;
+        match self {
+            Self::RejectedByGate { decision } => {
+                // **Reviewer P1-1 v3:** GateDispositionV2Tag kullan — tek authoritative
+                // mapping (PASSED=0, REJECTED=1). Hardcoded değer YOK — pinned newtype.
+                encode_u8(
+                    hasher,
+                    GateDispositionV2Tag::REJECTED.as_u8(),
+                    "gate_evaluation_rejected_by_gate",
+                );
+                encode_u8(hasher, decision.tag().as_u8(), "rejected_gate_decision_tag");
+            }
+            Self::GatePassed { mutation_decision } => {
+                encode_u8(
+                    hasher,
+                    GateDispositionV2Tag::PASSED.as_u8(),
+                    "gate_evaluation_gate_passed",
+                );
+                encode_u8(
+                    hasher,
+                    MutationDecisionTag::from(mutation_decision).as_u8(),
+                    "gate_passed_mutation_decision_tag",
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:75-79):** VerifiedGateEvaluationV2 — opaque
+/// producer proof. Field private; Serialize/Deserialize/Clone YOK. Production build'de
+/// constructor YOK — Faz 5 gerçek evaluator producer. `into_canonical(self)` pub(crate).
+///
+/// **Proof-gated context (plan md:72):** `AuthorizationContextV2::new` bu tipi tüketir;
+/// `CanonicalGateEvaluationV2` reddedilir. Invariant: "AuthorizationContextV2 yalnızca
+/// VerifiedGateEvaluationV2 tüketilerek doğabilir".
+#[derive(Debug)]
+pub(crate) struct VerifiedGateEvaluationV2 {
+    canonical: CanonicalGateEvaluationV2,
+}
+
+impl VerifiedGateEvaluationV2 {
+    /// **pub(crate) consumer (plan md:78):** Verified proof'u canonical snapshot'a
+    /// indirger. Context constructor bunu çağırır (tek yol — field private).
+    #[allow(dead_code, reason = "Faz 4 context constructor / Commit 2 consumer")]
+    pub(crate) fn into_canonical(self) -> CanonicalGateEvaluationV2 {
+        self.canonical
+    }
+
+    /// **cfg(test) fixture (plan md:79):** Test-only constructor — authorization.rs'te
+    /// (field privacy). Production build'de constructor YOK — Faz 5 gerçek evaluator.
+    #[cfg(test)]
+    #[allow(dead_code, reason = "Faz 4 test fixture — production build'de yok")]
+    pub(crate) fn fixture(canonical: CanonicalGateEvaluationV2) -> Self {
+        Self { canonical }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — AuthorizationContextV2 (plan md:69-72)
+//
+// **Proof-gated context constructor (plan md:69):**
+// - `AuthorizationContextV2::new(basis, gate_evaluation: VerifiedGateEvaluationV2,
+//    witness_requirement)` — VerifiedGateEvaluationV2 tüketir
+// - `CanonicalGateEvaluationV2` (persisted snapshot) → `new` reddedilir (compile error)
+// - Invariant: "AuthorizationContextV2 yalnızca VerifiedGateEvaluationV2 tüketilerek doğebilir"
+//
+// **Karar (reviewer #3):** Mimari invariant yeterli — trybuild YOK. Private fields +
+// tek proof-gated producer + cfg(test) fixture + doc comment (yapısal zorunluluk).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:164):** AuthorizationContextV2 build error —
+/// orchestration (Commit 2 builder). Context invariant hatası `AuthorizationContextV2Error`.
+///
+/// **P0-2 (reviewer):** Typed taxonomy — builder'ın fallible zincirinin tüm error tipleri
+/// korunur (telemetry + exact assertion). BasisDigest kaldırıldı — AuthorizationContextV2::new
+/// basis digest hesaplamıyor.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum AuthorizationContextV2BuildError {
+    #[error("engine measurement digest computation failed: {0}")]
+    EngineMeasurementDigest(#[from] crate::measurement::EngineMeasurementDigestError),
+    #[error("engine measurement binding mismatch: proof={proof}, recomputed={recomputed}")]
+    EngineMeasurementBindingMismatch { proof: String, recomputed: String },
+    #[error("canonical evidence conversion failed: {0}")]
+    Canonicalization(#[from] CanonicalizationError),
+    #[error("baseline evidence validation failed: {0}")]
+    BaselineValidation(#[from] CanonicalBaselineValidationError),
+    #[error("measurement digest computation failed: {0}")]
+    MeasurementDigest(#[from] crate::measurement::MeasurementDigestError),
+    #[error("authorization basis construction failed: {0}")]
+    Basis(#[from] AuthorizationBasisV2Error),
+    #[error("witness requirement validation failed: {0}")]
+    WitnessRequirement(#[from] CanonicalWitnessRequirementV2Error),
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:164):** AuthorizationContextV2 invariant error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum AuthorizationContextV2Error {
+    #[error("context invariant violation: {detail}")]
+    Invariant { detail: String },
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 (plan md:31, 69-72):** Authorization context V2 — basis
+/// + verified gate snapshot + canonical witness requirement. Checked constructor
+/// proof-gated: `VerifiedGateEvaluationV2` tüketir, `CanonicalGateEvaluationV2` reddeder.
+///
+/// **3 katman:** Context = Basis (kanıtsal zemin) + verified gate snapshot (Faz 5
+/// evaluator'den) + canonical witness requirement. `apply_target` context'te YOK
+/// (plan md:63 — `AuthorizationReceiptV2`'ye Faz 8'de). `witness_status` context'te YOK.
+///
+/// **P0-1 v3 (reviewer):** `serde::Serialize` intentionally absent — V2 tiplerinin
+/// tek serialization yolu wire DTO (VersionedAuthorizationBasis). Direct Serialize bypass kapalı.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AuthorizationContextV2 {
+    basis: AuthorizationBasisV2,
+    gate_evaluation: CanonicalGateEvaluationV2,
+    witness_requirement: CanonicalWitnessRequirementV2,
+}
+
+impl AuthorizationContextV2 {
+    /// **Proof-gated constructor (plan md:69, reviewer P1-1):** `VerifiedGateEvaluationV2`
+    /// tüketir. `CanonicalGateEvaluationV2` reddedilir — compile error (farklı tip).
+    /// Bypass imkânsız: `CanonicalGateEvaluationV2::try_from_parts` pub(crate) ama context
+    /// constructor `VerifiedGateEvaluationV2` ister.
+    ///
+    /// **Witness validation (reviewer P1-1):** `mutation_decision` → `apply_target()`
+    /// (INV-T8) → `witness_requirement.validate_for(apply_target)`. Tutarlılık context
+    /// sınırında doğrulanır: Reject→NotApplied→NotRequired, lane→Required.
+    ///
+    /// **Invariant:** "AuthorizationContextV2 yalnızca VerifiedGateEvaluationV2
+    /// tüketilerek doğabilir". Verified proof'un `into_canonical`'ı çağrılır (tek yol).
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub(crate) fn new(
+        basis: AuthorizationBasisV2,
+        gate_evaluation: VerifiedGateEvaluationV2,
+        witness_requirement: CanonicalWitnessRequirementV2,
+    ) -> Result<Self, AuthorizationContextV2BuildError> {
+        // Verified proof'u canonical snapshot'a indirge (tek yol — field private).
+        let canonical_gate = gate_evaluation.into_canonical();
+        // **Reviewer P1-1 v2:** enum model — apply_target disposition'a göre deterministic
+        // türetim. RejectedByGate → NotApplied → witness NotRequired beklenir. GatePassed →
+        // mutation_decision.apply_target(). Illegal state yapısal olarak imkânsız.
+        let apply_target = canonical_gate.apply_target();
+        witness_requirement.validate_for(&apply_target)?;
+        Ok(Self {
+            basis,
+            gate_evaluation: canonical_gate,
+            witness_requirement,
+        })
+    }
+
+    /// Basis accessor.
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub fn basis(&self) -> &AuthorizationBasisV2 {
+        &self.basis
+    }
+
+    /// Gate evaluation (canonical snapshot) accessor.
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub fn gate_evaluation(&self) -> &CanonicalGateEvaluationV2 {
+        &self.gate_evaluation
+    }
+
+    /// Witness requirement accessor.
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub fn witness_requirement(&self) -> &CanonicalWitnessRequirementV2 {
+        &self.witness_requirement
+    }
+
+    /// **AuthorizationContextDigestV2 (plan md:55):** V2 canonical context digest.
+    /// Basis + gate eval + witness requirement commitment. Ayrı domain separator.
+    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    pub fn compute_digest(&self) -> Result<AuthorizationContextDigestV2, CanonicalDigestError> {
+        let basis_digest = self.basis.compute_digest()?;
+        AuthorizationContextDigestV2::compute(
+            &basis_digest,
+            &self.gate_evaluation,
+            &self.witness_requirement,
+        )
+    }
 }
 
 // **INV-T9 #72 (Commit 4):** `pub type AttemptEvidenceId = u64;` KALDIRILDI.
@@ -4162,6 +6109,1042 @@ impl PendingAuthorizationStore for NullPendingAuthorizationStore {
             authorization_basis_digest: envelope.record().authorization_basis_digest.clone(),
             evidence_digest: envelope.record().evidence_digest.clone(),
         })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 — Faz 5/8 Contract Documentation
+// (plan md:197-199)
+//
+// Bu section Faz 4'ün sonraki fazlara bıraktığı contract'leri pinler. Implementation
+// yok — sadece doc invariant'lar.
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// ## Faz 5 — Gate Evaluator → VerifiedGateEvaluationV2 Gerçek Producer
+//
+// Faz 4'te `VerifiedGateEvaluationV2` production build'de constructor YOK — yalnız
+// `#[cfg(test)] fixture`. Faz 5 gerçek deterministic gate evaluator producer:
+//
+// ```text
+// Deterministic gate chain (Q4 syntax → Q5 vision → Q6 rule → Q5.b binding)
+//     ↓ Faz 5 evaluator
+// CanonicalGateEvaluationV2 (RejectedByGate { GateDecisionTag } | GatePassed { MutationDecision })
+//     ↓ VerifiedGateEvaluationV2 (opaque proof — field private)
+// ```
+//
+// Faz 5 aynı zamanda `CanonicalTrajectoryLossEvidence::Unavailable` için yeni reason
+// varyantları ekleyebilir (örn `MeasurementUnavailable`, `PolicyDoesNotRequireLoss`).
+// Commit 1b'de loss reason mapping exhaustive yapıldı — yeni varyant compiler error
+// üretir (fail-open kapalı).
+//
+// ## Faz 8 — Production Wiring + AuthorizationReceiptV2 + Omega Receipt
+//
+// Faz 4 standalone — production wiring yok. Faz 8'de atomik:
+//
+// ```text
+// commit_task_claim
+//     ↓ verify_measurement_binding (Faz 3)
+//     ↓ deterministic gate evaluation (Faz 5)
+//     ↓ canonical witness requirement derivation
+//     ↓ build_authorization_context_v2 (Faz 4 Commit 2)
+//     ↓ witness evaluation + receipt
+//     ↓ navigator V2 + persistence write V2
+//     ↓ AuthorizationReceiptV2 + omega receipt
+// ```
+//
+// `AuthorizationReceiptV2` (Faz 8):
+// - `apply_target` context'te YOK (plan md:62) — receipt'te.
+// - `witness_status` context'te YOK (plan md:63) — receipt'te.
+// - Faz 4 `AuthorizationContextV2` proof-gated construction receipt için zemin sağlar.
+//
+// ## Clone Semantiği
+//
+// `VerifiedTaskMeasurementBinding`: Clone YOK (move-only consuming projection).
+// Cross-context substitution protection (same-context replay Faz 8 commit-ledger).
+//
+// `VerifiedGateEvaluationV2`: Serialize/Deserialize/Clone YOK. Opaque proof — field
+// private. Production constructor Faz 5. `cfg(test)` fixture authorization.rs'te.
+//
+// `AuthorizationBasisV2`: Clone VAR (wire serializer field'lara erişir).
+// `AuthorizationContextV2`: Clone VAR.
+//
+// ## Digest Reccompute
+//
+// `AuthorizationBasisV2::validate_semantics` stored digest'leri reverify eder:
+// 1. Baseline reason ↔ request subject (defense-in-depth)
+// 2. Baseline digest (shared encoder `compute_measurement_baseline_digest`)
+// 3. Engine measurement digest (`compute_from_commitments` shared encoder)
+// 4. Request snapshot → digest (`compute_from_canonical` shared encoder)
+// 5. Request delta digest == basis canonical_delta_digest
+//
+// Builder (`build_authorization_context_v2`) ek olarak proof ↔ artifact mismatch
+// kontrolü yapar: `measurement.compute_digest() == proof.engine_measurement_digest()`.
+//
+// ## VersionedAuthorizationBasis JSON-Specific
+//
+// Wire contract JSON-specific (plan md:112). Generic `Deserialize` absent — dispatch
+// `serde_json::Value` peek + `RawValue` duplicate-key koruması ile. Format-agnostic
+// Serde Faz 13 kapsamında.
+//
+// ## VerifiedGateEvaluationV2 Non-Test Constructor Yok
+//
+// Production build'de `VerifiedGateEvaluationV2` constructor YOK. Faz 5 gerçek
+// evaluator producer. `into_canonical(self)` pub(crate) — context constructor
+// tüketir. `cfg(test)` fixture authorization.rs'te (field privacy).
+//
+// ## Proof-Gated Context
+//
+// `AuthorizationContextV2::new(basis, gate_evaluation: VerifiedGateEvaluationV2,
+// witness_requirement)` — `VerifiedGateEvaluationV2` tüketir. `CanonicalGateEvaluationV2`
+// (persisted snapshot) → `new` reddedilir (compile error — farklı tip). Bypass imkânsız.
+//
+// ## Baseline Digest Shared Encoder Invariant
+//
+// `MeasurementBaseline::compute_digest()` ve `CanonicalTrajectoryEvidenceBaseline::
+// compute_measurement_baseline_digest()` aynı neutral writer'ı
+// (`write_measurement_baseline_commitment`) çağırır. Drift risk yapısal kapalı.
+//
+// ## Workspace Closure
+//
+// `osp-desktop` pre-existing breakage INV-T9 #80 (Faz 11 kapsamında, Faz 4'ten
+// bağımsız). osp-core + osp-cli + diğer crate'ler `cargo check --workspace` green.
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 4 Commit 1b — VersionedAuthorizationBasis wire dispatch
+// (plan md:104-112, reviewer v2 closure)
+//
+// **Wire dispatch surface:** legacy bare-V1 + strict versioned V1/V2. Shape-based
+// dispatch ("basis" key discriminator). RawValue + duplicate-key koruması. JSON-specific.
+// V2→V1 fallback YOK. V1 frozen (wire format HİÇ değişmez). Model A (versioned payload,
+// outer basis_digest yok — self-verifying envelope Faz 8).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **P1-4 rename:** Wire schema constants — `WIRE` ayrımı (mevcut V1 basis'in kendi
+/// `schema_version: u32` alanı var, iki farklı version kavramı).
+pub const AUTHORIZATION_BASIS_WIRE_SCHEMA_V1: u16 = 1;
+pub const AUTHORIZATION_BASIS_WIRE_SCHEMA_V2: u16 = 2;
+
+/// **INV-T9 #70 Commit 4b Faz 4 Commit 1b:** Versioned authorization basis wire dispatch
+/// surface. V1 (legacy/strict) + V2 (strict). JSON-specific `from_json_slice` entry point.
+///
+/// **P2-1:** Generic `Deserialize` intentionally absent — dispatch requires duplicate-key-
+/// preserving raw JSON parsing via `from_json_slice`. Derived Deserialize would bypass
+/// strict dispatch + duplicate-key koruması.
+///
+/// **P1-1 v3 (reviewer):** Opaque struct + private repr. Checked constructor `try_v1`/
+/// `try_v2` inner schema_version exact check yapar — outer/inner version illegal state
+/// yapısal olarak imkânsız (V1 varyantı inner schema_version=1 dışını kabul etmez).
+#[derive(Debug, Clone, PartialEq)]
+pub struct VersionedAuthorizationBasis {
+    repr: VersionedAuthorizationBasisRepr,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum VersionedAuthorizationBasisRepr {
+    V1(AuthorizationBasisV1),
+    V2(AuthorizationBasisV2),
+}
+
+impl VersionedAuthorizationBasis {
+    /// **P1-1 v3:** V1 checked constructor — inner schema_version exact check.
+    /// `schema_version != 1` → `InnerV1SchemaMismatch`. Illegal state bellekte bulunamaz.
+    pub fn try_v1(basis: AuthorizationBasisV1) -> Result<Self, VersionedAuthorizationBasisError> {
+        if basis.schema_version != u32::from(AUTHORIZATION_BASIS_WIRE_SCHEMA_V1) {
+            return Err(VersionedAuthorizationBasisError::InnerV1SchemaMismatch {
+                expected: AUTHORIZATION_BASIS_WIRE_SCHEMA_V1,
+                found: basis.schema_version,
+            });
+        }
+        Ok(Self {
+            repr: VersionedAuthorizationBasisRepr::V1(basis),
+        })
+    }
+
+    /// **P1-1 v3:** V2 constructor — AuthorizationBasisV2 zaten checked constructor.
+    pub fn try_v2(basis: AuthorizationBasisV2) -> Self {
+        Self {
+            repr: VersionedAuthorizationBasisRepr::V2(basis),
+        }
+    }
+
+    /// Wire schema version — `AUTHORIZATION_BASIS_WIRE_SCHEMA_V1` veya `V2`.
+    pub fn version(&self) -> u16 {
+        match &self.repr {
+            VersionedAuthorizationBasisRepr::V1(_) => AUTHORIZATION_BASIS_WIRE_SCHEMA_V1,
+            VersionedAuthorizationBasisRepr::V2(_) => AUTHORIZATION_BASIS_WIRE_SCHEMA_V2,
+        }
+    }
+
+    /// V1 basis accessor (legacy/strict).
+    pub fn as_v1(&self) -> Option<&AuthorizationBasisV1> {
+        match &self.repr {
+            VersionedAuthorizationBasisRepr::V1(v) => Some(v),
+            VersionedAuthorizationBasisRepr::V2(_) => None,
+        }
+    }
+
+    /// V2 basis accessor (strict).
+    pub fn as_v2(&self) -> Option<&AuthorizationBasisV2> {
+        match &self.repr {
+            VersionedAuthorizationBasisRepr::V2(v) => Some(v),
+            VersionedAuthorizationBasisRepr::V1(_) => None,
+        }
+    }
+
+    /// Private repr accessor (modül içi — dispatch/serialize).
+    fn repr(&self) -> &VersionedAuthorizationBasisRepr {
+        &self.repr
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 Commit 1b (reviewer P1-3):** Versioned authorization basis
+/// wire dispatch error. Real `serde_json::Error` call-site'lar taşır — InvalidHexDigest
+/// kaldırıldı (LowerHex32 hatası envelope parse sırasında serde_json::Error içine dönüşür).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum VersionedAuthorizationBasisError {
+    #[error("invalid JSON peek: {detail}")]
+    JsonPeek { detail: String },
+    #[error("JSON parse failed: {detail}")]
+    JsonParse { detail: String },
+    #[error("top-level authorization basis must be a JSON object")]
+    TopLevelNotObject,
+    #[error("versioned V1 envelope decode failed: {detail}")]
+    VersionedV1Decode { detail: String },
+    #[error("versioned V2 envelope decode failed: {detail}")]
+    VersionedV2Decode { detail: String },
+    #[error("legacy V1 decode failed: {detail}")]
+    LegacyV1Decode { detail: String },
+    #[error("schema_version missing")]
+    MissingSchemaVersion,
+    #[error("schema_version out of u16 range: {0}")]
+    SchemaVersionOutOfRange(u64),
+    #[error("schema_version must be an unsigned integer (reject float/string/null/exponent)")]
+    SchemaVersionNotStrict,
+    #[error("unknown schema_version: {0}")]
+    UnknownSchemaVersion(u16),
+    #[error("inner V1 schema_version mismatch: expected={expected}, found={found}")]
+    InnerV1SchemaMismatch { expected: u16, found: u32 },
+    /// **P1-2 v3:** `basis` yok ama schema_version=2 → V2-shaped input, legacy fallback yok.
+    #[error("schema_version={schema_version} without 'basis' key — versioned envelope required")]
+    MissingBasisForVersionedSchema { schema_version: u16 },
+    #[error("V2 wire conversion failed: {detail}")]
+    V2WireConversion { detail: String },
+    #[error("V2 basis validation failed: {0}")]
+    V2Validation(#[from] AuthorizationBasisV2Error),
+}
+
+/// **INV-T9 #70 Commit 4b Faz 4 Commit 1b (reviewer P0-3, P1-2):** V2 wire digest — tam
+/// 64 karakter, yalnız lowercase hex [0-9a-f], 0x prefix yok. Uppercase, 0x prefix,
+/// exponent, kısa/uzun reject. Serialize + Deserialize — V2 serializer yolu da var.
+struct LowerHex32([u8; 32]);
+
+impl LowerHex32 {
+    fn into_bytes(self) -> [u8; 32] {
+        self.0
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for LowerHex32 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+        let value = String::deserialize(deserializer)?;
+        if value.len() != 64
+            || !value
+                .bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        {
+            return Err(D::Error::custom(
+                "expected exactly 64 lowercase hexadecimal characters [0-9a-f]",
+            ));
+        }
+        let decoded = hex::decode(&value).map_err(D::Error::custom)?;
+        let bytes: [u8; 32] = decoded
+            .try_into()
+            .map_err(|_| D::Error::custom("digest must be 32 bytes"))?;
+        Ok(Self(bytes))
+    }
+}
+
+impl serde::Serialize for LowerHex32 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&hex::encode(self.0))
+    }
+}
+
+// ── V2 wire DTO ağacı (reviewer P0-3, P1-1) ─────────────────────────────────────
+// Nested Serialize-only tipleri doğrudan Deserialize edilemez. Tam wire DTO ağacı.
+// Hepsi deny_unknown_fields + tag="kind" + rename_all="snake_case".
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawTrajectoryBaselineV2 {
+    Available {
+        before: RawProvenancedMeasuredResultV2,
+    },
+    Unavailable {
+        reason: RawBaselineUnavailableReasonV2,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawBaselineUnavailableReasonV2 {
+    AllMembersIntroducedByDelta {
+        members: Vec<u64>,
+    },
+    PartialNewSubject {
+        existing: Vec<u64>,
+        introduced: Vec<u64>,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawTrajectoryLossV2 {
+    Available {
+        target: RawPositionV2,
+        loss_after: f64,
+    },
+    Unavailable {
+        reason: RawTrajectoryLossUnavailableReasonV2,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RawTrajectoryLossUnavailableReasonV2 {
+    NoPreferredVector,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPositionV2 {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    v: f64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAxisMeasurementV2 {
+    value: f64,
+    source_tag: u8,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProvenancedMeasuredResultV2 {
+    coupling: RawAxisMeasurementV2,
+    cohesion: RawAxisMeasurementV2,
+    instability: RawAxisMeasurementV2,
+    entropy: RawAxisMeasurementV2,
+    witness_depth: RawAxisMeasurementV2,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawSpaceViewIdV2 {
+    Persisted { id: [u8; 16] },
+    Ephemeral { id: u64 },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSpaceViewRevisionV2 {
+    view_id: RawSpaceViewIdV2,
+    sequence: u64,
+    content_digest: LowerHex32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMeasurementRequestEvidenceV2 {
+    subject: crate::measurement::CanonicalSubjectScope,
+    impact: crate::measurement::CanonicalImpactScope,
+    base_revision: RawSpaceViewRevisionV2,
+    structural_delta_digest: LowerHex32,
+    measurement_input_digest: LowerHex32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationBasisV2 {
+    task_id: u64,
+    claim_id: u64,
+    task_claim_digest: LowerHex32,
+    task_goal_digest: LowerHex32,
+    measurement_digest: LowerHex32,
+    engine_measurement_digest: LowerHex32,
+    trajectory_baseline: RawTrajectoryBaselineV2,
+    measurement_baseline_digest: LowerHex32,
+    trajectory_loss: RawTrajectoryLossV2,
+    measurement_request: RawMeasurementRequestEvidenceV2,
+    measurement_request_digest: LowerHex32,
+    measurement_context_digest: LowerHex32,
+    canonical_delta_digest: LowerHex32,
+}
+
+// ── Envelope tipleri (reviewer P0-2) ────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationBasisV2Envelope {
+    schema_version: u16,
+    basis: RawAuthorizationBasisV2,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationBasisV1Envelope {
+    schema_version: u16,
+    basis: RawAuthorizationBasisV1TopLevelStrict,
+}
+
+/// **P1-2 V1 strictlik:** Top-level strict, nested legacy semantics korur. Tam recursive
+/// strictlik gereksiz risk (frozen V1 uyumluluğu). Basis top-level field'ları strict,
+/// nested V1 representation mevcut parser davranışını korur.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAuthorizationBasisV1TopLevelStrict {
+    schema_version: u32,
+    task_id: crate::trajectory::TaskId,
+    claim_identity: ClaimIdentity,
+    claim_author: ClaimAuthor,
+    structural_delta: CanonicalStructuralDelta,
+    predicate_content: CanonicalPredicateContent,
+    predicate_evaluation: PredicateEvaluationBasis,
+    measured_result: ProvenancedMeasuredResult,
+    deterministic_gate_result: crate::trajectory::GateDecision,
+    predicate_completion: crate::trajectory::PredicateCompletion,
+    mutation_decision: crate::trajectory::MutationDecision,
+    intended_apply_target: crate::trajectory::ApplyTarget,
+    witness_policy: CanonicalWitnessPolicy,
+    measurement_input_digest: MeasurementInputDigest,
+    evaluation_context_digest: EvaluationContextDigest,
+    base_space_view_revision: SpaceViewRevision,
+}
+
+impl RawAuthorizationBasisV1TopLevelStrict {
+    fn into_domain(self) -> AuthorizationBasisV1 {
+        AuthorizationBasis {
+            schema_version: self.schema_version,
+            task_id: self.task_id,
+            claim_identity: self.claim_identity,
+            claim_author: self.claim_author,
+            structural_delta: self.structural_delta,
+            predicate_content: self.predicate_content,
+            predicate_evaluation: self.predicate_evaluation,
+            measured_result: self.measured_result,
+            deterministic_gate_result: self.deterministic_gate_result,
+            predicate_completion: self.predicate_completion,
+            mutation_decision: self.mutation_decision,
+            intended_apply_target: self.intended_apply_target,
+            witness_policy: self.witness_policy,
+            measurement_input_digest: self.measurement_input_digest,
+            evaluation_context_digest: self.evaluation_context_digest,
+            base_space_view_revision: self.base_space_view_revision,
+        }
+    }
+}
+
+// Serialize ref'ler (clone yok — &self üzerinden)
+#[derive(serde::Serialize)]
+struct VersionedV1EnvelopeRef<'a> {
+    schema_version: u16,
+    basis: &'a AuthorizationBasisV1,
+}
+
+#[derive(serde::Serialize)]
+struct VersionedV2EnvelopeRef<'a> {
+    schema_version: u16,
+    basis: RawAuthorizationBasisV2Ref<'a>,
+}
+
+/// V2 basis → wire DTO (borrow, clone yok).
+#[derive(serde::Serialize)]
+struct RawAuthorizationBasisV2Ref<'a> {
+    task_id: u64,
+    claim_id: u64,
+    task_claim_digest: LowerHex32,
+    task_goal_digest: LowerHex32,
+    measurement_digest: LowerHex32,
+    engine_measurement_digest: LowerHex32,
+    trajectory_baseline: RawTrajectoryBaselineV2Ref<'a>,
+    measurement_baseline_digest: LowerHex32,
+    trajectory_loss: RawTrajectoryLossV2Ref<'a>,
+    measurement_request: RawMeasurementRequestEvidenceV2Ref<'a>,
+    measurement_request_digest: LowerHex32,
+    measurement_context_digest: LowerHex32,
+    canonical_delta_digest: LowerHex32,
+}
+
+impl<'a> RawAuthorizationBasisV2Ref<'a> {
+    #[allow(dead_code)]
+    fn from_domain(basis: &'a AuthorizationBasisV2) -> Self {
+        Self {
+            task_id: basis.task_id(),
+            claim_id: basis.claim_id(),
+            task_claim_digest: LowerHex32(*basis.task_claim_digest().as_bytes()),
+            task_goal_digest: LowerHex32(*basis.task_goal_digest().as_bytes()),
+            measurement_digest: LowerHex32(*basis.measurement_digest().as_bytes()),
+            engine_measurement_digest: LowerHex32(*basis.engine_measurement_digest().as_bytes()),
+            trajectory_baseline: RawTrajectoryBaselineV2Ref::from_domain(
+                basis.trajectory_baseline(),
+            ),
+            measurement_baseline_digest: LowerHex32(
+                *basis.measurement_baseline_digest().as_bytes(),
+            ),
+            trajectory_loss: RawTrajectoryLossV2Ref::from_domain(basis.trajectory_loss()),
+            measurement_request: RawMeasurementRequestEvidenceV2Ref::from_domain(
+                basis.measurement_request(),
+            ),
+            measurement_request_digest: LowerHex32(*basis.measurement_request_digest().as_bytes()),
+            measurement_context_digest: LowerHex32(*basis.measurement_context_digest().as_bytes()),
+            canonical_delta_digest: LowerHex32(*basis.canonical_delta_digest().as_bytes()),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawTrajectoryBaselineV2Ref<'a> {
+    Available {
+        before: RawProvenancedMeasuredResultV2Ref<'a>,
+    },
+    Unavailable {
+        reason: RawBaselineUnavailableReasonV2Ref<'a>,
+    },
+}
+
+impl<'a> RawTrajectoryBaselineV2Ref<'a> {
+    fn from_domain(baseline: &'a CanonicalTrajectoryEvidenceBaseline) -> Self {
+        match baseline {
+            CanonicalTrajectoryEvidenceBaseline::Available { before } => Self::Available {
+                before: RawProvenancedMeasuredResultV2Ref::from_domain(before),
+            },
+            CanonicalTrajectoryEvidenceBaseline::Unavailable { reason } => Self::Unavailable {
+                reason: RawBaselineUnavailableReasonV2Ref::from_domain(reason),
+            },
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawBaselineUnavailableReasonV2Ref<'a> {
+    AllMembersIntroducedByDelta {
+        members: &'a [crate::space::NodeId],
+    },
+    PartialNewSubject {
+        existing: &'a [crate::space::NodeId],
+        introduced: &'a [crate::space::NodeId],
+    },
+}
+
+impl<'a> RawBaselineUnavailableReasonV2Ref<'a> {
+    fn from_domain(reason: &'a CanonicalBaselineUnavailableReason) -> Self {
+        match reason.view() {
+            CanonicalBaselineUnavailableReasonView::AllMembersIntroducedByDelta { members } => {
+                Self::AllMembersIntroducedByDelta { members }
+            }
+            CanonicalBaselineUnavailableReasonView::PartialNewSubject {
+                existing,
+                introduced,
+            } => Self::PartialNewSubject {
+                existing,
+                introduced,
+            },
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawTrajectoryLossV2Ref<'a> {
+    Available {
+        target: RawPositionV2Ref<'a>,
+        loss_after: CanonicalF64,
+    },
+    Unavailable {
+        reason: RawTrajectoryLossUnavailableReasonV2,
+    },
+}
+
+impl<'a> RawTrajectoryLossV2Ref<'a> {
+    fn from_domain(loss: &'a CanonicalTrajectoryLossEvidence) -> Self {
+        match loss {
+            CanonicalTrajectoryLossEvidence::Available { target, loss_after } => Self::Available {
+                target: RawPositionV2Ref::from_domain(target),
+                loss_after: *loss_after,
+            },
+            // **P1-3 v3:** Exhaustive match — yeni reason varyantı compiler error üretir.
+            CanonicalTrajectoryLossEvidence::Unavailable {
+                reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+            } => Self::Unavailable {
+                reason: RawTrajectoryLossUnavailableReasonV2::NoPreferredVector,
+            },
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RawPositionV2Ref<'a> {
+    x: CanonicalF64,
+    y: CanonicalF64,
+    z: CanonicalF64,
+    w: CanonicalF64,
+    v: CanonicalF64,
+    #[serde(skip)]
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> RawPositionV2Ref<'a> {
+    fn from_domain(pos: &'a CanonicalRawPosition) -> Self {
+        Self {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            w: pos.w,
+            v: pos.v,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RawProvenancedMeasuredResultV2Ref<'a> {
+    coupling: RawAxisMeasurementV2Ref<'a>,
+    cohesion: RawAxisMeasurementV2Ref<'a>,
+    instability: RawAxisMeasurementV2Ref<'a>,
+    entropy: RawAxisMeasurementV2Ref<'a>,
+    witness_depth: RawAxisMeasurementV2Ref<'a>,
+}
+
+impl<'a> RawProvenancedMeasuredResultV2Ref<'a> {
+    fn from_domain(result: &'a ProvenancedMeasuredResult) -> Self {
+        Self {
+            coupling: RawAxisMeasurementV2Ref::from_domain(&result.coupling),
+            cohesion: RawAxisMeasurementV2Ref::from_domain(&result.cohesion),
+            instability: RawAxisMeasurementV2Ref::from_domain(&result.instability),
+            entropy: RawAxisMeasurementV2Ref::from_domain(&result.entropy),
+            witness_depth: RawAxisMeasurementV2Ref::from_domain(&result.witness_depth),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RawAxisMeasurementV2Ref<'a> {
+    value: CanonicalF64,
+    source_tag: u8,
+    #[serde(skip)]
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> RawAxisMeasurementV2Ref<'a> {
+    fn from_domain(axis: &'a CanonicalAxisMeasurement) -> Self {
+        Self {
+            value: axis.value,
+            source_tag: axis.source.as_u8(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RawMeasurementRequestEvidenceV2Ref<'a> {
+    subject: &'a crate::measurement::CanonicalSubjectScope,
+    impact: &'a crate::measurement::CanonicalImpactScope,
+    base_revision: RawSpaceViewRevisionV2Ref<'a>,
+    structural_delta_digest: LowerHex32,
+    measurement_input_digest: LowerHex32,
+}
+
+impl<'a> RawMeasurementRequestEvidenceV2Ref<'a> {
+    fn from_domain(evidence: &'a crate::measurement::CanonicalMeasurementRequestEvidence) -> Self {
+        Self {
+            subject: &evidence.subject,
+            impact: &evidence.impact,
+            base_revision: RawSpaceViewRevisionV2Ref::from_domain(&evidence.base_revision),
+            structural_delta_digest: LowerHex32(*evidence.structural_delta_digest.as_bytes()),
+            measurement_input_digest: LowerHex32(*evidence.measurement_input_digest.as_bytes()),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+struct RawSpaceViewRevisionV2Ref<'a> {
+    view_id: RawSpaceViewIdV2Ref<'a>,
+    sequence: u64,
+    content_digest: LowerHex32,
+}
+
+impl<'a> RawSpaceViewRevisionV2Ref<'a> {
+    fn from_domain(rev: &'a SpaceViewRevision) -> Self {
+        Self {
+            view_id: RawSpaceViewIdV2Ref::from_domain(&rev.view_id),
+            sequence: rev.sequence,
+            content_digest: LowerHex32(*rev.content_digest.as_bytes()),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawSpaceViewIdV2Ref<'a> {
+    Persisted { id: &'a [u8; 16] },
+    Ephemeral { id: u64 },
+}
+
+impl<'a> RawSpaceViewIdV2Ref<'a> {
+    fn from_domain(view_id: &'a SpaceViewId) -> Self {
+        match view_id {
+            SpaceViewId::Persisted(id) => Self::Persisted { id: id.as_bytes() },
+            SpaceViewId::Ephemeral(id) => Self::Ephemeral { id: *id },
+        }
+    }
+}
+
+// ── Dispatch + conversion (reviewer P0-1, P0-4, P1-4) ───────────────────────────
+
+impl VersionedAuthorizationBasis {
+    /// **P2-1:** JSON-specific entry point. RawValue ile duplicate-key koruması.
+    /// Generic Deserialize intentionally absent — dispatch requires duplicate-key-
+    /// preserving raw JSON parsing.
+    #[allow(dead_code, reason = "Faz 4 wire restore / Commit 1b consumer")]
+    pub fn from_json_slice(data: &[u8]) -> Result<Self, VersionedAuthorizationBasisError> {
+        // Top-level RawValue — duplicate-key preserved.
+        let raw_value: &serde_json::value::RawValue =
+            serde_json::from_slice(data).map_err(|e| {
+                VersionedAuthorizationBasisError::JsonParse {
+                    detail: e.to_string(),
+                }
+            })?;
+        // Peek outer shape (Value — dispatch only, typed parse sonra).
+        let peek: serde_json::Value = serde_json::from_str(raw_value.get()).map_err(|e| {
+            VersionedAuthorizationBasisError::JsonPeek {
+                detail: e.to_string(),
+            }
+        })?;
+        // Top-level non-object check (P2-2).
+        if !peek.is_object() {
+            return Err(VersionedAuthorizationBasisError::TopLevelNotObject);
+        }
+        // Shape-based dispatch (P0-1): "basis" key discriminator (P1-4 reserved).
+        if peek.get("basis").is_some() {
+            // Explicit versioned envelope.
+            let schema_version = parse_outer_schema_version_strictly(&peek)?;
+            match schema_version {
+                AUTHORIZATION_BASIS_WIRE_SCHEMA_V1 => {
+                    let env: RawAuthorizationBasisV1Envelope =
+                        serde_json::from_str(raw_value.get()).map_err(|e| {
+                            VersionedAuthorizationBasisError::VersionedV1Decode {
+                                detail: e.to_string(),
+                            }
+                        })?;
+                    if env.schema_version != AUTHORIZATION_BASIS_WIRE_SCHEMA_V1 {
+                        return Err(VersionedAuthorizationBasisError::UnknownSchemaVersion(
+                            env.schema_version,
+                        ));
+                    }
+                    // env.basis.try_into() inner schema check yapar → AuthorizationBasisV1.
+                    // try_v1 tekrar check eder (double-check defense-in-depth).
+                    let basis: AuthorizationBasisV1 = env.basis.try_into()?;
+                    Self::try_v1(basis)
+                }
+                AUTHORIZATION_BASIS_WIRE_SCHEMA_V2 => {
+                    let env: RawAuthorizationBasisV2Envelope =
+                        serde_json::from_str(raw_value.get()).map_err(|e| {
+                            VersionedAuthorizationBasisError::VersionedV2Decode {
+                                detail: e.to_string(),
+                            }
+                        })?;
+                    if env.schema_version != AUTHORIZATION_BASIS_WIRE_SCHEMA_V2 {
+                        return Err(VersionedAuthorizationBasisError::UnknownSchemaVersion(
+                            env.schema_version,
+                        ));
+                    }
+                    let basis = AuthorizationBasisV2::from_wire(env.basis)?;
+                    Ok(Self::try_v2(basis))
+                }
+                unknown => Err(VersionedAuthorizationBasisError::UnknownSchemaVersion(
+                    unknown,
+                )),
+            }
+        } else {
+            // **P1-2 v3:** "basis" key yok. Önce inner schema_version sınıflandır —
+            // V2-shaped input (schema_version=2 + basis yok) hiçbir koşulda legacy V1
+            // parser'a ulaşmaz. V1 (schema_version=1 veya yok) → legacy parse.
+            match peek.get("schema_version") {
+                None => {
+                    // schema_version yok → legacy bare V1 (permissive parser korur).
+                    let basis: AuthorizationBasisV1 = serde_json::from_str(raw_value.get())
+                        .map_err(|e| VersionedAuthorizationBasisError::LegacyV1Decode {
+                            detail: e.to_string(),
+                        })?;
+                    Self::try_v1(basis)
+                }
+                Some(serde_json::Value::Number(n)) if n.is_u64() => {
+                    let raw = n.as_u64().unwrap();
+                    match u16::try_from(raw) {
+                        Ok(AUTHORIZATION_BASIS_WIRE_SCHEMA_V1) => {
+                            // Legacy V1 with schema_version=1.
+                            let basis: AuthorizationBasisV1 = serde_json::from_str(raw_value.get())
+                                .map_err(|e| VersionedAuthorizationBasisError::LegacyV1Decode {
+                                    detail: e.to_string(),
+                                })?;
+                            Self::try_v1(basis)
+                        }
+                        Ok(AUTHORIZATION_BASIS_WIRE_SCHEMA_V2) => {
+                            // schema_version=2 ama basis yok → V2-shaped, versioned
+                            // envelope required. Legacy fallback YOK.
+                            Err(
+                                VersionedAuthorizationBasisError::MissingBasisForVersionedSchema {
+                                    schema_version: AUTHORIZATION_BASIS_WIRE_SCHEMA_V2,
+                                },
+                            )
+                        }
+                        Ok(other) => {
+                            // **P2-1 v2:** Unknown version → UnknownSchemaVersion
+                            // (typed taxonomy tutarlı — envelope shape ile aynı error).
+                            Err(VersionedAuthorizationBasisError::UnknownSchemaVersion(
+                                other,
+                            ))
+                        }
+                        Err(_) => Err(VersionedAuthorizationBasisError::SchemaVersionOutOfRange(
+                            raw,
+                        )),
+                    }
+                }
+                Some(_) => Err(VersionedAuthorizationBasisError::SchemaVersionNotStrict),
+            }
+        }
+    }
+}
+
+/// **P2-3 (exponent dahil):** Strict numeric schema_version parse. `is_u64()` float/
+/// exponent'i reject eder (1.0, 1e0 `is_u64()` false). String/null/missing ayrı reject.
+fn parse_outer_schema_version_strictly(
+    peek: &serde_json::Value,
+) -> Result<u16, VersionedAuthorizationBasisError> {
+    match peek.get("schema_version") {
+        Some(serde_json::Value::Number(n)) if n.is_u64() => {
+            let raw = n.as_u64().unwrap();
+            u16::try_from(raw)
+                .map_err(|_| VersionedAuthorizationBasisError::SchemaVersionOutOfRange(raw))
+        }
+        Some(_) => Err(VersionedAuthorizationBasisError::SchemaVersionNotStrict),
+        None => Err(VersionedAuthorizationBasisError::MissingSchemaVersion),
+    }
+}
+
+/// **P1-4:** Versioned V1 TryFrom — inner schema_version exact check.
+impl TryFrom<RawAuthorizationBasisV1TopLevelStrict> for AuthorizationBasisV1 {
+    type Error = VersionedAuthorizationBasisError;
+
+    fn try_from(raw: RawAuthorizationBasisV1TopLevelStrict) -> Result<Self, Self::Error> {
+        if raw.schema_version != u32::from(AUTHORIZATION_BASIS_WIRE_SCHEMA_V1) {
+            return Err(VersionedAuthorizationBasisError::InnerV1SchemaMismatch {
+                expected: AUTHORIZATION_BASIS_WIRE_SCHEMA_V1,
+                found: raw.schema_version,
+            });
+        }
+        Ok(raw.into_domain())
+    }
+}
+
+impl serde::Serialize for VersionedAuthorizationBasis {
+    /// **P0-2:** Her iki varyant için explicit envelope. Clone yok — `&self`.
+    /// Legacy yazım yalnız doğrudan `AuthorizationBasisV1` serializer'ı ile.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self.repr() {
+            VersionedAuthorizationBasisRepr::V1(basis) => VersionedV1EnvelopeRef {
+                schema_version: AUTHORIZATION_BASIS_WIRE_SCHEMA_V1,
+                basis,
+            }
+            .serialize(serializer),
+            VersionedAuthorizationBasisRepr::V2(basis) => VersionedV2EnvelopeRef {
+                schema_version: AUTHORIZATION_BASIS_WIRE_SCHEMA_V2,
+                basis: RawAuthorizationBasisV2Ref::from_domain(basis),
+            }
+            .serialize(serializer),
+        }
+    }
+}
+
+impl AuthorizationBasisV2 {
+    /// **P0-3 conversion sırası:** Raw wire DTO → checked domain construction.
+    /// 1. subject parse. 2. baseline reason + subject → try_from_reason (union invariant).
+    /// 3. trajectory loss local invariant (finite + >= 0, target finite). 4. new() validate_semantics.
+    #[allow(dead_code, reason = "Faz 4 wire restore / Commit 1b consumer")]
+    fn from_wire(raw: RawAuthorizationBasisV2) -> Result<Self, VersionedAuthorizationBasisError> {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+
+        // Trajectory baseline conversion.
+        let trajectory_baseline = match raw.trajectory_baseline {
+            RawTrajectoryBaselineV2::Available { before } => {
+                let mk_axis =
+                    |a: RawAxisMeasurementV2| -> Result<_, VersionedAuthorizationBasisError> {
+                        let source =
+                            CanonicalMetricSourceTag::try_from(a.source_tag).map_err(|e| {
+                                VersionedAuthorizationBasisError::V2WireConversion {
+                                    detail: format!("axis source_tag: {e}"),
+                                }
+                            })?;
+                        Ok(CanonicalAxisMeasurement {
+                            value: a.value,
+                            source,
+                        })
+                    };
+                CanonicalTrajectoryEvidenceBaseline::Available {
+                    before: ProvenancedMeasuredResult {
+                        coupling: mk_axis(before.coupling)?,
+                        cohesion: mk_axis(before.cohesion)?,
+                        instability: mk_axis(before.instability)?,
+                        entropy: mk_axis(before.entropy)?,
+                        witness_depth: mk_axis(before.witness_depth)?,
+                    },
+                }
+            }
+            RawTrajectoryBaselineV2::Unavailable { reason } => {
+                let raw_reason = match reason {
+                    RawBaselineUnavailableReasonV2::AllMembersIntroducedByDelta { members } => {
+                        crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                            members,
+                        }
+                    }
+                    RawBaselineUnavailableReasonV2::PartialNewSubject {
+                        existing,
+                        introduced,
+                    } => crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+                        existing,
+                        introduced,
+                    },
+                };
+                let canonical_reason = CanonicalBaselineUnavailableReason::try_from_reason(
+                    &raw_reason,
+                    &raw.measurement_request.subject.clone(),
+                )
+                .map_err(|e| {
+                    VersionedAuthorizationBasisError::V2WireConversion {
+                        detail: e.to_string(),
+                    }
+                })?;
+                CanonicalTrajectoryEvidenceBaseline::Unavailable {
+                    reason: canonical_reason,
+                }
+            }
+        };
+
+        // Trajectory loss conversion + local invariant (P1-5).
+        let trajectory_loss = match raw.trajectory_loss {
+            RawTrajectoryLossV2::Available { target, loss_after } => {
+                // P1-5: loss_after finite + >= 0.0 (Euclidean distance semantics).
+                if !loss_after.is_finite() || loss_after < 0.0 {
+                    return Err(VersionedAuthorizationBasisError::V2WireConversion {
+                        detail: format!("loss_after must be finite and >= 0.0, got {loss_after}"),
+                    });
+                }
+                // P1-5: target all axes finite.
+                for (axis, value) in [
+                    ("x", target.x),
+                    ("y", target.y),
+                    ("z", target.z),
+                    ("w", target.w),
+                    ("v", target.v),
+                ] {
+                    if !value.is_finite() {
+                        return Err(VersionedAuthorizationBasisError::V2WireConversion {
+                            detail: format!("target axis {axis} must be finite, got {value}"),
+                        });
+                    }
+                }
+                CanonicalTrajectoryLossEvidence::Available {
+                    target: CanonicalRawPosition {
+                        x: target.x,
+                        y: target.y,
+                        z: target.z,
+                        w: target.w,
+                        v: target.v,
+                    },
+                    loss_after,
+                }
+            }
+            // **P1-3 v3:** Exhaustive match — yeni wire reason varyantı compiler error üretir.
+            RawTrajectoryLossV2::Unavailable {
+                reason: RawTrajectoryLossUnavailableReasonV2::NoPreferredVector,
+            } => CanonicalTrajectoryLossEvidence::Unavailable {
+                reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+            },
+        };
+
+        // Measurement request evidence conversion.
+        let base_revision = SpaceViewRevision {
+            view_id: match raw.measurement_request.base_revision.view_id {
+                RawSpaceViewIdV2::Persisted { id } => {
+                    SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes(id))
+                }
+                RawSpaceViewIdV2::Ephemeral { id } => SpaceViewId::Ephemeral(id),
+            },
+            sequence: raw.measurement_request.base_revision.sequence,
+            content_digest: SpaceDigest::from_bytes(
+                raw.measurement_request
+                    .base_revision
+                    .content_digest
+                    .into_bytes(),
+            ),
+        };
+        let measurement_request = crate::measurement::CanonicalMeasurementRequestEvidence {
+            subject: raw.measurement_request.subject,
+            impact: raw.measurement_request.impact,
+            base_revision,
+            structural_delta_digest: crate::measurement::MeasurementDeltaDigest::from_bytes(
+                raw.measurement_request.structural_delta_digest.into_bytes(),
+            ),
+            measurement_input_digest: MeasurementInputDigest::from_bytes(
+                raw.measurement_request
+                    .measurement_input_digest
+                    .into_bytes(),
+            ),
+        };
+
+        // AuthorizationBasisV2::new — validate_semantics (nested commitment reverify).
+        Self::new(
+            raw.task_id,
+            raw.claim_id,
+            crate::measurement::TaskClaimDigest::from_bytes(raw.task_claim_digest.into_bytes()),
+            crate::measurement::TaskGoalDigest::from_bytes(raw.task_goal_digest.into_bytes()),
+            crate::measurement::MeasurementDigest::from_bytes(raw.measurement_digest.into_bytes()),
+            crate::measurement::EngineMeasurementDigest::from_bytes(
+                raw.engine_measurement_digest.into_bytes(),
+            ),
+            trajectory_baseline,
+            crate::measurement::MeasurementBaselineDigest::from_bytes(
+                raw.measurement_baseline_digest.into_bytes(),
+            ),
+            trajectory_loss,
+            measurement_request,
+            crate::measurement::MeasurementRequestDigest::from_bytes(
+                raw.measurement_request_digest.into_bytes(),
+            ),
+            crate::measurement::MeasurementContextDigest::from_bytes(
+                raw.measurement_context_digest.into_bytes(),
+            ),
+            crate::measurement::MeasurementDeltaDigest::from_bytes(
+                raw.canonical_delta_digest.into_bytes(),
+            ),
+        )
+        .map_err(VersionedAuthorizationBasisError::V2Validation)
     }
 }
 
@@ -9186,5 +12169,1951 @@ v = 0.5
             receipt1.evidence_digest, receipt2.evidence_digest,
             "distinct attempt → distinct evidence digest"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 4 (reviewer P0-1) — V1 production encoder frozen
+    //
+    // **Production `gate_decision_tag_v1`** (fallible): mevcut 7 varyant (0-6) `Ok`,
+    // V2-only varyantlar (RejectedByTaskValidation=7, RejectedByMeasurementBinding=8)
+    // `Err(UnsupportedV1GateDecision)`. `AuthorizationBasisDigest::compute` (V1 production
+    // encoder) bunu kullanır — V2-only kararların V1 artifact'lerine sızması imkânsız.
+    // Eski test-only paralel enum (`GateDecisionV1Frozen`) kaldırıldı; production fn
+    // gerçek V1 encoder'ı kullanır.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn v1_encoder_gate_decision_tag_accepts_legacy_variants() {
+        // Reviewer P0-1: production gate_decision_tag_v1 legacy 7 varyant (0-6) kabul eder.
+        use crate::trajectory::GateDecision::*;
+        assert_eq!(gate_decision_tag_v1(Unknown).unwrap(), 0);
+        assert_eq!(gate_decision_tag_v1(PassedAll).unwrap(), 1);
+        assert_eq!(gate_decision_tag_v1(RejectedBySyntax).unwrap(), 2);
+        assert_eq!(gate_decision_tag_v1(RejectedByVision).unwrap(), 3);
+        assert_eq!(gate_decision_tag_v1(RejectedByRule).unwrap(), 4);
+        assert_eq!(gate_decision_tag_v1(RejectedByTaskBinding).unwrap(), 5);
+        assert_eq!(gate_decision_tag_v1(BlockedByManeuverLimit).unwrap(), 6);
+    }
+
+    #[test]
+    fn v1_encoder_gate_decision_tag_rejects_v2_variants() {
+        // Reviewer P0-1: V2-only varyantlar (7, 8) V1 encoder'da reject — V1 byte contract frozen.
+        use crate::trajectory::GateDecision::*;
+        let err1 = gate_decision_tag_v1(RejectedByTaskValidation)
+            .expect_err("RejectedByTaskValidation reject");
+        assert!(
+            matches!(
+                err1,
+                CanonicalDigestError::UnsupportedV1GateDecision { tag: 7 }
+            ),
+            "RejectedByTaskValidation (tag 7) reject"
+        );
+        let err2 = gate_decision_tag_v1(RejectedByMeasurementBinding)
+            .expect_err("RejectedByMeasurementBinding reject");
+        assert!(
+            matches!(
+                err2,
+                CanonicalDigestError::UnsupportedV1GateDecision { tag: 8 }
+            ),
+            "RejectedByMeasurementBinding (tag 8) reject"
+        );
+    }
+
+    #[test]
+    fn v1_basis_compute_rejects_v2_gate_decision() {
+        // Reviewer P0-1: V2-only GateDecision içeren V1 basis → AuthorizationBasisDigest::compute Err.
+        // V1 byte contract frozen — V2-only kararların V1 artifact'lerine sızması imkânsız.
+        let mut basis = golden_authorization_basis_fixture();
+        basis.deterministic_gate_result = crate::trajectory::GateDecision::RejectedByTaskValidation;
+        let err = AuthorizationBasisDigest::compute(&basis)
+            .expect_err("V1 basis with V2 GateDecision must reject");
+        assert!(
+            matches!(
+                err,
+                CanonicalDigestError::UnsupportedV1GateDecision { tag: 7 }
+            ),
+            "V1 encoder must reject V2-only GateDecision"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b — GateDecision v2 append-only tag mapping test
+    // (reviewer Faz 2 scoped P1-2: gerçek tag mapping'i doğrudan çağırır)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn gate_decision_v2_tags_are_unique_and_append_only() {
+        // Reviewer v4 P1-4 + Faz 2 scoped P1-2: append-only canonical tag invariant.
+        // gate_decision_tag_v2 helper'ını doğrudan çağırarak gerçek tag mapping'i test eder.
+        use crate::trajectory::GateDecision::*;
+        // Mevcut tag'ler (0-6) exact pin — golden vector lock.
+        assert_eq!(gate_decision_tag_v2(Unknown), 0);
+        assert_eq!(gate_decision_tag_v2(PassedAll), 1);
+        assert_eq!(gate_decision_tag_v2(RejectedBySyntax), 2);
+        assert_eq!(gate_decision_tag_v2(RejectedByVision), 3);
+        assert_eq!(gate_decision_tag_v2(RejectedByRule), 4);
+        assert_eq!(gate_decision_tag_v2(RejectedByTaskBinding), 5);
+        assert_eq!(gate_decision_tag_v2(BlockedByManeuverLimit), 6);
+        // Commit 4b — append-only yeni tag'ler (7, 8).
+        assert_eq!(gate_decision_tag_v2(RejectedByTaskValidation), 7);
+        assert_eq!(gate_decision_tag_v2(RejectedByMeasurementBinding), 8);
+
+        // Uniqueness: tüm tag'ler distinct.
+        let all_tags: Vec<u8> = [
+            Unknown,
+            PassedAll,
+            RejectedBySyntax,
+            RejectedByVision,
+            RejectedByRule,
+            RejectedByTaskBinding,
+            BlockedByManeuverLimit,
+            RejectedByTaskValidation,
+            RejectedByMeasurementBinding,
+        ]
+        .iter()
+        .map(|gd| gate_decision_tag_v2(*gd))
+        .collect();
+        let mut sorted_tags = all_tags.clone();
+        sorted_tags.sort_unstable();
+        sorted_tags.dedup();
+        assert_eq!(
+            sorted_tags.len(),
+            all_tags.len(),
+            "all GateDecision v2 tags must be unique (no tag reuse)"
+        );
+        // Range: 0..=8 (append-only — hiçbir tag 8'in üstüne çıkmaz Commit 4b'de).
+        assert!(
+            all_tags.iter().all(|&t| t <= 8),
+            "Commit 4b GateDecision tags must be in range 0..=8"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b — CanonicalBaselineUnavailableReason validation matrisi
+    // (reviewer Faz 2 scoped P2-2: duplicate/subject-mismatch/empty/not-disjoint/union)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    fn subject_scope(members: Vec<u64>) -> crate::measurement::CanonicalSubjectScope {
+        crate::measurement::CanonicalSubjectScope::try_new(members).unwrap()
+    }
+
+    #[test]
+    fn canonical_baseline_all_members_duplicate_rejected() {
+        let subject = subject_scope(vec![1, 2]);
+        let reason = crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+            members: vec![1, 1, 2], // duplicate 1
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::AllMembersDuplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_all_members_subject_mismatch_rejected() {
+        let subject = subject_scope(vec![1, 2]);
+        let reason = crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+            members: vec![1, 3], // 3 not in subject
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::AllMembersSubjectMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_partial_existing_duplicate_rejected() {
+        let subject = subject_scope(vec![1, 2, 3]);
+        let reason = crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+            existing: vec![1, 1], // duplicate
+            introduced: vec![2, 3],
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::PartialExistingDuplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_partial_introduced_duplicate_rejected() {
+        let subject = subject_scope(vec![1, 2, 3]);
+        let reason = crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+            existing: vec![1],
+            introduced: vec![2, 2, 3], // duplicate
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::PartialIntroducedDuplicate { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_partial_empty_list_rejected() {
+        let subject = subject_scope(vec![1, 2]);
+        let reason = crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+            existing: vec![], // empty
+            introduced: vec![1, 2],
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::PartialEmptyList
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_partial_not_disjoint_rejected() {
+        let subject = subject_scope(vec![1, 2]);
+        let reason = crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+            existing: vec![1, 2],
+            introduced: vec![2], // 2 in both — not disjoint
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::PartialNotDisjoint { node_id: 2 }
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_partial_union_subject_mismatch_rejected() {
+        let subject = subject_scope(vec![1, 2, 3]);
+        let reason = crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+            existing: vec![1, 4], // 4 not in subject
+            introduced: vec![2],
+        };
+        let err =
+            CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject).unwrap_err();
+        assert!(matches!(
+            err,
+            CanonicalBaselineValidationError::PartialUnionSubjectMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn canonical_baseline_valid_all_members_succeeds() {
+        let subject = subject_scope(vec![2, 1, 3]); // unsorted input
+        let reason = crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+            members: vec![3, 1, 2], // unsorted — ordering canonicalize edilir
+        };
+        let canonical = CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject)
+            .expect("valid all-members must succeed (ordering canonicalized)");
+        match canonical.repr() {
+            CanonicalBaselineUnavailableReasonRepr::AllMembersIntroducedByDelta { members } => {
+                assert_eq!(members, &vec![1, 2, 3], "members sorted canonical order");
+            }
+            other => panic!("expected AllMembersIntroducedByDelta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_baseline_valid_partial_succeeds() {
+        let subject = subject_scope(vec![1, 2, 3]);
+        let reason = crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+            existing: vec![2, 1], // unsorted
+            introduced: vec![3],
+        };
+        let canonical = CanonicalBaselineUnavailableReason::try_from_reason(&reason, &subject)
+            .expect("valid partial must succeed (ordering canonicalized)");
+        match canonical.repr() {
+            CanonicalBaselineUnavailableReasonRepr::PartialNewSubject {
+                existing,
+                introduced,
+            } => {
+                assert_eq!(existing, &vec![1, 2], "existing sorted canonical order");
+                assert_eq!(introduced, &vec![3], "introduced sorted canonical order");
+            }
+            other => panic!("expected PartialNewSubject, got {other:?}"),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 4 — Pinned tag + V2 basis + witness requirement +
+    // gate evaluation + context digest testleri (plan md:166)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    // ── Pinned canonical tag newtype testleri (plan md:115) ───────────────────────
+
+    #[test]
+    fn faz4_gate_decision_tag_pinned_values() {
+        use crate::trajectory::GateDecision;
+        // Pinned exact values — append-only (0-8). V1 frozen (0-6) KORUNUR.
+        assert_eq!(GateDecisionTag::from(&GateDecision::Unknown).as_u8(), 0);
+        assert_eq!(GateDecisionTag::from(&GateDecision::PassedAll).as_u8(), 1);
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::RejectedBySyntax).as_u8(),
+            2
+        );
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::RejectedByVision).as_u8(),
+            3
+        );
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::RejectedByRule).as_u8(),
+            4
+        );
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::RejectedByTaskBinding).as_u8(),
+            5
+        );
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::BlockedByManeuverLimit).as_u8(),
+            6
+        );
+        // Commit 4b append-only yeni tag'ler.
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::RejectedByTaskValidation).as_u8(),
+            7
+        );
+        assert_eq!(
+            GateDecisionTag::from(&GateDecision::RejectedByMeasurementBinding).as_u8(),
+            8
+        );
+    }
+
+    #[test]
+    fn faz4_gate_decision_tag_rejects_unknown() {
+        // TryFrom<u8> — invalid tag reddedilir (CanonicalizationError::InvalidCanonicalTag).
+        assert!(GateDecisionTag::try_from(9).is_err());
+        assert!(GateDecisionTag::try_from(255).is_err());
+        assert!(GateDecisionTag::try_from(0).is_ok());
+        assert!(GateDecisionTag::try_from(8).is_ok());
+    }
+
+    #[test]
+    fn faz4_predicate_completion_and_mutation_decision_tags_pinned() {
+        use crate::trajectory::{MutationDecision, PredicateCompletion};
+        assert_eq!(
+            PredicateCompletionTag::from(&PredicateCompletion::NotCompleted).as_u8(),
+            0
+        );
+        assert_eq!(
+            PredicateCompletionTag::from(&PredicateCompletion::Completed).as_u8(),
+            1
+        );
+        assert_eq!(
+            MutationDecisionTag::from(&MutationDecision::Reject).as_u8(),
+            0
+        );
+        assert_eq!(
+            MutationDecisionTag::from(&MutationDecision::AcceptAsProgress).as_u8(),
+            1
+        );
+        assert_eq!(
+            MutationDecisionTag::from(&MutationDecision::AcceptAsCompleted).as_u8(),
+            2
+        );
+        assert_eq!(
+            MutationDecisionTag::from(&MutationDecision::RequireOperatorApproval).as_u8(),
+            3
+        );
+    }
+
+    #[test]
+    fn faz4_apply_target_tag_pinned() {
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        assert_eq!(ApplyTargetTag::from(&ApplyTarget::NotApplied).as_u8(), 0);
+        assert_eq!(
+            ApplyTargetTag::from(&ApplyTarget::Lane(CommitLane::Mainline)).as_u8(),
+            1
+        );
+        assert_eq!(
+            ApplyTargetTag::from(&ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint)).as_u8(),
+            2
+        );
+        assert_eq!(
+            ApplyTargetTag::from(&ApplyTarget::Lane(CommitLane::Sandbox)).as_u8(),
+            3
+        );
+    }
+
+    #[test]
+    fn faz4_helper_fn_delegate_preserves_v1_byte_contract() {
+        // Helper fn'ler newtype'a delege eder — mapping değerleri KORUNUR.
+        // V1 digest byte'ları HİÇ DEĞİŞMEZ (golden test green kalır).
+        use crate::trajectory::{
+            ApplyTarget, CommitLane, GateDecision, MutationDecision, PredicateCompletion,
+        };
+        assert_eq!(gate_decision_tag_v2(GateDecision::PassedAll), 1);
+        assert_eq!(
+            gate_decision_tag_v2(GateDecision::RejectedByMeasurementBinding),
+            8
+        );
+        assert_eq!(predicate_completion_tag(PredicateCompletion::Completed), 1);
+        assert_eq!(
+            mutation_decision_tag(MutationDecision::AcceptAsCompleted),
+            2
+        );
+        assert_eq!(apply_target_tag(&ApplyTarget::Lane(CommitLane::Sandbox)), 3);
+    }
+
+    #[test]
+    fn faz4_witness_requirement_and_disposition_tags_pinned() {
+        // Witness requirement + reason ayrı newtype (ontolojik ayrım).
+        assert_eq!(WitnessRequirementTag::REQUIRED.as_u8(), 0);
+        assert_eq!(WitnessRequirementTag::NOT_REQUIRED.as_u8(), 1);
+        assert_eq!(
+            WitnessNotRequiredReasonTag::REJECTED_BEFORE_WITNESS.as_u8(),
+            0
+        );
+        // GateDispositionV2 — Passed/Rejected.
+        assert_eq!(GateDispositionV2Tag::PASSED.as_u8(), 0);
+        assert_eq!(GateDispositionV2Tag::REJECTED.as_u8(), 1);
+        // Reject unknown tags.
+        assert!(WitnessRequirementTag::try_from(2).is_err());
+        assert!(WitnessNotRequiredReasonTag::try_from(1).is_err());
+        assert!(GateDispositionV2Tag::try_from(2).is_err());
+    }
+
+    // ── CanonicalWitnessRequirementV2 testleri (plan md:96-102) ──────────────────
+
+    fn faz4_witness_policy() -> CanonicalWitnessPolicy {
+        CanonicalWitnessPolicy {
+            schema_version: 1,
+            min_approvers: 2,
+            quorum_threshold: 1.5,
+            independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag::default(),
+        }
+    }
+
+    #[test]
+    fn faz4_witness_requirement_not_required_for_not_applied() {
+        use crate::trajectory::ApplyTarget;
+        // Reject → NotApplied → NotRequired { RejectedBeforeWitness }.
+        let policy = faz4_witness_policy();
+        let req = CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied))
+            .expect("NotApplied → NotRequired");
+        // validate_for(NotApplied) → Ok.
+        req.validate_for(&ApplyTarget::NotApplied)
+            .expect("NotRequired valid for NotApplied");
+        // tag = NOT_REQUIRED.
+        assert_eq!(
+            req.tag().as_u8(),
+            WitnessRequirementTag::NOT_REQUIRED.as_u8()
+        );
+    }
+
+    #[test]
+    fn faz4_witness_requirement_required_for_lane() {
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let policy = faz4_witness_policy();
+        let req = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .expect("Lane → Required");
+        req.validate_for(&ApplyTarget::Lane(CommitLane::Mainline))
+            .expect("Required valid for Lane");
+        assert_eq!(req.tag().as_u8(), WitnessRequirementTag::REQUIRED.as_u8());
+    }
+
+    #[test]
+    fn faz4_witness_requirement_validate_for_mismatch() {
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let policy = faz4_witness_policy();
+        // Required için NotApplied → tutarsız.
+        let req_for_lane = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        assert!(req_for_lane.validate_for(&ApplyTarget::NotApplied).is_err());
+        // NotRequired için Lane → tutarsız.
+        let req_for_not_applied =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        assert!(req_for_not_applied
+            .validate_for(&ApplyTarget::Lane(CommitLane::Sandbox))
+            .is_err());
+    }
+
+    #[test]
+    fn faz4_witness_requirement_encode_canonical_deterministic() {
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let policy = faz4_witness_policy();
+        let req1 = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let req2 = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let mut h1 = blake3::Hasher::new();
+        let mut h2 = blake3::Hasher::new();
+        req1.encode_canonical(&mut h1).unwrap();
+        req2.encode_canonical(&mut h2).unwrap();
+        assert_eq!(
+            h1.finalize().as_bytes(),
+            h2.finalize().as_bytes(),
+            "same requirement → same canonical bytes"
+        );
+    }
+
+    // ── CanonicalGateEvaluationV2 + VerifiedGateEvaluationV2 testleri (plan md:74-79, P1-1) ─
+
+    use crate::trajectory::MutationDecision;
+
+    #[test]
+    fn faz4_canonical_gate_evaluation_gate_passed_constructor() {
+        // **Reviewer P1-1 v2:** GatePassed constructor — tüm MutationDecision varyantları
+        // geçerli (Reject dahil — predicate/policy sonucu uygulanmama).
+        let gate = CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted)
+            .expect("structural construct");
+        assert!(matches!(gate, CanonicalGateEvaluationV2::GatePassed { .. }));
+        assert_eq!(
+            gate.apply_target(),
+            crate::trajectory::ApplyTarget::Lane(crate::trajectory::CommitLane::Mainline)
+        );
+    }
+
+    #[test]
+    fn faz4_canonical_gate_evaluation_rejected_by_gate_constructor() {
+        // **Reviewer P1-1 v2:** RejectedByGate constructor — checked RejectedGateDecisionV2.
+        let gate = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedBySyntax,
+        )
+        .expect("rejection gate decision valid");
+        assert!(matches!(
+            gate,
+            CanonicalGateEvaluationV2::RejectedByGate { .. }
+        ));
+        assert_eq!(
+            gate.apply_target(),
+            crate::trajectory::ApplyTarget::NotApplied
+        );
+    }
+
+    #[test]
+    fn faz4_canonical_gate_evaluation_rejected_decision_rejects_non_rejection() {
+        // **Reviewer P1-1 v2:** PassedAll/Unknown rejected gate decision olarak geçersiz.
+        let err =
+            CanonicalGateEvaluationV2::rejected_by_gate(crate::trajectory::GateDecision::PassedAll)
+                .expect_err("PassedAll is not a rejection");
+        assert!(
+            matches!(err, GateDispositionError::NotARejectedGateDecision { .. }),
+            "PassedAll → NotARejectedGateDecision"
+        );
+        let err =
+            CanonicalGateEvaluationV2::rejected_by_gate(crate::trajectory::GateDecision::Unknown)
+                .expect_err("Unknown is not a rejection");
+        assert!(
+            matches!(err, GateDispositionError::NotARejectedGateDecision { .. }),
+            "Unknown → NotARejectedGateDecision"
+        );
+    }
+
+    #[test]
+    fn faz4_verified_gate_evaluation_fixture_cfg_test_only() {
+        // cfg(test) fixture — production build'de constructor YOK.
+        let canonical = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedByRule,
+        )
+        .unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(canonical);
+        // into_canonical — tek yol (field private).
+        let recovered = verified.into_canonical();
+        assert!(matches!(
+            recovered,
+            CanonicalGateEvaluationV2::RejectedByGate { .. }
+        ));
+    }
+
+    #[test]
+    fn faz4_gate_evaluation_encode_canonical_deterministic() {
+        let gate1 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let gate2 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let mut h1 = blake3::Hasher::new();
+        let mut h2 = blake3::Hasher::new();
+        gate1.encode_canonical(&mut h1).unwrap();
+        gate2.encode_canonical(&mut h2).unwrap();
+        assert_eq!(
+            h1.finalize().as_bytes(),
+            h2.finalize().as_bytes(),
+            "same gate → same canonical bytes"
+        );
+    }
+
+    // ── AuthorizationBasisV2 + AuthorizationContextV2 testleri (plan md:146-160) ───
+
+    /// Faz 4 AuthorizationBasisV2 fixture — tutarlı digest zinciri (gerçek compute).
+    /// Reviewer P1-2: field'lar private — fixture builder helper üzerinden üretilir.
+    fn faz4_basis_v2_fixture() -> AuthorizationBasisV2 {
+        faz4_basis_v2_fixture_with_task_id(42)
+    }
+
+    /// **Reviewer P1-2:** Parametreli fixture builder — farklı task_id ile tutarlı basis.
+    /// Field write bypass imkânsız (field'lar private) — her fixture `new()` üzerinden.
+    fn faz4_basis_v2_fixture_with_task_id(
+        task_id: crate::trajectory::TaskId,
+    ) -> AuthorizationBasisV2 {
+        let parts = faz4_basis_v2_raw_parts(task_id);
+        AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            parts.engine_measurement_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            parts.measurement_request,
+            parts.measurement_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest,
+        )
+        .expect("valid V2 basis")
+    }
+
+    /// **Reviewer P1-2:** Raw constructor parts — test'ler tek field'ı bozup `new()`
+    /// çağırarak gerçek rejection testi yapar. Field write bypass YOK.
+    struct Faz4BasisV2RawParts {
+        task_id: crate::trajectory::TaskId,
+        claim_id: crate::witness::ClaimId,
+        task_claim_digest: crate::measurement::TaskClaimDigest,
+        task_goal_digest: crate::measurement::TaskGoalDigest,
+        measurement_digest: crate::measurement::MeasurementDigest,
+        engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
+        trajectory_baseline: CanonicalTrajectoryEvidenceBaseline,
+        measurement_baseline_digest: crate::measurement::MeasurementBaselineDigest,
+        trajectory_loss: CanonicalTrajectoryLossEvidence,
+        measurement_request: crate::measurement::CanonicalMeasurementRequestEvidence,
+        measurement_request_digest: crate::measurement::MeasurementRequestDigest,
+        measurement_context_digest: crate::measurement::MeasurementContextDigest,
+        canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+    }
+
+    fn faz4_basis_v2_raw_parts(task_id: crate::trajectory::TaskId) -> Faz4BasisV2RawParts {
+        use crate::measurement::{
+            EngineMeasurement, MeasurementBaseline, MeasurementContextDigest, MeasurementDigest,
+            TaskGoalDigest,
+        };
+
+        // EngineMeasurement — uniform measured + Available baseline.
+        let (request, evidence) = sample_measurement_request_evidence_parts();
+        let measured = faz4_uniform_measured(0.5);
+        let baseline = MeasurementBaseline::Available(measured.clone());
+        let context = sample_measurement_input_context_for_faz4();
+        let engine_meas = EngineMeasurement::new(baseline, measured, context, request.clone())
+            .expect("context matches request");
+
+        // Commitments — gerçek compute (tutarlı zincir).
+        let measurement_digest = MeasurementDigest::compute(engine_meas.after()).unwrap();
+        let engine_measurement_digest = engine_meas.compute_digest().unwrap();
+        let measurement_baseline_digest = engine_meas.before().compute_digest().unwrap();
+        let measurement_request_digest = engine_meas.request_digest().unwrap();
+        let measurement_context_digest =
+            MeasurementContextDigest::compute(engine_meas.context()).unwrap();
+        let canonical_delta_digest = request.structural_delta_digest().clone();
+
+        // **Reviewer P2:** Task goal digest — zengin golden task (tek commitment zinciri
+        // measurement.rs golden ile aynı).
+        let task = crate::measurement::tests::faz4_golden_task_with_id(task_id);
+        let task_goal_digest = TaskGoalDigest::compute(&task).unwrap();
+
+        // Task claim digest — minimal claim.
+        let claim = faz4_test_claim_for_digest(1, task_id, 100);
+        let task_claim_digest =
+            crate::measurement::TaskClaimDigest::compute(&claim, task_id, &canonical_delta_digest)
+                .unwrap();
+
+        // Evidence — baseline Available (shared encoder ile tutarlı).
+        let trajectory_baseline = CanonicalTrajectoryEvidenceBaseline::Available {
+            before: faz4_provenanced_measured_result(),
+        };
+        // **Reviewer P1-1 v4:** Loss evidence Available — preferred_vector Some ile tutarlı.
+        // target, faz4_golden_task preferred_vector ile birebir aynı. loss_after production
+        // `trajectory::trajectory_loss` ile hesaplanır (x/y/z 3 eksen — production semantiği).
+        let golden_task = crate::measurement::tests::faz4_golden_task_with_id(task_id);
+        let preferred = golden_task
+            .target_predicate_set
+            .preferred_vector
+            .expect("golden task preferred_vector Some");
+        let target = CanonicalRawPosition {
+            x: preferred.x,
+            y: preferred.y,
+            z: preferred.z,
+            w: preferred.w,
+            v: preferred.v,
+        };
+        let loss_after = crate::trajectory::trajectory_loss(engine_meas.after(), &preferred);
+        let trajectory_loss = CanonicalTrajectoryLossEvidence::Available { target, loss_after };
+
+        Faz4BasisV2RawParts {
+            task_id,
+            claim_id: 1,
+            task_claim_digest,
+            task_goal_digest,
+            measurement_digest,
+            engine_measurement_digest,
+            trajectory_baseline,
+            measurement_baseline_digest,
+            trajectory_loss,
+            measurement_request: evidence,
+            measurement_request_digest,
+            measurement_context_digest,
+            canonical_delta_digest,
+        }
+    }
+
+    /// Uniform MeasuredRawPosition — minimal fixture (measurement.rs test_measured pattern).
+    fn faz4_uniform_measured(value: f64) -> crate::coords::MeasuredRawPosition {
+        use crate::coords::{AxisMeasurement, MeasuredRawPosition, MetricSource};
+        let axis = AxisMeasurement {
+            value,
+            source: MetricSource::Scip,
+        };
+        MeasuredRawPosition {
+            coupling: axis,
+            cohesion: axis,
+            instability: axis,
+            entropy: axis,
+            witness_depth: axis,
+        }
+    }
+
+    /// Minimal Claim for digest tests (measurement.rs test_claim_for_digest pattern).
+    fn faz4_test_claim_for_digest(
+        claim_id: u64,
+        _task_id: u64,
+        author: u64,
+    ) -> crate::witness::Claim {
+        use crate::witness::{Claim, Intent};
+        Claim {
+            id: claim_id,
+            intent: Intent::new(100, crate::coords::RawPosition::default()),
+            author,
+            computed_raw: crate::coords::RawPosition::default(),
+            delta_nodes: vec![],
+            delta_edges: vec![],
+            task_id: Some(_task_id),
+            removed_edges: vec![],
+        }
+    }
+
+    fn faz4_provenanced_measured_result() -> ProvenancedMeasuredResult {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        use crate::coords::MetricSource;
+        let scip = CanonicalMetricSourceTag::try_from(&MetricSource::Scip).unwrap();
+        let mk = |v: f64| CanonicalAxisMeasurement {
+            value: v,
+            source: scip,
+        };
+        ProvenancedMeasuredResult {
+            coupling: mk(0.5),
+            cohesion: mk(0.5),
+            instability: mk(0.5),
+            entropy: mk(0.5),
+            witness_depth: mk(0.5),
+        }
+    }
+
+    /// MeasurementRequest + CanonicalMeasurementRequestEvidence çifti (tutarlı).
+    /// measurement.rs test helper'larına crate-içi erişim.
+    fn sample_measurement_request_evidence_parts() -> (
+        crate::measurement::MeasurementRequest,
+        crate::measurement::CanonicalMeasurementRequestEvidence,
+    ) {
+        let request = crate::measurement::tests::sample_measurement_request();
+        let evidence = request.canonical_evidence();
+        (request, evidence)
+    }
+
+    fn sample_measurement_input_context_for_faz4() -> MeasurementInputContext {
+        crate::measurement::tests::sample_measurement_input_context()
+    }
+
+    #[test]
+    fn faz4_basis_v2_fixture_constructs_and_validates() {
+        // validate_semantics başarılı — baseline digest + engine measurement digest reverify.
+        let basis = faz4_basis_v2_fixture();
+        // compute_digest başarılı (canonical encoding çalışır).
+        let digest = basis.compute_digest().expect("V2 basis digest");
+        assert_eq!(digest.to_hex().len(), 64, "hex wire 64 lowercase");
+    }
+
+    #[test]
+    fn faz4_basis_v2_digest_is_deterministic() {
+        let d1 = faz4_basis_v2_fixture().compute_digest().expect("digest");
+        let d2 = faz4_basis_v2_fixture().compute_digest().expect("digest");
+        assert_eq!(d1.as_bytes(), d2.as_bytes(), "same basis → same digest");
+    }
+
+    #[test]
+    fn faz4_basis_v2_digest_mutates_on_identity() {
+        // Farklı task_id → farklı digest.
+        // **Reviewer P1-2:** Farklı task_id → farklı digest. Field write YOK —
+        // parametreli fixture builder ile iki ayrı basis kurulur (her biri new() üzerinden).
+        let d1 = faz4_basis_v2_fixture().compute_digest().unwrap();
+        let d2 = faz4_basis_v2_fixture_with_task_id(43)
+            .compute_digest()
+            .unwrap();
+        assert_ne!(
+            d1.as_bytes(),
+            d2.as_bytes(),
+            "different task_id → different digest"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_validate_semantics_rejects_baseline_mismatch() {
+        // **Reviewer P1-2:** Gerçek rejection testi. Tutarsız baseline digest ile
+        // new() çağır → Err(MeasurementBaselineDigestMismatch). Field write YOK —
+        // raw parts builder ile tutarsız digest verilir.
+        let parts = faz4_basis_v2_raw_parts(42);
+        // Tutarlı olmayan baseline digest üret (farklı measured değer).
+        let bad_measured = faz4_uniform_measured(0.9);
+        let bad_baseline = crate::measurement::MeasurementBaseline::Available(bad_measured);
+        let bad_baseline_digest = bad_baseline.compute_digest().unwrap();
+        let err = AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            parts.engine_measurement_digest,
+            parts.trajectory_baseline,
+            bad_baseline_digest, // tutarsız — trajectory_baseline ile uyuşmaz
+            parts.trajectory_loss,
+            parts.measurement_request,
+            parts.measurement_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest,
+        )
+        .expect_err("baseline mismatch must reject");
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementBaselineDigestMismatch { .. }
+            ),
+            "tutarsız baseline digest → MeasurementBaselineDigestMismatch, got {err:?}"
+        );
+    }
+
+    // ── P1-3: Request snapshot mutation matrisi (reviewer) ──────────────────────────
+
+    /// Helper: raw parts + bozuk request evidence ile new() çağır → error type assert.
+    fn faz4_basis_v2_with_bad_request_evidence(
+        bad_evidence: crate::measurement::CanonicalMeasurementRequestEvidence,
+    ) -> Result<AuthorizationBasisV2, AuthorizationBasisV2Error> {
+        let parts = faz4_basis_v2_raw_parts(42);
+        AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            parts.engine_measurement_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            bad_evidence,
+            parts.measurement_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest,
+        )
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_subject_mismatch() {
+        // **Reviewer P1-3:** measurement_request.subject değişir → MeasurementRequestDigestMismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        // Subject'e yeni node ekle (farklı subject → farklı digest).
+        let mut new_members = bad_evidence.subject.member_ids().to_vec();
+        new_members.push(999);
+        bad_evidence.subject =
+            crate::measurement::CanonicalSubjectScope::try_new(new_members).unwrap();
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "subject mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_impact_mismatch() {
+        // **Reviewer P1-3:** measurement_request.impact değişir → mismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.impact =
+            crate::measurement::CanonicalImpactScope::try_new(vec![888], vec![]).unwrap();
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "impact mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_base_revision_mismatch() {
+        // **Reviewer P1-3:** measurement_request.base_revision değişir → mismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.base_revision.sequence = bad_evidence.base_revision.sequence + 1;
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "base_revision mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_structural_delta_digest_mismatch() {
+        // **Reviewer P1-3:** measurement_request.structural_delta_digest değişir → mismatch.
+        // Aynı zamanda canonical_delta_digest != request.structural_delta_digest olur.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.structural_delta_digest =
+            crate::measurement::MeasurementDeltaDigest::compute_from_canonical(
+                &crate::authorization::CanonicalStructuralDelta::try_new(vec![], vec![], vec![])
+                    .unwrap(),
+            )
+            .unwrap();
+        // Önce MeasurementRequestDigestMismatch (structural_delta_digest evidence'da değişti).
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(err, AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }),
+            "structural_delta_digest evidence mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_request_measurement_input_digest_mismatch() {
+        // **Reviewer P1-3:** measurement_request.measurement_input_digest değişir → mismatch.
+        let parts = faz4_basis_v2_raw_parts(42);
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.measurement_input_digest = MeasurementInputDigest::from_bytes([0xFE; 32]);
+        let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::MeasurementRequestDigestMismatch { .. }
+            ),
+            "measurement_input_digest mismatch → MeasurementRequestDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_basis_v2_canonical_delta_digest_mismatch() {
+        // **Reviewer P1-3:** Request digest tutarlı ama canonical_delta_digest eski →
+        // CanonicalDeltaDigestMismatch. measurement_request.structural_delta_digest ile
+        // basis canonical_delta_digest farklı.
+        let parts = faz4_basis_v2_raw_parts(42);
+        // Yeni structural_delta_digest üret — hem evidence'da hem canonical_delta_digest'te
+        // tutarlı olmalı ama eski canonical_delta_digest ile uyuşmaz.
+        let new_delta = crate::measurement::MeasurementDeltaDigest::compute_from_canonical(
+            &crate::authorization::CanonicalStructuralDelta::try_new(vec![], vec![], vec![])
+                .unwrap(),
+        )
+        .unwrap();
+        let mut bad_evidence = parts.measurement_request.clone();
+        bad_evidence.structural_delta_digest = new_delta.clone();
+        // measurement_request_digest de yeni delta'ya göre recompute — tutarlı olsun ki
+        // sadece canonical_delta_digest ile çelişsin.
+        bad_evidence.measurement_input_digest =
+            parts.measurement_request.measurement_input_digest.clone();
+        let new_request_digest =
+            crate::measurement::MeasurementRequestDigest::compute_from_canonical(&bad_evidence)
+                .unwrap();
+        // engine_measurement_digest de recompute — tutarlı zincir.
+        let new_engine_digest =
+            crate::measurement::EngineMeasurementDigest::compute_from_commitments(
+                &new_request_digest,
+                &parts.measurement_baseline_digest,
+                &parts.measurement_digest,
+                &parts.measurement_context_digest,
+            )
+            .unwrap();
+        let err = AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            new_engine_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            bad_evidence,
+            new_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest, // eski — yeni delta ile çelişir
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisV2Error::CanonicalDeltaDigestMismatch { .. }
+            ),
+            "canonical_delta_digest mismatch → CanonicalDeltaDigestMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn faz4_measurement_request_digest_compute_equals_compute_from_canonical() {
+        // **Reviewer P1-3:** MeasurementRequestDigest::compute(request) ==
+        // compute_from_canonical(request.canonical_evidence()) (shared encoder).
+        let request = crate::measurement::tests::sample_measurement_request();
+        let digest_via_compute =
+            crate::measurement::MeasurementRequestDigest::compute(&request).unwrap();
+        let evidence = request.canonical_evidence();
+        let digest_via_canonical =
+            crate::measurement::MeasurementRequestDigest::compute_from_canonical(&evidence)
+                .unwrap();
+        assert_eq!(
+            digest_via_compute.as_bytes(),
+            digest_via_canonical.as_bytes(),
+            "compute(request) == compute_from_canonical(evidence) — shared encoder"
+        );
+    }
+
+    // ── AuthorizationContextV2 proof-gated constructor (plan md:69-72) ────────────
+
+    #[test]
+    fn faz4_context_v2_new_consumes_verified_gate_evaluation() {
+        let basis = faz4_basis_v2_fixture();
+        let gate =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let context = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect("proof-gated context construction");
+        // Accessors çalışır.
+        assert_eq!(context.basis().task_id(), 42);
+        assert!(matches!(
+            context.gate_evaluation(),
+            CanonicalGateEvaluationV2::GatePassed { .. }
+        ));
+        let _ = context.witness_requirement();
+    }
+
+    #[test]
+    fn faz4_context_v2_new_rejects_witness_mismatch() {
+        // **Reviewer P1-1:** GatePassed + Reject → apply_target NotApplied,
+        // ama witness Required → tutarsız → WitnessRequirement err.
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::gate_passed(MutationDecision::Reject).unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        // witness_req = Required (Mainline lane), ama mutation_decision = Reject → NotApplied.
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let err = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect_err("witness mismatch must reject");
+        assert!(
+            matches!(err, AuthorizationContextV2BuildError::WitnessRequirement(_)),
+            "witness requirement mismatch → WitnessRequirement error"
+        );
+    }
+
+    #[test]
+    fn faz4_context_v2_new_accepts_consistent_not_required() {
+        // **Reviewer P1-1:** GatePassed + Reject → NotApplied + witness NotRequired → Ok.
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::gate_passed(MutationDecision::Reject).unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::ApplyTarget;
+        let witness_req =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        let context = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect("consistent NotRequired + NotApplied → Ok");
+        assert!(matches!(
+            context.gate_evaluation(),
+            CanonicalGateEvaluationV2::GatePassed {
+                mutation_decision: MutationDecision::Reject
+            }
+        ));
+    }
+
+    #[test]
+    fn faz4_context_v2_new_accepts_rejected_gate_not_required() {
+        // **Reviewer P1-1 v2:** RejectedByGate → NotApplied + witness NotRequired → Ok.
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedBySyntax,
+        )
+        .unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::ApplyTarget;
+        let witness_req =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        let context = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect("RejectedByGate + NotRequired → Ok");
+        assert!(matches!(
+            context.gate_evaluation(),
+            CanonicalGateEvaluationV2::RejectedByGate { .. }
+        ));
+    }
+
+    #[test]
+    fn faz4_context_v2_new_rejects_rejected_gate_required() {
+        // **Reviewer P1-1 v2:** RejectedByGate → NotApplied, ama witness Required → tutarsız.
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedByRule,
+        )
+        .unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let err = AuthorizationContextV2::new(basis, verified, witness_req)
+            .expect_err("RejectedByGate + Required must reject");
+        assert!(
+            matches!(err, AuthorizationContextV2BuildError::WitnessRequirement(_)),
+            "RejectedByGate + Required → WitnessRequirement error"
+        );
+    }
+
+    #[test]
+    fn faz4_context_v2_digest_is_deterministic() {
+        let basis = faz4_basis_v2_fixture();
+        let gate1 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let gate2 =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let policy = faz4_witness_policy();
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let wr1 = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let wr2 = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let ctx1 = AuthorizationContextV2::new(
+            basis.clone(),
+            VerifiedGateEvaluationV2::fixture(gate1),
+            wr1,
+        )
+        .unwrap();
+        let ctx2 =
+            AuthorizationContextV2::new(basis, VerifiedGateEvaluationV2::fixture(gate2), wr2)
+                .unwrap();
+        let d1 = ctx1.compute_digest().unwrap();
+        let d2 = ctx2.compute_digest().unwrap();
+        assert_eq!(d1.as_bytes(), d2.as_bytes(), "same context → same digest");
+    }
+
+    #[test]
+    fn faz4_context_v2_digest_mutates_on_variant() {
+        // **Reviewer P1-1 v2 + P2 v3:** GatePassed vs RejectedByGate → farklı digest.
+        // **Isolation:** iki context aynı witness requirement (NotRequired) tutar —
+        // GatePassed { Reject } → NotApplied + NotRequired, RejectedByGate → NotApplied +
+        // NotRequired. Böylece sadece gate variant/payload değişir (digest farkı gate'ten).
+        let basis = faz4_basis_v2_fixture();
+        let policy = faz4_witness_policy();
+        use crate::trajectory::ApplyTarget;
+        let wr_not_req =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        // GatePassed + Reject → NotApplied + NotRequired (aynı witness requirement).
+        let gate_passed = CanonicalGateEvaluationV2::gate_passed(MutationDecision::Reject).unwrap();
+        let ctx_passed = AuthorizationContextV2::new(
+            basis.clone(),
+            VerifiedGateEvaluationV2::fixture(gate_passed),
+            wr_not_req.clone(),
+        )
+        .unwrap();
+        // RejectedByGate → NotApplied + NotRequired (aynı witness requirement).
+        let gate_rejected = CanonicalGateEvaluationV2::rejected_by_gate(
+            crate::trajectory::GateDecision::RejectedBySyntax,
+        )
+        .unwrap();
+        let ctx_rejected = AuthorizationContextV2::new(
+            basis,
+            VerifiedGateEvaluationV2::fixture(gate_rejected),
+            wr_not_req,
+        )
+        .unwrap();
+        let d_passed = ctx_passed.compute_digest().unwrap();
+        let d_rejected = ctx_rejected.compute_digest().unwrap();
+        assert_ne!(
+            d_passed.as_bytes(),
+            d_rejected.as_bytes(),
+            "GatePassed vs RejectedByGate → different digest"
+        );
+    }
+
+    // ── V2 digest golden vector pinleme (reviewer P2-2) ──────────────────────────────
+
+    #[test]
+    fn faz4_basis_v2_digest_golden_vector() {
+        // **Reviewer P2-2:** Frozen golden hex — AuthorizationBasisDigestV2 canonical byte
+        // contract pin (OSP/AUTHORIZATION-BASIS/V2).
+        let basis = faz4_basis_v2_fixture();
+        let digest = basis.compute_digest().expect("V2 basis digest");
+        const FAZ4_BASIS_V2_GOLDEN_HEX: &str =
+            "ee3e78c4b5c3df71752d58cb94cf772816014c3709009a44a98dd1d57fe2bc64";
+        assert_eq!(
+            digest.to_hex(),
+            FAZ4_BASIS_V2_GOLDEN_HEX,
+            "AuthorizationBasisDigestV2 golden byte contract changed (OSP/AUTHORIZATION-BASIS/V2)"
+        );
+    }
+
+    #[test]
+    fn faz4_context_v2_digest_golden_vector() {
+        // **Reviewer P2-2:** Frozen golden hex — AuthorizationContextDigestV2 canonical byte
+        // contract pin (OSP/AUTHORIZATION-CONTEXT/V2).
+        let basis = faz4_basis_v2_fixture();
+        let gate =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let policy = faz4_witness_policy();
+        use crate::trajectory::{ApplyTarget, CommitLane};
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &policy,
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        let context = AuthorizationContextV2::new(basis, verified, witness_req).unwrap();
+        let digest = context.compute_digest().expect("V2 context digest");
+        const FAZ4_CONTEXT_V2_GOLDEN_HEX: &str =
+            "3000ccb37928868e2506869aeb6a13f1c823e61977cdf60603b645123380d8a0";
+        assert_eq!(
+            digest.to_hex(),
+            FAZ4_CONTEXT_V2_GOLDEN_HEX,
+            "AuthorizationContextDigestV2 golden byte contract changed (OSP/AUTHORIZATION-CONTEXT/V2)"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 4 Commit 1b — VersionedAuthorizationBasis wire dispatch
+    // testleri (plan md:177, reviewer v2 closure)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// V1 basis fixture — wire dispatch testleri için.
+    fn faz4_v1_basis_fixture() -> AuthorizationBasisV1 {
+        sample_basis()
+    }
+
+    /// Versioned V1 envelope JSON string — `{schema_version:1, basis:{...}}`.
+    fn faz4_versioned_v1_envelope_json() -> String {
+        let basis = faz4_v1_basis_fixture();
+        let envelope = VersionedAuthorizationBasis::try_v1(basis).unwrap();
+        serde_json::to_string(&envelope).unwrap()
+    }
+
+    /// Versioned V2 envelope JSON string — `{schema_version:2, basis:{...}}`.
+    fn faz4_versioned_v2_envelope_json() -> String {
+        let basis = faz4_basis_v2_fixture();
+        let envelope = VersionedAuthorizationBasis::try_v2(basis);
+        serde_json::to_string(&envelope).unwrap()
+    }
+
+    /// Legacy bare V1 JSON string — mevcut V1 serialization shape (schema_version field dahil).
+    fn faz4_legacy_v1_json() -> String {
+        let basis = faz4_v1_basis_fixture();
+        serde_json::to_string(&basis).unwrap()
+    }
+
+    // ── Dispatch matrisi (P0-1, P0-2, P1-4) ──────────────────────────────────────
+
+    #[test]
+    fn commit1b_legacy_v1_dispatches_correctly() {
+        // P0-1: Legacy V1 kendi schema_version=1 ile doğru dispatch. "basis" key yok.
+        let json = faz4_legacy_v1_json();
+        let parsed =
+            VersionedAuthorizationBasis::from_json_slice(json.as_bytes()).expect("legacy V1");
+        assert_eq!(parsed.version(), AUTHORIZATION_BASIS_WIRE_SCHEMA_V1);
+        assert!(parsed.as_v1().is_some());
+        assert!(parsed.as_v2().is_none());
+    }
+
+    #[test]
+    fn commit1b_versioned_v1_produces_explicit_envelope() {
+        // P0-2: Versioned V1 serialize gerçekten {schema_version, basis} üretir.
+        let json = faz4_versioned_v1_envelope_json();
+        let peek: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(peek.get("schema_version"), Some(&serde_json::json!(1)));
+        assert!(
+            peek.get("basis").is_some(),
+            "versioned V1 must have 'basis' key"
+        );
+    }
+
+    #[test]
+    fn commit1b_versioned_v1_round_trip() {
+        let original = faz4_versioned_v1_envelope_json();
+        let parsed = VersionedAuthorizationBasis::from_json_slice(original.as_bytes())
+            .expect("versioned V1 round-trip");
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(
+            original, reserialized,
+            "versioned V1 round-trip preserves JSON"
+        );
+    }
+
+    #[test]
+    fn commit1b_versioned_v2_round_trip() {
+        let original = faz4_versioned_v2_envelope_json();
+        let parsed = VersionedAuthorizationBasis::from_json_slice(original.as_bytes())
+            .expect("versioned V2 round-trip");
+        assert_eq!(parsed.version(), AUTHORIZATION_BASIS_WIRE_SCHEMA_V2);
+        let reserialized = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(
+            original, reserialized,
+            "versioned V2 round-trip preserves JSON"
+        );
+    }
+
+    #[test]
+    fn commit1b_schema_version_2_without_basis_rejects() {
+        // P1-2 v3: schema_version=2 ama basis yok → MissingBasisForVersionedSchema.
+        // V2-shaped input hiçbir koşulda legacy V1 parser'a ulaşmaz.
+        let json = r#"{"schema_version": 2, "task_id": 42}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("schema_version=2 without basis must reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::MissingBasisForVersionedSchema { schema_version: 2 }
+        ));
+    }
+
+    #[test]
+    fn commit1b_basis_without_schema_version_rejects() {
+        // P0-1: basis var ama schema_version yok → reject.
+        let json = r#"{"basis": {"schema_version": 1}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("basis without schema_version must reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::MissingSchemaVersion
+        ));
+    }
+
+    #[test]
+    fn commit1b_legacy_v1_with_extra_basis_key_rejects_ambiguous() {
+        // P1-4: Legacy V1 + extra "basis" key → reject ambiguous (versioned-envelope-shaped).
+        let mut legacy: serde_json::Value = serde_json::from_str(&faz4_legacy_v1_json()).unwrap();
+        legacy["basis"] = serde_json::json!({});
+        let json = serde_json::to_string(&legacy).unwrap();
+        let result = VersionedAuthorizationBasis::from_json_slice(json.as_bytes());
+        // "basis" var → versioned path. Inner basis boş → decode error veya schema mismatch.
+        assert!(
+            result.is_err(),
+            "legacy V1 with extra 'basis' key must reject"
+        );
+    }
+
+    // ── Duplicate-key matrisi (P0-4) ─────────────────────────────────────────────
+
+    #[test]
+    fn commit1b_duplicate_schema_version_rejects() {
+        // P0-4: duplicate top-level schema_version → reject.
+        let json = r#"{"schema_version": 1, "schema_version": 2, "basis": {"schema_version": 1}}"#;
+        let result = VersionedAuthorizationBasis::from_json_slice(json.as_bytes());
+        assert!(result.is_err(), "duplicate schema_version must reject");
+    }
+
+    #[test]
+    fn commit1b_duplicate_basis_field_rejects() {
+        // P0-4: duplicate basis field → reject.
+        let json = r#"{"schema_version": 1, "basis": {}, "basis": {}}"#;
+        let result = VersionedAuthorizationBasis::from_json_slice(json.as_bytes());
+        assert!(result.is_err(), "duplicate basis field must reject");
+    }
+
+    // ── Strict numeric matrisi (P2-3) ────────────────────────────────────────────
+
+    #[test]
+    fn commit1b_schema_version_float_rejects() {
+        // P2-3: schema_version=1.0 (float) → reject.
+        let json = r#"{"schema_version": 1.0, "basis": {}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("float schema_version reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::SchemaVersionNotStrict
+        ));
+    }
+
+    #[test]
+    fn commit1b_schema_version_string_rejects() {
+        // P2-3: schema_version="2" (string) → reject.
+        let json = r#"{"schema_version": "2", "basis": {}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("string schema_version reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::SchemaVersionNotStrict
+        ));
+    }
+
+    #[test]
+    fn commit1b_schema_version_null_rejects() {
+        // P2-3: schema_version=null → reject.
+        let json = r#"{"schema_version": null, "basis": {}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("null schema_version reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::SchemaVersionNotStrict
+        ));
+    }
+
+    #[test]
+    fn commit1b_schema_version_exponent_rejects() {
+        // P2-3: schema_version=1e0 (exponent) → reject.
+        let json = r#"{"schema_version": 1e0, "basis": {}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("exponent schema_version reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::SchemaVersionNotStrict
+        ));
+    }
+
+    #[test]
+    fn commit1b_schema_version_out_of_range_rejects() {
+        // P2-3: schema_version=65536 (u16 dışı) → reject.
+        let json = r#"{"schema_version": 65536, "basis": {}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("u16 out-of-range schema_version reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::SchemaVersionOutOfRange(65536)
+        ));
+    }
+
+    #[test]
+    fn commit1b_unknown_schema_version_rejects() {
+        // Unknown version → reject (V2→V1 fallback YOK).
+        let json = r#"{"schema_version": 3, "basis": {}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("unknown schema_version reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::UnknownSchemaVersion(3)
+        ));
+    }
+
+    // ── Top-level non-object matrisi (P2-2) ──────────────────────────────────────
+
+    #[test]
+    fn commit1b_top_level_null_rejects() {
+        let err = VersionedAuthorizationBasis::from_json_slice(b"null")
+            .expect_err("null top-level reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::TopLevelNotObject
+        ));
+    }
+
+    #[test]
+    fn commit1b_top_level_array_rejects() {
+        let err = VersionedAuthorizationBasis::from_json_slice(b"[]")
+            .expect_err("array top-level reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::TopLevelNotObject
+        ));
+    }
+
+    #[test]
+    fn commit1b_top_level_number_rejects() {
+        let err = VersionedAuthorizationBasis::from_json_slice(b"42")
+            .expect_err("number top-level reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::TopLevelNotObject
+        ));
+    }
+
+    // ── Wire contract matrisi ────────────────────────────────────────────────────
+
+    #[test]
+    fn commit1b_versioned_v1_basis_payload_preserves_legacy() {
+        // P2: versioned V1 basis payload == legacy V1 JSON payload (Value equality —
+        // field sıralaması serde map'te farklı olabilir ama içerik aynı).
+        let legacy: serde_json::Value = serde_json::from_str(&faz4_legacy_v1_json()).unwrap();
+        let versioned_json = faz4_versioned_v1_envelope_json();
+        let versioned: serde_json::Value = serde_json::from_str(&versioned_json).unwrap();
+        assert_eq!(
+            versioned.get("basis"),
+            Some(&legacy),
+            "versioned V1 basis payload must exactly preserve legacy V1 JSON representation"
+        );
+    }
+
+    #[test]
+    fn commit1b_v2_nested_commitment_inconsistency_rejects() {
+        // P1-5 Model A: V2 nested commitment inconsistency → validate_semantics reject.
+        // Geçerli V2 envelope'ı al, basis içinde bir digest'ı boz → new() reject.
+        let json = faz4_versioned_v2_envelope_json();
+        let mut value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // measurement_baseline_digest'i boz (farklı hex).
+        value["basis"]["measurement_baseline_digest"] =
+            serde_json::json!("0000000000000000000000000000000000000000000000000000000000000000");
+        let tampered = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(tampered.as_bytes())
+            .expect_err("V2 nested inconsistency must reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::V2Validation(_)
+        ));
+    }
+
+    // ── Bağımsız V2 golden fixture (reviewer P1-4) ────────────────────────────────
+
+    /// **P1-4:** Bağımsız golden JSON fixture — serializer/deserializer birlikte
+    /// yanlış değişse bile wire contract pinlenir. Repository fixture'dan okunur.
+    const V2_WIRE_GOLDEN_FIXTURE: &str =
+        include_str!("../tests/fixtures/authorization_basis_v2_wire.json");
+
+    #[test]
+    fn commit1b_v2_wire_golden_fixture_round_trip() {
+        // P1-4: Bağımsız fixture → parse → reserialize → Value equality.
+        let parsed =
+            VersionedAuthorizationBasis::from_json_slice(V2_WIRE_GOLDEN_FIXTURE.as_bytes())
+                .expect("golden fixture must parse");
+        assert_eq!(parsed.version(), AUTHORIZATION_BASIS_WIRE_SCHEMA_V2);
+        let actual: serde_json::Value = serde_json::to_value(&parsed).expect("reserialize");
+        let expected: serde_json::Value =
+            serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).expect("fixture is valid JSON");
+        assert_eq!(
+            actual, expected,
+            "V2 wire golden fixture round-trip — wire contract pin"
+        );
+    }
+
+    // ── LowerHex32 strict matrisi (P1-2) ─────────────────────────────────────────
+
+    #[test]
+    fn commit1b_v2_digest_lowercase_hex() {
+        // V2 nested tüm digest alanları lowercase hex string.
+        let json = faz4_versioned_v2_envelope_json();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let digest_str = &value["basis"]["task_goal_digest"];
+        assert!(
+            digest_str.is_string(),
+            "V2 digest must be JSON string (LowerHex32)"
+        );
+        let s = digest_str.as_str().unwrap();
+        assert_eq!(s.len(), 64, "V2 digest must be 64 chars");
+        assert!(
+            s.bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')),
+            "V2 digest must be lowercase hex only"
+        );
+    }
+
+    // ── P2: Negatif wire testleri (reviewer) ──────────────────────────────────────
+
+    #[test]
+    fn commit1b_v2_uppercase_hex_rejects() {
+        // P2: uppercase hex → LowerHex32 reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["task_goal_digest"] =
+            serde_json::json!("03A3AD384D2DFF383974A301ED68A52D932439F18E3C08CC4CB8A8B9C7C8201C");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("uppercase hex reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_0x_prefix_hex_rejects() {
+        // P2: 0x prefix → LowerHex32 reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["task_goal_digest"] =
+            serde_json::json!("0x03a3ad384d2dff383974a301ed68a52d932439f18e3c08cc4cb8a8b9c7c8201c");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("0x prefix reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_short_hex_rejects() {
+        // P2: 63 karakter hex → reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["task_goal_digest"] =
+            serde_json::json!("03a3ad384d2dff383974a301ed68a52d932439f18e3c08cc4cb8a8b9c7c8201");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("short hex reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_source_tag_255_rejects() {
+        // P2: source_tag=255 → checked TryFrom reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["trajectory_baseline"]["before"]["coupling"]["source_tag"] =
+            serde_json::json!(255);
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("source_tag=255 reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::V2WireConversion { .. }
+                | VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_unknown_baseline_kind_rejects() {
+        // P2: unknown baseline kind → reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["trajectory_baseline"]["kind"] = serde_json::json!("unknown_kind");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("unknown baseline kind reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_unknown_loss_kind_rejects() {
+        // P2: unknown loss kind → reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["trajectory_loss"]["kind"] = serde_json::json!("unknown_loss");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("unknown loss kind reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_unknown_space_view_id_kind_rejects() {
+        // P2: unknown space_view_id kind → reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["measurement_request"]["base_revision"]["view_id"]["kind"] =
+            serde_json::json!("unknown_view");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("unknown space_view_id kind reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_negative_loss_after_rejects() {
+        // P2: negative loss_after → local invariant reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        value["basis"]["trajectory_loss"]["loss_after"] = serde_json::json!(-0.5);
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("negative loss_after reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::V2WireConversion { .. }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v1_inner_schema_version_2_rejects() {
+        // P1-1: outer V1 + inner schema_version=2 → InnerV1SchemaMismatch exact error.
+        let mut basis = faz4_v1_basis_fixture();
+        basis.schema_version = 2;
+        let err = VersionedAuthorizationBasis::try_v1(basis)
+            .expect_err("inner schema_version=2 with V1 constructor must reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::InnerV1SchemaMismatch {
+                expected: AUTHORIZATION_BASIS_WIRE_SCHEMA_V1,
+                found: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn commit1b_v2_missing_axis_field_rejects() {
+        // P2: missing axis field (coupling removed) → reject.
+        let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
+        // Remove coupling axis from before.
+        let before = value
+            .get_mut("basis")
+            .unwrap()
+            .get_mut("trajectory_baseline")
+            .unwrap()
+            .get_mut("before")
+            .unwrap()
+            .as_object_mut()
+            .unwrap();
+        before.remove("coupling");
+        let json = serde_json::to_string(&value).unwrap();
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("missing axis field reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    // ── P1-1 v2: Kalan varyant golden wire shape testleri ─────────────────────────
+    // Reviewer: golden fixture yalnız available/ephemeral pinliyor. Kalan varyantlar
+    // modül içi testlerde private DTO'lara erişerek exact JSON shape pinlenir.
+
+    // ── P1-1 v3: Production *Ref serializer golden wire shape testleri ────────────
+    // Reviewer: production serializer *Ref tiplerini kullanır (owned DTO değil).
+    // Outer baseline wrapper + nested reason birlikte pinlenir.
+
+    #[test]
+    fn commit1b_wire_shape_baseline_unavailable_all_members_output_golden() {
+        // Production Ref serializer — outer wrapper + nested reason.
+        let members = [1u64, 2];
+        let value = serde_json::to_value(RawTrajectoryBaselineV2Ref::Unavailable {
+            reason: RawBaselineUnavailableReasonV2Ref::AllMembersIntroducedByDelta {
+                members: &members,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "unavailable",
+                "reason": {
+                    "kind": "all_members_introduced_by_delta",
+                    "members": [1, 2]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn commit1b_wire_shape_baseline_unavailable_partial_new_subject_output_golden() {
+        let existing = [1u64, 2];
+        let introduced = [3u64];
+        let value = serde_json::to_value(RawTrajectoryBaselineV2Ref::Unavailable {
+            reason: RawBaselineUnavailableReasonV2Ref::PartialNewSubject {
+                existing: &existing,
+                introduced: &introduced,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "unavailable",
+                "reason": {
+                    "kind": "partial_new_subject",
+                    "existing": [1, 2],
+                    "introduced": [3]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn commit1b_wire_shape_loss_unavailable_output_golden() {
+        let value = serde_json::to_value(RawTrajectoryLossV2Ref::Unavailable {
+            reason: RawTrajectoryLossUnavailableReasonV2::NoPreferredVector,
+        })
+        .unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"kind": "unavailable", "reason": "no_preferred_vector"})
+        );
+    }
+
+    #[test]
+    fn commit1b_wire_shape_space_view_id_persisted_output_golden() {
+        let id_bytes = [
+            0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
+            0xff, 0x00,
+        ];
+        let value = serde_json::to_value(RawSpaceViewIdV2Ref::Persisted { id: &id_bytes }).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "kind": "persisted",
+                "id": [
+                    17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238, 255, 0
+                ]
+            })
+        );
+    }
+
+    // ── P2-1: Bare unknown version → UnknownSchemaVersion ────────────────────────
+
+    #[test]
+    fn commit1b_schema_version_3_without_basis_unknown_version_error() {
+        // P2-1: schema_version=3 (unknown) + basis yok → UnknownSchemaVersion
+        // (MissingBasisForVersionedSchema değil — typed taxonomy tutarlı).
+        let json = r#"{"schema_version": 3, "task_id": 42}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("unknown version without basis must reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::UnknownSchemaVersion(3)
+        ));
+    }
+
+    // ── P2-2: Nested duplicate-key test (raw JSON) ───────────────────────────────
+
+    #[test]
+    fn commit1b_v2_nested_duplicate_key_rejects() {
+        // P2-2: Nested duplicate key (task_id iki kez) → VersionedV2Decode.
+        // Raw JSON — serde_json::Value duplicate'e ezmez (RawValue parse).
+        let json = r#"{"schema_version": 2, "basis": {"task_id": 42, "task_id": 43, "claim_id": 1, "task_claim_digest": "0000000000000000000000000000000000000000000000000000000000000000", "task_goal_digest": "0000000000000000000000000000000000000000000000000000000000000000", "measurement_digest": "0000000000000000000000000000000000000000000000000000000000000000", "engine_measurement_digest": "0000000000000000000000000000000000000000000000000000000000000000", "trajectory_baseline": {"kind": "available", "before": {"coupling": {"value": 0.5, "source_tag": 1}, "cohesion": {"value": 0.5, "source_tag": 1}, "instability": {"value": 0.5, "source_tag": 1}, "entropy": {"value": 0.5, "source_tag": 1}, "witness_depth": {"value": 0.5, "source_tag": 1}}}, "measurement_baseline_digest": "0000000000000000000000000000000000000000000000000000000000000000", "trajectory_loss": {"kind": "available", "target": {"x": 0.2, "y": 0.8, "z": 0.15, "w": 0.3, "v": 0.6}, "loss_after": 0.55}, "measurement_request": {"subject": {"member_ids": [1]}, "impact": {"node_ids": [], "edge_ids": []}, "base_revision": {"view_id": {"kind": "ephemeral", "id": 1}, "sequence": 1, "content_digest": "0000000000000000000000000000000000000000000000000000000000000000"}, "structural_delta_digest": "0000000000000000000000000000000000000000000000000000000000000000", "measurement_input_digest": "0000000000000000000000000000000000000000000000000000000000000000"}, "measurement_request_digest": "0000000000000000000000000000000000000000000000000000000000000000", "measurement_context_digest": "0000000000000000000000000000000000000000000000000000000000000000", "canonical_delta_digest": "0000000000000000000000000000000000000000000000000000000000000000"}}"#;
+        let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
+            .expect_err("nested duplicate key must reject");
+        assert!(matches!(
+            err,
+            VersionedAuthorizationBasisError::VersionedV2Decode { .. }
+        ));
+    }
+
+    // ── P2-3: Tek-wire-surface invariant compile-time guard ──────────────────────
+    // Reviewer P1-2 v3: Bu test "Serialize absent compile-time guard" DEĞİL.
+    // AuthorizationBasisV2: Serialize trait bound'una başvurmuyor — yarın derive
+    // geri eklenirse test yine geçer. Gerçek compile-fail guard (trybuild external
+    // crate fixture — requires_serialize::<AuthorizationBasisV2>()) Faz 10 type-
+    // suite'e deferred. Bu test sadece "wrapper serialization çalışıyor" doğrular.
+
+    /// **P1-2 v3:** VersionedAuthorizationBasis wrapper serialization çalışıyor —
+    /// V2 envelope tek serialization yolu. **NOT:** Bu test AuthorizationBasisV2
+    /// direct Serialize absent invariant'ını doğrulamaz. Compile-fail guard
+    /// (trybuild external crate) Faz 10 type-suite'e deferred.
+    #[test]
+    fn commit1b_versioned_v2_wrapper_is_serializable() {
+        let basis = faz4_basis_v2_fixture();
+        let envelope = VersionedAuthorizationBasis::try_v2(basis);
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            json.contains("\"schema_version\":2"),
+            "V2 envelope tek serialization yolu"
+        );
+    }
+
+    #[test]
+    fn commit1b_authorization_basis_digest_v2_serialize_hex_string() {
+        // P2-3: Digest custom Serialize — yalnız 64 lowercase hex string üretir.
+        let basis = faz4_basis_v2_fixture();
+        let digest = basis.compute_digest().unwrap();
+        let json = serde_json::to_string(&digest).unwrap();
+        // JSON string quote'lu hex — "\"hex...\""
+        assert!(
+            json.starts_with('"') && json.ends_with('"'),
+            "digest must serialize as JSON string"
+        );
+        let hex = &json[1..json.len() - 1];
+        assert_eq!(hex.len(), 64, "digest hex 64 chars");
+        assert!(
+            hex.bytes()
+                .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f')),
+            "digest hex lowercase only"
+        );
+        assert_eq!(hex, &digest.to_hex(), "custom Serialize == to_hex");
+    }
+
+    // ── P2-1: 5-axis projection unit test (reviewer) ─────────────────────────────
+
+    #[test]
+    fn commit2_provenanced_projection_preserves_all_axis_values_and_sources() {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        use crate::coords::{AxisMeasurement, MeasuredRawPosition, MetricSource};
+        let measured = MeasuredRawPosition {
+            coupling: AxisMeasurement::try_new(0.11, MetricSource::TreeSitter).unwrap(),
+            cohesion: AxisMeasurement::try_new(0.22, MetricSource::Scip).unwrap(),
+            instability: AxisMeasurement::try_new(0.33, MetricSource::Heuristic).unwrap(),
+            entropy: AxisMeasurement::try_new(0.44, MetricSource::Placeholder).unwrap(),
+            witness_depth: AxisMeasurement::try_new(0.55, MetricSource::TreeSitter).unwrap(),
+        };
+        let canonical = ProvenancedMeasuredResult::try_from(&measured).unwrap();
+        assert_eq!(canonical.coupling.value, 0.11);
+        assert_eq!(canonical.cohesion.value, 0.22);
+        assert_eq!(canonical.instability.value, 0.33);
+        assert_eq!(canonical.entropy.value, 0.44);
+        assert_eq!(canonical.witness_depth.value, 0.55);
+        assert_eq!(
+            canonical.coupling.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::TreeSitter).unwrap()
+        );
+        assert_eq!(
+            canonical.cohesion.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::Scip).unwrap()
+        );
+        assert_eq!(
+            canonical.instability.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::Heuristic).unwrap()
+        );
+        assert_eq!(
+            canonical.entropy.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::Placeholder).unwrap()
+        );
+        assert_eq!(
+            canonical.witness_depth.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::TreeSitter).unwrap()
+        );
+    }
+
+    #[test]
+    fn commit2_canonical_raw_position_from_preserves_all_axes() {
+        use crate::coords::RawPosition;
+        let pos = RawPosition {
+            x: 0.10,
+            y: 0.20,
+            z: 0.30,
+            w: 0.40,
+            v: 0.50,
+        };
+        let canonical = CanonicalRawPosition::from(pos);
+        assert_eq!(canonical.x, 0.10);
+        assert_eq!(canonical.y, 0.20);
+        assert_eq!(canonical.z, 0.30);
+        assert_eq!(canonical.w, 0.40);
+        assert_eq!(canonical.v, 0.50);
     }
 }

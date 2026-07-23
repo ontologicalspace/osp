@@ -98,15 +98,25 @@ pub struct CommitOutcome {
 ///
 /// **Prensip:** `commit() = legacy/standalone claim path; commit_task_claim() = trajectory/task-bound path.`
 /// Mevcut commit() korunur (Paper 1 uyumluluk); commit_task_claim Paper 2 için.
+///
+/// **INV-T9 #70 Commit 4b (reviewer v3 P1-1 — TODO Faz 8):** Bu struct atomik migration'da
+/// smart constructor'a çevrilecek: `{ claim, omega, task_resolver, measurement: EngineMeasurement }`.
+/// `target`/`loss_before`/`measured` kaldırılıp engine-owned derivation'a geçilecek (Faz 3).
+/// Public struct + private fields + `new()` smart constructor (external crate literal bypass
+/// kapalı). Şimdilik mevcut caller'lar (navigator, MCP, test) korunduğu için public field'lar
+/// kaldı — Faz 8 caller migration ile aynı commit'te smart constructor'a çevrilecek.
 pub struct TaskCommitInput<'a> {
     pub claim: &'a crate::witness::Claim,
     pub omega: &'a crate::witness::WitnessSet,
     pub task_resolver: &'a dyn crate::trajectory::TaskResolver,
     /// preferred_vector (loss/distance target — INV-T1 internal).
+    /// **TODO Faz 8:** kaldırılır, engine `task.target_predicate_set.preferred_vector`'den derive eder.
     pub target: crate::coords::RawPosition,
     /// Loss before (mevcut durumun preferred_vector'e uzaklığı).
+    /// **TODO Faz 8:** kaldırılır, engine-owned typed loss evidence (reviewer v4 P0).
     pub loss_before: f64,
     /// Engine-measured simulated_after (INV-T3 — claim.computed_raw'tan ProvenancedRawPosition).
+    /// **TODO Faz 8:** `measurement: EngineMeasurement` ile değiştirilir (token authority).
     pub measured: crate::trajectory::ProvenancedRawPosition,
 }
 
@@ -253,6 +263,882 @@ pub enum EngineCommitError {
     /// witness'a ulaşmaz. Navigator `GateDecision::Unknown`'a map'ler.
     #[error("vision context invalid (terminal — fail-closed): {0}")]
     VisionContextInvalid(#[from] crate::authorization::VisionContextError),
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 karar 2):** Task declaration validation
+    /// failure — `Task::validate_for_commit` terminal reject. Geçersiz task declaration
+    /// (Mixed source requirement, non-finite threshold/tolerance, geçersiz policy).
+    /// Guard sırası: Q4 syntax → task bind → **validate_for_commit** →
+    /// verify_measurement_binding → Q5 → gate → Q6 → witness.
+    /// Navigator `GateDecision::RejectedByTaskValidation`'a map'ler (append-only tag 7).
+    /// Maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
+    #[error("task validation failed: {0}")]
+    TaskValidation(#[from] crate::trajectory::TaskValidationError),
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + v4 P1-2/P1-3):** Presented
+    /// `EngineMeasurement` token'ı claim/task/subject/impact/delta/revision/context ile
+    /// uyuşmuyor — token replay/tamper detected. Disposition:
+    /// `RegenerateMeasurement` (stale — Revision/CurrentContext) veya
+    /// `RejectPresentedAuthority` (replay — Task/Subject/Impact/StructuralDelta/ContextDigest).
+    /// Navigator `GateDecision::RejectedByMeasurementBinding`'a map'ler (append-only tag 8).
+    /// Maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
+    ///
+    /// **Reviewer v6 #1 (legacy):** Bu varyant korunur ama `#[from]` KALDIRILDI — yeni kod
+    /// tek kapsayıcı `MeasurementBindingVerification` üzerinden gider. Aynı hata ailesi
+    /// tek EngineCommitError şekline dağılmaz.
+    #[error("measurement binding mismatch: {0}")]
+    MeasurementBindingMismatch(crate::measurement::MeasurementBindingMismatch),
+
+    /// **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** Engine derivation failure —
+    /// `verify_measurement_binding` sırasında expected binding üretilemedi. Sistem
+    /// hatası (operational fault), hallucination DEĞİL. Navigator SystemFailure'a
+    /// map'ler, `GateDecision::Unknown`. Maneuver budget tüketmez, witness'a ulaşmaz.
+    ///
+    /// **Reviewer v6 #1 (legacy):** Bu varyant korunur ama `#[from]` KALDIRILDI.
+    #[error("measurement binding derivation failed: {0}")]
+    MeasurementBindingFailed(crate::measurement::MeasurementBindingDerivationError),
+
+    /// **INV-T9 #70 Commit 4b Faz 3 (reviewer v6 #1):** Tek kapsayıcı measurement
+    /// binding verification error varyantı. Mismatch (presented authority) + Derivation
+    /// (system/capture failure) + Drift (verification epoch gerçeklik değişimi) üç sınıf.
+    /// `verify_measurement_binding` `?` ile yayılır. Navigator:
+    /// - Mismatch → `GateDecision::RejectedByMeasurementBinding` (tag 8)
+    /// - Derivation → `GateDecision::Unknown` (SystemFailure)
+    /// - Drift → `GateDecision::Unknown` (SystemFailure — retry gerekebilir)
+    #[error("measurement binding verification failed: {0}")]
+    MeasurementBindingVerification(#[from] crate::measurement::MeasurementBindingVerificationError),
+}
+
+/// **INV-T9 #70 Commit 4b Faz 3 (reviewer v6 #1):** `MeasurementBindingVerificationError`
+/// → `EngineCommitError` tek terminal mapping — `#[from]` attribute varyant üzerinde
+/// otomatik `From` üretir (manuel impl KALDIRILDI — E0119 conflict).
+///
+/// **Reviewer v6 #1:** Alt error tipleri wrapper üzerinden — aynı hata ailesi tek
+/// EngineCommitError şekline gider. Legacy `MeasurementBindingMismatch`/`MeasurementBindingFailed`
+/// varyantları yeni kod tarafından üretilmez.
+impl From<crate::measurement::MeasurementBindingMismatch> for EngineCommitError {
+    fn from(value: crate::measurement::MeasurementBindingMismatch) -> Self {
+        Self::MeasurementBindingVerification(value.into())
+    }
+}
+
+impl From<crate::measurement::MeasurementBindingDerivationError> for EngineCommitError {
+    fn from(value: crate::measurement::MeasurementBindingDerivationError) -> Self {
+        Self::MeasurementBindingVerification(value.into())
+    }
+}
+
+impl From<crate::measurement::MeasurementBindingDriftError> for EngineCommitError {
+    fn from(value: crate::measurement::MeasurementBindingDriftError) -> Self {
+        Self::MeasurementBindingVerification(value.into())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// VerifiedMeasurementBinding (INV-T9 #70 Commit 4b — reviewer Faz 2 scoped P1-3)
+//
+// **Capability encapsulation:** tip engine.rs'te tanımlı — `new()` modül-private
+// (engine modülü içinde). `verify_measurement_binding` (Faz 3) aynı modülde olduğu
+// için construction private — measurement.rs veya başka crate/modül doğrudan
+// `VerifiedMeasurementBinding::new()` çağıramaz (gerçek verifier-only invariant).
+//
+// Accessor'lar `pub(crate)` — authorization.rs basis builder (Faz 4) consume eder.
+// External tanılama gerekirse ayrı DTO kullanılmalı.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b (reviewer v2 karar 4 + Faz 2 scoped P1-3 + P2-4):** `verify_measurement_binding`
+/// (Faz 3) tarafından üretilen doğrulanmış binding capability. **Production non-test
+/// code'da construction yalnız `verify_measurement_binding()` ile** — modül-private `new()`
+/// (engine.rs). Basis builder consume eder — re-derivation yok.
+///
+/// **Dürüst invariant (reviewer Faz 2 scoped P2-4):** Rust'ta `engine.rs` içindeki diğer
+/// fonksiyonlar ve `engine.rs`'in child `mod tests` modülü private constructor/field'lara
+/// erişebilir. Dolayısıyla "external crate/test bypass tip seviyesinde kapalı" ifadesi
+/// tam doğru DEĞİL — test modülü hala çağırabilir. Doğru invariant: **production non-test
+/// code'da `VerifiedMeasurementBinding` yalnız `verify_measurement_binding` tarafından
+/// construct edilir.** Bu Faz 9 AST/source-contract kontrolü ile enforce edilir:
+/// `non-test AST içinde VerifiedMeasurementBinding::new call count == 1` ve çağıran
+/// `verify_measurement_binding` olmalı.
+#[derive(Debug, Clone)]
+pub(crate) struct VerifiedMeasurementBinding {
+    subject: crate::measurement::CanonicalSubjectScope,
+    impact: crate::measurement::CanonicalImpactScope,
+    canonical_delta: crate::authorization::CanonicalStructuralDelta,
+    current_revision: crate::authorization::SpaceViewRevision,
+    current_context: crate::authorization::MeasurementInputContext,
+    request_digest: crate::measurement::MeasurementRequestDigest,
+}
+
+impl VerifiedMeasurementBinding {
+    /// **Faz 3:** modül-private constructor — yalnız `verify_measurement_binding`
+    /// (engine.rs aynı modül) çağırır. measurement.rs veya test bypass kapalı.
+    fn new(
+        subject: crate::measurement::CanonicalSubjectScope,
+        impact: crate::measurement::CanonicalImpactScope,
+        canonical_delta: crate::authorization::CanonicalStructuralDelta,
+        current_revision: crate::authorization::SpaceViewRevision,
+        current_context: crate::authorization::MeasurementInputContext,
+        request_digest: crate::measurement::MeasurementRequestDigest,
+    ) -> Self {
+        Self {
+            subject,
+            impact,
+            canonical_delta,
+            current_revision,
+            current_context,
+            request_digest,
+        }
+    }
+
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn subject(&self) -> &crate::measurement::CanonicalSubjectScope {
+        &self.subject
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn impact(&self) -> &crate::measurement::CanonicalImpactScope {
+        &self.impact
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn canonical_delta(&self) -> &crate::authorization::CanonicalStructuralDelta {
+        &self.canonical_delta
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn current_revision(&self) -> &crate::authorization::SpaceViewRevision {
+        &self.current_revision
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn current_context(&self) -> &crate::authorization::MeasurementInputContext {
+        &self.current_context
+    }
+    #[allow(dead_code)] // Faz 4: basis builder consume
+    pub(crate) fn request_digest(&self) -> &crate::measurement::MeasurementRequestDigest {
+        &self.request_digest
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 3 — VerifiedTaskMeasurementBinding (outer opaque proof)
+//
+// **Reviewer v4 P1-1 + v6 P1-2:** Mevcut `VerifiedMeasurementBinding` task_id/claim/
+// measured-result taşımıyor. `MeasurementRequestDigest` hash'e task_id katmıyor.
+// Outer proof bu kimlikleri taşır — cross-context substitution protection.
+//
+// **Clone YOK (reviewer v6 P1-2):** "replay protection" değil "cross-context
+// substitution protection". Same-context replay/idempotency Faz 8 commit-ledger
+// sorumluluğu. `into_parts(self)` consuming projection — Faz 4 basis builder move-only.
+//
+// **EngineMeasurement origin invariant (reviewer v6 P1-3 — Faz 1'de kapatılmış):**
+// `measurement_digest` yalnız `measure_task_delta` (engine.rs) tarafından üretilen
+// EngineMeasurement'tan gelir. Constructor `pub(crate)` (measurement.rs:523),
+// Deserialize absent (measurement.rs:563-564) — wire/literal bypass kapalı.
+// Single-producer Faz 3 source-structure regression guard ile pinlenir (Commit 1.9).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Commit 4b Faz 3 (reviewer v4 P1-1, v6 P1-2):** Task-bound verified
+/// measurement binding — task/claim/measured-result kimliği taşır. Faz 1
+/// `VerifiedMeasurementBinding`'i wrap eder (frozen koruma).
+///
+/// **Cross-context substitution protection (reviewer v6 P1-2):** Outer proof farklı
+/// task/claim bağlamına taşınamaz. Aynı bağlamda iki kez kullanım (same-context replay)
+/// Faz 8 commit-ledger/idempotency katmanı tarafından engellenir — bu tip `Clone`
+/// olmadığı için caller önceden kopya üretemez, ama `build_authorization_context_v2`
+/// iki defa çağırmak Faz 8'de ayrıca guardlanmalı.
+///
+/// **Construction:** modül-private `new()` — yalnız `verify_measurement_binding`
+/// (engine.rs aynı modül) çağırır. Rust module privacy + Faz 9 AST call-count +
+/// Faz 10 trybuild type-suite ile multi-layer non-forgeability.
+#[derive(Debug)]
+#[allow(
+    dead_code,
+    reason = "Faz 3 verify_measurement_binding producer + Faz 4 consumer"
+)]
+pub(crate) struct VerifiedTaskMeasurementBinding {
+    task_id: crate::trajectory::TaskId,
+    /// **P0-1 (reviewer):** Claim identity — proof'tan gelir, builder parametresi DEĞİL.
+    /// Identity injection kapalı: claim_id + task_claim_digest aynı verifier epoch'undan.
+    claim_id: crate::witness::ClaimId,
+    task_claim_digest: crate::measurement::TaskClaimDigest,
+    measurement_digest: crate::measurement::MeasurementDigest,
+    binding: VerifiedMeasurementBinding,
+    // INV-T9 #70 Commit 4b Faz 4 (plan md:123-126) — 3 yeni field:
+    /// Task goal commitment — task_id + predicate body + preferred_vector.
+    task_goal_digest: crate::measurement::TaskGoalDigest,
+    /// Tam artifact commitment — request + baseline + after + context.
+    engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
+    /// Trusted task'tan snapshot — preferred_vector (Some/None).
+    preferred_vector_snapshot: Option<crate::coords::RawPosition>,
+}
+
+impl VerifiedTaskMeasurementBinding {
+    /// Modül-private constructor — yalnız `verify_measurement_binding` çağırır.
+    fn new(
+        task_id: crate::trajectory::TaskId,
+        claim_id: crate::witness::ClaimId,
+        task_claim_digest: crate::measurement::TaskClaimDigest,
+        measurement_digest: crate::measurement::MeasurementDigest,
+        binding: VerifiedMeasurementBinding,
+        // INV-T9 #70 Commit 4b Faz 4 — 3 yeni field (plan md:123-126):
+        task_goal_digest: crate::measurement::TaskGoalDigest,
+        engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
+        preferred_vector_snapshot: Option<crate::coords::RawPosition>,
+    ) -> Self {
+        Self {
+            task_id,
+            claim_id,
+            task_claim_digest,
+            measurement_digest,
+            binding,
+            task_goal_digest,
+            engine_measurement_digest,
+            preferred_vector_snapshot,
+        }
+    }
+
+    /// Task identity — outer proof field. `MeasurementRequestDigest` task_id'yı
+    /// doğrudan hash'lemiyor; bu field cross-context substitution'ı engeller.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+
+    /// **P0-1 (reviewer):** Claim identity — proof'tan gelir.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn claim_id(&self) -> crate::witness::ClaimId {
+        self.claim_id
+    }
+
+    /// Claim binding commitment — claim_id + task_id + author + structural_delta_digest.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn task_claim_digest(&self) -> &crate::measurement::TaskClaimDigest {
+        &self.task_claim_digest
+    }
+
+    /// Measured result commitment — 5-axis değer + source.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn measurement_digest(&self) -> &crate::measurement::MeasurementDigest {
+        &self.measurement_digest
+    }
+
+    /// Inner binding — subject/impact/delta/revision/context/request_digest.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn binding(&self) -> &VerifiedMeasurementBinding {
+        &self.binding
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:124):** Task goal commitment accessor.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn task_goal_digest(&self) -> &crate::measurement::TaskGoalDigest {
+        &self.task_goal_digest
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:125):** Tam artifact commitment accessor.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn engine_measurement_digest(&self) -> &crate::measurement::EngineMeasurementDigest {
+        &self.engine_measurement_digest
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:126):** Preferred vector snapshot accessor.
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn preferred_vector_snapshot(&self) -> Option<crate::coords::RawPosition> {
+        self.preferred_vector_snapshot
+    }
+
+    /// **Consuming projection (reviewer v6 P1-2):** Faz 4 basis builder move-only
+    /// consume. Clone YOK — outer proof iki defa kullanılamaz. Same-context replay
+    /// Faz 8 commit-ledger sorumluluğu.
+    ///
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:128) + P0-1 (reviewer):** 6-tuple —
+    /// task_id, claim_id, task_claim_digest, measurement_digest, binding, ve Faz 4
+    /// extension (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot).
+    #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        crate::trajectory::TaskId,
+        crate::witness::ClaimId,
+        crate::measurement::TaskClaimDigest,
+        crate::measurement::MeasurementDigest,
+        VerifiedMeasurementBinding,
+        // Faz 4 extension — 3 yeni field ayrı tuple.
+        (
+            crate::measurement::TaskGoalDigest,
+            crate::measurement::EngineMeasurementDigest,
+            Option<crate::coords::RawPosition>,
+        ),
+    ) {
+        (
+            self.task_id,
+            self.claim_id,
+            self.task_claim_digest,
+            self.measurement_digest,
+            self.binding,
+            (
+                self.task_goal_digest,
+                self.engine_measurement_digest,
+                self.preferred_vector_snapshot,
+            ),
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Commit 4b Faz 3 — VerificationEpoch (drift-detected consistent verification)
+//
+// **Reviewer v4 P1-1 + v6 P1-1/P1-2:** `BoundMeasurementSession` axis descriptor'ları
+// capture eder ama space revision'ı DEĞİL. Revision okuması ile session begin arası
+// race window'u kapatmak için: revision + context aynı epoch içinde capture, ve
+// finalization'da revision re-verify.
+//
+// **All-path finalization (reviewer v6 P1-1):** Session başladıktan sonraki tüm
+// success/error/early-return yolları coordinate finalization'dan geçer. Operation
+// closure içinde revision/context computation hata verse bile finalization çalışır.
+//
+// **Capture failure vs drift (reviewer v6 P1-2):**
+// - `BoundMeasurementSession::begin` Err → Derivation(CurrentContextCaptureFailed)
+//   (capture failure — drift DEĞİL, başlangıç kanıtı elde edilemedi)
+// - `session.verify_unchanged()` Err → Drift(CoordinateContextChanged)
+//   (capture başarılıydı ama verification sırasında gerçeklik değişti)
+//
+// **Revision re-verify (reviewer v6 P1-1):** Revision baseline başarıyla capture
+// edildiyse verification sonunda yeniden hesaplanıp karşılaştırılır. Capture
+// edilemeyen yollar derivation failure olarak sonuçlanır. `revision_after` hesap
+// hatası → Derivation(RevisionRecheckFailed).
+//
+// **Deterministic precedence:** coord drift > revision recheck failed > revision
+// before≠after > ordinary verification error. Drift ordinary verification sonuçlarına
+// göre öncelikli — drift sırasında üretilen karşılaştırma sonucu güvenilmez.
+//
+// **Naming (reviewer v6 P2-7):** "atomic snapshot" DEĞİL — "drift-detected consistent
+// verification epoch". Optimistic consistency validation with drift detection. Read-lock/
+// immutable-copy yok; before/after karşılaştırması ile drift tespiti.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Verification epoch view — inner verifier'e geçilen captured revision + context.
+/// Private (reviewer P3) — yalnız `with_epoch` + `verify_measurement_binding_inner`
+/// tarafından kullanılır. `pub(crate)` DEĞİL (gereksiz yüzey genişletme riski).
+struct VerificationEpochView<'a> {
+    revision_before: &'a crate::authorization::SpaceViewRevision,
+    context: &'a crate::authorization::MeasurementInputContext,
+}
+
+impl<'a> VerificationEpochView<'a> {
+    fn revision_before(&self) -> &crate::authorization::SpaceViewRevision {
+        self.revision_before
+    }
+    fn context(&self) -> &crate::authorization::MeasurementInputContext {
+        self.context
+    }
+}
+
+/// `with_epoch` operation result — revision_before dışarı taşınır yalnız capture
+/// başarılıysa (context construction hatasında proof üretilmiyor, revision gerekmez).
+type EpochOperationResult<R> = Result<
+    (
+        crate::authorization::SpaceViewRevision,
+        Result<R, crate::measurement::MeasurementBindingVerificationError>,
+    ),
+    crate::measurement::MeasurementBindingVerificationError,
+>;
+
+impl SpaceEngine {
+    /// **Reviewer v6 P1-1 (all-path finalization):** Verification epoch runner.
+    ///
+    /// Session başladıktan sonraki tüm yollar coordinate finalization'dan geçer:
+    /// - revision computation hata → operation Err, ama coord finalization çalışır
+    /// - context construction hata → operation Err, ama coord finalization çalışır
+    /// - inner verifier mismatch/derivation → operation Err, ama coord finalization çalışır
+    /// - inner verifier Ok → operation Ok, coord finalization + revision re-verify
+    ///
+    /// Session begin failure (capture failure) → Derivation, finalization yok (session yok).
+    fn with_epoch<R>(
+        &self,
+        f: impl FnOnce(
+            &VerificationEpochView<'_>,
+        ) -> Result<R, crate::measurement::MeasurementBindingVerificationError>,
+    ) -> Result<R, crate::measurement::MeasurementBindingVerificationError> {
+        use crate::measurement::{
+            MeasurementBindingDerivationError, MeasurementBindingVerificationError as VerifErr,
+        };
+
+        // Session begin — capture failure (drift DEĞİL): başlangıç kanıtı elde edilemedi.
+        let session = match crate::coords::BoundMeasurementSession::begin(&self.coord_system) {
+            Ok(s) => s,
+            Err(source) => {
+                return Err(VerifErr::Derivation(
+                    MeasurementBindingDerivationError::CurrentContextCaptureFailed { source },
+                ));
+            }
+        };
+
+        // Operation closure: revision + context setup + inner verify. Tüm fallible işlemler
+        // burada — early `?` return bile (closure olduğu için) finalization'ı atlamaz.
+        let operation: EpochOperationResult<R> = (|| {
+            let revision_before = self.current_space_view_revision().map_err(|detail| {
+                VerifErr::Derivation(
+                    MeasurementBindingDerivationError::RevisionComputationFailed { detail },
+                )
+            })?;
+            let context =
+                crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
+                    .map_err(|e| {
+                        VerifErr::Derivation(
+                            MeasurementBindingDerivationError::ContextConstructionFailed {
+                                detail: e.to_string(),
+                            },
+                        )
+                    })?;
+            let view = VerificationEpochView {
+                revision_before: &revision_before,
+                context: &context,
+            };
+            let result = f(&view);
+            Ok((revision_before, result))
+        })();
+
+        // Finalization — session başladıktan SONRA her durumda çalışır (reviewer v6 P1-1).
+        let coordinate_drift = session.verify_unchanged();
+        self.finalize_verification(operation, coordinate_drift)
+    }
+
+    /// **Reviewer v6 P1-1/P1-2:** Drift-aware finalization. Coord drift + revision
+    /// re-verify + ordinary result üçünü deterministic precedence ile birleştirir.
+    ///
+    /// Precedence: coord drift > revision recheck failed > revision before≠after > ordinary.
+    /// Drift tespit edilirse ordinary verification sonucu güvenilmez — drift öncelikli.
+    fn finalize_verification<R>(
+        &self,
+        operation: EpochOperationResult<R>,
+        coordinate_drift: Result<(), crate::coords::CoordinateMeasurementError>,
+    ) -> Result<R, crate::measurement::MeasurementBindingVerificationError> {
+        // **Reviewer v8 P1-1:** revision_after engine'den alınıp pure decision function'a
+        // pass edilir. Bu sayede combine_verification_results test edilebilir (mock engine
+        // gerekmeden RevisionRecheckFailed kolu doğrulanabilir).
+        let revision_after = self.current_space_view_revision();
+        Self::combine_verification_results(operation, coordinate_drift, revision_after)
+    }
+
+    /// **Reviewer v8 P1-1:** Pure decision combiner — engine state bağımlılığı yok.
+    /// `finalize_verification` production'ta `current_space_view_revision()` sonucunu
+    /// `revision_after` olarak verir; testler synthetic `Err(...)` vererek
+    /// `RevisionRecheckFailed` kolunu doğrudan doğrular.
+    #[allow(
+        dead_code,
+        reason = "Faz 3 test matrisi consumer — combine_verification_results test'leri"
+    )]
+    fn combine_verification_results<R>(
+        operation: EpochOperationResult<R>,
+        coordinate_drift: Result<(), crate::coords::CoordinateMeasurementError>,
+        revision_after: Result<crate::authorization::SpaceViewRevision, String>,
+    ) -> Result<R, crate::measurement::MeasurementBindingVerificationError> {
+        use crate::measurement::{
+            MeasurementBindingDerivationError, MeasurementBindingDriftError,
+            MeasurementBindingVerificationError as VerifErr,
+        };
+
+        // Operation Err (revision/context capture failed) — coord drift varsa onu döndür
+        // (drift capture failure'a göre öncelikli — capture sırasında gerçeklik değişti).
+        let (revision_before, inner_result) = match operation {
+            Ok((revision_before, inner_result)) => (revision_before, inner_result),
+            Err(capture_err) => {
+                return match coordinate_drift {
+                    Ok(()) => Err(capture_err),
+                    Err(coord) => Err(VerifErr::Drift(
+                        MeasurementBindingDriftError::CoordinateContextChanged { source: coord },
+                    )),
+                };
+            }
+        };
+
+        // Revision re-verify — baseline capture edildi, final revision karşılaştır.
+        match (coordinate_drift, revision_after) {
+            // İkisi de Ok — revision before==after kontrolü.
+            (Ok(()), Ok(after)) => {
+                if revision_before == after {
+                    // Drift yok — ordinary result döndür.
+                    inner_result
+                } else {
+                    // Revision drift — ordinary result güvenilmez.
+                    Err(VerifErr::Drift(
+                        MeasurementBindingDriftError::SpaceRevisionChanged {
+                            before: revision_before,
+                            after,
+                        },
+                    ))
+                }
+            }
+            // Coord drift var, revision recheck başarılı — coord öncelikli ama revision
+            // drift varsa BothChanged.
+            (Err(coord), Ok(after)) => {
+                if revision_before == after {
+                    Err(VerifErr::Drift(
+                        MeasurementBindingDriftError::CoordinateContextChanged { source: coord },
+                    ))
+                } else {
+                    Err(VerifErr::Drift(MeasurementBindingDriftError::BothChanged {
+                        coord,
+                        before: revision_before,
+                        after,
+                    }))
+                }
+            }
+            // Coord Ok, revision recheck failed — Derivation (system failure).
+            (Ok(()), Err(detail)) => Err(VerifErr::Derivation(
+                MeasurementBindingDerivationError::RevisionRecheckFailed { detail },
+            )),
+            // Coord drift + revision recheck failed — coord öncelikli (revision karşılaştırma yapılamaz).
+            (Err(coord), Err(_detail)) => Err(VerifErr::Drift(
+                MeasurementBindingDriftError::CoordinateContextChanged { source: coord },
+            )),
+        }
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 3 (reviewer v4 karar 4 + v6):** Measurement binding
+    /// verifier — presented `EngineMeasurement` token'ını claim/task/subject/impact/
+    /// delta/revision/context karşısında doğrular. 7 binding validation + canonical
+    /// commitment derivation.
+    ///
+    /// **Standalone primitive (reviewer v6):** Production enforcement Faz 8'de
+    /// (caller migration + smart constructor ile). Faz 3'te binding primitive
+    /// established, production commit-path enforcement deferred.
+    ///
+    /// **All-path drift validation:** `with_epoch` session başladıktan sonraki tüm
+    /// yolları coordinate finalization + revision re-verify'dan geçirir. Capture
+    /// failure (begin Err) → Derivation; gözlenen değişim → Drift.
+    #[allow(
+        dead_code,
+        reason = "Binding primitive established in Faz 3; production commit-path wiring is Faz 8"
+    )]
+    pub(crate) fn verify_measurement_binding(
+        &self,
+        claim: &crate::witness::Claim,
+        task: &crate::trajectory::Task,
+        measurement: &crate::measurement::EngineMeasurement,
+    ) -> Result<
+        VerifiedTaskMeasurementBinding,
+        crate::measurement::MeasurementBindingVerificationError,
+    > {
+        self.with_epoch(|epoch| {
+            self.verify_measurement_binding_inner(epoch, claim, task, measurement)
+        })
+    }
+
+    /// **INV-T9 #70 Commit 4b Faz 4 Commit 2:** `build_authorization_context_v2`
+    /// standalone builder. Verified measurement binding (proof) + verified gate
+    /// evaluation + canonical witness requirement + presented artifact →
+    /// `AuthorizationContextV2`. Re-derivation YOK — proof consume + 2 çevrim +
+    /// checked constructor zinciri.
+    ///
+    /// **Ontolojik zincir:** verify_measurement_binding → build_authorization_context_v2
+    /// → AuthorizationContextV2 (basis + verified gate eval + witness requirement).
+    ///
+    /// **Production wiring Faz 8.** Standalone — engine state kullanmaz.
+    #[allow(
+        dead_code,
+        reason = "Faz 8 production wiring / Commit 2 standalone test"
+    )]
+    pub(crate) fn build_authorization_context_v2(
+        &self,
+        binding: VerifiedTaskMeasurementBinding,
+        gate_evaluation: crate::authorization::VerifiedGateEvaluationV2,
+        witness_requirement: crate::authorization::CanonicalWitnessRequirementV2,
+        measurement: &crate::measurement::EngineMeasurement,
+    ) -> Result<
+        crate::authorization::AuthorizationContextV2,
+        crate::authorization::AuthorizationContextV2BuildError,
+    > {
+        use crate::authorization::{
+            AuthorizationBasisV2, AuthorizationContextV2, CanonicalBaselineUnavailableReason,
+            CanonicalRawPosition, CanonicalTrajectoryEvidenceBaseline,
+            CanonicalTrajectoryLossEvidence, CanonicalTrajectoryLossUnavailableReason,
+            ProvenancedMeasuredResult,
+        };
+        use crate::measurement::{
+            MeasurementBaseline, MeasurementContextDigest, MeasurementDeltaDigest,
+        };
+
+        let (
+            task_id,
+            claim_id,
+            task_claim_digest,
+            measurement_digest,
+            inner_binding,
+            (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot),
+        ) = binding.into_parts();
+
+        // 1. Presented artifact == consumed proof? (tüm evidence projection'dan ÖNCE)
+        let recomputed = measurement.compute_digest()?;
+        if recomputed.as_bytes() != engine_measurement_digest.as_bytes() {
+            return Err(crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
+                proof: engine_measurement_digest.to_hex(),
+                recomputed: recomputed.to_hex(),
+            });
+        }
+
+        // 2. Baseline canonical evidence (MeasurementBaseline → CanonicalTrajectoryEvidenceBaseline).
+        let trajectory_baseline = match measurement.before() {
+            MeasurementBaseline::Available(before) => {
+                CanonicalTrajectoryEvidenceBaseline::Available {
+                    before: ProvenancedMeasuredResult::try_from(before)?,
+                }
+            }
+            MeasurementBaseline::Unavailable { reason } => {
+                CanonicalTrajectoryEvidenceBaseline::Unavailable {
+                    reason: CanonicalBaselineUnavailableReason::try_from_reason(
+                        reason,
+                        inner_binding.subject(),
+                    )?,
+                }
+            }
+        };
+        let measurement_baseline_digest =
+            trajectory_baseline.compute_measurement_baseline_digest()?;
+
+        // 3. Loss evidence (preferred_vector Some/None → Available/Unavailable).
+        let trajectory_loss = match preferred_vector_snapshot {
+            Some(target) => {
+                let loss_after = crate::trajectory::trajectory_loss(measurement.after(), &target);
+                CanonicalTrajectoryLossEvidence::Available {
+                    target: CanonicalRawPosition::from(target),
+                    loss_after,
+                }
+            }
+            None => CanonicalTrajectoryLossEvidence::Unavailable {
+                reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+            },
+        };
+
+        // 4. Request + subordinate commitments.
+        let measurement_request = measurement.request().canonical_evidence();
+        let measurement_request_digest = inner_binding.request_digest().clone();
+        let canonical_delta_digest =
+            MeasurementDeltaDigest::compute_from_canonical(inner_binding.canonical_delta())?;
+        let measurement_context_digest =
+            MeasurementContextDigest::compute(inner_binding.current_context())?;
+
+        // 5. Checked basis (validate_semantics — nested commitment reverify).
+        let basis = AuthorizationBasisV2::new(
+            task_id,
+            claim_id,
+            task_claim_digest,
+            task_goal_digest,
+            measurement_digest,
+            engine_measurement_digest,
+            trajectory_baseline,
+            measurement_baseline_digest,
+            trajectory_loss,
+            measurement_request,
+            measurement_request_digest,
+            measurement_context_digest,
+            canonical_delta_digest,
+        )?;
+
+        // 6. Proof-gated context + witness/apply-target consistency.
+        AuthorizationContextV2::new(basis, gate_evaluation, witness_requirement)
+    }
+
+    /// **7 binding validation + commitment derivation.** Check sırası: TaskMismatch →
+    /// Subject → Impact → StructuralDelta → Revision → ContextDigest → CurrentContext.
+    /// Her mismatch testi kendisinden önceki check'leri geçecek fixture ile tasarlanmalı
+    /// (reviewer P2-1 — check-order-aware).
+    fn verify_measurement_binding_inner(
+        &self,
+        epoch: &VerificationEpochView<'_>,
+        claim: &crate::witness::Claim,
+        task: &crate::trajectory::Task,
+        measurement: &crate::measurement::EngineMeasurement,
+    ) -> Result<
+        VerifiedTaskMeasurementBinding,
+        crate::measurement::MeasurementBindingVerificationError,
+    > {
+        use crate::measurement::{
+            MeasurementBindingDerivationError as DerivErr, MeasurementBindingMismatch as Mismatch,
+        };
+
+        // ── Check 1: TaskMismatch ────────────────────────────────────────────────
+        // Task identity doğrudan hash değil — explicit check. Aynı subject scope'a sahip
+        // iki farklı task aynı request_digest üretebilir, ama bu check TaskMismatch üretir.
+        match claim.task_id {
+            Some(tid) if tid == task.id => {}
+            other => {
+                return Err(Mismatch::TaskMismatch {
+                    claim_task_id: other,
+                    resolved_task_id: task.id,
+                }
+                .into());
+            }
+        }
+
+        // ── Check 2: SubjectMismatch ─────────────────────────────────────────────
+        let subject = self.derive_task_subject_scope(task).map_err(|e| {
+            DerivErr::SubjectDerivationFailed {
+                detail: e.to_string(),
+            }
+        })?;
+        if &subject != measurement.request().subject() {
+            return Err(Mismatch::SubjectMismatch {
+                expected: subject,
+                presented: measurement.request().subject().clone(),
+            }
+            .into());
+        }
+
+        // ── Check 3: ImpactMismatch ──────────────────────────────────────────────
+        let impact =
+            self.derive_impact_scope(claim)
+                .map_err(|e| DerivErr::ImpactDerivationFailed {
+                    detail: e.to_string(),
+                })?;
+        if &impact != measurement.request().impact() {
+            return Err(Mismatch::ImpactMismatch {
+                expected: impact,
+                presented: measurement.request().impact().clone(),
+            }
+            .into());
+        }
+
+        // ── Check 4: StructuralDeltaMismatch ─────────────────────────────────────
+        // Canonical delta → digest. claim delta'yı canonical'a çevir + digest üret,
+        // token request'in structural_delta_digest ile karşılaştır.
+        let canonical_delta = crate::authorization::canonical_structural_delta_from_claim(claim)
+            .map_err(|e| DerivErr::StructuralCanonicalizationFailed {
+                detail: e.to_string(),
+            })?;
+        let expected_delta_digest =
+            crate::measurement::MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)
+                .map_err(|e| DerivErr::StructuralCanonicalizationFailed {
+                    detail: e.to_string(),
+                })?;
+        if &expected_delta_digest != measurement.request().structural_delta_digest() {
+            return Err(Mismatch::StructuralDeltaMismatch {
+                expected: expected_delta_digest,
+                presented: measurement.request().structural_delta_digest().clone(),
+            }
+            .into());
+        }
+
+        // ── Check 5: RevisionMismatch ────────────────────────────────────────────
+        // Epoch'tan (session begin sonrası capture) — race window kapalı.
+        if epoch.revision_before() != measurement.request().base_revision() {
+            return Err(Mismatch::RevisionMismatch {
+                expected: epoch.revision_before().clone(),
+                presented: measurement.request().base_revision().clone(),
+            }
+            .into());
+        }
+
+        // ── Check 6: ContextDigestMismatch (token içi tutarsızlık) ───────────────
+        // Context zaten mevcut — yapılan digest hesaplaması. Faz 1 frozen isim
+        // (ContextConstructionFailed) korunur, doc net. Defensively fallible — pratikte
+        // infallible (already-validated context), ama Result korunur.
+        let actual_input_digest = crate::authorization::MeasurementInputDigest::compute(
+            measurement.context(),
+        )
+        .map_err(|e| DerivErr::ContextConstructionFailed {
+            detail: e.to_string(),
+        })?;
+        if &actual_input_digest != measurement.request().measurement_input_digest() {
+            return Err(Mismatch::ContextDigestMismatch {
+                expected: actual_input_digest,
+                presented: measurement.request().measurement_input_digest().clone(),
+            }
+            .into());
+        }
+
+        // ── Check 7: CurrentContextMismatch (epoch context vs token context) ─────
+        // Epoch'tan capture edilen context (drift-detect) ile token context karşılaştır.
+        let epoch_context_digest = crate::authorization::MeasurementInputDigest::compute(
+            epoch.context(),
+        )
+        .map_err(|e| DerivErr::ContextConstructionFailed {
+            detail: e.to_string(),
+        })?;
+        let token_context_digest = crate::authorization::MeasurementInputDigest::compute(
+            measurement.context(),
+        )
+        .map_err(|e| DerivErr::ContextConstructionFailed {
+            detail: e.to_string(),
+        })?;
+        if epoch_context_digest != token_context_digest {
+            return Err(Mismatch::CurrentContextMismatch {
+                expected: epoch_context_digest,
+                presented: token_context_digest,
+            }
+            .into());
+        }
+
+        // ── Commitment derivation (check değil — proof inşası) ───────────────────
+        // TaskClaimDigest: claim_id + task_id + author + structural_delta_digest.
+        // **Reviewer v7 P2-1:** TaskClaimDigestComputationFailed — structural DEĞİL,
+        // binding commitment hatası (semantic ayrım telemetry için korunur).
+        let task_claim_digest =
+            crate::measurement::TaskClaimDigest::compute(claim, task.id, &expected_delta_digest)
+                .map_err(|e| DerivErr::TaskClaimDigestComputationFailed {
+                    detail: e.to_string(),
+                })?;
+
+        // MeasurementDigest: 5-axis measured result (engine-origin — measure_task_delta).
+        // **Reviewer v7 P2-1:** MeasurementResultDigestComputationFailed — structural DEĞİL,
+        // measured-result commitment hatası.
+        let measurement_digest =
+            crate::measurement::MeasurementDigest::compute(measurement.after()).map_err(|e| {
+                DerivErr::MeasurementResultDigestComputationFailed {
+                    detail: e.to_string(),
+                }
+            })?;
+
+        // RequestDigest: defensively fallible — unreachable invariant (pratikte infallible,
+        // input already-canonical). Result korunur, test ÜRETİLMEZ (reviewer P2-5).
+        let request_digest =
+            crate::measurement::MeasurementRequestDigest::compute(measurement.request())
+                .map_err(|source| DerivErr::RequestDigestComputationFailed { source })?;
+
+        // Inner binding — Faz 1 frozen 6 field.
+        let binding = VerifiedMeasurementBinding::new(
+            subject,
+            impact,
+            canonical_delta,
+            epoch.revision_before().clone(),
+            epoch.context().clone(),
+            request_digest,
+        );
+
+        // ── INV-T9 #70 Commit 4b Faz 4 (plan md:121-128) — 3 yeni commitment ──────
+        // TaskGoalDigest: task_id + predicate body + preferred_vector. Trusted task'tan
+        // tek okuma → snapshot + digest (TOCTOU yok — task zaten verify sırasında okundu).
+        // **Reviewer v7 P2-1:** TaskGoalDigestComputationFailed — structural DEĞİL,
+        // task goal commitment hatası (semantic ayrım telemetry için korunur).
+        let task_goal_digest = crate::measurement::TaskGoalDigest::compute(task).map_err(|e| {
+            DerivErr::TaskGoalDigestComputationFailed {
+                detail: e.to_string(),
+            }
+        })?;
+
+        // EngineMeasurementDigest: tam artifact commitment (request + baseline + after + context).
+        // **Reviewer v7 P2-1:** EngineMeasurementDigestComputationFailed — structural DEĞİL,
+        // artifact commitment hatası.
+        let engine_measurement_digest = measurement.compute_digest().map_err(|e| {
+            DerivErr::EngineMeasurementDigestComputationFailed {
+                detail: e.to_string(),
+            }
+        })?;
+
+        // Preferred vector snapshot — trusted task'tan alınır (INV-T1: agent view'a sızmaz).
+        let preferred_vector_snapshot = task.target_predicate_set.preferred_vector;
+
+        // Outer proof — task/claim/measured-result identity + Faz 4 extension
+        // (task_goal_digest + engine_measurement_digest + preferred_vector_snapshot).
+        // Cross-context substitution protection + tam artifact commitment.
+        // **P0-1 (reviewer):** claim_id proof'tan gelir — identity injection kapalı.
+        Ok(VerifiedTaskMeasurementBinding::new(
+            task.id,
+            claim.id,
+            task_claim_digest,
+            measurement_digest,
+            binding,
+            task_goal_digest,
+            engine_measurement_digest,
+            preferred_vector_snapshot,
+        ))
+    }
 }
 
 /// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
@@ -552,6 +1438,18 @@ impl SpaceEngine {
             task,
         };
 
+        // **Phase 0b+ (INV-T9 #70 Commit 4b Faz 3 — reviewer v2 karar 2, tag 7):**
+        // Task declaration validation. TaskBoundClaim yalnız `claim.task_id ↔ task.id`
+        // identity binding'i kanıtlar (semantic contract) — task'ın commit için geçerli
+        // olduğunu ima ETMEZ. Declaration validity `validate_for_commit()` ile ayrıca
+        // kontrol edilir: empty predicate set, non-finite threshold/tolerance, Mixed
+        // source requirement, geçersiz policy.
+        //
+        // Guard order: Q4 syntax → task bind → **validate_for_commit** → Q5 vision →
+        // (Faz 8: verify_measurement_binding) → Q5.b gate → Q6 rule → witness.
+        // Terminal — maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
+        bound.task.validate_for_commit()?;
+
         // Phase 0c: Q5 Vision (θ bound — negatif-uzay safety).
         // **Step 4b:** Captured `EffectiveVisionGateContext` — bir kez üretilir, Q5 +
         // build_authorization_context + digest paylaşır (4a rule_context pattern).
@@ -830,7 +1728,20 @@ impl SpaceEngine {
     /// 2. delta_edges: Imports self-loop reddi, geçerli EdgeKind, from/to ≥ 0
     /// 3. delta_nodes içinde duplicate ID yok
     /// 4. computed_raw: tüm core eksen değerleri finite
+    ///
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Artık ayrılmış helper'lara delegasyon —
+    /// `check_claim_structure` (structural 1-3) + `check_raw_position_finite` (computed_raw 4).
+    /// Task-bound path (Faz 3) `measurement.after().to_raw()` ile finite-check yapar.
     fn check_claim_syntax(&self, claim: &Claim) -> Result<(), EngineCommitError> {
+        self.check_claim_structure(claim)?;
+        self.check_raw_position_finite(claim.id, "computed_raw", &claim.computed_raw)?;
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Structural syntax validation —
+    /// node mass/kind, duplicate ID, edge self-import. `claim.computed_raw`'a dokunmaz
+    /// (finite-check ayrı). Legacy `commit()` + task-bound path ortak kullanır.
+    fn check_claim_structure(&self, claim: &Claim) -> Result<(), EngineCommitError> {
         // 1. Node validation
         for node in &claim.delta_nodes {
             if node.id == 0 && !claim.delta_nodes.is_empty() {
@@ -875,8 +1786,19 @@ impl SpaceEngine {
             }
         }
 
-        // 4. computed_raw finite check (flat RawPosition: x,y,z,w,v)
-        let raw = &claim.computed_raw;
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3 + Faz 2 scoped P2-2):** RawPosition
+    /// finite-check — flat x/y/z/w/v eksen değerleri finite. `claim.computed_raw`'dan
+    /// ayrı parametre (task-bound path `measurement.after().to_raw()` ile çağırır — Faz 3).
+    /// `source_label` nötr — "computed_raw" (legacy) veya "measurement.after" (task-bound).
+    fn check_raw_position_finite(
+        &self,
+        claim_id: crate::witness::ClaimId,
+        source_label: &str,
+        raw: &crate::coords::RawPosition,
+    ) -> Result<(), EngineCommitError> {
         let axes = [
             ("x", raw.x),
             ("y", raw.y),
@@ -888,13 +1810,12 @@ impl SpaceEngine {
             if !val.is_finite() {
                 return Err(EngineCommitError::SyntaxViolation {
                     violation: SyntaxViolation {
-                        claim_id: claim.id,
-                        detail: format!("computed_raw.{} is not finite: {}", name, val),
+                        claim_id,
+                        detail: format!("{}.{} is not finite: {}", source_label, name, val),
                     },
                 });
             }
         }
-
         Ok(())
     }
 
@@ -909,26 +1830,42 @@ impl SpaceEngine {
     /// **INV-T9 Step 4b (reviewer P0-1):** Artık captured `EffectiveVisionGateContext`
     /// kullanır — `effective_vision_gate_context(claim)` bir kez üretilir, Q5 + digest
     /// paylaşır. `vision_for_claim` wrapper'ı legacy/test yüzeylerinde kalır.
+    ///
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** `claim.computed_raw`'a delegasyon —
+    /// `check_vision_raw_with_context`. Task-bound path (Faz 3) `measurement.after().to_raw()`
+    /// ile çağırır.
     fn check_claim_vision_with_context(
         &self,
         claim: &Claim,
         vision_context: &crate::authorization::EffectiveVisionGateContext,
     ) -> Result<(), EngineCommitError> {
+        self.check_vision_raw_with_context(claim.id, &claim.computed_raw, vision_context)
+    }
+
+    /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Vision gate — ayrı raw parametre.
+    /// `claim.computed_raw`'dan bağımsız — task-bound path `measurement.after().to_raw()`
+    /// ile çağırır (token authority). Violation evidence `raw` field'ı authority-tied.
+    fn check_vision_raw_with_context(
+        &self,
+        claim_id: crate::witness::ClaimId,
+        raw: &crate::coords::RawPosition,
+        vision_context: &crate::authorization::EffectiveVisionGateContext,
+    ) -> Result<(), EngineCommitError> {
         // Effective vision captured context'ten — yeniden infer YOK.
         let vision = vision_context.selection.effective_vision;
-        let theta = CosineDeviation.theta(&claim.computed_raw, &vision, &self.space);
+        let theta = CosineDeviation.theta(raw, &vision, &self.space);
         if theta > vision_context.theta_bound {
             tracing::warn!(
-                claim_id = claim.id,
+                claim_id,
                 theta,
                 bound = vision_context.theta_bound,
                 "Q5 vision violation — claim rejected (negatif-uzay)"
             );
             return Err(EngineCommitError::VisionViolation {
                 violation: VisionViolation {
-                    claim_id: claim.id,
+                    claim_id,
                     theta,
-                    raw: claim.computed_raw,
+                    raw: *raw,
                 },
                 bound: vision_context.theta_bound,
             });
@@ -4035,5 +4972,1157 @@ v = 0.5
             5,
             "token context carries exactly 5 core axis descriptors"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 2 — helper regression test'leri
+    // (reviewer Faz 2 scoped P2-1: provided raw bağımsız-parametre semantiği)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn check_raw_position_finite_rejects_provided_nan_independent_of_claim_computed_raw() {
+        // Reviewer Faz 2 scoped P2-1: claim.computed_raw finite olsa bile provided raw
+        // (measurement.after().to_raw()) NaN ise reddetmeli — bağımsız parametre.
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            CoordinateSystem::empty(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let claim_id: crate::witness::ClaimId = 42;
+        // claim.computed_raw finite (simüle) — provided raw NaN.
+        let provided_raw_nan = crate::coords::RawPosition {
+            x: f64::NAN,
+            ..RawPosition::default()
+        };
+        let result =
+            engine.check_raw_position_finite(claim_id, "measurement.after", &provided_raw_nan);
+        match result {
+            Err(EngineCommitError::SyntaxViolation { violation }) => {
+                assert_eq!(violation.claim_id, claim_id);
+                assert!(
+                    violation.detail.contains("measurement.after.x"),
+                    "detail must reference provided source label, got: {}",
+                    violation.detail
+                );
+                assert!(
+                    violation.detail.contains("NaN"),
+                    "detail must report NaN, got: {}",
+                    violation.detail
+                );
+            }
+            other => panic!("expected SyntaxViolation for NaN provided raw, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_raw_position_finite_accepts_all_finite_provided_raw() {
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            CoordinateSystem::empty(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let finite_raw = RawPosition {
+            x: 0.3,
+            y: 0.5,
+            z: 0.7,
+            w: 0.2,
+            v: 0.1,
+        };
+        engine
+            .check_raw_position_finite(1, "measurement.after", &finite_raw)
+            .expect("all-finite provided raw must pass");
+    }
+
+    #[test]
+    fn check_raw_position_finite_source_label_appears_in_violation_detail() {
+        // Reviewer Faz 2 scoped P2-2: nötr source label — "computed_raw" DEĞİL.
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            CoordinateSystem::empty(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let raw = RawPosition {
+            z: f64::INFINITY,
+            ..RawPosition::default()
+        };
+        let err = engine
+            .check_raw_position_finite(7, "measurement.after", &raw)
+            .unwrap_err();
+        match err {
+            EngineCommitError::SyntaxViolation { violation } => {
+                assert!(
+                    violation.detail.contains("measurement.after.z"),
+                    "detail must use provided source label 'measurement.after', got: {}",
+                    violation.detail
+                );
+                assert!(
+                    !violation.detail.contains("computed_raw"),
+                    "detail must NOT hardcode 'computed_raw', got: {}",
+                    violation.detail
+                );
+            }
+            other => panic!("expected SyntaxViolation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_vision_raw_with_context_uses_provided_raw_not_claim_computed_raw() {
+        // Reviewer Faz 2 scoped P2-3: claim.computed_raw Q5'i geçiyor ama provided raw
+        // (measurement.after) ihlal ediyor → VisionViolation oluşmalı + raw field == provided.
+        // Bağımsız-raw semantiği: helper claim.computed_raw'a değil verilen raw'a bakar.
+        let space = crate::space::Space::new();
+        let engine = SpaceEngine::new(
+            space,
+            CoordinateSystem::empty(),
+            // Vision center — claim.computed_raw ile aynı (theta=0, Q5 geçer).
+            VisionVector::new(CENTER),
+            EngineConfig::default_calibrated(),
+        );
+        // Claim — computed_raw vision center'a yakın (Q5 geçer).
+        let claim = crate::witness::Claim {
+            id: 1,
+            intent: crate::witness::Intent::new(100, CENTER),
+            author: 100,
+            computed_raw: CENTER, // theta=0 → Q5 geçer
+            delta_nodes: vec![mod_node(1)],
+            delta_edges: vec![],
+            task_id: None,
+            removed_edges: vec![],
+        };
+        let vision_context = engine
+            .effective_vision_gate_context(&claim)
+            .expect("vision context for CENTER claim");
+
+        // claim.computed_raw (CENTER) ile Q5 geçer.
+        engine
+            .check_vision_raw_with_context(claim.id, &claim.computed_raw, &vision_context)
+            .expect("CENTER computed_raw must pass Q5 (theta=0)");
+
+        // Provided raw — vision center'dan uzak (theta > bound → Q5 ihlal).
+        let provided_raw_far = RawPosition {
+            x: 0.0,
+            y: 0.0,
+            z: 0.0,
+            w: 0.0,
+            v: 0.0,
+        };
+        let err = engine
+            .check_vision_raw_with_context(claim.id, &provided_raw_far, &vision_context)
+            .expect_err("provided far raw must violate Q5");
+        match err {
+            EngineCommitError::VisionViolation { violation, .. } => {
+                assert_eq!(violation.claim_id, claim.id);
+                // **Reviewer Faz 2 scoped P2-3:** raw field provided raw olmalı
+                // (claim.computed_raw DEĞIL — authority-tied evidence).
+                assert_eq!(
+                    violation.raw, provided_raw_far,
+                    "VisionViolation.raw must be the provided raw (measurement.after), \
+                     not claim.computed_raw"
+                );
+            }
+            other => panic!("expected VisionViolation, got {other:?}"),
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 3 — verify_measurement_binding test matrisi
+    //
+    // **Reviewer v6:** 1 pozitif + 7 mismatch (check-order-aware) + derivation/drift +
+    // canonical-field coverage + EngineMeasurement origin evidence.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// Helper: produce a valid EngineMeasurement via measure_task_delta (engine-origin
+    /// token producer). Faz 3 verify_measurement_binding bu token'ı doğrular.
+    /// Subject scope (node_id) delta ile introduced — claim delta_nodes içermeli.
+    fn produce_valid_measurement(
+        engine: &SpaceEngine,
+        task: &crate::trajectory::Task,
+        claim: &crate::witness::Claim,
+    ) -> crate::measurement::EngineMeasurement {
+        let bound = crate::trajectory::TaskBoundClaim { claim, task };
+        let revision = engine.current_space_view_revision().unwrap();
+        engine.measure_task_delta(&bound, &revision, None).unwrap()
+    }
+
+    /// Claim with node-1 delta introduced (matches task_with_node_scope(1, ...)).
+    fn claim_with_node1_delta(task_id: crate::trajectory::TaskId) -> crate::witness::Claim {
+        claim_with_task_id(task_id, vec![mod_node(1)], vec![], vec![])
+    }
+
+    #[test]
+    fn verify_measurement_binding_succeeds_for_valid_token() {
+        // Pozitif: measure_task_delta ürettiği token, aynı engine ile verify → Ok.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let result = engine.verify_measurement_binding(&claim, &task, &measurement);
+        assert!(
+            result.is_ok(),
+            "valid token must verify: {:?}",
+            result.err()
+        );
+        let proof = result.unwrap();
+        assert_eq!(proof.task_id(), 42);
+    }
+
+    #[test]
+    fn verify_measurement_binding_rejects_task_mismatch() {
+        // Check 1: claim.task_id ≠ task.id → TaskMismatch.
+        // Aynı subject scope'a sahip iki farklı task → request_digest aynı olabilir,
+        // ama bu explicit check TaskMismatch üretir.
+        let engine = make_measurement_engine();
+        let task_a = task_with_node_scope(1, 10);
+        let task_b = task_with_node_scope(1, 20); // aynı node scope, farklı id
+        let claim = claim_with_node1_delta(10);
+        let measurement = produce_valid_measurement(&engine, &task_a, &claim);
+        // claim task 10'a bağlı, ama task_b (id=20) ile verify et.
+        let result = engine.verify_measurement_binding(&claim, &task_b, &measurement);
+        use crate::measurement::{MeasurementBindingMismatch, MeasurementBindingVerificationError};
+        assert!(matches!(
+            result,
+            Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::TaskMismatch {
+                    claim_task_id: Some(10),
+                    resolved_task_id: 20
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn verify_measurement_binding_rejects_subject_mismatch() {
+        // Check 2: task predicate scope değişince (impact'i etkilemeden) → SubjectMismatch.
+        let engine = make_measurement_engine();
+        let task_a = task_with_node_scope(1, 42); // subject = {1}
+        let task_b = task_with_node_scope(2, 42); // subject = {2}, aynı task id
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task_a, &claim);
+        // task_a ile üretilen measurement subject={1}, task_b subject={2}.
+        let result = engine.verify_measurement_binding(&claim, &task_b, &measurement);
+        use crate::measurement::{MeasurementBindingMismatch, MeasurementBindingVerificationError};
+        assert!(matches!(
+            result,
+            Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::SubjectMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn verify_measurement_binding_rejects_revision_mismatch() {
+        // Check 5: stale token (engine t_c artınca revision değişir).
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        // Engine state değiştir (t_c artır) → revision değişir → stale token.
+        let mut engine = engine;
+        engine.t_c += 1;
+        let result = engine.verify_measurement_binding(&claim, &task, &measurement);
+        use crate::measurement::{
+            MeasurementBindingDisposition, MeasurementBindingMismatch,
+            MeasurementBindingVerificationError,
+        };
+        match &result {
+            Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::RevisionMismatch {
+                    expected,
+                    presented,
+                },
+            )) => {
+                assert_ne!(expected, presented, "revision must differ");
+                // Disposition: RegenerateMeasurement (stale — reviewer v2 karar 4).
+                assert_eq!(
+                    MeasurementBindingMismatch::RevisionMismatch {
+                        expected: expected.clone(),
+                        presented: presented.clone(),
+                    }
+                    .disposition(),
+                    MeasurementBindingDisposition::RegenerateMeasurement
+                );
+            }
+            other => panic!("expected RevisionMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_measurement_binding_no_state_mutation_on_failure() {
+        // **Reviewer v8 P2-2 (dürüst kapsam):** mismatch durumunda selected state
+        // cardinality (node/edge count) ve t_c korunur. Full space equality, coordinate
+        // generation, event/audit state Faz 12 carryover (in-memory engine'de audit/
+        // event-ledger boş; full snapshot test'i Faz 12'de persistent engine ile).
+        let engine = make_measurement_engine();
+        let engine_before_t_c = engine.t_c;
+        let engine_before_space_node_count = engine.space.nodes.len();
+        let engine_before_space_edge_count = engine.space.edges.len();
+
+        let task_a = task_with_node_scope(1, 10);
+        let task_b = task_with_node_scope(1, 20);
+        let claim = claim_with_node1_delta(10);
+        let measurement = produce_valid_measurement(&engine, &task_a, &claim);
+        // TaskMismatch üret.
+        let _ = engine.verify_measurement_binding(&claim, &task_b, &measurement);
+
+        assert_eq!(engine.t_c, engine_before_t_c, "t_c must not change");
+        assert_eq!(
+            engine.space.nodes.len(),
+            engine_before_space_node_count,
+            "space node count must not change"
+        );
+        assert_eq!(
+            engine.space.edges.len(),
+            engine_before_space_edge_count,
+            "space edge count must not change"
+        );
+    }
+
+    #[test]
+    fn verify_measurement_binding_rejects_impact_mismatch() {
+        // Check 3: claim delta_edges/removed_edges değişince (subject'i etkilemeden)
+        // → ImpactMismatch. node 1 subject'te, edge impact'i değiştir.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        // Claim A: sadece node 1 delta (impact = {1}).
+        let claim_a = claim_with_node1_delta(42);
+        // Claim B: node 1 + edge(1→2) — impact'e node 2 eklenir.
+        let claim_b = claim_with_task_id(42, vec![mod_node(1)], vec![edge(1, 2)], vec![]);
+        let measurement = produce_valid_measurement(&engine, &task, &claim_b);
+        // measurement claim_b'nin impact'ini taşır, claim_a ile verify → mismatch.
+        let result = engine.verify_measurement_binding(&claim_a, &task, &measurement);
+        use crate::measurement::{MeasurementBindingMismatch, MeasurementBindingVerificationError};
+        assert!(matches!(
+            result,
+            Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::ImpactMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn verify_measurement_binding_rejects_structural_delta_mismatch() {
+        // Check 4: canonical delta digest değişince → StructuralDeltaMismatch.
+        // Aynı impact set'i koruyan ama delta içeriği farklı claim → digest farklı.
+        // claim_a node 1 mass=1.0, claim_b node 1 mass=2.0 — impact aynı ({1}),
+        // ama canonical delta node mass farklı → digest farklı.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let mut node_a = mod_node(1);
+        node_a.mass = 1.0;
+        let claim_a = claim_with_task_id(42, vec![node_a], vec![], vec![]);
+        let mut node_b = mod_node(1);
+        node_b.mass = 2.0;
+        let claim_b = claim_with_task_id(42, vec![node_b], vec![], vec![]);
+        let measurement = produce_valid_measurement(&engine, &task, &claim_b);
+        let result = engine.verify_measurement_binding(&claim_a, &task, &measurement);
+        use crate::measurement::{MeasurementBindingMismatch, MeasurementBindingVerificationError};
+        assert!(matches!(
+            result,
+            Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::StructuralDeltaMismatch { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn verify_measurement_binding_fails_subject_derivation() {
+        // **P1-1 (reviewer v7):** verify_measurement_binding gerçek çağrı ile
+        // SubjectDerivationFailed üretir. Module-scope predicate → derive_task_subject_scope
+        // SubjectScopeResolutionError verir. Measurement valid task ile üretilir, sonra
+        // task module-scope'a değiştirilip verify çağrılır.
+        let engine = make_measurement_engine();
+        let valid_task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &valid_task, &claim);
+
+        // Module-scope predicate ile task — derive_task_subject_scope fail.
+        use crate::trajectory::{MetricPredicate, PredicateMode, PredicateSet, WeightedPredicate};
+        let module_task = crate::trajectory::Task {
+            id: 42,
+            milestone_id: 0,
+            label: "module-scope-task".to_string(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: crate::trajectory::PredicateAxis::Coupling,
+                        operator: crate::trajectory::ComparisonOp::Le,
+                        threshold: 0.5,
+                        scope: crate::trajectory::PredicateScope::Module("nonexistent".to_string()),
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: Some(1.0),
+                }],
+                preferred_vector: None,
+            },
+            policy: crate::trajectory::TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: crate::trajectory::TaskStatus::Pending,
+        };
+        let result = engine.verify_measurement_binding(&claim, &module_task, &measurement);
+        use crate::measurement::{
+            MeasurementBindingDerivationError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Derivation(
+                    MeasurementBindingDerivationError::SubjectDerivationFailed { .. }
+                ))
+            ),
+            "module-scope predicate must produce SubjectDerivationFailed — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn space_view_revision_changes_when_sequence_increments() {
+        // **P1-1b (reviewer v7 rename):** SpaceViewRevision sequence monotonik.
+        // t_c artınca sequence değişir → revision farklı. Gerçek A→B→A revert test'i
+        // Faz 12 full test matrisinde (space mutation + rollback infra gerekir).
+        let engine = make_measurement_engine();
+        let r1 = engine.current_space_view_revision().unwrap();
+        let mut engine = engine;
+        engine.t_c += 1; // sequence artar
+        let r2 = engine.current_space_view_revision().unwrap();
+        assert_ne!(
+            r1.sequence, r2.sequence,
+            "sequence must change when t_c increments"
+        );
+        assert_ne!(r1, r2, "revisions must differ");
+    }
+
+    #[test]
+    fn verify_reports_coordinate_context_changed() {
+        // **P1-1 (reviewer v7):** Drift — CoordinateContextChanged. finalize_verification
+        // direkt çağrılır: operation Ok + coordinate_drift Err → Drift(CoordinateContextChanged).
+        // Coord drift doğal olarak axis descriptor değişimi sırasında oluşur — test'te
+        // finalize_verification synthetic input ile çağrılır (realistic epoch mutation zor).
+        let engine = make_measurement_engine();
+        let revision_before = engine.current_space_view_revision().unwrap();
+        let ok_proof: Result<(), crate::measurement::MeasurementBindingVerificationError> = Ok(());
+        let operation: EpochOperationResult<()> = Ok((revision_before.clone(), ok_proof));
+        let coord_drift = Err(crate::coords::CoordinateMeasurementError::EmptySourceSet);
+        let result = engine.finalize_verification(operation, coord_drift);
+        use crate::measurement::{
+            MeasurementBindingDriftError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Drift(
+                    MeasurementBindingDriftError::CoordinateContextChanged { .. }
+                ))
+            ),
+            "coord drift must produce Drift(CoordinateContextChanged) — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_reports_space_revision_changed() {
+        // **P1-1 (reviewer v7):** Drift — SpaceRevisionChanged. finalize_verification:
+        // operation Ok(rev_before) + coord Ok + revision_after ≠ rev_before → Drift.
+        let engine = make_measurement_engine();
+        let revision_before = engine.current_space_view_revision().unwrap();
+        let ok_proof: Result<(), crate::measurement::MeasurementBindingVerificationError> = Ok(());
+        let operation: EpochOperationResult<()> = Ok((revision_before.clone(), ok_proof));
+        // Engine state değiştir → revision_after farklı.
+        let mut engine = engine;
+        engine.t_c += 1;
+        let coord_drift: Result<(), crate::coords::CoordinateMeasurementError> = Ok(());
+        let result = engine.finalize_verification(operation, coord_drift);
+        use crate::measurement::{
+            MeasurementBindingDriftError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Drift(
+                    MeasurementBindingDriftError::SpaceRevisionChanged { .. }
+                ))
+            ),
+            "revision change must produce Drift(SpaceRevisionChanged) — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_reports_both_changed() {
+        // **P1-1 (reviewer v7):** Drift — BothChanged. coord drift + revision change.
+        let engine = make_measurement_engine();
+        let revision_before = engine.current_space_view_revision().unwrap();
+        let ok_proof: Result<(), crate::measurement::MeasurementBindingVerificationError> = Ok(());
+        let operation: EpochOperationResult<()> = Ok((revision_before.clone(), ok_proof));
+        let mut engine = engine;
+        engine.t_c += 1; // revision change
+        let coord_drift = Err(crate::coords::CoordinateMeasurementError::EmptySourceSet);
+        let result = engine.finalize_verification(operation, coord_drift);
+        use crate::measurement::{
+            MeasurementBindingDriftError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Drift(
+                    MeasurementBindingDriftError::BothChanged { .. }
+                ))
+            ),
+            "coord + revision drift must produce Drift(BothChanged) — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_reports_revision_recheck_failed() {
+        // **P1-1 (reviewer v8):** Derivation — RevisionRecheckFailed.
+        // combine_verification_results pure decision fn — synthetic revision_after Err
+        // ile RevisionRecheckFailed kolu doğrudan doğrulanır (mock engine gerekmez).
+        let revision_before = crate::authorization::SpaceViewRevision {
+            view_id: crate::authorization::SpaceViewId::Ephemeral(0),
+            sequence: 0,
+            content_digest: crate::authorization::SpaceDigest::from_bytes([0; 32]),
+        };
+        let ok_proof: Result<(), crate::measurement::MeasurementBindingVerificationError> = Ok(());
+        let operation: EpochOperationResult<()> = Ok((revision_before.clone(), ok_proof));
+        let coord_drift: Result<(), crate::coords::CoordinateMeasurementError> = Ok(());
+        // revision_after Err — SpaceDigest computation hatası simülasyonu.
+        let revision_after: Result<crate::authorization::SpaceViewRevision, String> =
+            Err("simulated space digest failure".to_string());
+        let result =
+            SpaceEngine::combine_verification_results(operation, coord_drift, revision_after);
+        use crate::measurement::{
+            MeasurementBindingDerivationError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Derivation(
+                    MeasurementBindingDerivationError::RevisionRecheckFailed { .. }
+                ))
+            ),
+            "revision recheck Err must produce Derivation(RevisionRecheckFailed) — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_reports_coord_drift_and_revision_recheck_failed_prefers_coord() {
+        // **P1-1 (reviewer v8):** Coord drift + revision recheck failed → coord öncelikli.
+        // combine_verification_results ile doğrulanır.
+        let revision_before = crate::authorization::SpaceViewRevision {
+            view_id: crate::authorization::SpaceViewId::Ephemeral(0),
+            sequence: 0,
+            content_digest: crate::authorization::SpaceDigest::from_bytes([0; 32]),
+        };
+        let ok_proof: Result<(), crate::measurement::MeasurementBindingVerificationError> = Ok(());
+        let operation: EpochOperationResult<()> = Ok((revision_before, ok_proof));
+        let coord_drift = Err(crate::coords::CoordinateMeasurementError::EmptySourceSet);
+        let revision_after: Result<crate::authorization::SpaceViewRevision, String> =
+            Err("simulated failure".to_string());
+        let result =
+            SpaceEngine::combine_verification_results(operation, coord_drift, revision_after);
+        use crate::measurement::{
+            MeasurementBindingDriftError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Drift(
+                    MeasurementBindingDriftError::CoordinateContextChanged { .. }
+                ))
+            ),
+            "coord drift + revision recheck failed → coord öncelikli — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_reports_operation_capture_failure_prefers_coord_drift() {
+        // **P1-1 (reviewer v8):** Operation Err (capture failure) + coord drift →
+        // coord drift öncelikli (capture sırasında gerçeklik değişti).
+        let capture_err: crate::measurement::MeasurementBindingVerificationError =
+            crate::measurement::MeasurementBindingDerivationError::RevisionComputationFailed {
+                detail: "capture failed".to_string(),
+            }
+            .into();
+        let operation: EpochOperationResult<()> = Err(capture_err);
+        let coord_drift = Err(crate::coords::CoordinateMeasurementError::EmptySourceSet);
+        let revision_after: Result<crate::authorization::SpaceViewRevision, String> =
+            Ok(crate::authorization::SpaceViewRevision {
+                view_id: crate::authorization::SpaceViewId::Ephemeral(0),
+                sequence: 0,
+                content_digest: crate::authorization::SpaceDigest::from_bytes([0; 32]),
+            });
+        let result =
+            SpaceEngine::combine_verification_results(operation, coord_drift, revision_after);
+        use crate::measurement::{
+            MeasurementBindingDriftError, MeasurementBindingVerificationError,
+        };
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Drift(
+                    MeasurementBindingDriftError::CoordinateContextChanged { .. }
+                ))
+            ),
+            "capture failure + coord drift → coord drift öncelikli — got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_current_context_mismatch_axis_descriptor_drift() {
+        // İki engine fixture: aynı Space + t_c ama farklı axis descriptor (CohesionAxis
+        // source TreeSitter vs Scip). Token engine A'da üretilip engine B'de verify →
+        // önceki kontroller geçer (subject/impact/delta/revision aynı — t_c aynı), ama
+        // check 7'de epoch context (engine B) ≠ token context (engine A) → CurrentContextMismatch.
+        let engine_a = make_measurement_engine(); // cohesion source = Scip (explicit)
+                                                  // Engine B: cohesion source = TreeSitter (default) — farklı axis descriptor.
+        let cs_b = CoordinateSystem::default_raw_five(
+            crate::coords::MetricSource::TreeSitter,
+            crate::axes::CohesionAxis::try_with_observed_source(
+                crate::coords::MetricSource::TreeSitter, // farklı source
+            )
+            .unwrap(),
+            crate::axes::EntropyAxis::from_commit_entropy(6.5),
+            crate::axes::WitnessDepthAxis::from_witness(0.5, 3),
+        )
+        .unwrap();
+        let engine_b = SpaceEngine::new(
+            crate::space::Space::new(),
+            cs_b,
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        // Token engine A'da üretilir (A'nın context digest'i ile).
+        let measurement = produce_valid_measurement(&engine_a, &task, &claim);
+        // Verify engine B'de — B'nin epoch context'i farklı (cohesion source farklı).
+        let result = engine_b.verify_measurement_binding(&claim, &task, &measurement);
+        use crate::measurement::{
+            MeasurementBindingDisposition, MeasurementBindingMismatch,
+            MeasurementBindingVerificationError,
+        };
+        match &result {
+            Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::CurrentContextMismatch {
+                    expected,
+                    presented,
+                },
+            )) => {
+                assert_ne!(
+                    expected, presented,
+                    "epoch context (engine B) must differ from token context (engine A)"
+                );
+                // Disposition: RegenerateMeasurement (axis config drift — stale).
+                assert_eq!(
+                    MeasurementBindingMismatch::CurrentContextMismatch {
+                        expected: expected.clone(),
+                        presented: presented.clone(),
+                    }
+                    .disposition(),
+                    MeasurementBindingDisposition::RegenerateMeasurement
+                );
+            }
+            other => panic!("expected CurrentContextMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn verify_rejects_context_digest_mismatch_corrupt_fixture() {
+        // **P1-1d (reviewer v8):** Check 6 — ContextDigestMismatch (token içi tutarsızlık).
+        // EngineMeasurement::new defensive cross-field verify yapar → production yolunda
+        // unreachable. Ama verifier'daki defense-in-depth kolu test edilmeli.
+        // measurement.rs `#[cfg(test)] corrupt_request_context_digest_for_test` fixture
+        // ile tutarsız token üretilir, verify_measurement_binding check 6 yakalar.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let valid_measurement = produce_valid_measurement(&engine, &task, &claim);
+        // Corrupt fixture: measurement_input_digest rastgele bytes → context digest ile tutarsız.
+        let corrupt_measurement =
+            crate::measurement::EngineMeasurement::corrupt_request_context_digest_for_test(
+                valid_measurement.before().clone(),
+                valid_measurement.after().clone(),
+                valid_measurement.context().clone(),
+                valid_measurement.request().clone(),
+            );
+        let result = engine.verify_measurement_binding(&claim, &task, &corrupt_measurement);
+        use crate::measurement::{MeasurementBindingMismatch, MeasurementBindingVerificationError};
+        assert!(
+            matches!(
+                result,
+                Err(MeasurementBindingVerificationError::Mismatch(
+                    MeasurementBindingMismatch::ContextDigestMismatch { .. }
+                ))
+            ),
+            "corrupt token (context digest ≠ request digest) must produce ContextDigestMismatch — got {result:?}"
+        );
+    }
+
+    // NOTE: verify_reports_current_context_capture_failed ve verify_maps_derivation_failures
+    // testleri KALDIRILDI (reviewer v8 P1-1 — no-op testler closure kanıtı olarak sayılmaz).
+    //
+    // **Reviewer v9 P2-1:** ContextDigestMismatch ve CurrentContextMismatch artık gerçek
+    // test edildi (yukarıda verify_rejects_context_digest_mismatch_corrupt_fixture +
+    // verify_rejects_current_context_mismatch_axis_descriptor_drift). Faz 12 carryover
+    // olarak yalnız gerçekten ertelenen yollar kaldı:
+    //
+    // **Faz 12 carryover:**
+    // - CurrentContextCaptureFailed: malformed coord_system fixture (BoundMeasurementSession::begin
+    //   Err). Default engine'da begin infallible.
+    // - ImpactDerivationFailed: invalid edge kind fixture (measurement üretilemez — aynı
+    //   helper measure_task_delta kullanır).
+    // - StructuralCanonicalizationFailed: duplicate/cross-list node ID fixture.
+    // - RevisionComputationFailed: space digest computation failure (pratikte infallible).
+    // - ContextConstructionFailed: MeasurementInputContext::try_new invalid descriptors fixture.
+    // - MeasurementResultDigestComputationFailed: corrupted measured result (NaN/∞ —
+    //   MeasuredRawPosition smart constructor yok, struct literal).
+    // - Full state-integrity: space equality / coordinate generation / event-audit state.
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 4 — VerifiedTaskMeasurementBinding extension testleri
+    // (plan md:121-128)
+    //
+    // 3 yeni field populated + into_parts 5-tuple + preferred_vector snapshot.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn faz4_verified_binding_populates_task_goal_digest() {
+        // verify_measurement_binding producer — task_goal_digest populated (trusted task'tan).
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .expect("valid binding");
+        // task_goal_digest populated — accessor çalışır.
+        let goal_digest = binding.task_goal_digest();
+        assert_eq!(
+            goal_digest.to_hex().len(),
+            64,
+            "task goal digest hex wire 64"
+        );
+    }
+
+    #[test]
+    fn faz4_verified_binding_populates_engine_measurement_digest() {
+        // verify_measurement_binding producer — engine_measurement_digest populated.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .expect("valid binding");
+        let engine_digest = binding.engine_measurement_digest();
+        assert_eq!(
+            engine_digest.to_hex().len(),
+            64,
+            "engine measurement digest hex wire 64"
+        );
+        // Consistency: binding.engine_measurement_digest() == measurement.compute_digest().
+        let recomputed = measurement.compute_digest().expect("recompute");
+        assert_eq!(
+            engine_digest.as_bytes(),
+            recomputed.as_bytes(),
+            "binding engine_measurement_digest == measurement.compute_digest()"
+        );
+    }
+
+    #[test]
+    fn faz4_verified_binding_populates_preferred_vector_snapshot_none() {
+        // task_with_node_scope preferred_vector: None → snapshot None.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .expect("valid binding");
+        assert_eq!(
+            binding.preferred_vector_snapshot(),
+            None,
+            "task_with_node_scope preferred_vector None → snapshot None"
+        );
+    }
+
+    #[test]
+    fn faz4_verified_binding_into_parts_returns_6_tuple() {
+        // **P0-1 (reviewer):** into_parts — 6-tuple (task_id, claim_id, + 3 mevcut + extension).
+        // Move-only consuming projection (Clone YOK). claim_id proof'tan gelir.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .expect("valid binding");
+        let (task_id, claim_id, task_claim_digest, measurement_digest, inner_binding, extension) =
+            binding.into_parts();
+        // Mevcut field'lar + claim_id (P0-1).
+        assert_eq!(task_id, 42);
+        assert_eq!(
+            claim_id,
+            claim_with_node1_delta(42).id,
+            "claim_id proof'tan gelir"
+        );
+        assert_eq!(task_claim_digest.to_hex().len(), 64);
+        assert_eq!(measurement_digest.to_hex().len(), 64);
+        let _ = inner_binding; // VerifiedMeasurementBinding (6 field)
+                               // Faz 4 extension — 3 yeni field tuple.
+        let (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot) = extension;
+        assert_eq!(task_goal_digest.to_hex().len(), 64);
+        assert_eq!(engine_measurement_digest.to_hex().len(), 64);
+        assert_eq!(preferred_vector_snapshot, None);
+    }
+
+    #[test]
+    fn faz4_verified_binding_task_goal_digest_deterministic() {
+        // Aynı task + claim + measurement → aynı task_goal_digest.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding1 = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let binding2 = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        assert_eq!(
+            binding1.task_goal_digest().as_bytes(),
+            binding2.task_goal_digest().as_bytes(),
+            "same task → same task_goal_digest"
+        );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Commit 4b Faz 4 Commit 2 — build_authorization_context_v2 testleri
+    // (plan md:195, reviewer revize matris)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    use crate::authorization::{
+        CanonicalGateEvaluationV2, CanonicalWitnessPolicy, CanonicalWitnessRequirementV2,
+        VerifiedGateEvaluationV2,
+    };
+    use crate::trajectory::{ApplyTarget, CommitLane, MutationDecision};
+
+    /// Commit 2 builder test fixture — VerifiedGateEvaluationV2 + CanonicalWitnessRequirementV2.
+    /// GatePassed + AcceptAsCompleted → Mainline + Required (tutarlı).
+    fn faz4_builder_gate_passed() -> VerifiedGateEvaluationV2 {
+        let gate =
+            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
+        VerifiedGateEvaluationV2::fixture(gate)
+    }
+
+    fn faz4_builder_witness_required() -> CanonicalWitnessRequirementV2 {
+        let policy = CanonicalWitnessPolicy {
+            schema_version: 1,
+            min_approvers: 2,
+            quorum_threshold: 1.5,
+            independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag::default(),
+        };
+        CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::Lane(CommitLane::Mainline)))
+            .unwrap()
+    }
+
+    // ── Pozitif testler ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn commit2_build_authorization_context_v2_pipeline() {
+        // Tam pipeline: verify → build → AuthorizationContextV2.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let context = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .expect("context build success");
+        assert_eq!(context.basis().task_id(), 42);
+    }
+
+    #[test]
+    fn commit2_preferred_vector_none_unavailable_loss() {
+        // preferred_vector None → Unavailable(NoPreferredVector).
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42); // preferred_vector: None
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let context = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .unwrap();
+        // Basis trajectory_loss Unavailable olmalı — accessor ile doğrula.
+        assert!(matches!(
+            context.basis().trajectory_loss(),
+            crate::authorization::CanonicalTrajectoryLossEvidence::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn commit2_preferred_vector_some_available_loss() {
+        // **P2-2 (reviewer):** preferred_vector Some → Available { target, loss_after }.
+        // target preferred_vector ile birebir, loss_after trajectory_loss(after, preferred).
+        use crate::authorization::{CanonicalRawPosition, CanonicalTrajectoryLossEvidence};
+        use crate::coords::RawPosition;
+        let engine = make_measurement_engine();
+        let mut task = task_with_node_scope(1, 42);
+        let preferred = RawPosition {
+            x: 0.10,
+            y: 0.20,
+            z: 0.30,
+            w: 0.40,
+            v: 0.50,
+        };
+        task.target_predicate_set.preferred_vector = Some(preferred);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let context = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .unwrap();
+        match context.basis().trajectory_loss() {
+            CanonicalTrajectoryLossEvidence::Available { target, loss_after } => {
+                assert_eq!(target, &CanonicalRawPosition::from(preferred));
+                let expected = crate::trajectory::trajectory_loss(measurement.after(), &preferred);
+                assert_eq!(*loss_after, expected);
+            }
+            other => panic!("expected Available loss, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit2_deterministic_context_digest() {
+        // Aynı girdiler → aynı context digest.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+
+        let ctx1 = {
+            let binding = engine
+                .verify_measurement_binding(&claim, &task, &measurement)
+                .unwrap();
+            engine
+                .build_authorization_context_v2(
+                    binding,
+                    faz4_builder_gate_passed(),
+                    faz4_builder_witness_required(),
+                    &measurement,
+                )
+                .unwrap()
+        };
+        let ctx2 = {
+            let binding = engine
+                .verify_measurement_binding(&claim, &task, &measurement)
+                .unwrap();
+            engine
+                .build_authorization_context_v2(
+                    binding,
+                    faz4_builder_gate_passed(),
+                    faz4_builder_witness_required(),
+                    &measurement,
+                )
+                .unwrap()
+        };
+        let d1 = ctx1.compute_digest().unwrap();
+        let d2 = ctx2.compute_digest().unwrap();
+        assert_eq!(d1.as_bytes(), d2.as_bytes(), "deterministic context digest");
+    }
+
+    #[test]
+    fn commit2_identity_preservation_task_id_claim_id() {
+        // proof'tan gelen task_id ve claim_id basis'te korunur.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let context = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .unwrap();
+        assert_eq!(context.basis().task_id(), 42);
+        assert_eq!(context.basis().claim_id(), claim.id);
+    }
+
+    // ── Negatif testler ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn commit2_binding_mismatch_different_before() {
+        // **P1-1 v2 (reviewer):** proof A + artifact B/different-before → mismatch.
+        // EngineMeasurement::new kullan — sadece before mutate, request digest'i bozmaz
+        // (corrupt_request_context_digest_for_test measurement_input_digest'i de bozuyordu).
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let bad_before = crate::measurement::MeasurementBaseline::Available(
+            crate::measurement::tests::test_measured(0.99),
+        );
+        let bad_measurement = crate::measurement::EngineMeasurement::new(
+            bad_before,
+            measurement.after().clone(),
+            measurement.context().clone(),
+            measurement.request().clone(),
+        )
+        .expect("context matches request — only before mutated");
+        let err = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &bad_measurement,
+            )
+            .expect_err("different before → mismatch");
+        // P1-1: mismatch payload pin — proof ≠ recomputed, both 64 hex.
+        match err {
+            crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
+                proof,
+                recomputed,
+            } => {
+                assert_ne!(proof, recomputed, "proof ≠ recomputed");
+                assert_eq!(proof.len(), 64);
+                assert_eq!(recomputed.len(), 64);
+            }
+            other => panic!("expected EngineMeasurementBindingMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit2_binding_mismatch_different_after() {
+        // **P1-1 v2 (reviewer):** proof A + artifact B/different-after → mismatch.
+        // EngineMeasurement::new — sadece after mutate.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let bad_after = crate::measurement::tests::test_measured(0.99);
+        let bad_measurement = crate::measurement::EngineMeasurement::new(
+            measurement.before().clone(),
+            bad_after,
+            measurement.context().clone(),
+            measurement.request().clone(),
+        )
+        .expect("context matches request — only after mutated");
+        let err = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &bad_measurement,
+            )
+            .expect_err("different after → mismatch");
+        match err {
+            crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
+                proof,
+                recomputed,
+            } => {
+                assert_ne!(proof, recomputed, "proof ≠ recomputed");
+                assert_eq!(proof.len(), 64);
+                assert_eq!(recomputed.len(), 64);
+            }
+            other => panic!("expected EngineMeasurementBindingMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commit2_rejected_gate_with_required_witness_rejects() {
+        // RejectedByGate → NotApplied, ama Required witness → reject.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let gate = {
+            let g = CanonicalGateEvaluationV2::rejected_by_gate(
+                crate::trajectory::GateDecision::RejectedBySyntax,
+            )
+            .unwrap();
+            VerifiedGateEvaluationV2::fixture(g)
+        };
+        let err = engine
+            .build_authorization_context_v2(
+                binding,
+                gate,
+                faz4_builder_witness_required(), // Required — ama RejectedByGate → NotApplied
+                &measurement,
+            )
+            .expect_err("RejectedByGate + Required → reject");
+        assert!(matches!(
+            err,
+            crate::authorization::AuthorizationContextV2BuildError::WitnessRequirement(_)
+        ));
+    }
+
+    #[test]
+    fn commit2_gate_passed_lane_with_not_required_witness_rejects() {
+        // GatePassed/lane → Required expected, ama NotRequired witness → reject.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let policy = CanonicalWitnessPolicy {
+            schema_version: 1,
+            min_approvers: 2,
+            quorum_threshold: 1.5,
+            independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag::default(),
+        };
+        let not_required =
+            CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
+        let err = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(), // GatePassed + AcceptAsCompleted → Mainline
+                not_required,               // NotRequired — ama lane expected
+                &measurement,
+            )
+            .expect_err("lane + NotRequired → reject");
+        assert!(matches!(
+            err,
+            crate::authorization::AuthorizationContextV2BuildError::WitnessRequirement(_)
+        ));
     }
 }
