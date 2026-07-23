@@ -5878,6 +5878,45 @@ v = 0.5
     }
 
     #[test]
+    fn commit2_preferred_vector_some_available_loss() {
+        // **P2-2 (reviewer):** preferred_vector Some → Available { target, loss_after }.
+        // target preferred_vector ile birebir, loss_after trajectory_loss(after, preferred).
+        use crate::authorization::{CanonicalRawPosition, CanonicalTrajectoryLossEvidence};
+        use crate::coords::RawPosition;
+        let engine = make_measurement_engine();
+        let mut task = task_with_node_scope(1, 42);
+        let preferred = RawPosition {
+            x: 0.10,
+            y: 0.20,
+            z: 0.30,
+            w: 0.40,
+            v: 0.50,
+        };
+        task.target_predicate_set.preferred_vector = Some(preferred);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .unwrap();
+        let context = engine
+            .build_authorization_context_v2(
+                binding,
+                faz4_builder_gate_passed(),
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .unwrap();
+        match context.basis().trajectory_loss() {
+            CanonicalTrajectoryLossEvidence::Available { target, loss_after } => {
+                assert_eq!(target, &CanonicalRawPosition::from(preferred));
+                let expected = crate::trajectory::trajectory_loss(measurement.after(), &preferred);
+                assert_eq!(*loss_after, expected);
+            }
+            other => panic!("expected Available loss, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn commit2_deterministic_context_digest() {
         // Aynı girdiler → aynı context digest.
         let engine = make_measurement_engine();
@@ -5942,7 +5981,9 @@ v = 0.5
 
     #[test]
     fn commit2_binding_mismatch_different_before() {
-        // proof A + artifact B/different-before → EngineMeasurementBindingMismatch.
+        // **P1-1 v2 (reviewer):** proof A + artifact B/different-before → mismatch.
+        // EngineMeasurement::new kullan — sadece before mutate, request digest'i bozmaz
+        // (corrupt_request_context_digest_for_test measurement_input_digest'i de bozuyordu).
         let engine = make_measurement_engine();
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
@@ -5950,17 +5991,16 @@ v = 0.5
         let binding = engine
             .verify_measurement_binding(&claim, &task, &measurement)
             .unwrap();
-        // Farklı baseline ile measurement üret.
         let bad_before = crate::measurement::MeasurementBaseline::Available(
             crate::measurement::tests::test_measured(0.99),
         );
-        let bad_measurement =
-            crate::measurement::EngineMeasurement::corrupt_request_context_digest_for_test(
-                bad_before,
-                measurement.after().clone(),
-                measurement.context().clone(),
-                measurement.request().clone(),
-            );
+        let bad_measurement = crate::measurement::EngineMeasurement::new(
+            bad_before,
+            measurement.after().clone(),
+            measurement.context().clone(),
+            measurement.request().clone(),
+        )
+        .expect("context matches request — only before mutated");
         let err = engine
             .build_authorization_context_v2(
                 binding,
@@ -5969,15 +6009,24 @@ v = 0.5
                 &bad_measurement,
             )
             .expect_err("different before → mismatch");
-        assert!(matches!(
-            err,
-            crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch { .. }
-        ));
+        // P1-1: mismatch payload pin — proof ≠ recomputed, both 64 hex.
+        match err {
+            crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
+                proof,
+                recomputed,
+            } => {
+                assert_ne!(proof, recomputed, "proof ≠ recomputed");
+                assert_eq!(proof.len(), 64);
+                assert_eq!(recomputed.len(), 64);
+            }
+            other => panic!("expected EngineMeasurementBindingMismatch, got {other:?}"),
+        }
     }
 
     #[test]
     fn commit2_binding_mismatch_different_after() {
-        // proof A + artifact B/different-after → mismatch.
+        // **P1-1 v2 (reviewer):** proof A + artifact B/different-after → mismatch.
+        // EngineMeasurement::new — sadece after mutate.
         let engine = make_measurement_engine();
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
@@ -5986,13 +6035,13 @@ v = 0.5
             .verify_measurement_binding(&claim, &task, &measurement)
             .unwrap();
         let bad_after = crate::measurement::tests::test_measured(0.99);
-        let bad_measurement =
-            crate::measurement::EngineMeasurement::corrupt_request_context_digest_for_test(
-                measurement.before().clone(),
-                bad_after,
-                measurement.context().clone(),
-                measurement.request().clone(),
-            );
+        let bad_measurement = crate::measurement::EngineMeasurement::new(
+            measurement.before().clone(),
+            bad_after,
+            measurement.context().clone(),
+            measurement.request().clone(),
+        )
+        .expect("context matches request — only after mutated");
         let err = engine
             .build_authorization_context_v2(
                 binding,
@@ -6001,10 +6050,17 @@ v = 0.5
                 &bad_measurement,
             )
             .expect_err("different after → mismatch");
-        assert!(matches!(
-            err,
-            crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch { .. }
-        ));
+        match err {
+            crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
+                proof,
+                recomputed,
+            } => {
+                assert_ne!(proof, recomputed, "proof ≠ recomputed");
+                assert_eq!(proof.len(), 64);
+                assert_eq!(recomputed.len(), 64);
+            }
+            other => panic!("expected EngineMeasurementBindingMismatch, got {other:?}"),
+        }
     }
 
     #[test]

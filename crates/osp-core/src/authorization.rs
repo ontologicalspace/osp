@@ -13960,4 +13960,63 @@ v = 0.5
         );
         assert_eq!(hex, &digest.to_hex(), "custom Serialize == to_hex");
     }
+
+    // ── P2-1: 5-axis projection unit test (reviewer) ─────────────────────────────
+
+    #[test]
+    fn commit2_provenanced_projection_preserves_all_axis_values_and_sources() {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        use crate::coords::{AxisMeasurement, MeasuredRawPosition, MetricSource};
+        let measured = MeasuredRawPosition {
+            coupling: AxisMeasurement::try_new(0.11, MetricSource::TreeSitter).unwrap(),
+            cohesion: AxisMeasurement::try_new(0.22, MetricSource::Scip).unwrap(),
+            instability: AxisMeasurement::try_new(0.33, MetricSource::Heuristic).unwrap(),
+            entropy: AxisMeasurement::try_new(0.44, MetricSource::Placeholder).unwrap(),
+            witness_depth: AxisMeasurement::try_new(0.55, MetricSource::TreeSitter).unwrap(),
+        };
+        let canonical = ProvenancedMeasuredResult::try_from(&measured).unwrap();
+        assert_eq!(canonical.coupling.value, 0.11);
+        assert_eq!(canonical.cohesion.value, 0.22);
+        assert_eq!(canonical.instability.value, 0.33);
+        assert_eq!(canonical.entropy.value, 0.44);
+        assert_eq!(canonical.witness_depth.value, 0.55);
+        assert_eq!(
+            canonical.coupling.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::TreeSitter).unwrap()
+        );
+        assert_eq!(
+            canonical.cohesion.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::Scip).unwrap()
+        );
+        assert_eq!(
+            canonical.instability.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::Heuristic).unwrap()
+        );
+        assert_eq!(
+            canonical.entropy.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::Placeholder).unwrap()
+        );
+        assert_eq!(
+            canonical.witness_depth.source,
+            CanonicalMetricSourceTag::try_from(&MetricSource::TreeSitter).unwrap()
+        );
+    }
+
+    #[test]
+    fn commit2_canonical_raw_position_from_preserves_all_axes() {
+        use crate::coords::RawPosition;
+        let pos = RawPosition {
+            x: 0.10,
+            y: 0.20,
+            z: 0.30,
+            w: 0.40,
+            v: 0.50,
+        };
+        let canonical = CanonicalRawPosition::from(pos);
+        assert_eq!(canonical.x, 0.10);
+        assert_eq!(canonical.y, 0.20);
+        assert_eq!(canonical.z, 0.30);
+        assert_eq!(canonical.w, 0.40);
+        assert_eq!(canonical.v, 0.50);
+    }
 }
