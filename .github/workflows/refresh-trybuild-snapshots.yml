@@ -9,9 +9,8 @@ name: Refresh trybuild snapshots
 #
 # Tetikleme:
 #   - workflow_dispatch: kalıcı manuel refresh (toolchain bump / dep update).
-#   - pull_request: bootstrap — ilk kullanımda bu workflow main'de olmadığı için
-#     PR #69 branch'inde refresh job'u çalıştırır. Commit B'de kaldırılır.
-#     (GitHub workflow_dispatch yalnız default branch'teki dosyayı çalıştırır.)
+#     (GitHub workflow_dispatch yalnız default branch'teki dosyayı çalıştırır;
+#      bu workflow PR #69 ile main'e merge olduktan sonra kullanılabilir.)
 on:
   workflow_dispatch:
     inputs:
@@ -19,8 +18,6 @@ on:
         description: "Refresh sebebi (toolchain bump / dep update / manual)"
         required: false
         default: "manual"
-  pull_request:
-    branches: [main]
 
 # Snapshot üreten ortam, doğrulayan normal CI ile BİREBİR aynı olmalı.
 # exact compiler + locked dependency graph + exact compiler flags üçlüsü.
@@ -34,22 +31,12 @@ permissions:
 
 jobs:
   refresh:
-    # workflow_dispatch her zaman; pull_request yalnız PR #69'un same-repository
-    # branch'inde (fork taklidi kapalı — head.repo.full_name kontrolü).
-    # Bootstrap sonrası pull_request trigger'ı Commit B'de kaldırılır.
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event_name == 'pull_request' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        github.event.pull_request.head.ref == 'fix/inv-t9-witness-suspension'
-      )
+    # Kalıcı: yalnız workflow_dispatch (manuel tetikleme). pull_request bootstrap
+    # trigger'ı PR #69'un ilk snapshot refresh'i için kullanıldı, artık kaldırıldı.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          # PR event'inde gerçek branch head'i (synthetic merge commit değil).
-          ref: ${{ github.event.pull_request.head.sha || github.ref }}
 
       - name: Read pinned Rust toolchain
         id: rust-toolchain
