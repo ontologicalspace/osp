@@ -462,6 +462,50 @@ pub enum EffectiveSourceRequirement {
     Exact(crate::canonical_tags::CanonicalMetricSourceTag),
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 2 (P1-3) — Canonical projection: Tag → Domain
+//
+// Faz 5 restore evaluator'ın ihtiyaç duyduğu iki infallible projection. Canonical
+// canonical form → domain form. İkisi de infallible çünkü:
+//   - CanonicalPredicateScope: CanonicalSubgraphScope invariant'ı (sorted + unique)
+//     zaten type seviyesinde korunduğu için Subgraph armı sort/dedup gerektirmez.
+//   - EffectiveSourceRequirement: Any→None, Exact(tag)→Some(MetricSource::from(tag)).
+//     From<CanonicalMetricSourceTag> for MetricSource infallible (Adım 1).
+//
+// Forward yön (engine.rs canonicalize_scope) fallible (duplicate id reddi); reverse
+// infallible çünkü canonical newtype invariant'ı zaten enforced.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl From<&CanonicalPredicateScope> for crate::trajectory::PredicateScope {
+    /// Canonical predicate scope → domain predicate scope.
+    ///
+    /// `Subgraph` armı `CanonicalSubgraphScope::as_sorted_ids()` üzerinden gider —
+    /// canonical sıra korunur (sorted + unique invariant canonical katmanda enforced).
+    fn from(scope: &CanonicalPredicateScope) -> Self {
+        use crate::trajectory::PredicateScope;
+        match scope {
+            CanonicalPredicateScope::Node(id) => PredicateScope::Node(*id),
+            CanonicalPredicateScope::Module(name) => PredicateScope::Module(name.clone()),
+            CanonicalPredicateScope::Subgraph(sub) => {
+                PredicateScope::Subgraph(sub.as_sorted_ids().to_vec())
+            }
+        }
+    }
+}
+
+impl From<&EffectiveSourceRequirement> for Option<crate::coords::MetricSource> {
+    /// Effective source requirement → domain `required_source` projection.
+    ///
+    /// `Any → None` (herhangi source kabul), `Exact(tag) → Some(MetricSource::from(tag))`.
+    /// `From<CanonicalMetricSourceTag> for MetricSource` infallible (Faz 5 Adım 1).
+    fn from(req: &EffectiveSourceRequirement) -> Self {
+        match req {
+            EffectiveSourceRequirement::Any => None,
+            EffectiveSourceRequirement::Exact(tag) => Some((*tag).into()),
+        }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CanonicalWitnessPolicy (reviewer P0-1 — witness policy basis'e bağlı)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1677,6 +1721,45 @@ impl TryFrom<&crate::coords::MeasuredRawPosition> for ProvenancedMeasuredResult 
             instability: convert(&measured.instability)?,
             entropy: convert(&measured.entropy)?,
             witness_depth: convert(&measured.witness_depth)?,
+        })
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 3 (P1-3):** Reverse projection — ProvenancedMeasuredResult
+/// → MeasuredRawPosition. Faz 5 restore evaluator'ın ihtiyaç duyduğu reverse yön.
+///
+/// Forward impl (`TryFrom<&MeasuredRawPosition>` yukarıda) ile simetrik. Her 5 axis
+/// için `CanonicalAxisMeasurement → AxisMeasurement`: value direkt copy (CanonicalF64 =
+/// f64), source `From<CanonicalMetricSourceTag> for MetricSource` (Adım 1, infallible).
+///
+/// **Neden `TryFrom` (fallible) değil de aslında infallible?** Reverse yönünde tüm
+/// alt dönüşümler infallible: `From<CanonicalMetricSourceTag>` infallible, value copy
+/// infallible. Plan Item 3 `TryFrom` imzası kullanır (forward ile simetri + gelecekte
+/// eklenebilecek range/semantic validation için açık kapı). Mevcut impl `Ok(...)`
+/// döner — error arm hiçbir zaman tetiklenmez, `Error = std::convert::Infallible`
+/// kullanılmaz çünkü trait impl imzası forward ile aynı `CanonicalizationError` tutar.
+///
+/// **`[0,1]` range invariant:** Forward impl range kontrolü YAPMAZ (line ~1670 direkt
+/// `axis.value` copy). Reverse de tutarlı olarak range kontrolü yapmaz — canonical
+/// encoding katmanı NaN/-0.0 normalize eder ama `[0,1]` range'i garantilemez; range
+/// invariant'ı `AxisMeasurement::validate()` (coords.rs:250) defensive re-validation
+/// ile consumption-side enforced.
+impl TryFrom<&ProvenancedMeasuredResult> for crate::coords::MeasuredRawPosition {
+    type Error = CanonicalizationError;
+
+    fn try_from(measured: &ProvenancedMeasuredResult) -> Result<Self, Self::Error> {
+        let convert = |axis: &CanonicalAxisMeasurement| -> crate::coords::AxisMeasurement {
+            crate::coords::AxisMeasurement {
+                value: axis.value,
+                source: axis.source.into(),
+            }
+        };
+        Ok(Self {
+            coupling: convert(&measured.coupling),
+            cohesion: convert(&measured.cohesion),
+            instability: convert(&measured.instability),
+            entropy: convert(&measured.entropy),
+            witness_depth: convert(&measured.witness_depth),
         })
     }
 }
@@ -14457,5 +14540,99 @@ v = 0.5
         assert_eq!(canonical.z, 0.30);
         assert_eq!(canonical.w, 0.40);
         assert_eq!(canonical.v, 0.50);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 2+3 (P1-3) — Reverse projection round-trip tests
+    //
+    // Forward (Domain→Canonical) impl'lar ile reverse (Canonical→Domain) impl'lar
+    // arasındaki parity. Round-trip (Domain→Canonical→Domain == original) reverse
+    // projection tutarlılığını pinler; forward exact-value testleri (yukarıda
+    // commit2_provenanced_projection) canonical byte sözleşmesini ayrıca pinler.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn faz5_provenanced_measured_result_round_trips_through_domain() {
+        use crate::coords::{AxisMeasurement, MeasuredRawPosition, MetricSource};
+        // Farklı source'lar her axis'te — per-axis provenance (INV-T4) restore edilir.
+        let original = MeasuredRawPosition {
+            coupling: AxisMeasurement::try_new(0.11, MetricSource::TreeSitter).unwrap(),
+            cohesion: AxisMeasurement::try_new(0.22, MetricSource::Scip).unwrap(),
+            instability: AxisMeasurement::try_new(0.33, MetricSource::Heuristic).unwrap(),
+            entropy: AxisMeasurement::try_new(0.44, MetricSource::Placeholder).unwrap(),
+            witness_depth: AxisMeasurement::try_new(0.55, MetricSource::TreeSitter).unwrap(),
+        };
+        // Forward: Domain → Canonical
+        let canonical = ProvenancedMeasuredResult::try_from(&original)
+            .expect("forward MeasuredRawPosition → ProvenancedMeasuredResult");
+        // Reverse: Canonical → Domain (by-reference, forward impl ile simetrik)
+        let restored: MeasuredRawPosition = (&canonical)
+            .try_into()
+            .expect("reverse ProvenancedMeasuredResult → MeasuredRawPosition");
+        assert_eq!(
+            restored, original,
+            "round-trip failed — value or source lost"
+        );
+    }
+
+    #[test]
+    fn faz5_canonical_predicate_scope_round_trips_through_domain() {
+        use crate::trajectory::PredicateScope;
+        // Üç varyant da: Node, Module, Subgraph (sorted + unique invariant).
+        let cases = [
+            PredicateScope::Node(42),
+            PredicateScope::Module("metrics/coupling".to_string()),
+            PredicateScope::Subgraph(vec![3, 1, 2]), // unsorted input — canonical sort'lar
+        ];
+        for original in cases {
+            // Forward: Domain → Canonical (engine.rs canonicalize_scope ile aynı mapping).
+            let canonical = match &original {
+                PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
+                PredicateScope::Module(name) => CanonicalPredicateScope::Module(name.clone()),
+                PredicateScope::Subgraph(ids) => CanonicalPredicateScope::Subgraph(
+                    CanonicalSubgraphScope::try_new(ids.clone()).unwrap(),
+                ),
+            };
+            // Reverse: Canonical → Domain
+            let restored: PredicateScope = (&canonical).into();
+            // Subgraph arm'ı sorted + unique canonical sıra döner; domain karşılaştırma
+            // için sorted beklenir.
+            let expected = match original {
+                PredicateScope::Subgraph(mut ids) => {
+                    ids.sort_unstable();
+                    PredicateScope::Subgraph(ids)
+                }
+                other => other,
+            };
+            assert_eq!(restored, expected, "round-trip failed for scope");
+        }
+    }
+
+    #[test]
+    fn faz5_effective_source_requirement_projects_to_option() {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        use crate::coords::MetricSource;
+        // Any → None (herhangi source kabul).
+        let any = EffectiveSourceRequirement::Any;
+        let projected_any: Option<MetricSource> = (&any).into();
+        assert_eq!(projected_any, None);
+        // Her source tag için Exact(tag) → Some(MetricSource).
+        let sources = [
+            MetricSource::TreeSitter,
+            MetricSource::Scip,
+            MetricSource::Placeholder,
+            MetricSource::Heuristic,
+            MetricSource::Mixed, // aggregation çıktısı — reverse projection dahil
+        ];
+        for src in sources {
+            let tag = CanonicalMetricSourceTag::try_from(&src).unwrap();
+            let exact = EffectiveSourceRequirement::Exact(tag);
+            let projected: Option<MetricSource> = (&exact).into();
+            assert_eq!(
+                projected,
+                Some(src),
+                "Exact({src:?}) should project to Some({src:?})"
+            );
+        }
     }
 }
