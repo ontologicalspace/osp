@@ -4389,11 +4389,11 @@ pub enum CanonicalizationError {
 // ═══════════════════════════════════════════════════════════════════════════════
 // INV-T9 #70 Faz 5 Adım 13 — gate_v2 child module (runtime proof)
 //
-// **#[path] attribute:** authorization.rs → mod.rs taşıma YOK (plan negatif koşulu).
-// Bu dosya `authorization/gate_v2.rs`'i child module olarak declare eder. Child module
+// `authorization.rs` file module + `authorization/` directory: Rust 2018 otomatik
+// resolve — `mod gate_v2;` `authorization/gate_v2.rs`'i bulur (review P2: #[path]
+// gereksiz). authorization.rs → mod.rs taşıma YOK (plan negatif koşulu). Child module
 // olduğu için parent'ın private field'larına erişebilir (sibling DEĞİL).
 // ═══════════════════════════════════════════════════════════════════════════════
-#[path = "authorization/gate_v2.rs"]
 mod gate_v2;
 
 // Re-export Faz 5 gate_v2 public API (error taxonomy + bundle consumers).
