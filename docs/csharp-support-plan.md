@@ -65,7 +65,7 @@ Aşağıdakiler repo/grammar üzerinde doğrulandı — çıkarım değil, ölç
 7. **`MetricSource` variant'ları mevcut** (`coords.rs:86`): TreeSitter, Scip, Placeholder,
    Heuristic, Mixed. Provenance altyapısı var; bu bir yetenek boşluğu değil, politika kararı.
 
-8. **`walk_class_defs` `force_abstract` taşıyor** (`shared.rs:274`): `interface_declaration`
+8. **`walk_class_defs` `force_abstract` taşıyor** (`shared.rs:273`): `interface_declaration`
    ve `type_alias_declaration` kind-seviyesinde abstract işaretleniyor; diğerleri substring
    pattern'e bakıyor. Refactor bu ikili mantığı bit-identical korumalı.
 
@@ -134,31 +134,40 @@ pub fn walk_class_defs(root: Node, source: &str, specs: &[DeclarationKindSpec]) 
 ```
 
 Eski `_class_node_kind: &str` (ölü parametre) ve `abstract_patterns: &[&str]` kaldırılır.
-`force_abstract` mantığı `AbstractnessRule::Always`'a eşlenir.
 
-### Adapter policy'leri (bit-identical eşleme)
+**`is_abstract` OR-semantiği (kesin — envanterle doğrulandı):** mevcut kod
+`is_abstract = force_abstract(kind) OR substring_match(patterns)`. `force_abstract` yalnızca
+`interface_declaration` + `type_alias_declaration` için true (`shared.rs:273`). Refactor'de
+`AbstractnessRule::Always` bu iki kind için, `LegacyTextContains` diğerleri için kullanılır ve
+**`Always` substring sonucundan bağımsız true yazar** (OR yapısını korur).
+
+### Adapter policy'leri (bit-identical eşleme — grammar envanteriyle doğrulandı 2026-07-24)
+
+Envanter sonucu: `is_class_def` listesindeki **9 kind'ın her biri tam bir grammar'a ait**
+(hiçbiri paylaşılmıyor). Her adapter yalnızca kendi grammar'ında **fiilen listeye giren**
+kind'lar için policy verir.
 
 | Adapter | kind | AbstractnessRule | NameStrategy | Not |
 |---|---|---|---|---|
-| python | `class_definition` | `LegacyTextContains(["ABC","Protocol","ABCMeta"])` | `FirstIdentifierFallback` | mevcut |
+| python | `class_definition` | `LegacyTextContains(["ABC","Protocol","ABCMeta"])` | `FirstIdentifierFallback` | KNOWN-DIVERGENCE(PY-ABST-004) |
 | typescript | `class_declaration` | `LegacyTextContains(["abstract class","interface "])` | `FirstIdentifierFallback` | |
 | typescript | `abstract_class_declaration` | `Always` | `FirstIdentifierFallback` | |
 | typescript | `interface_declaration` | `Always` | `FirstIdentifierFallback` | eski force_abstract |
 | typescript | `type_alias_declaration` | `Always` | `FirstIdentifierFallback` | eski force_abstract |
-| typescript | `enum_declaration` | `Never` | `FirstIdentifierFallback` | concrete kalmalı |
 | javascript | `class_declaration` | `Never` | `FirstIdentifierFallback` | eski `__NEVER_MATCH__` |
-| javascript | `interface_declaration` | `Always` | `FirstIdentifierFallback` | JS interface (varsa) |
 | rust | `struct_item` | `Never` | `FirstIdentifierFallback` | |
-| rust | `trait_item` | `LegacyTextContains(["trait "])` | `FirstIdentifierFallback` | KNOWN-DIVERGENCE riski |
+| rust | `trait_item` | `LegacyTextContains(["trait "])` | `FirstIdentifierFallback` | KNOWN-DIVERGENCE(RUST-ABST-003) |
 | rust | `enum_item` | `Never` | `FirstIdentifierFallback` | |
-| go | `type_declaration` | `LegacyTextContains(["interface"])` | `FirstIdentifierFallback` | KNOWN-DIVERGENCE |
+| go | `type_declaration` | `LegacyTextContains(["interface"])` | `FirstIdentifierFallback` | KNOWN-DIVERGENCE(GO-TYPE-001, GO-ABST-002) |
 
-> **Uyarı — TS `enum_declaration`.** Şu an `walk_class_defs` `enum_declaration`'ı hem
-> Rust `enum_item` hem TS için `is_class_def` listesine **almıyor** (liste `enum_item`
-> içeriyor, `enum_declaration` değil). Refactor öncesi mevcut listeye tam sadık kalınmalı:
-> yalnızca listede fiilen var olan kind'lar policy alır. TS `enum_declaration` mevcut kodda
-> **sayılmıyorsa**, PR A'da da sayılmamalı (bit-identical). Bu, PR A'nın ilk adımında
-> `is_class_def` listesinin birebir envanteriyle doğrulanır.
+> **KORUNAN DIŞLAMALAR (bit-identical için sayılmayan, dokunulmayacak):**
+> - **TS `enum_declaration`** grammar'da VAR ama `is_class_def` listesinde YOK → sayılmıyor.
+>   Policy'ye **eklenmez** (eklemek TS enum'larını Nc'ye sokar, bit-identical'ı bozar).
+> - **JS `interface_declaration`** JS grammar'ında YOK (yalnız TS'te) → JS'te hiç tetiklenmiyor.
+>   JS policy'sine **konmaz** (ölü satır olurdu).
+> - **`class` node kind'ı** (JS/TS anonymous/expression class) listede YOK → sayılmıyor. Korunur.
+>
+> Bu üç dışlama envanterle sabitlendi; PR A ilk adımı bunları characterization-test ile dondurur.
 
 ### KNOWN-DIVERGENCE (dondurulacak, düzeltilmeyecek)
 
@@ -182,26 +191,41 @@ Eski `_class_node_kind: &str` (ölü parametre) ve `abstract_patterns: &[&str]` 
 // (ör. yorumda) concrete sınıf abstract sayılabilir. Düzeltme: issue #...
 ```
 
+### Uygulama sırası (kesin)
+
+1. **Baseline snapshot altyapısı — refactor'den ÖNCE.** Kanonik normalizer + 23-repo golden
+   fixture. "Değişmedi" kanıtı ancak baseline varsa mümkün; refactor'ü baseline'sız yapmak
+   kabul kriterini test-edilemez bırakır.
+2. **`is_class_def` envanteri** characterization-test'lerle dondurulur (üç korunan dışlama dahil).
+3. `DeclarationKindSpec`/`AbstractnessRule`/`NameStrategy` tipleri + `walk_class_defs` yeni imza.
+4. Beş adapter policy'ye göçürülür (yukarıdaki tablo).
+5. Baseline snapshot yeniden çalıştırılır → SHA256 identical.
+
 ### Test katmanları
 
 - **unit:** her adapter'ın `extract_class_defs` çıktısı refactor öncesi/sonrası aynı (mevcut
   adapter testleri değişmeden geçmeli).
 - **characterization:** `characterization_go_grouped_type_currently_counts_wrapper`,
-  `characterization_go_interface_field_currently_abstract` — mevcut (hatalı) davranışı sabitler;
-  test adı "doğru" demez, "refactor sırasında değişmemeli" der.
-- **golden/snapshot:** 23-repo normalize→SHA256.
+  `characterization_go_interface_field_currently_abstract`, `characterization_ts_enum_not_counted`,
+  `characterization_anonymous_class_not_counted` — mevcut davranışı sabitler; test adı "doğru"
+  demez, "refactor sırasında değişmemeli" der.
+- **golden/snapshot:** 23-repo kanonik-normalize→SHA256.
 
-### Kabul kriteri (kesin)
+### Kabul kriteri (kesin — normalizer gereği doğrulandı 2026-07-24)
 
 Normalize edilmiş analiz çıktısı 23 repo için **semantik olarak birebir**. Karşılaştırılan alanlar:
 `source file count, node count, internal edge count, type-only edge count, Nc, Na, A, I, D,
 per-node coupling, per-node instability, diagnostic code counts`.
-Çıktı deterministikse SHA-256 özeti kullanılır.
 
-> **CI ön-koşulu:** Snapshot'ın **repo-relative** olduğu doğrulanmalı. `pipeline.rs` `node_paths`'i
-> `(id, rel)` ile üretiyor (rel path), ama snapshot'ın mutlak yol / map sırası / diagnostic
-> sıralaması gibi semantik-olmayan nedenlerle kırılmadığı ilk adımda teyit edilir. Aksi halde
-> kriter makine-bağımlı olur.
+**Kanonik normalizer ZORUNLU (ham serialize SHA256'yı yanlış-negatif kırar):**
+- `pipeline.rs` çıktısında `node_map`/`node_paths`/`node_semantics`/`node_witnesses` **HashMap** →
+  key'e (NodeId veya rel-path) göre **sıralı** serialize edilmeli.
+- `diagnostics` **Vec**, faz-sırasına göre push ediliyor → snapshot öncesi `sort()`.
+- `f64` alanlar (coupling, instability, A, I, D) → **sabit ondalık hassasiyet** (ör. 6 hane) ile
+  yazılmalı, ham bit değil (platform floating-point farkı SHA256'yı kırar).
+- **Teyit edilmiş iyi durum:** `node_paths` zaten repo-relative (`strip_prefix(&repo)`) ve
+  ayırıcı-normalize (`\`→`/`); `files.sort()` (`pipeline.rs:490`) NodeId atamasını deterministik
+  yapıyor. Kalan iş yalnızca yukarıdaki map/vec/f64 kanonikleştirmesi.
 
 ---
 
