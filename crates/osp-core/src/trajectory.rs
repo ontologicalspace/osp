@@ -1031,6 +1031,37 @@ pub enum MutationDecision {
     RequireOperatorApproval,
 }
 
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** Improvement assessment — gate decision core'ın
+/// zenginleştirilmiş sonucu. `MutationDecision` *ne* yapılacağını söyler;
+/// `ImprovementAssessment` *neden* — restore validator semantic matrix için kanıt.
+///
+/// Completion-first short-circuit'ler (`PredicateCompleted`, `SourceInsufficient`) +
+/// policy-driven decision'lar (`StrictRejectPolicy`, `OperatorApprovalPolicy`) +
+/// improvement result (`Improved`, `NotImproved`). `evaluate_decision_core` üretir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImprovementAssessment {
+    /// PredicateSet completed → AcceptAsCompleted. Loss hesabı YOK (completion-first).
+    PredicateCompleted,
+    /// Source insufficient (INV-T4) → Reject. Placeholder/heuristic ile task kapatılamaz.
+    SourceInsufficient,
+    /// StrictReject policy → Reject (predicate fail her zaman reject).
+    StrictRejectPolicy,
+    /// OperatorApproval policy → RequireOperatorApproval (critical domain).
+    OperatorApprovalPolicy,
+    /// AcceptImprovement policy + improved + progress checkpoint → AcceptAsProgress.
+    Improved,
+    /// AcceptImprovement policy ama improved DEĞİL (loss regression veya hard-cap fail)
+    /// veya progress checkpoint kapalı → Reject.
+    NotImproved {
+        /// min_improvement_delta sağlanmadı mı (loss_after >= loss_before - delta)?
+        insufficient_delta: bool,
+        /// Hard-cap aşıldı mı (coupling/instability/cohesion threshold)?
+        hard_cap_violated: bool,
+        /// Progress checkpoint policy kapalı mı?
+        progress_checkpoint_disabled: bool,
+    },
+}
+
 /// Commit lane — INV-T8 (progress checkpoint isolation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CommitLane {
@@ -1325,9 +1356,7 @@ pub enum TrajectoryLossEvidence<'a> {
     /// (predicate completed/source insufficient/policy reject/operator approval).
     /// `LossNotRequiredReason` kapalı enum — `Other(String)` yok. Epistemik kaçış kapısı
     /// DEĞİL: loss üretim hatası `NotRequired` yerine typed operational error olur.
-    NotRequired {
-        reason: LossNotRequiredReason,
-    },
+    NotRequired { reason: LossNotRequiredReason },
 }
 
 /// **Owned variant** — `TaskCommitResult.evaluation` ve navigator state (Faz 7) için.
@@ -1345,9 +1374,7 @@ pub enum OwnedTrajectoryLossEvidence {
         reason: TrajectoryLossUnavailableReason,
     },
     /// **Faz 5:** Loss gerekmiyor — borrowed ile aynı reason set.
-    NotRequired {
-        reason: LossNotRequiredReason,
-    },
+    NotRequired { reason: LossNotRequiredReason },
 }
 
 /// **Borrowed gate input** — baseline (before-state) evidence. Subject scope üyelerinin
@@ -1551,50 +1578,37 @@ impl PredicateGate {
     /// **reviewer P0-1:** `improvement_policy` burada BİR KEZ üretilir — `is_improved_loss`
     /// kararını verir ve `PredicateGateOutput` ile döndürülür. Engine output'tan alıp
     /// authorization basis'e taşır; basis builder yeniden üretmez (tek source of truth).
+    ///
+    /// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** V1 adapter — legacy scalar loss formülünü
+    /// hesaplayıp `evaluate_decision_core`'a geçirir. Core loss formülü içermez (plan
+    /// negatif koşulu). 7 test parity: mevcut behavior korunur, decision logic core'da.
     pub fn evaluate(&self, input: PredicateGateInput<'_>) -> PredicateGateOutput {
         let policy = &input.bound.task.policy;
         let loss_after = trajectory_loss(input.measured, input.target);
         let improvement_policy = EffectiveImprovementPolicy::current_semantics();
 
         // 1. PredicateSet completion (INV-T4 source check dahil).
-        let (predicate_completion, mutation_decision) = match input
+        let completion = input
             .bound
             .task
             .target_predicate_set
-            .evaluate_completion(input.measured)
-        {
-            PredicateSetResult::Completed => (
-                PredicateCompletion::Completed,
-                MutationDecision::AcceptAsCompleted,
-            ),
-            PredicateSetResult::SourceInsufficient => {
-                // INV-T4 — placeholder/heuristic ile task kapatılamaz. Her zaman Reject.
-                (PredicateCompletion::NotCompleted, MutationDecision::Reject)
-            }
-            PredicateSetResult::NotCompleted => {
-                // 2. INV-T6 — policy'ye göre: improved mı, regressed mi?
-                let improved = is_improved_loss(
-                    input.loss_before,
-                    loss_after,
-                    input.measured,
-                    policy,
-                    &improvement_policy,
-                );
-                let completion = PredicateCompletion::NotCompleted;
-                let decision = match policy.predicate_failure_policy {
-                    PredicateFailurePolicy::StrictReject => MutationDecision::Reject,
-                    PredicateFailurePolicy::AcceptImprovement => {
-                        if policy.allow_progress_checkpoint && improved {
-                            MutationDecision::AcceptAsProgress
-                        } else {
-                            MutationDecision::Reject
-                        }
-                    }
-                    PredicateFailurePolicy::OperatorApproval => {
-                        MutationDecision::RequireOperatorApproval
-                    }
-                };
-                (completion, decision)
+            .evaluate_completion(input.measured);
+
+        // 2. INV-T9 #70 Faz 5: decision core — loss scalar parametre olarak geçilir.
+        let (_assessment, mutation_decision) = evaluate_decision_core(
+            completion,
+            policy,
+            input.loss_before,
+            loss_after,
+            input.measured,
+            &improvement_policy,
+        );
+
+        // PredicateCompletion: Completed yalnızca PredicateSetResult::Completed ise.
+        let predicate_completion = match completion {
+            PredicateSetResult::Completed => PredicateCompletion::Completed,
+            PredicateSetResult::SourceInsufficient | PredicateSetResult::NotCompleted => {
+                PredicateCompletion::NotCompleted
             }
         };
 
@@ -1618,6 +1632,14 @@ impl PredicateGate {
 /// `min_cohesion`) artık hardcoded literal DEĞİL — `EffectiveImprovementPolicy`'den
 /// okunur. Bu policy `PredicateGate::evaluate`'de bir kez üretilir ve buraya geçirilir;
 /// aynı nesne authorization basis'e de taşınır. Tek truth source.
+///
+/// **INV-T9 #70 Faz 5 Adım 12:** Logic `evaluate_decision_core`'a taşındı (improvement
+/// result zenginleştirilmiş — insufficient_delta/hard_cap_violated ayrımı). Bu wrapper
+/// core öncesi V1 callers için korundu; core kendi logic'ini içerir.
+#[allow(
+    dead_code,
+    reason = "Faz 5 evaluate_decision_core superseded; V1 scalar wrapper retained"
+)]
 fn is_improved_loss(
     loss_before: f64,
     loss_after: f64,
@@ -1633,6 +1655,76 @@ fn is_improved_loss(
     measured.coupling.value < improvement.max_coupling
         && measured.instability.value < improvement.max_instability
         && measured.cohesion.value > improvement.min_cohesion
+}
+
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** Gate decision core — pure free function.
+/// `PredicateGate::evaluate`'in decision logic'ini extract eder. Loss formülü YOK
+/// (plan negatif koşulu: loss scalar parametre olarak geçilir, core hesaplamaz).
+/// V1 adapter (PredicateGate::evaluate) legacy scalar loss'u hesaplayıp geçirecek.
+///
+/// **7 test parity:** mevcut PredicateGate::evaluate test'leri (1-7) bu core üzerinden
+/// aynı MutationDecision üretmeli. ImprovementAssessment restore validator semantic
+/// matrix için zenginleştirilmiş kanıt taşır.
+///
+/// Girdiler: PredicateSetResult (completion), TaskPolicy (failure_policy +
+/// min_improvement_delta + allow_progress_checkpoint), loss_before/after (scalar),
+/// measured (hard-cap check), EffectiveImprovementPolicy (threshold'lar).
+pub(crate) fn evaluate_decision_core(
+    completion: PredicateSetResult,
+    policy: &TaskPolicy,
+    loss_before: f64,
+    loss_after: f64,
+    measured: &ProvenancedRawPosition,
+    improvement: &EffectiveImprovementPolicy,
+) -> (ImprovementAssessment, MutationDecision) {
+    match completion {
+        PredicateSetResult::Completed => (
+            ImprovementAssessment::PredicateCompleted,
+            MutationDecision::AcceptAsCompleted,
+        ),
+        PredicateSetResult::SourceInsufficient => (
+            // INV-T4 — placeholder/heuristic ile task kapatılamaz. Her zaman Reject.
+            ImprovementAssessment::SourceInsufficient,
+            MutationDecision::Reject,
+        ),
+        PredicateSetResult::NotCompleted => {
+            // INV-T6 — policy'ye göre: improved mı, regressed mi?
+            let insufficient_delta = loss_after >= loss_before - policy.min_improvement_delta;
+            let hard_cap_violated = !(measured.coupling.value < improvement.max_coupling
+                && measured.instability.value < improvement.max_instability
+                && measured.cohesion.value > improvement.min_cohesion);
+            let improved = !insufficient_delta && !hard_cap_violated;
+
+            let (assessment, decision) = match policy.predicate_failure_policy {
+                PredicateFailurePolicy::StrictReject => (
+                    ImprovementAssessment::StrictRejectPolicy,
+                    MutationDecision::Reject,
+                ),
+                PredicateFailurePolicy::AcceptImprovement => {
+                    if policy.allow_progress_checkpoint && improved {
+                        (
+                            ImprovementAssessment::Improved,
+                            MutationDecision::AcceptAsProgress,
+                        )
+                    } else {
+                        (
+                            ImprovementAssessment::NotImproved {
+                                insufficient_delta,
+                                hard_cap_violated,
+                                progress_checkpoint_disabled: !policy.allow_progress_checkpoint,
+                            },
+                            MutationDecision::Reject,
+                        )
+                    }
+                }
+                PredicateFailurePolicy::OperatorApproval => (
+                    ImprovementAssessment::OperatorApprovalPolicy,
+                    MutationDecision::RequireOperatorApproval,
+                ),
+            };
+            (assessment, decision)
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3351,8 +3443,8 @@ mod tests {
         let mut task = valid_task_for_validation();
         task.policy.maneuver_limit = 0; // policy issue — free function bunu görmez
         task.target_predicate_set.predicates.clear(); // predicate issue
-        let err = validate_predicate_goal_for_commit(task.id, &task.target_predicate_set)
-            .unwrap_err();
+        let err =
+            validate_predicate_goal_for_commit(task.id, &task.target_predicate_set).unwrap_err();
         // EmptyPredicateSet (predicate issue) — InvalidManeuverLimit (policy) DEĞİL.
         assert!(matches!(
             err,
