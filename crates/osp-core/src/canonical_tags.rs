@@ -345,6 +345,79 @@ canonical_tag_newtype! {
     OperatorApproval => 2,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 1 (P1-3) — Reverse projection: Tag → Domain
+//
+// Faz 5 restore evaluator'ın ihtiyaç duyduğu dört dönüşüm. `canonical_tag_newtype!`
+// makrosuna blanket reverse From eklenmez — yalnızca bu dört tag'e yetki verilir.
+// Diğer tag aileleri (NodeKind, EdgeKind, vb.) restore semantiği ortaya çıktığında
+// ayrı değerlendirilir.
+//
+// **Neden `From` infallible?** Tag newtype construction/deserialization sınırında
+// geçersiz `u8` reddeder (`TryFrom<u8>` + custom Deserialize → `VALID_TAGS` set
+// dışı değer = `CanonicalizationError`). Domain enum varyant set'i ile tag set'i
+// birebir örtüşür, bu yüzden reverse dönüşüm kayıpsız ve infallible'dır.
+// `unreachable!` arm'ı `VALID_TAGS` invariant'ının bilinçliAssert'idir.
+//
+// **`MetricSource::Mixed`:** measured evidence'ında geçerli aggregation çıktısıdır
+// (`aggregate_source`). Guards consumption-side (predicate evaluate, axis
+// construction) — enum-construction-side DEĞİL. Reverse `From` `Mixed` üretebilir.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+impl From<PredicateAxisTag> for PredicateAxis {
+    fn from(tag: PredicateAxisTag) -> Self {
+        match tag.as_u8() {
+            0 => PredicateAxis::Coupling,
+            1 => PredicateAxis::Cohesion,
+            2 => PredicateAxis::Instability,
+            3 => PredicateAxis::Entropy,
+            4 => PredicateAxis::WitnessDepth,
+            5 => PredicateAxis::RiskScore,
+            6 => PredicateAxis::MainSequenceDistance,
+            7 => PredicateAxis::Custom,
+            _ => unreachable!("PredicateAxisTag VALID_TAGS invariant"),
+        }
+    }
+}
+
+impl From<ComparisonOpTag> for ComparisonOp {
+    fn from(tag: ComparisonOpTag) -> Self {
+        match tag.as_u8() {
+            0 => ComparisonOp::Lt,
+            1 => ComparisonOp::Le,
+            2 => ComparisonOp::Gt,
+            3 => ComparisonOp::Ge,
+            4 => ComparisonOp::Eq,
+            5 => ComparisonOp::Ne,
+            _ => unreachable!("ComparisonOpTag VALID_TAGS invariant"),
+        }
+    }
+}
+
+impl From<CanonicalMetricSourceTag> for MetricSource {
+    fn from(tag: CanonicalMetricSourceTag) -> Self {
+        match tag.as_u8() {
+            0 => MetricSource::TreeSitter,
+            1 => MetricSource::Scip,
+            2 => MetricSource::Placeholder,
+            3 => MetricSource::Heuristic,
+            4 => MetricSource::Mixed,
+            _ => unreachable!("CanonicalMetricSourceTag VALID_TAGS invariant"),
+        }
+    }
+}
+
+impl From<PredicateModeTag> for crate::trajectory::PredicateMode {
+    fn from(tag: PredicateModeTag) -> Self {
+        match tag.as_u8() {
+            0 => crate::trajectory::PredicateMode::All,
+            1 => crate::trajectory::PredicateMode::Any,
+            2 => crate::trajectory::PredicateMode::Weighted,
+            _ => unreachable!("PredicateModeTag VALID_TAGS invariant"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +567,95 @@ mod tests {
         assert_eq!(json, "0");
         let back: CanonicalNodeKind = serde_json::from_str("0").unwrap();
         assert_eq!(back, tag);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 1 (P1-3) — PredicateMode forward + 4 round-trip
+    //
+    // Forward test canonical byte sözleşmesini sabitler; round-trip test reverse
+    // projection tutarlılığını pinler. İkisi farklı şeyi kanıtlar: round-trip tek
+    // başına simetrik hatayı (All↔Any karşılıklı değişimi) yakalayamaz.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn predicate_mode_tag_maps_all_domain_variants() {
+        // EKSİK forward test — Adım 1 ile aynı atomik değişiklikte tamamlanır.
+        let cases = [
+            (crate::trajectory::PredicateMode::All, 0u8),
+            (crate::trajectory::PredicateMode::Any, 1),
+            (crate::trajectory::PredicateMode::Weighted, 2),
+        ];
+        for (mode, expected) in cases {
+            let tag = PredicateModeTag::try_from(&mode).unwrap();
+            assert_eq!(tag.as_u8(), expected);
+        }
+    }
+
+    #[test]
+    fn predicate_axis_tag_round_trips_through_domain() {
+        let cases = [
+            PredicateAxis::Coupling,
+            PredicateAxis::Cohesion,
+            PredicateAxis::Instability,
+            PredicateAxis::Entropy,
+            PredicateAxis::WitnessDepth,
+            PredicateAxis::RiskScore,
+            PredicateAxis::MainSequenceDistance,
+            PredicateAxis::Custom,
+        ];
+        for axis in cases {
+            let tag = PredicateAxisTag::try_from(&axis).unwrap();
+            let restored: PredicateAxis = tag.into();
+            assert_eq!(restored, axis, "round-trip failed for {axis:?}");
+        }
+    }
+
+    #[test]
+    fn comparison_op_tag_round_trips_through_domain() {
+        let cases = [
+            ComparisonOp::Lt,
+            ComparisonOp::Le,
+            ComparisonOp::Gt,
+            ComparisonOp::Ge,
+            ComparisonOp::Eq,
+            ComparisonOp::Ne,
+        ];
+        for op in cases {
+            let tag = ComparisonOpTag::try_from(&op).unwrap();
+            let restored: ComparisonOp = tag.into();
+            assert_eq!(restored, op, "round-trip failed for {op:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_metric_source_tag_round_trips_through_domain() {
+        // Mixed dahil — measured evidence'ında geçerli aggregation çıktısıdır
+        // (guards consumption-side, enum-construction-side DEĞİL).
+        let cases = [
+            MetricSource::TreeSitter,
+            MetricSource::Scip,
+            MetricSource::Placeholder,
+            MetricSource::Heuristic,
+            MetricSource::Mixed,
+        ];
+        for src in cases {
+            let tag = CanonicalMetricSourceTag::try_from(&src).unwrap();
+            let restored: MetricSource = tag.into();
+            assert_eq!(restored, src, "round-trip failed for {src:?}");
+        }
+    }
+
+    #[test]
+    fn predicate_mode_tag_round_trips_through_domain() {
+        let cases = [
+            crate::trajectory::PredicateMode::All,
+            crate::trajectory::PredicateMode::Any,
+            crate::trajectory::PredicateMode::Weighted,
+        ];
+        for mode in cases {
+            let tag = PredicateModeTag::try_from(&mode).unwrap();
+            let restored: crate::trajectory::PredicateMode = tag.into();
+            assert_eq!(restored, mode, "round-trip failed for {mode:?}");
+        }
     }
 }
