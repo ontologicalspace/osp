@@ -999,6 +999,51 @@ pub struct CanonicalPredicateEvaluationBasisV2 {
     pub effective_improvement: EffectiveImproPolicyBasisV2,
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 13 (P1-1) — Parent authorization.rs restore validator errors
+//
+// Plan: `PredicateBasisConsistencyError` + `GateSemanticConsistencyError` parent'ta
+// (restore validator'lar — Item 16). Child gate_v2.rs runtime errors (yukarıda).
+// Explicit variant mapping, `#[from]` YOK (plan negatif koşulu).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Predicate basis consistency error — restore
+/// path predicate basis validation hatası. `validate_predicate_basis_semantics_v2`
+/// (Item 16) üretir. Typed variant mapping — hatanın kaynağı lokalize.
+#[allow(dead_code, reason = "Faz 5 Item 16 restore validator consumer")]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum PredicateBasisConsistencyError {
+    /// Gate evaluation semantics version mismatch — restore vs runtime farklı semantics.
+    #[error("unsupported gate evaluation semantics: stored={stored}, expected={expected}")]
+    UnsupportedGateEvaluationSemantics { stored: u32, expected: u32 },
+    /// Task-goal evidence → PredicateSet restore hatası (canonicalization).
+    #[error("task-goal evidence restore failed: {0}")]
+    TaskGoalEvidenceRestore(CanonicalizationError),
+    /// Predicate goal validation hatası (validate_predicate_goal_for_commit).
+    #[error("predicate goal validation failed: {0}")]
+    PredicateGoalValidation(crate::trajectory::TaskValidationError),
+}
+
+/// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Gate semantic consistency error — restore
+/// path gate decision semantic matrix validation hatası. `validate_gate_decision_semantics_v2`
+/// (Item 16) üretir. Typed variant mapping — branch-aware restore matrix ihlali.
+#[allow(dead_code, reason = "Faz 5 Item 16 restore validator consumer")]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum GateSemanticConsistencyError {
+    /// Stored loss evidence ile recomputed loss parity ihlali.
+    #[error("stored loss evidence mismatch: stored={stored}, recomputed={recomputed}")]
+    LossEvidenceMismatch { stored: String, recomputed: String },
+    /// Expected MutationDecision ↔ stored gate decision mismatch.
+    #[error("mutation decision mismatch: expected={expected:?}, stored={stored:?}")]
+    MutationDecisionMismatch {
+        expected: crate::trajectory::MutationDecision,
+        stored: crate::trajectory::MutationDecision,
+    },
+    /// Branch-aware restore matrix ihlali (GatePassed tablosu).
+    #[error("gate semantic matrix violation: {detail}")]
+    MatrixViolation { detail: String },
+}
+
 /// Canonical raw position — 5-axis, NaN reject, -0.0 normalize.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CanonicalRawPosition {
@@ -4291,6 +4336,22 @@ pub enum CanonicalizationError {
     #[error("unsupported measurement axis (not core raw): {0}")]
     UnsupportedMeasurementAxis(String),
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 13 — gate_v2 child module (runtime proof)
+//
+// **#[path] attribute:** authorization.rs → mod.rs taşıma YOK (plan negatif koşulu).
+// Bu dosya `authorization/gate_v2.rs`'i child module olarak declare eder. Child module
+// olduğu için parent'ın private field'larına erişebilir (sibling DEĞİL).
+// ═══════════════════════════════════════════════════════════════════════════════
+#[path = "authorization/gate_v2.rs"]
+mod gate_v2;
+
+// Re-export Faz 5 gate_v2 public API (error taxonomy + bundle consumers).
+#[allow(unused_imports, reason = "Faz 5 Item 15-17 consumers")]
+pub(crate) use gate_v2::{
+    GateEvaluationV2Error, ProducedTrajectoryLossEvidence, TrajectoryLossProductionError,
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // hex encoding (inline — dependency eklemeden)
