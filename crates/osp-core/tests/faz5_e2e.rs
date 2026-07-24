@@ -17,7 +17,7 @@ use osp_core::agent::{
     compute_space_slice, EvidenceSummary, NewNodeSpec, OutputContract, PermissionMask, SpaceSlice,
 };
 use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
-use osp_core::coords::{CoordinateSystem, RawPosition};
+use osp_core::coords::{CoordinateSystem, MetricSource, RawPosition};
 use osp_core::engine::{EngineCommitError, EngineConfig, SpaceEngine};
 use osp_core::space::{Edge, EdgeKind, Node, NodeKind, Space};
 use osp_core::vision::VisionVector;
@@ -68,10 +68,13 @@ fn make_project_space() -> Space {
 
 fn make_engine(space: Space) -> SpaceEngine {
     let cs = CoordinateSystem::default_raw_five(
+        // INV-T9 #70: e2e test fixture — Placeholder topology + Placeholder cohesion.
+        MetricSource::Placeholder,
         CohesionAxis::new(),
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.5, 3),
-    );
+    )
+    .expect("faz5_e2e axis registration: 5 distinct core axes");
     let vision = VisionVector::new(RawPosition {
         x: 0.4,
         y: 0.6,
@@ -80,6 +83,7 @@ fn make_engine(space: Space) -> SpaceEngine {
         v: 0.5,
     });
     SpaceEngine::with_default_rules(space, cs, vision, EngineConfig::default_calibrated())
+        .expect("faz5_e2e rule registration: 3 distinct default rules")
 }
 
 fn ev(id: EvidenceId, actor: u64) -> EvidenceEvent {
@@ -328,15 +332,16 @@ fn e2e_insufficient_witnesses_hold() {
         removed_edges: vec![], // G2c-2
     };
 
-    // Only 1 witness → Hold (min_approvers=2 not met)
+    // Only 1 witness → Held (min_approvers=2 not met). Legacy commit() → Internal.
+    // INV-T9: commit_task_claim kullanırsanız EngineCommitResult::Held döner.
     let result = engine.commit(&claim, &one_witness());
 
     assert!(
-        matches!(result, Err(EngineCommitError::Witness(_))),
-        "1 witness should Hold — got: {:?}",
+        matches!(result, Err(EngineCommitError::Internal(ref msg)) if msg.contains("Held")),
+        "1 witness should Held (legacy commit → Internal): got {:?}",
         result.as_ref().err()
     );
-    assert_eq!(engine.space().node_count(), 3, "no mutation on Hold");
+    assert_eq!(engine.space().node_count(), 3, "no mutation on Held");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

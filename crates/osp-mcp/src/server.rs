@@ -575,6 +575,11 @@ impl OspMcpServer {
                 output_contract: osp_core::agent::OutputContract::strict(),
                 // MCP server = production context → Production witness (min_approvers=2).
                 witness_policy: osp_core::navigator::NavigatorWitnessPolicy::Production,
+                // INV-T9: production filesystem store.
+                pending_authorization_store: Box::new(
+                    osp_core::authorization::FilesystemPendingAuthorizationStore::new("."),
+                ),
+                clock: Box::new(osp_core::authorization::SystemClock),
             };
             let result = nav.run_task(task_id, 1);
             // Evidence'ı store'a kaydet (RQ6 verisi).
@@ -655,6 +660,43 @@ fn serialize_navigator_result(result: &osp_core::navigator::NavigatorResult) -> 
             "attempts": attempts,
             "last_mutation_decision": format!("{:?}", last_outcome.mutation_decision),
             "last_predicate_completion": format!("{:?}", last_outcome.predicate_completion),
+        }),
+        NavigatorResult::AwaitingWitnesses {
+            pending,
+            persistence,
+        } => serde_json::json!({
+            "outcome": "AwaitingWitnesses",
+            "task_id": pending.task_id,
+            "claim_id": pending.claim_id,
+            "witness_hold_reason": pending.witness_hold_reason.as_reason_str(),
+            "commit_state": "awaiting_witnesses",
+            "mainline_mutation": "not_applied",
+            "pending_artifact": persistence.artifact_path.to_string_lossy(),
+            "next_action": "await_external_evidence",
+        }),
+        NavigatorResult::RequiresRevision(rev) => serde_json::json!({
+            "outcome": "RequiresRevision",
+            "task_id": rev.task_id(),
+            "claim_id": rev.claim_id(),
+            "rejecting_witnesses": rev.reasons().map(|r| r.as_slice().iter().map(|x| x.witness).collect::<Vec<_>>()).unwrap_or_default(),
+            "commit_state": "rejected_by_witness",
+            "next_action": "requires_revision",
+        }),
+        NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
+            serde_json::json!({
+                "outcome": "PendingAuthorizationPersistenceFailure",
+                "task_id": pending.task_id,
+                "claim_id": pending.claim_id,
+                "error": error.to_string(),
+            })
+        }
+        NavigatorResult::WitnessEvaluationError(msg) => serde_json::json!({
+            "outcome": "WitnessEvaluationError",
+            "message": msg,
+        }),
+        NavigatorResult::SystemFailure(msg) => serde_json::json!({
+            "outcome": "SystemFailure",
+            "message": msg,
         }),
         NavigatorResult::TaskNotFound => serde_json::json!({ "outcome": "TaskNotFound" }),
         NavigatorResult::RequiresOperatorApproval {
@@ -841,7 +883,46 @@ impl Workspace {
                 loss_before,
                 measured: measured.clone(),
             }) {
-            Ok(r) => r,
+            Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,
+            Ok(osp_core::engine::EngineCommitResult::Held {
+                reason, snapshot, ..
+            }) => {
+                // **INV-T9** — expected authorization bekleme. Agent failure DEĞİL.
+                return Ok(serde_json::json!({
+                    "commit_result": "Held",
+                    "witness_hold_reason": reason.as_reason_str(),
+                    "witness_snapshot": {
+                        "approvers": snapshot.approvers,
+                        "required_approvers": snapshot.required_approvers,
+                        "support": snapshot.support,
+                        "required_support": snapshot.required_support,
+                    },
+                    "commit_state": "awaiting_witnesses",
+                    "mainline_mutation": "not_applied",
+                    "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+                    "next_action": "await_external_evidence",
+                }));
+            }
+            Ok(osp_core::engine::EngineCommitResult::Rejected {
+                reasons, snapshot, ..
+            }) => {
+                // Explicit witness rejection — RequiresRevision.
+                let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
+                return Ok(serde_json::json!({
+                    "commit_result": "Rejected",
+                    "rejecting_witnesses": witness_ids,
+                    "witness_snapshot": {
+                        "approvers": snapshot.approvers,
+                        "required_approvers": snapshot.required_approvers,
+                        "support": snapshot.support,
+                        "required_support": snapshot.required_support,
+                    },
+                    "commit_state": "rejected_by_witness",
+                    "mainline_mutation": "not_applied",
+                    "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+                    "next_action": "requires_revision",
+                }));
+            }
             Err(e) => {
                 return Ok(serde_json::json!({
                     "attempt_outcome": {
@@ -858,7 +939,7 @@ impl Workspace {
             }
         };
 
-        // 4. Serialize outcome.
+        // 4. Serialize outcome (Applied path).
         let gate_str = match result.outcome.gate_decision {
             osp_core::trajectory::GateDecision::PassedAll => "PassedAll",
             osp_core::trajectory::GateDecision::RejectedBySyntax => "RejectedBySyntax",
@@ -866,6 +947,13 @@ impl Workspace {
             osp_core::trajectory::GateDecision::RejectedByRule => "RejectedByRule",
             osp_core::trajectory::GateDecision::RejectedByTaskBinding => "RejectedByTaskBinding",
             osp_core::trajectory::GateDecision::BlockedByManeuverLimit => "BlockedByManeuverLimit",
+            // **INV-T9 #70 Commit 4b (reviewer v4 P1-4 — append-only tag):**
+            osp_core::trajectory::GateDecision::RejectedByTaskValidation => {
+                "RejectedByTaskValidation"
+            }
+            osp_core::trajectory::GateDecision::RejectedByMeasurementBinding => {
+                "RejectedByMeasurementBinding"
+            }
             osp_core::trajectory::GateDecision::Unknown => "Unknown",
         };
         let pred_str = match result.outcome.predicate_completion {

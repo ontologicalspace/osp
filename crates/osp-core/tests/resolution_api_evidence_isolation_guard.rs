@@ -37,9 +37,9 @@
 //! guard'ın bunları yakaladığını (panik ile) doğrular. Bu, guard'ın gerçekten tarama
 //! yaptığının kanıtıdır; test yeşil olsa bile tarama çalışmıyorsa red-kanıt kırılır.
 
+use quote::ToTokens;
 use std::path::Path;
 use syn::visit::Visit;
-use quote::ToTokens;
 
 /// Forbidden evidence-capability type names that must not appear in the public resolution
 /// API signature surface.
@@ -85,7 +85,9 @@ fn path_to_string(path: &syn::Path) -> String {
 
 /// Bir isim resolution-API yüzeyine mi ait?
 fn is_resolution_item(ident: &str) -> bool {
-    RESOLUTION_API_FRAGMENTS.iter().any(|frag| ident.contains(frag))
+    RESOLUTION_API_FRAGMENTS
+        .iter()
+        .any(|frag| ident.contains(frag))
 }
 
 /// AST ziyaretçisi: forbidden token içeren public resolution API yüzeylerini toplar.
@@ -108,7 +110,9 @@ impl ViolationCollector {
 /// Bir `TypeParamBound` listesinden (inline generic bound `T: Trait` veya where-clause
 /// bound `T: Trait`) forbidden token çıkar. `Punctuated<TypeParamBound>` üzerinden TraitBound
 /// path'lerini string'e çevirip forbidden token ara.
-fn bounds_mention_forbidden(bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>) -> Vec<&'static str> {
+fn bounds_mention_forbidden(
+    bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+) -> Vec<&'static str> {
     let mut hits = Vec::new();
     for bound in bounds {
         if let syn::TypeParamBound::Trait(trait_bound) = bound {
@@ -183,11 +187,7 @@ fn check_fn_signature(
 }
 
 /// Bir struct field'ı üzerinde forbidden token ara.
-fn check_struct_field(
-    collector: &mut ViolationCollector,
-    struct_name: &str,
-    field: &syn::Field,
-) {
+fn check_struct_field(collector: &mut ViolationCollector, struct_name: &str, field: &syn::Field) {
     for tok in type_mentions_forbidden(&field.ty) {
         collector.violations.push(format!(
             "struct `{struct_name}` field forbidden token `{tok}` taşıyor: `{}`",
@@ -275,9 +275,7 @@ impl<'ast> Visit<'ast> for ViolationCollector {
 }
 
 /// Üç hedef dosyayı parse et ve violation topla. (violations, parsed_filenames) döndürür.
-fn collect_violations_from_resolution_surface(
-    files: &[&Path],
-) -> (Vec<String>, Vec<String>) {
+fn collect_violations_from_resolution_surface(files: &[&Path]) -> (Vec<String>, Vec<String>) {
     let mut all_violations = Vec::new();
     let mut parsed_files = Vec::new();
     for path in files {
@@ -295,7 +293,12 @@ fn collect_violations_from_resolution_surface(
                 continue;
             }
         };
-        parsed_files.push(path.file_name().unwrap_or_default().to_string_lossy().into_owned());
+        parsed_files.push(
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        );
         let mut collector = ViolationCollector::new();
         collector.visit_file(&file);
         all_violations.extend(collector.violations);
@@ -423,9 +426,18 @@ impl ResolutionApplication {
     );
 
     let joined = collector.violations.join("\n");
-    assert!(joined.contains("ObservedCodeEvidence"), "ObservedCodeEvidence violation yakalanmadı");
-    assert!(joined.contains("CodeEvidenceProvider"), "CodeEvidenceProvider violation yakalanmadı");
-    assert!(joined.contains("CodeEvidenceSource"), "CodeEvidenceSource violation yakalanmadı");
+    assert!(
+        joined.contains("ObservedCodeEvidence"),
+        "ObservedCodeEvidence violation yakalanmadı"
+    );
+    assert!(
+        joined.contains("CodeEvidenceProvider"),
+        "CodeEvidenceProvider violation yakalanmadı"
+    );
+    assert!(
+        joined.contains("CodeEvidenceSource"),
+        "CodeEvidenceSource violation yakalanmadı"
+    );
     // Generic bound vakaları: inline + where clause. Review 2 P1 — bu ikisi eskiden kaçılıyordu.
     assert!(
         joined.contains("inline bound") || joined.contains("apply_resolution_generic_inline"),

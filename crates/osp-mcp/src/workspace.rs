@@ -19,7 +19,7 @@ use osp_analyzer::contract::{AnalysisConfig, RepoMetrics, SemanticCoverage};
 use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
 use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
-use osp_core::coords::CoordinateSystem;
+use osp_core::coords::{CoordinateSystem, MetricSource};
 use osp_core::engine::{EngineConfig, SpaceEngine};
 use osp_core::vision::VisionVector;
 
@@ -86,11 +86,17 @@ impl Workspace {
         let semantic_coverage = result.semantic_coverage.clone();
 
         // 3. Engine kur (D2 calibrated — osp-cli ve osp-desktop ile aynı).
+        // **INV-T9 Adım 3:** default_raw_five artık validated Result döner.
+        // **INV-T9 #70:** production topology_source = TreeSitter, observed cohesion = Scip.
+        let cohesion = CohesionAxis::try_with_observed_source(MetricSource::Scip)
+            .map_err(|e| WorkspaceError::Analyze(format!("cohesion axis source: {e}")))?;
         let cs = CoordinateSystem::default_raw_five(
-            CohesionAxis::new(),
+            MetricSource::TreeSitter,
+            cohesion,
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
-        );
+        )
+        .map_err(|e| WorkspaceError::Analyze(format!("axis registration failed: {e}")))?;
         // Default vision — Aşama C'de operator override edebilir.
         let vision = VisionVector::new(osp_core::coords::RawPosition {
             x: 0.4,
@@ -104,7 +110,8 @@ impl Workspace {
             cs,
             vision,
             EngineConfig::default_calibrated(),
-        );
+        )
+        .map_err(|e| WorkspaceError::Analyze(format!("engine rule registration failed: {e}")))?;
 
         Ok(Self {
             path: canonical,

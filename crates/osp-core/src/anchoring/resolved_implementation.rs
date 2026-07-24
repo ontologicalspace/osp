@@ -165,9 +165,11 @@ impl ResolvedImplementationLineage {
         resolution: DerivedEdgeReference,
     ) -> Result<Self, ResolvedImplementationShapeError> {
         if expected_implementation.kind != ConceptEdgeKind::ExpectedImplementation {
-            return Err(ResolvedImplementationShapeError::UnexpectedExpectedImplementationKind {
-                found: expected_implementation.kind,
-            });
+            return Err(
+                ResolvedImplementationShapeError::UnexpectedExpectedImplementationKind {
+                    found: expected_implementation.kind,
+                },
+            );
         }
         if resolution.kind != ConceptEdgeKind::ResolvesTo {
             return Err(ResolvedImplementationShapeError::UnexpectedResolutionKind {
@@ -278,13 +280,9 @@ pub enum ResolvedImplementationShapeError {
     #[error("lineages cannot be empty")]
     EmptyLineages,
     #[error("expected implementation edge kind mismatch: found {found:?}")]
-    UnexpectedExpectedImplementationKind {
-        found: ConceptEdgeKind,
-    },
+    UnexpectedExpectedImplementationKind { found: ConceptEdgeKind },
     #[error("resolution edge kind mismatch: found {found:?}")]
-    UnexpectedResolutionKind {
-        found: ConceptEdgeKind,
-    },
+    UnexpectedResolutionKind { found: ConceptEdgeKind },
     #[error("expected implementation source mismatch (not packet node)")]
     ExpectedSourceMismatch,
     #[error("expected implementation target mismatch (not candidate)")]
@@ -302,17 +300,11 @@ pub enum ResolvedImplementationShapeError {
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ResolvedImplementationStructureError {
     #[error("duplicate node in projection basis: {node_id}")]
-    DuplicateNode {
-        node_id: ConceptNodeId,
-    },
+    DuplicateNode { node_id: ConceptNodeId },
     #[error("missing edge endpoint: {node_id}")]
-    MissingEndpoint {
-        node_id: ConceptNodeId,
-    },
+    MissingEndpoint { node_id: ConceptNodeId },
     #[error("candidate has multiple accepted resolutions: {candidate_id}")]
-    MultipleResolutions {
-        candidate_id: ConceptNodeId,
-    },
+    MultipleResolutions { candidate_id: ConceptNodeId },
     /// R1a P1-1 (review tur 1) — Accepted ResolvesTo edge'in ResolutionRecord karşılığı yok
     /// (INV-C16 projection mirror: edge ↔ record ↔ binding triangulation).
     #[error("resolution record not found for edge: {candidate_id} -> {entity_id}")]
@@ -441,10 +433,12 @@ pub fn project_resolved_implementations(
         let count = record_pairs.entry(key).or_insert(0);
         *count += 1;
         if *count > 1 {
-            return Err(ResolvedImplementationStructureError::DuplicateResolutionRecord {
-                candidate_id: r.candidate_id.clone(),
-                entity_id: r.entity_id.clone(),
-            });
+            return Err(
+                ResolvedImplementationStructureError::DuplicateResolutionRecord {
+                    candidate_id: r.candidate_id.clone(),
+                    entity_id: r.entity_id.clone(),
+                },
+            );
         }
     }
 
@@ -463,54 +457,66 @@ pub fn project_resolved_implementations(
         }
         // P1-4 (tur 3) — non-Accepted ResolvesTo typed error (INV-C16 structural).
         if edge.decision_status != DecisionStatus::Accepted {
-            return Err(ResolvedImplementationStructureError::InvalidResolutionStatus {
-                from: edge.from.clone(),
-                to: edge.to.clone(),
-                status: edge.decision_status,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidResolutionStatus {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    status: edge.decision_status,
+                },
+            );
         }
         // Source validation.
-        let source = nodes_by_id
-            .get(&edge.from)
-            .ok_or_else(|| ResolvedImplementationStructureError::MissingEndpoint {
+        let source = nodes_by_id.get(&edge.from).ok_or_else(|| {
+            ResolvedImplementationStructureError::MissingEndpoint {
                 node_id: edge.from.clone(),
-            })?;
+            }
+        })?;
         if source.node_kind != ConceptNodeKind::CodeEntityCandidate {
-            return Err(ResolvedImplementationStructureError::InvalidResolutionSourceKind {
-                node_id: source.id.clone(),
-                found: source.node_kind,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidResolutionSourceKind {
+                    node_id: source.id.clone(),
+                    found: source.node_kind,
+                },
+            );
         }
         // P1-3 (tur 4) — source status Accepted required.
         if source.decision_status != DecisionStatus::Accepted {
-            return Err(ResolvedImplementationStructureError::InvalidResolutionSourceStatus {
-                node_id: source.id.clone(),
-                status: source.decision_status,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidResolutionSourceStatus {
+                    node_id: source.id.clone(),
+                    status: source.decision_status,
+                },
+            );
         }
         if source.position_family != PositionFamily::PhysicalCode {
-            return Err(ResolvedImplementationStructureError::InvalidResolutionEndpointFamily {
-                node_id: source.id.clone(),
-                found: source.position_family,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidResolutionEndpointFamily {
+                    node_id: source.id.clone(),
+                    found: source.position_family,
+                },
+            );
         }
         // Target validation.
-        let target = nodes_by_id
-            .get(&edge.to)
-            .ok_or_else(|| ResolvedImplementationStructureError::MissingEndpoint {
+        let target = nodes_by_id.get(&edge.to).ok_or_else(|| {
+            ResolvedImplementationStructureError::MissingEndpoint {
                 node_id: edge.to.clone(),
-            })?;
+            }
+        })?;
         if target.node_kind != ConceptNodeKind::CodeEntity {
-            return Err(ResolvedImplementationStructureError::InvalidResolutionTargetKind {
-                node_id: target.id.clone(),
-                found: target.node_kind,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidResolutionTargetKind {
+                    node_id: target.id.clone(),
+                    found: target.node_kind,
+                },
+            );
         }
         if target.position_family != PositionFamily::PhysicalCode {
-            return Err(ResolvedImplementationStructureError::InvalidResolutionEndpointFamily {
-                node_id: target.id.clone(),
-                found: target.position_family,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidResolutionEndpointFamily {
+                    node_id: target.id.clone(),
+                    found: target.position_family,
+                },
+            );
         }
         // R1a P1-1 (review tur 2) — iki yönlü occurrence-aware triangulation.
         // Non-live skip'ten ÖNCE: structural validity (edge ↔ record) doğrulanmalı.
@@ -529,19 +535,26 @@ pub fn project_resolved_implementations(
             }
             None => {
                 // Record yok → belki farklı entity'ye record var (mismatch).
-                let mismatch = basis.resolution_records.iter().find(|r| r.candidate_id == edge.from);
+                let mismatch = basis
+                    .resolution_records
+                    .iter()
+                    .find(|r| r.candidate_id == edge.from);
                 if let Some(r) = mismatch {
-                    return Err(ResolvedImplementationStructureError::ResolutionRecordEdgeMismatch {
-                        record_candidate: r.candidate_id.clone(),
-                        record_entity: r.entity_id.clone(),
-                        edge_candidate: edge.from.clone(),
-                        edge_entity: edge.to.clone(),
-                    });
+                    return Err(
+                        ResolvedImplementationStructureError::ResolutionRecordEdgeMismatch {
+                            record_candidate: r.candidate_id.clone(),
+                            record_entity: r.entity_id.clone(),
+                            edge_candidate: edge.from.clone(),
+                            edge_entity: edge.to.clone(),
+                        },
+                    );
                 }
-                return Err(ResolvedImplementationStructureError::MissingResolutionRecord {
-                    candidate_id: edge.from.clone(),
-                    entity_id: edge.to.clone(),
-                });
+                return Err(
+                    ResolvedImplementationStructureError::MissingResolutionRecord {
+                        candidate_id: edge.from.clone(),
+                        entity_id: edge.to.clone(),
+                    },
+                );
             }
         }
         // R1a P1 (review tur 3) — candidate-level R6 cardinality non-live skip'ten ÖNCE.
@@ -570,18 +583,22 @@ pub fn project_resolved_implementations(
     //     Her record'un Accepted ResolvesTo edge karşılığı olmalı.
     for (pair, _) in &record_pairs {
         if !edge_pairs.contains_key(pair) {
-            return Err(ResolvedImplementationStructureError::OrphanResolutionRecord {
-                candidate_id: pair.0.clone(),
-                entity_id: pair.1.clone(),
-            });
+            return Err(
+                ResolvedImplementationStructureError::OrphanResolutionRecord {
+                    candidate_id: pair.0.clone(),
+                    entity_id: pair.1.clone(),
+                },
+            );
         }
     }
 
     // 3. ExpectedImplementation admission + canonical triple dedup.
     let mut seen_expected: BTreeSet<(ConceptNodeId, ConceptEdgeKind, ConceptNodeId)> =
         BTreeSet::new();
-    let mut grouped: BTreeMap<(ConceptPacketId, ConceptNodeId), Vec<ResolvedImplementationLineage>> =
-        BTreeMap::new();
+    let mut grouped: BTreeMap<
+        (ConceptPacketId, ConceptNodeId),
+        Vec<ResolvedImplementationLineage>,
+    > = BTreeMap::new();
     for edge in &basis.edges {
         if edge.kind != ConceptEdgeKind::ExpectedImplementation {
             continue;
@@ -590,25 +607,29 @@ pub fn project_resolved_implementations(
         // ExpectedImplementation proposal provenance Candidate lane'dir; non-Candidate edge
         // (Accepted/Rejected/Deprecated/SupersededAccepted) sessiz skip DEĞİL — typed error.
         if edge.decision_status != DecisionStatus::Candidate {
-            return Err(ResolvedImplementationStructureError::InvalidExpectedImplementationStatus {
-                from: edge.from.clone(),
-                to: edge.to.clone(),
-                status: edge.decision_status,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidExpectedImplementationStatus {
+                    from: edge.from.clone(),
+                    to: edge.to.clone(),
+                    status: edge.decision_status,
+                },
+            );
         }
         // Packet source parse (P1-2 — try_from_node_id, ? ile #[from]).
         let packet_id = ConceptPacketId::try_from_node_id(&edge.from)?;
         // Target validation — CodeEntityCandidate required.
-        let candidate = nodes_by_id
-            .get(&edge.to)
-            .ok_or_else(|| ResolvedImplementationStructureError::MissingEndpoint {
+        let candidate = nodes_by_id.get(&edge.to).ok_or_else(|| {
+            ResolvedImplementationStructureError::MissingEndpoint {
                 node_id: edge.to.clone(),
-            })?;
+            }
+        })?;
         if candidate.node_kind != ConceptNodeKind::CodeEntityCandidate {
-            return Err(ResolvedImplementationStructureError::InvalidExpectedTargetKind {
-                node_id: candidate.id.clone(),
-                found: candidate.node_kind,
-            });
+            return Err(
+                ResolvedImplementationStructureError::InvalidExpectedTargetKind {
+                    node_id: candidate.id.clone(),
+                    found: candidate.node_kind,
+                },
+            );
         }
         // Canonical triple dedup (duplicate expectation occurrence → collapse).
         let expected_key = (edge.from.clone(), edge.kind, edge.to.clone());
@@ -686,14 +707,20 @@ mod tests {
     #[test]
     fn concept_packet_id_non_empty_round_trips() {
         let p = packet("packet-1");
-        assert_eq!(ConceptPacketId::try_from_node_id(&p.to_node_id()).unwrap(), p);
+        assert_eq!(
+            ConceptPacketId::try_from_node_id(&p.to_node_id()).unwrap(),
+            p
+        );
     }
 
     #[test]
     fn concept_packet_id_empty_is_rejected() {
         let p = packet("");
         let result = ConceptPacketId::try_from_node_id(&p.to_node_id());
-        assert!(result.is_err(), "empty packet ID reject (non-empty contract)");
+        assert!(
+            result.is_err(),
+            "empty packet ID reject (non-empty contract)"
+        );
     }
 
     #[test]
@@ -745,11 +772,7 @@ mod tests {
 
     #[test]
     fn derived_edge_reference_new_and_from_edge() {
-        let r = DerivedEdgeReference::new(
-            node_id("A"),
-            ConceptEdgeKind::ResolvesTo,
-            node_id("B"),
-        );
+        let r = DerivedEdgeReference::new(node_id("A"), ConceptEdgeKind::ResolvesTo, node_id("B"));
         assert_eq!(r.from(), &node_id("A"));
         assert_eq!(r.kind(), ConceptEdgeKind::ResolvesTo);
         assert_eq!(r.to(), &node_id("B"));
@@ -874,7 +897,9 @@ mod tests {
             resolution_ref(&candidate, &entity),
         )
         .unwrap();
-        let exp = ResolvedImplementationExpectation::try_new(p.clone(), entity.clone(), vec![lineage]).unwrap();
+        let exp =
+            ResolvedImplementationExpectation::try_new(p.clone(), entity.clone(), vec![lineage])
+                .unwrap();
         assert_eq!(exp.packet_id(), &p);
         assert_eq!(exp.entity_id(), &entity);
         assert_eq!(exp.lineages().len(), 1);
@@ -1104,7 +1129,10 @@ mod lineage_fold_tests {
     }
 
     /// Convenience: basis without resolution records (negatif test'ler için).
-    fn basis_no_records(nodes: Vec<ConceptNode>, edges: Vec<ConceptEdge>) -> ResolvedImplementationBasis {
+    fn basis_no_records(
+        nodes: Vec<ConceptNode>,
+        edges: Vec<ConceptEdge>,
+    ) -> ResolvedImplementationBasis {
         ResolvedImplementationBasis::new(nodes, edges, vec![])
     }
 
@@ -1224,7 +1252,13 @@ mod lineage_fold_tests {
         edge.decision_status = DecisionStatus::Candidate; // non-Accepted
         let b = basis_no_records(
             vec![candidate, entity],
-            vec![expected_edge(&packet, &ConceptNodeId("CodeEntityCandidate:src/auth.rs".into())), edge],
+            vec![
+                expected_edge(
+                    &packet,
+                    &ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()),
+                ),
+                edge,
+            ],
         );
         let err = project_resolved_implementations(&b).unwrap_err();
         assert!(matches!(
@@ -1242,8 +1276,16 @@ mod lineage_fold_tests {
         let entity = live_entity("CodeEntity:abc");
         let b = basis_no_records(
             vec![candidate, entity.clone()],
-            vec![expected_edge(&packet, &ConceptNodeId("CodeEntityCandidate:src/auth.rs".into())),
-                 resolves_to_edge(&ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()), &entity.id)],
+            vec![
+                expected_edge(
+                    &packet,
+                    &ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()),
+                ),
+                resolves_to_edge(
+                    &ConceptNodeId("CodeEntityCandidate:src/auth.rs".into()),
+                    &entity.id,
+                ),
+            ],
         );
         let err = project_resolved_implementations(&b).unwrap_err();
         assert!(matches!(
@@ -1361,10 +1403,7 @@ mod lineage_fold_tests {
             decision_status: DecisionStatus::Candidate,
             explanation: None,
         };
-        let b = basis_no_records(
-            vec![candidate, entity],
-            vec![bad_edge],
-        );
+        let b = basis_no_records(vec![candidate, entity], vec![bad_edge]);
         let err = project_resolved_implementations(&b).unwrap_err();
         assert!(matches!(
             err,
@@ -1382,10 +1421,7 @@ mod lineage_fold_tests {
         let entity = live_entity("CodeEntity:abc");
         let mut edge = expected_edge(&packet, &candidate.id);
         edge.decision_status = DecisionStatus::Accepted; // non-Candidate → error
-        let b = basis_no_records(
-            vec![candidate, entity],
-            vec![edge],
-        );
+        let b = basis_no_records(vec![candidate, entity], vec![edge]);
         let err = project_resolved_implementations(&b).unwrap_err();
         assert!(matches!(
             err,
@@ -1415,11 +1451,19 @@ mod lineage_fold_tests {
         let result = project_resolved_implementations(&b).unwrap();
         let json = serde_json::to_value(&result).unwrap();
         for relation in json.as_array().unwrap() {
-            assert!(relation.get("explanation").is_none(), "RP3: relation explanation yok");
+            assert!(
+                relation.get("explanation").is_none(),
+                "RP3: relation explanation yok"
+            );
             for lineage in relation["lineages"].as_array().unwrap() {
-                assert!(lineage.get("explanation").is_none(), "RP3: lineage explanation yok");
                 assert!(
-                    lineage["expected_implementation"].get("explanation").is_none(),
+                    lineage.get("explanation").is_none(),
+                    "RP3: lineage explanation yok"
+                );
+                assert!(
+                    lineage["expected_implementation"]
+                        .get("explanation")
+                        .is_none(),
                     "RP3: expected_implementation explanation yok"
                 );
                 assert!(
@@ -1704,7 +1748,7 @@ mod lineage_fold_tests {
         let entity_id = ConceptNodeId("CodeEntity:abc".into());
         let b = basis(
             vec![candidate, entity],
-            vec![], // edge yok
+            vec![],                                             // edge yok
             vec![resolution_record(&candidate_id, &entity_id)], // record var → orphan
         );
         let err = project_resolved_implementations(&b).unwrap_err();
@@ -1753,9 +1797,7 @@ mod store_integration_tests {
         CodeEntityResolutionSession, OperatorId, PresentedResolutionBasis,
     };
     use crate::anchoring::store::{AnchorStore, InMemoryAnchorStore};
-    use crate::anchoring::types::{
-        CodeIdentityBinding, ConceptNode, ConceptNodeKind, GraphSeed,
-    };
+    use crate::anchoring::types::{CodeIdentityBinding, ConceptNode, ConceptNodeKind, GraphSeed};
     use crate::anchoring::{DecisionStatus, NonEmptyExplanation, PositionFamily};
 
     fn accepted_candidate(path: &str) -> ConceptNode {

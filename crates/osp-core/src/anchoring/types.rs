@@ -16,7 +16,9 @@ use crate::anchoring::{
 ///
 /// PR G: `Ord`/`PartialOrd` eklendi (BTreeMap key — resolved implementation grouping
 /// deterministik sort için). String Ord olduğu için lexicographic sıralama güvenli.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct ConceptPacketId(pub String);
 
@@ -24,7 +26,9 @@ pub struct ConceptPacketId(pub String);
 ///
 /// PR E: `Ord`/`PartialOrd` eklendi (BTreeMap key — store-owned identity bindings deterministik
 /// sort için). String Ord olduğu için lexicographic sıralama güvenli.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct ConceptNodeId(pub String);
 
@@ -672,9 +676,7 @@ impl ObservedPhysicalMetrics {
             PhysicalCodeMetricAxis::Entropy,
             PhysicalCodeMetricAxis::WitnessDepth,
         ];
-        all.into_iter()
-            .filter(|a| !present.contains(a))
-            .collect()
+        all.into_iter().filter(|a| !present.contains(a)).collect()
     }
 
     /// Normative min-over-axes strength policy (PR C — provider bunu kullanır).
@@ -2139,8 +2141,13 @@ mod tests {
             other => panic!("InvalidValue bekleniyordu, got {other:?}"),
         }
         // entropy 0.52 → Ok (representative normalized).
-        assert!(single_metric(PhysicalCodeMetricAxis::Entropy, 0.52, 0.85).value().get() - 0.52
-            < 1e-9);
+        assert!(
+            single_metric(PhysicalCodeMetricAxis::Entropy, 0.52, 0.85)
+                .value()
+                .get()
+                - 0.52
+                < 1e-9
+        );
     }
 
     #[test]
@@ -2301,7 +2308,7 @@ mod tests {
         assert_eq!(metrics.values()[0].source(), ts); // Coupling (sort_order 0)
         assert_eq!(metrics.values()[1].source(), scip); // Cohesion (sort_order 1)
         assert_eq!(metrics.values()[2].source(), ts); // Instability (sort_order 2)
-        // Missing deterministik.
+                                                      // Missing deterministik.
         assert_eq!(
             metrics.missing_axes(),
             vec![

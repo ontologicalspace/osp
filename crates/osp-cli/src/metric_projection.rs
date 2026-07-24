@@ -225,10 +225,11 @@ pub(crate) struct MetricProjectionReport {
     pub projected_axis_values: usize,
     pub skipped_placeholder: usize,
     pub skipped_heuristic: usize,
+    pub skipped_mixed: usize,
     pub skipped_zero_confidence: usize,
-    pub analyzer_declared_axes: AxisSet,   // capability (analyzer declares 3 axes)
+    pub analyzer_declared_axes: AxisSet, // capability (analyzer declares 3 axes)
     pub analyzer_unavailable_axes: AxisSet, // capability (entropy/witness_depth)
-    pub projected_axes: AxisSet,           // actually projected after admission (distinct from declared)
+    pub projected_axes: AxisSet, // actually projected after admission (distinct from declared)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -239,15 +240,21 @@ pub(crate) struct MetricProjectionReport {
 pub(crate) enum MetricSourceRejection {
     PlaceholderSource,
     HeuristicNotAdmitted,
+    /// **INV-T9 #70:** `Mixed` aggregation result observed code evidence'ına
+    /// yükseltilmemeli — TreeSitter/Scip'ten farklı epistemik kategori.
+    MixedSourceNotAdmitted,
 }
 
 /// Exhaustive match → yeni MetricSource compile-time zorlanır.
-fn admit_metric_source(source: MetricSource) -> Result<ObservedCodeMetricSource, MetricSourceRejection> {
+fn admit_metric_source(
+    source: MetricSource,
+) -> Result<ObservedCodeMetricSource, MetricSourceRejection> {
     match source {
         MetricSource::TreeSitter => Ok(ObservedCodeMetricSource::TreeSitter),
         MetricSource::Scip => Ok(ObservedCodeMetricSource::Scip),
         MetricSource::Placeholder => Err(MetricSourceRejection::PlaceholderSource),
         MetricSource::Heuristic => Err(MetricSourceRejection::HeuristicNotAdmitted),
+        MetricSource::Mixed => Err(MetricSourceRejection::MixedSourceNotAdmitted),
     }
 }
 
@@ -277,7 +284,9 @@ pub enum MetricProjectionError {
         node_id: ConceptNodeId,
         axis: PhysicalCodeAxis,
     },
-    #[error("invalid metric: node={node_id:?}, axis={axis:?}, field={field:?}, violation={violation:?}")]
+    #[error(
+        "invalid metric: node={node_id:?}, axis={axis:?}, field={field:?}, violation={violation:?}"
+    )]
     InvalidMetric {
         node_id: ConceptNodeId,
         axis: PhysicalCodeAxis,
@@ -298,8 +307,11 @@ pub(crate) fn project_code_metrics(
     identity_index: &crate::analysis_bridge::AnalysisProjectionIndex,
 ) -> Result<AnalysisMetricProjection, MetricProjectionError> {
     // Analyzer capability: 3 axis declares, 2 unavailable.
-    let analyzer_declared_axes =
-        AxisSet::from_axes(&[PhysicalCodeAxis::Coupling, PhysicalCodeAxis::Cohesion, PhysicalCodeAxis::Instability]);
+    let analyzer_declared_axes = AxisSet::from_axes(&[
+        PhysicalCodeAxis::Coupling,
+        PhysicalCodeAxis::Cohesion,
+        PhysicalCodeAxis::Instability,
+    ]);
     let analyzer_unavailable_axes =
         AxisSet::from_axes(&[PhysicalCodeAxis::Entropy, PhysicalCodeAxis::WitnessDepth]);
 
@@ -326,11 +338,11 @@ pub(crate) fn project_code_metrics(
         report.module_nodes_seen += 1;
 
         // Identity — PR A'dan tüket (R1).
-        let concept_id = identity_index
-            .concept_node_id_for(*node_id)
-            .ok_or(MetricProjectionError::MissingProjectedIdentity {
+        let concept_id = identity_index.concept_node_id_for(*node_id).ok_or(
+            MetricProjectionError::MissingProjectedIdentity {
                 analysis_node_id: *node_id,
-            })?;
+            },
+        )?;
 
         // Module metrics — MissingModuleMetrics typed error.
         let module_metrics = analysis.module_metrics.get(node_id).ok_or(
@@ -373,7 +385,7 @@ pub(crate) fn project_code_metrics(
                 }
             })?;
 
-            // Source admission (Placeholder/Heuristic skip — N4: Heuristic defensive policy).
+            // Source admission (Placeholder/Heuristic/Mixed skip — N4: defensive policy).
             let source = match admit_metric_source(metric_value.source) {
                 Ok(s) => s,
                 Err(MetricSourceRejection::PlaceholderSource) => {
@@ -382,6 +394,10 @@ pub(crate) fn project_code_metrics(
                 }
                 Err(MetricSourceRejection::HeuristicNotAdmitted) => {
                     report.skipped_heuristic += 1;
+                    continue;
+                }
+                Err(MetricSourceRejection::MixedSourceNotAdmitted) => {
+                    report.skipped_mixed += 1;
                     continue;
                 }
             };
@@ -480,14 +496,11 @@ pub(crate) fn projected_metric_unchecked_for_contract_tests(
     ProjectedCodeMetric {
         node_id,
         axis,
-        value: MetricAxisValue::new(value)
-            .unwrap_or(MetricAxisValue(std::f64::NAN)), // forged — NaN bile geçebilir
+        value: MetricAxisValue::new(value).unwrap_or(MetricAxisValue(std::f64::NAN)), // forged — NaN bile geçebilir
         provenance: ProjectedMetricProvenance {
             source,
-            confidence: MetricConfidence::new(confidence)
-                .unwrap_or(MetricConfidence(confidence)), // forged — raw değer
-            coverage: MetricCoverage::new(coverage)
-                .unwrap_or(MetricCoverage(coverage)), // forged — raw değer
+            confidence: MetricConfidence::new(confidence).unwrap_or(MetricConfidence(confidence)), // forged — raw değer
+            coverage: MetricCoverage::new(coverage).unwrap_or(MetricCoverage(coverage)), // forged — raw değer
         },
     }
 }
@@ -504,11 +517,7 @@ mod tests {
 
     /// Synthetic analysis with module_metrics — test fixture.
     fn analysis_with_metrics(
-        nodes: Vec<(
-            u64,
-            &str,
-            ModuleMetrics,
-        )>,
+        nodes: Vec<(u64, &str, ModuleMetrics)>,
     ) -> (AnalysisResult, AnalysisProjectionIndex) {
         let mut space = Space::default();
         let mut node_paths = HashMap::new();
@@ -587,7 +596,10 @@ mod tests {
         assert_eq!(proj.report.skipped_heuristic, 0);
         assert_eq!(proj.report.skipped_zero_confidence, 0);
         // Happy path: projected_axes == declared (all admitted).
-        assert_eq!(proj.report.projected_axes, proj.report.analyzer_declared_axes);
+        assert_eq!(
+            proj.report.projected_axes,
+            proj.report.analyzer_declared_axes
+        );
     }
 
     // ── AxisSet capability ───────────────────────────────────────────────────
@@ -601,15 +613,24 @@ mod tests {
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
-        let all = proj.report.analyzer_declared_axes.union(proj.report.analyzer_unavailable_axes);
+        let all = proj
+            .report
+            .analyzer_declared_axes
+            .union(proj.report.analyzer_unavailable_axes);
         assert!(all.contains(PhysicalCodeAxis::Coupling));
         assert!(all.contains(PhysicalCodeAxis::Cohesion));
         assert!(all.contains(PhysicalCodeAxis::Instability));
         assert!(all.contains(PhysicalCodeAxis::Entropy));
         assert!(all.contains(PhysicalCodeAxis::WitnessDepth));
         // No overlap.
-        assert!(!proj.report.analyzer_declared_axes.contains(PhysicalCodeAxis::Entropy));
-        assert!(!proj.report.analyzer_declared_axes.contains(PhysicalCodeAxis::WitnessDepth));
+        assert!(!proj
+            .report
+            .analyzer_declared_axes
+            .contains(PhysicalCodeAxis::Entropy));
+        assert!(!proj
+            .report
+            .analyzer_declared_axes
+            .contains(PhysicalCodeAxis::WitnessDepth));
     }
 
     // ── Source admission skip (N4: Heuristic defensive policy) ────────────────
@@ -625,11 +646,23 @@ mod tests {
         let proj = project_code_metrics(&analysis, &index).unwrap();
         assert_eq!(proj.report.skipped_placeholder, 1);
         assert_eq!(proj.report.projected_axis_values, 2); // coupling + instability
-        // Declared vs projected: Cohesion declared ama projected değil (Placeholder).
-        assert!(proj.report.analyzer_declared_axes.contains(PhysicalCodeAxis::Cohesion));
-        assert!(!proj.report.projected_axes.contains(PhysicalCodeAxis::Cohesion));
-        assert!(proj.report.projected_axes.contains(PhysicalCodeAxis::Coupling));
-        assert!(proj.report.projected_axes.contains(PhysicalCodeAxis::Instability));
+                                                          // Declared vs projected: Cohesion declared ama projected değil (Placeholder).
+        assert!(proj
+            .report
+            .analyzer_declared_axes
+            .contains(PhysicalCodeAxis::Cohesion));
+        assert!(!proj
+            .report
+            .projected_axes
+            .contains(PhysicalCodeAxis::Cohesion));
+        assert!(proj
+            .report
+            .projected_axes
+            .contains(PhysicalCodeAxis::Coupling));
+        assert!(proj
+            .report
+            .projected_axes
+            .contains(PhysicalCodeAxis::Instability));
     }
 
     #[test]
@@ -656,7 +689,10 @@ mod tests {
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
         assert_eq!(proj.report.projected_axis_values, 3);
-        assert_eq!(proj.metrics[0].provenance().source(), ObservedCodeMetricSource::Scip);
+        assert_eq!(
+            proj.metrics[0].provenance().source(),
+            ObservedCodeMetricSource::Scip
+        );
     }
 
     // ── Zero-confidence skip ─────────────────────────────────────────────────
@@ -804,7 +840,10 @@ mod tests {
         // Boş index → node 1 için identity yok.
         let empty_index = AnalysisProjectionIndex::for_tests(vec![]).unwrap();
         let err = project_code_metrics(&analysis, &empty_index).unwrap_err();
-        assert!(matches!(err, MetricProjectionError::MissingProjectedIdentity { .. }));
+        assert!(matches!(
+            err,
+            MetricProjectionError::MissingProjectedIdentity { .. }
+        ));
     }
 
     #[test]
@@ -839,7 +878,10 @@ mod tests {
         )])
         .unwrap();
         let err = project_code_metrics(&analysis, &index).unwrap_err();
-        assert!(matches!(err, MetricProjectionError::MissingModuleMetrics { .. }));
+        assert!(matches!(
+            err,
+            MetricProjectionError::MissingModuleMetrics { .. }
+        ));
     }
 
     // ── C5: pass-through (confidence/coverage değiştirilmeden taşınır) ───────
@@ -863,8 +905,14 @@ mod tests {
             .find(|m| m.axis() == PhysicalCodeAxis::Coupling)
             .unwrap();
         // MetricValue'nun kendi alanlarıyla birebir karşılaştır (formül bilgisi YOK).
-        assert_eq!(coupling_metric.provenance().confidence().get(), coupling_mv.confidence);
-        assert_eq!(coupling_metric.provenance().coverage().get(), coupling_mv.coverage);
+        assert_eq!(
+            coupling_metric.provenance().confidence().get(),
+            coupling_mv.confidence
+        );
+        assert_eq!(
+            coupling_metric.provenance().coverage().get(),
+            coupling_mv.coverage
+        );
     }
 
     // ── N6 invariant: input_axis_values == module_nodes_seen × 3 ─────────────
@@ -881,7 +929,10 @@ mod tests {
             (2, "src/b.rs", metrics),
         ]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
-        assert_eq!(proj.report.input_axis_values, proj.report.module_nodes_seen * 3);
+        assert_eq!(
+            proj.report.input_axis_values,
+            proj.report.module_nodes_seen * 3
+        );
     }
 
     // ── Many-to-one collision: DuplicateProjectedAxis ─────────────────────────

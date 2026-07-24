@@ -17,20 +17,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # INV-T9 #70 CI fix: toolchain pin'i tek truth source rust-toolchain.toml'dur.
+      # dtolnay/rust-toolchain @stable ref'inden resolve eder, dosyayı parse ETMEZ
+      # (action rustup'a literal toolchain string'i verir). Bu yüzden dosyayı
+      # biz okuyup action input'una explicit veriyoruz — floating stable drift'ini
+      # kapatır. Trybuild .stderr snapshot'ları compiler diagnostics'e duyarlıdır.
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          with open("rust-toolchain.toml", "rb") as f:
+              tc = tomllib.load(f)["toolchain"]
+          print(f"channel={tc['channel']}")
+          print(f"components={','.join(tc.get('components', []))}")
+          PY
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1, pinned SHA (supply-chain)
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          components: ${{ steps.rust-toolchain.outputs.components }}
+
+      - name: Record active Rust toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version --verbose
+          cargo --version
 
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          # Cache identity toolchain'i de kapsar — bump sonrası eski compiler
+          # artifact'leri restore edilmez.
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
 
       - name: Cache cargo build
         uses: actions/cache@v4
         with:
           path: target
-          key: ${{ runner.os }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
 
       - name: Check formatting (warnings only)
         run: cargo fmt --all -- --check || true
@@ -42,11 +70,15 @@ jobs:
       # headless PR gate — the desktop binary cannot run here anyway. It is
       # built locally / in a release workflow. CI covers the 4 library crates:
       # osp-core, osp-analyzer, osp-spike, osp-llm-runtime.
+      #
+      # --locked: Cargo.lock'u source of truth kabul eder, çözüm değişikliğine
+      # izin vermez. trybuild .stderr snapshot'ları (compiler + dependency graph +
+      # compiler flags) üçlüsüne duyarlıdır; deterministic CI için zorunlu.
       - name: Build
-        run: cargo build --workspace --verbose --exclude osp-desktop
+        run: cargo build --locked --workspace --verbose --exclude osp-desktop
 
       - name: Run tests
-        run: cargo test --workspace --verbose --exclude osp-desktop
+        run: cargo test --locked --workspace --verbose --exclude osp-desktop
 
       - name: Build examples
-        run: cargo build --workspace --examples --exclude osp-desktop
+        run: cargo build --locked --workspace --examples --exclude osp-desktop

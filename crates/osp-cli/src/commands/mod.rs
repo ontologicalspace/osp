@@ -10,9 +10,40 @@ use osp_analyzer::contract::AnalysisConfig;
 use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 — CLI exit-code contract (snapshot testlerle sabitlenir)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Navigator trajectory attempt exit codes.
+///
+/// Bu kodlar sabittir — downstream tooling (CI, scripts) bunlara güvenebilir.
+/// Yeni kod eklemek mümkündür ama mevcut kodların anlamı değişmez.
+pub mod exit_codes {
+    /// Task completed — predicate satisfied, mainline applied.
+    pub const COMPLETED: i32 = 0;
+    /// INV-T9 — witness authorization bekleme (expected domain outcome, hata DEĞİL).
+    pub const AWAITING_WITNESSES: i32 = 10;
+    /// Explicit witness rejection — agent must revise proposal.
+    pub const REQUIRES_REVISION: i32 = 11;
+    /// INV-T7 — maneuver limit aşıldı (agent-correctable retryable failures tükendi).
+    pub const EXCEEDED_MANEUVER_LIMIT: i32 = 12;
+    /// Critical domain — insan review gerekli.
+    pub const REQUIRES_OPERATOR_APPROVAL: i32 = 13;
+    /// Invalid witness evidence — operational fault (malformed/author-self/duplicate).
+    pub const WITNESS_EVALUATION_ERROR: i32 = 20;
+    /// Pending authorization persistence failure — terminal (non-retryable).
+    pub const PENDING_AUTHORIZATION_PERSISTENCE_FAILURE: i32 = 40;
+    /// System failure — persistence/internal error. Terminal.
+    pub const SYSTEM_FAILURE: i32 = 70;
+    /// Task resolver'da bulunamadı.
+    pub const TASK_NOT_FOUND: i32 = 80;
+    /// LLM hatası (NoMoreProposals, parse, network).
+    pub const LLM_ERROR: i32 = 90;
+}
+
 pub mod graph;
-pub mod review;
 pub(crate) mod resolve_code_entity_preview_render;
+pub mod review;
 pub(crate) mod supersede_preview_render;
 
 /// Output format (text/json).
@@ -138,7 +169,7 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 /// `osp trajectory init` — SpaceEngine kur (analyze + coord system + vision).
 pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
-    use osp_core::coords::CoordinateSystem;
+    use osp_core::coords::{CoordinateSystem, MetricSource};
     use osp_core::engine::{EngineConfig, SpaceEngine};
     use osp_core::vision::VisionVector;
 
@@ -149,10 +180,12 @@ pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
     };
     let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
     let cs = CoordinateSystem::default_raw_five(
-        CohesionAxis::new(),
+        // INV-T9 #70: production preset — graph topology TreeSitter, observed cohesion Scip.
+        MetricSource::TreeSitter,
+        CohesionAxis::try_with_observed_source(MetricSource::Scip)?,
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = VisionVector::new(osp_core::coords::RawPosition {
         x: 0.4,
         y: 0.6,
@@ -165,7 +198,7 @@ pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
         cs,
         vision,
         EngineConfig::default_calibrated(),
-    );
+    )?;
     let _ = engine; // engine kuruldu (space private — count analyze'den biliniyor)
     println!("✓ Trajectory initialized");
     println!("  SpaceEngine ready (analyze + coord system + vision)");
@@ -175,7 +208,7 @@ pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
 /// `osp trajectory attempt` — D2 navigator + MockLlmClient/RuntimeLlmClient.
 pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()> {
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
-    use osp_core::coords::CoordinateSystem;
+    use osp_core::coords::{CoordinateSystem, MetricSource};
     use osp_core::engine::{EngineConfig, SpaceEngine};
     use osp_core::vision::VisionVector;
 
@@ -185,10 +218,12 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
     // 2. Engine (D2 gerçek measure).
     let cs = CoordinateSystem::default_raw_five(
-        CohesionAxis::new(),
+        // INV-T9 #70: production preset — graph topology TreeSitter, observed cohesion Scip.
+        MetricSource::TreeSitter,
+        CohesionAxis::try_with_observed_source(MetricSource::Scip)?,
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = VisionVector::new(osp_core::coords::RawPosition {
         x: 0.4,
         y: 0.6,
@@ -201,7 +236,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         cs,
         vision,
         EngineConfig::default_calibrated(),
-    );
+    )?;
     // 3. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
     match args.llm.as_str() {
         "real" => {
@@ -304,34 +339,92 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         output_contract: osp_core::agent::OutputContract::strict(),
         // CLI = production → Production witness (min_approvers=2, Paper 1 güven modeli).
         witness_policy: osp_core::navigator::NavigatorWitnessPolicy::Production,
+        // INV-T9: production filesystem store — cwd altında .osp/pending-authorizations/.
+        pending_authorization_store: Box::new(
+            osp_core::authorization::FilesystemPendingAuthorizationStore::new("."),
+        ),
+        clock: Box::new(osp_core::authorization::SystemClock),
     };
     let result = nav.run_task(args.task_id, 1);
-    // 6. Sonuç yazdır.
-    match result {
+    // 6. Sonuç yazdır + exit code.
+    let exit_code = match result {
         NavigatorResult::Completed {
             attempts,
             total_tokens,
         } => {
             println!("✓ Task completed in {attempts} attempts");
             println!("  Total tokens: {}", total_tokens.total_tokens);
+            exit_codes::COMPLETED
         }
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             println!("✗ Maneuver limit exceeded after {attempts} attempts");
+            exit_codes::EXCEEDED_MANEUVER_LIMIT
+        }
+        NavigatorResult::AwaitingWitnesses {
+            pending,
+            persistence,
+        } => {
+            // **INV-T9** — expected authorization bekleme. Domain outcome, hata DEĞİL.
+            println!(
+                "⏸ Awaiting witnesses (INV-T9) — task {}, claim {}",
+                pending.task_id, pending.claim_id
+            );
+            println!(
+                "  Witness hold reason: {}",
+                pending.witness_hold_reason.as_reason_str()
+            );
+            println!("  Commit state: awaiting_witnesses");
+            println!("  Mainline mutation: not_applied");
+            println!("  Next action: await external evidence");
+            println!(
+                "  Pending artifact: {}",
+                persistence.artifact_path.display()
+            );
+            exit_codes::AWAITING_WITNESSES
+        }
+        NavigatorResult::RequiresRevision(rev) => {
+            println!(
+                "↻ Requires revision (explicit witness rejection) — task {}, claim {}",
+                rev.task_id(),
+                rev.claim_id()
+            );
+            exit_codes::REQUIRES_REVISION
+        }
+        NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
+            println!(
+                "✗ Pending authorization persistence failed — task {}, claim {}: {error}",
+                pending.task_id, pending.claim_id
+            );
+            exit_codes::PENDING_AUTHORIZATION_PERSISTENCE_FAILURE
+        }
+        NavigatorResult::WitnessEvaluationError(msg) => {
+            println!("✗ Witness evaluation error: {msg}");
+            exit_codes::WITNESS_EVALUATION_ERROR
+        }
+        NavigatorResult::SystemFailure(msg) => {
+            println!("✗ System failure: {msg}");
+            exit_codes::SYSTEM_FAILURE
         }
         NavigatorResult::TaskNotFound => {
             println!("✗ Task {} not found", args.task_id);
+            exit_codes::TASK_NOT_FOUND
         }
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
             println!("⚠ Operator approval required after {attempts} attempts");
+            exit_codes::REQUIRES_OPERATOR_APPROVAL
         }
         NavigatorResult::LlmError(e) => {
             println!("✗ LLM error: {e}");
+            exit_codes::LLM_ERROR
         }
-    }
+    };
     println!("  Evidence entries: {}", evidence.len());
     if !evidence.is_empty() {
         let json = serde_json::to_string_pretty(&evidence)?;
         println!("{json}");
+    }
+    if exit_code != exit_codes::COMPLETED {
+        std::process::exit(exit_code);
     }
     Ok(())
 }

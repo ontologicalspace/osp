@@ -278,6 +278,12 @@ trajectory loss decreases and no hard invariant is violated."
 **Tanım:** Bir Task için ardışık N (default 5, operator-configurable) reddedilen attempt
 sonra sistem **Trajectory Deviation Alert** üretir ve operatöre (God Mode) kontrol devreder.
 Sonsuz context-loop ve token patlaması önlenir.
+
+> **Kapsam (INV-T9 çapraz referans):** Maneuver budget yalnızca agent'ın yeni bir structural
+> proposal ile düzeltebileceği retryable attempt sonuçlarında ilerler (syntax/vision/rule
+> violation, predicate near-miss policy'ye göre). Permission, persistence, internal ve
+> invalid-witness-evidence failure'ları budget tüketmez (terminal). External-authorization
+> suspension (witness quorum insufficient) ek budget tüketmez ve INV-T9 tarafından yönetilir.
 **Yapısal garanti:** `Task.attempts` sayacı + `TrajectoryDeviationAlert` event;
 `ManeuverLimit { max_attempts }` operator config.
 **Test:** `maneuver_limit_triggers_alert` — 5 reject sonra alert, 6. attempt blocked.
@@ -319,6 +325,65 @@ impl MutationDecision {
 `reject_produces_not_applied` — Reject → `ApplyTarget::NotApplied` (değil Sandbox).
 **İhlal örneği:** predicate fail, loss improved, AcceptAsProgress, yanlışlıkla main branch
 merge → OSP güven modeli çöker (progress ≠ merge, ama merge oldu).
+
+### INV-T9 — External-Evidence Suspension Isolation (review turu 1-4, Paper 2 conformance fix)
+**Status:** implemented (fix/inv-t9-witness-suspension PR)
+**Model:** Model B — yalnız `AcceptAsCompleted` değil, external authorization gerektiren TÜM
+mutation decision'ları (AcceptAsProgress checkpoint dahil) INV-T9 kapsamındadır. Invariant'ın
+özü predicate completion değil, **external-authorization-waiting'in agent-retry'den ayrılmasıdır.**
+
+**Tanım:** Bir attempt tüm deterministik gate'leri geçtiğinde ve external authorization gerektiren
+bir mutation decision ürettiğinde, yetersiz external evidence veya witness quorum claim'i
+**suspended authorization state**'e taşımalıdır. Bu durum:
+- yeni bir agent attempt başlatamaz,
+- ek maneuver budget tüketemez,
+- LLM'i yeniden çağıramaz,
+- engine space'i mutate edemez,
+- project-space mutation persistence çağıramaz veya structural delta apply edemez.
+
+Yalnızca pending-authorization suspension record'unu (injected `PendingAuthorizationStore`
+üzerinden) **crash-consistent atomic publication** ile persist etmeli ve suspended result
+döndürmeden ÖNCE publish etmelidir.
+
+Validated pending claim identity, authorization basis digest (BLAKE3, domain-separated, canonical
+encoding), predicate completion, mutation decision, intended apply target, witness hold reason ve
+base space-view revision korunmalıdır — böylece yeni external evidence geldiğinde evaluation
+resume edilebilir.
+
+**Yapısal garanti:**
+```rust
+// Engine — domain outcome (HATA DEĞİL)
+pub enum EngineCommitResult {
+    Applied(TaskCommitResult),                                    // AcceptAsCompleted + AcceptAsProgress
+    Held { reason: WitnessHoldReason, snapshot: WitnessQuorumSnapshot },
+    Rejected { reasons: NonEmptyWitnessRejections, snapshot: WitnessQuorumSnapshot },
+}
+
+// Navigator — persist ÖNCE, sonra return
+Ok(EngineCommitResult::Held { reason, snapshot }) => {
+    let pending = build_pending(reason, snapshot, ...)?;
+    let receipt = pending_authorization_store.persist(&envelope(pending.clone()))?;
+    return NavigatorResult::AwaitingWitnesses { pending, persistence: receipt };
+}
+```
+
+| Enforcement |
+|-------------|
+| `EngineCommitResult::Held` distinct from `EngineCommitError`; `NavigatorResult::AwaitingWitnesses` yalnızca successful persist sonrası return; exhaustive variant match (catch-all YOK); pending record `AuthorizationBasisDigest` + `base_space_view_revision` + `evaluation_context_digest` + predicate/mutation/apply-target + `witness_hold_reason` taşır; no-clobber idempotent artifact `.osp/pending-authorizations/<claim-id>--<digest>.json`; budget counter unchanged; engine space not mutated. |
+
+**Test:** `predicate_complete_without_quorum_returns_awaiting_witnesses`,
+`awaiting_witnesses_does_not_reinvoke_llm`, `awaiting_witnesses_does_not_apply_mainline_mutation`,
+`quorum_shortage_never_returns_exceeded_maneuver_limit`, `pending_artifact_is_persisted_before_awaiting_result_is_returned`,
+`pending_authorization_preserves_witness_hold_reason` (tam liste: conformance evidence note).
+
+**İhlal örneği:** Predicate satisfied, witness quorum insufficient → navigator bunu generic
+`Reject` olarak retry loop'a sokar → aynı proposal 5 kez üretilir → `ExceededManeuverLimit`.
+Agent failure ile external-evidence-waiting karışır; INV-T7 yanlış failure class için kullanılır.
+
+**Not (kapsam):** Witness resume workflow (witness-add/status/resume + store-backed persistence +
+staleness re-measure + cross-process resume) P1 takip PR'ındadır. Bu PR suspension semantics +
+claim continuity + budget isolation kurar; `PendingAuthorizationEnvelope` embedded
+`AuthorizationBasis` taşıdığı için P1 yeniden tasarım gerektirmez.
 
 ---
 

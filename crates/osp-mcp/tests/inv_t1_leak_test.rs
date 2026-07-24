@@ -212,9 +212,18 @@ fn inv_t1_submit_delta_outcome_has_no_target_coordinate() {
         .expect("attempt");
     let json = serde_json::to_string(&outcome).expect("serialize");
     assert_no_leak(&json, "osp_submit_delta");
-    // Pozitif: attempt_outcome ve mutation_decision GÖRÜNÜR (agent ne olduğunu bilmeli).
-    assert!(json.contains("attempt_outcome"));
-    assert!(json.contains("mutation_decision"));
+    // **INV-T9:** Production witness policy (boş witness set) → Held (expected authorization
+    // bekleme). Artık `attempt_outcome` yerine `commit_result: "Held"` + `commit_state:
+    // "awaiting_witnesses"` döner. Agent ne olduğunu bilmeli — leak yok, INV-T1 korunur.
+    // (Eski davranış: Err(EngineCommitError::Witness) → "attempt_outcome" reject JSON.)
+    assert!(
+        json.contains("\"commit_result\":\"Held\"") || json.contains("attempt_outcome"),
+        "INV-T9 Held veya legacy attempt_outcome bekleniyordu, got: {json}"
+    );
+    assert!(
+        json.contains("commit_state") || json.contains("mutation_decision"),
+        "commit_state (Held) veya mutation_decision (Applied) bekleniyordu, got: {json}"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -451,11 +451,13 @@ fn run_one_experiment(
     let edge_count = result.space.edges.len();
 
     // 2. Engine kur (CLI/MCP pattern'ı).
+    // INV-T9 #70: production topology_source = TreeSitter, observed cohesion = Scip.
     let cs = CoordinateSystem::default_raw_five(
-        osp_core::axes::CohesionAxis::new(),
+        MetricSource::TreeSitter,
+        osp_core::axes::CohesionAxis::try_with_observed_source(MetricSource::Scip)?,
         osp_core::axes::EntropyAxis::from_commit_entropy(6.0),
         osp_core::axes::WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = osp_core::vision::VisionVector::new(RawPosition {
         x: 0.4,
         y: 0.6,
@@ -468,7 +470,8 @@ fn run_one_experiment(
         cs,
         vision,
         osp_core::engine::EngineConfig::default_calibrated(),
-    );
+    )
+    .expect("g2c rule registration: 3 distinct default rules");
 
     // 3. Deterministik target node seç (review 5 #4).
     let (target_node, target_role, selection_reason) =
@@ -550,6 +553,10 @@ fn run_one_experiment(
             output_contract: OutputContract::strict(),
             // G2c harness: controlled experiment → auto-approve (production değil).
             witness_policy: osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove,
+            pending_authorization_store: Box::new(
+                osp_core::authorization::NullPendingAuthorizationStore,
+            ),
+            clock: Box::new(osp_core::authorization::FixedClock(1700000000)),
         };
         nav.run_task(task_id, 1)
     };
@@ -560,6 +567,20 @@ fn run_one_experiment(
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             ("ExceededManeuverLimit".to_string(), *attempts)
         }
+        NavigatorResult::AwaitingWitnesses { pending, .. } => (
+            "AwaitingWitnesses".to_string(),
+            pending.attempt_num.get() as usize,
+        ),
+        NavigatorResult::RequiresRevision(rev) => (
+            "RequiresRevision".to_string(),
+            rev.attempt_num().get() as usize,
+        ),
+        NavigatorResult::PendingAuthorizationPersistenceFailure { pending, .. } => (
+            "PendingAuthorizationPersistenceFailure".to_string(),
+            pending.attempt_num.get() as usize,
+        ),
+        NavigatorResult::WitnessEvaluationError(_) => ("WitnessEvaluationError".to_string(), 0),
+        NavigatorResult::SystemFailure(_) => ("SystemFailure".to_string(), 0),
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
             ("RequiresOperatorApproval".to_string(), *attempts)
         }
@@ -726,11 +747,14 @@ fn run_synthetic_rq9(
     });
 
     // 2. Engine — değerlendirilebilir vision (instability measured'a yakın).
+    // INV-T9 #70: synthetic fixture — Placeholder topology + Placeholder cohesion
+    // (elle verilmiş `cohesion: Some(0.6)` hardcoded, gerçek analyzer üretmiyor).
     let cs = CoordinateSystem::default_raw_five(
+        MetricSource::Placeholder,
         osp_core::axes::CohesionAxis::new(),
         osp_core::axes::EntropyAxis::from_commit_entropy(6.0),
         osp_core::axes::WitnessDepthAxis::from_witness(0.3, 5),
-    );
+    )?;
     let vision = osp_core::vision::VisionVector::new(RawPosition {
         x: 0.55,
         y: 0.6,
@@ -743,7 +767,8 @@ fn run_synthetic_rq9(
         cs,
         vision,
         osp_core::engine::EngineConfig::default_calibrated(),
-    );
+    )
+    .expect("g2c rule registration: 3 distinct default rules");
 
     // 3. Target node 0, target_vector instability measured'a yakın.
     let target_node: NodeId = 0;
@@ -838,6 +863,10 @@ fn run_synthetic_rq9(
             output_contract: OutputContract::strict(),
             // G2c harness: controlled experiment → auto-approve (production değil).
             witness_policy: osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove,
+            pending_authorization_store: Box::new(
+                osp_core::authorization::NullPendingAuthorizationStore,
+            ),
+            clock: Box::new(osp_core::authorization::FixedClock(1700000000)),
         };
         nav.run_task(task_id, 1)
     };
@@ -848,6 +877,20 @@ fn run_synthetic_rq9(
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             ("ExceededManeuverLimit".to_string(), *attempts)
         }
+        NavigatorResult::AwaitingWitnesses { pending, .. } => (
+            "AwaitingWitnesses".to_string(),
+            pending.attempt_num.get() as usize,
+        ),
+        NavigatorResult::RequiresRevision(rev) => (
+            "RequiresRevision".to_string(),
+            rev.attempt_num().get() as usize,
+        ),
+        NavigatorResult::PendingAuthorizationPersistenceFailure { pending, .. } => (
+            "PendingAuthorizationPersistenceFailure".to_string(),
+            pending.attempt_num.get() as usize,
+        ),
+        NavigatorResult::WitnessEvaluationError(_) => ("WitnessEvaluationError".to_string(), 0),
+        NavigatorResult::SystemFailure(_) => ("SystemFailure".to_string(), 0),
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
             ("RequiresOperatorApproval".to_string(), *attempts)
         }
@@ -1059,8 +1102,14 @@ fn main() -> Result<()> {
         };
         for (repo_label, repo_path, lang) in &external_corpus {
             if !repo_path.exists() {
-                println!("  {repo_label}: SKIP (path not found: {})", repo_path.display());
-                errors.push(format!("{repo_label}: path not found ({})", repo_path.display()));
+                println!(
+                    "  {repo_label}: SKIP (path not found: {})",
+                    repo_path.display()
+                );
+                errors.push(format!(
+                    "{repo_label}: path not found ({})",
+                    repo_path.display()
+                ));
                 continue;
             }
             for task_type in [TaskType::CouplingReduction, TaskType::InstabilityReduction] {

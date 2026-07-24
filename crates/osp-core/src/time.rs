@@ -10,7 +10,7 @@
 
 use crate::bigbang::apply_delta;
 use crate::space::Space;
-use crate::witness::{evaluate, Claim, WitnessResult, WitnessSet};
+use crate::witness::{evaluate, Claim, WitnessDisposition, WitnessSet};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TimeMachine trait
@@ -18,10 +18,18 @@ use crate::witness::{evaluate, Claim, WitnessResult, WitnessSet};
 
 /// Zaman makinesi — `t_c`'yi ilerleten arayüz (§3.2).
 ///
-/// `advance()` bir Claim'i değerlendirir (Q1-Q3) + (Commit ise) `apply_delta` ile
-/// space'i mutasyona uğratır. Dönüş: `WitnessResult` (Commit/Reject/Hold).
+/// `advance()` bir Claim'i değerlendirir (Q1-Q3) + (Satisfied ise) `apply_delta` ile
+/// space'i mutasyona uğratır. Dönüş: `WitnessDisposition` (Satisfied/Held/Rejected).
+///
+/// **INV-T9:** `Held` expected authorization bekleme, `Rejected` explicit witness ret —
+/// ikisi de expected domain outcome, HATA DEĞİL.
 pub trait TimeMachine {
-    fn advance(&mut self, space: &mut Space, claim: &Claim, omega: &WitnessSet) -> WitnessResult;
+    fn advance(
+        &mut self,
+        space: &mut Space,
+        claim: &Claim,
+        omega: &WitnessSet,
+    ) -> WitnessDisposition;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -30,31 +38,37 @@ pub trait TimeMachine {
 
 /// Stateless zaman FSM'i.
 ///
-/// `evaluate(claim, omega)` → Q1-Q3 karar. Commit ise `apply_delta(space, &delta)`
-/// ile space'e mutasyon uygulanır (node/edge ekle, repositioned hesapla). Hold/Reject
+/// `evaluate(claim, omega)` → Q1-Q3 karar. Satisfied ise `apply_delta(space, &delta)`
+/// ile space'e mutasyon uygulanır (node/edge ekle, repositioned hesapla). Held/Rejected
 /// ise space dokunulmaz.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TimeFSM;
 
 impl TimeMachine for TimeFSM {
-    fn advance(&mut self, space: &mut Space, claim: &Claim, omega: &WitnessSet) -> WitnessResult {
+    fn advance(
+        &mut self,
+        space: &mut Space,
+        claim: &Claim,
+        omega: &WitnessSet,
+    ) -> WitnessDisposition {
         match evaluate(claim, omega) {
-            WitnessResult::Commit {
+            WitnessDisposition::Satisfied {
                 mut delta,
                 safety_weakened,
                 override_reason,
+                snapshot,
             } => {
                 // Mutasyon: apply_delta node/edge ekler + repositioned set döner (inv #6)
                 let repositioned = apply_delta(space, &delta);
                 delta.repositioned = repositioned;
-                WitnessResult::Commit {
+                WitnessDisposition::Satisfied {
                     delta,
                     safety_weakened,
                     override_reason,
+                    snapshot,
                 }
             }
-            WitnessResult::Hold(reason) => WitnessResult::Hold(reason),
-            WitnessResult::Reject(reason) => WitnessResult::Reject(reason),
+            other => other, // Held/Rejected — space dokunulmaz
         }
     }
 }
@@ -97,7 +111,7 @@ mod tests {
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
         let result = fsm.advance(&mut space, &claim, &omega);
-        assert!(matches!(result, WitnessResult::Commit { .. }));
+        assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
         assert_eq!(space.node_count(), 1, "node 42 eklenmiş olmalı");
         assert!(space.nodes.contains_key(&42));
     }
@@ -107,10 +121,10 @@ mod tests {
         let mut fsm = TimeFSM::default();
         let mut space = Space::new();
         let claim = claim_with(100, 42);
-        let omega = WitnessSet::new(vec![ev(1, 200)]); // Hold (tek witness)
+        let omega = WitnessSet::new(vec![ev(1, 200)]); // Held (tek witness)
         let result = fsm.advance(&mut space, &claim, &omega);
-        assert!(matches!(result, WitnessResult::Hold(_)));
-        assert_eq!(space.node_count(), 0, "Hold sonrası mutasyon olmamalı");
+        assert!(matches!(result, WitnessDisposition::Held { .. }));
+        assert_eq!(space.node_count(), 0, "Held sonrası mutasyon olmamalı");
     }
 
     #[test]
@@ -119,13 +133,14 @@ mod tests {
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
-        if let WitnessResult::Commit { delta, .. } = fsm.advance(&mut space, &claim, &omega) {
+        if let WitnessDisposition::Satisfied { delta, .. } = fsm.advance(&mut space, &claim, &omega)
+        {
             assert_eq!(delta.new_nodes.len(), 1);
             assert_eq!(delta.new_nodes[0].id, 42);
             // repositioned ΔV ∪ N₁(ΔV) — node 42 eklendi, komşu yok → sadece {42}
             assert!(delta.repositioned.contains(&42));
         } else {
-            panic!("Commit bekleniyordu");
+            panic!("Satisfied bekleniyordu");
         }
     }
 
@@ -135,14 +150,14 @@ mod tests {
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
-        if let WitnessResult::Commit {
+        if let WitnessDisposition::Satisfied {
             safety_weakened, ..
         } = fsm.advance(&mut space, &claim, &omega)
         {
             // Faz 1.5 evaluate hep false (admin override Faz 1.11+)
             assert!(!safety_weakened);
         } else {
-            panic!("Commit bekleniyordu");
+            panic!("Satisfied bekleniyordu");
         }
     }
 
@@ -157,7 +172,7 @@ mod tests {
         // FSM stateless — ikinci advance aynı claim ile tekrar çalışır (idempotent FSM)
         let claim2 = claim_with(100, 2);
         let result = fsm.advance(&mut space, &claim2, &omega);
-        assert!(matches!(result, WitnessResult::Commit { .. }));
+        assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
         assert_eq!(space.node_count(), 2);
     }
 
@@ -170,8 +185,8 @@ mod tests {
             let claim = claim_with(100, i);
             let r = fsm.advance(&mut space, &claim, &omega);
             assert!(
-                matches!(r, WitnessResult::Commit { .. }),
-                "advance #{i} Commit olmalı"
+                matches!(r, WitnessDisposition::Satisfied { .. }),
+                "advance #{i} Satisfied olmalı"
             );
         }
         assert_eq!(space.node_count(), 5, "5 commit → 5 node");
