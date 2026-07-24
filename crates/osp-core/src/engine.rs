@@ -471,6 +471,12 @@ pub(crate) struct VerifiedTaskMeasurementBinding {
     /// TOCTOU closure: gate bu policy'ye göre değerlendirilir, farklı task gerçekliğine
     /// göre DEĞİL. `EffectiveImprovementPolicy::current_semantics()` + `TaskPolicy`.
     predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
+    // INV-T9 #70 Faz 5 Adım 16 (review P1-1) — task goal evidence (readable canonical).
+    /// Task snapshot'ının readable canonical task-goal evidence'ı. Verify epoch'unda
+    /// `TryFrom<&Task>` ile üretilir (tek authoritative projection). `task_goal_digest`
+    /// ile aynı snapshot'tan — TOCTOU kapalı. Basis (Adım 16) + restore validator (Adım 17)
+    /// consume eder.
+    task_goal_evidence: crate::authorization::CanonicalTaskGoalEvidenceV2,
 }
 
 impl VerifiedTaskMeasurementBinding {
@@ -487,6 +493,8 @@ impl VerifiedTaskMeasurementBinding {
         preferred_vector_snapshot: Option<crate::coords::RawPosition>,
         // INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU):
         predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
+        // INV-T9 #70 Faz 5 Adım 16 (review P1-1):
+        task_goal_evidence: crate::authorization::CanonicalTaskGoalEvidenceV2,
     ) -> Self {
         Self {
             task_id,
@@ -498,6 +506,7 @@ impl VerifiedTaskMeasurementBinding {
             engine_measurement_digest,
             preferred_vector_snapshot,
             predicate_gate_policy_digest,
+            task_goal_evidence,
         }
     }
 
@@ -552,7 +561,10 @@ impl VerifiedTaskMeasurementBinding {
 
     /// **INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU):** Predicate gate policy digest accessor.
     /// Gate kararını belirleyen policy commitment'i — task snapshot'ına bağlı.
-    #[allow(dead_code, reason = "Faz 5 Item 15 validate_semantics consumer")]
+    #[allow(
+        dead_code,
+        reason = "Faz 5 bundle into_parts consumer — accessor inspector/restore için"
+    )]
     pub(crate) fn predicate_gate_policy_digest(
         &self,
     ) -> &crate::measurement::PredicateGatePolicyDigestV2 {
@@ -576,9 +588,10 @@ impl VerifiedTaskMeasurementBinding {
         crate::measurement::TaskClaimDigest,
         crate::measurement::MeasurementDigest,
         VerifiedMeasurementBinding,
-        // Faz 4+5 extension — 4 field ayrı tuple.
+        // Faz 4+5 extension — 5 field ayrı tuple (digest + evidence + snapshot + policy).
         (
             crate::measurement::TaskGoalDigest,
+            crate::authorization::CanonicalTaskGoalEvidenceV2,
             crate::measurement::EngineMeasurementDigest,
             Option<crate::coords::RawPosition>,
             crate::measurement::PredicateGatePolicyDigestV2,
@@ -592,6 +605,7 @@ impl VerifiedTaskMeasurementBinding {
             self.binding,
             (
                 self.task_goal_digest,
+                self.task_goal_evidence,
                 self.engine_measurement_digest,
                 self.preferred_vector_snapshot,
                 self.predicate_gate_policy_digest,
@@ -841,124 +855,16 @@ impl SpaceEngine {
         })
     }
 
-    /// **INV-T9 #70 Commit 4b Faz 4 Commit 2:** `build_authorization_context_v2`
-    /// standalone builder. Verified measurement binding (proof) + verified gate
-    /// evaluation + canonical witness requirement + presented artifact →
-    /// `AuthorizationContextV2`. Re-derivation YOK — proof consume + 2 çevrim +
-    /// checked constructor zinciri.
+    /// **INV-T9 #70 Faz 5 Adım 20:** `build_authorization_context_v2` artık
+    /// `authorization::gate_v2` child module'da free fn olarak yaşar (review P0-2:
+    /// ayrı binding + gate_evaluation bağımsız eşleştirme YOK — tek bundle consume).
+    /// `self.` kullanımı 0 olduğu için engine method olmaktan çıktı. Çağrı:
+    /// `crate::authorization::gate_v2::build_authorization_context_v2(bundle, ...)`.
     ///
-    /// **Ontolojik zincir:** verify_measurement_binding → build_authorization_context_v2
-    /// → AuthorizationContextV2 (basis + verified gate eval + witness requirement).
+    /// **Ontolojik zincir:** verify_measurement_binding → evaluate_task_gate_v2 (bundle)
+    /// → build_authorization_context_v2(bundle, witness, measurement) → AuthorizationContextV2.
     ///
-    /// **Production wiring Faz 8.** Standalone — engine state kullanmaz.
-    #[allow(
-        dead_code,
-        reason = "Faz 8 production wiring / Commit 2 standalone test"
-    )]
-    pub(crate) fn build_authorization_context_v2(
-        &self,
-        binding: VerifiedTaskMeasurementBinding,
-        gate_evaluation: crate::authorization::VerifiedGateEvaluationV2,
-        witness_requirement: crate::authorization::CanonicalWitnessRequirementV2,
-        measurement: &crate::measurement::EngineMeasurement,
-    ) -> Result<
-        crate::authorization::AuthorizationContextV2,
-        crate::authorization::AuthorizationContextV2BuildError,
-    > {
-        use crate::authorization::{
-            AuthorizationBasisV2, AuthorizationContextV2, CanonicalBaselineUnavailableReason,
-            CanonicalRawPosition, CanonicalTrajectoryEvidenceBaseline,
-            CanonicalTrajectoryLossEvidence, CanonicalTrajectoryLossUnavailableReason,
-            ProvenancedMeasuredResult,
-        };
-        use crate::measurement::{
-            MeasurementBaseline, MeasurementContextDigest, MeasurementDeltaDigest,
-        };
-
-        let (
-            task_id,
-            claim_id,
-            task_claim_digest,
-            measurement_digest,
-            inner_binding,
-            (
-                task_goal_digest,
-                engine_measurement_digest,
-                preferred_vector_snapshot,
-                _predicate_gate_policy_digest,
-            ),
-        ) = binding.into_parts();
-
-        // 1. Presented artifact == consumed proof? (tüm evidence projection'dan ÖNCE)
-        let recomputed = measurement.compute_digest()?;
-        if recomputed.as_bytes() != engine_measurement_digest.as_bytes() {
-            return Err(crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
-                proof: engine_measurement_digest.to_hex(),
-                recomputed: recomputed.to_hex(),
-            });
-        }
-
-        // 2. Baseline canonical evidence (MeasurementBaseline → CanonicalTrajectoryEvidenceBaseline).
-        let trajectory_baseline = match measurement.before() {
-            MeasurementBaseline::Available(before) => {
-                CanonicalTrajectoryEvidenceBaseline::Available {
-                    before: ProvenancedMeasuredResult::try_from(before)?,
-                }
-            }
-            MeasurementBaseline::Unavailable { reason } => {
-                CanonicalTrajectoryEvidenceBaseline::Unavailable {
-                    reason: CanonicalBaselineUnavailableReason::try_from_reason(
-                        reason,
-                        inner_binding.subject(),
-                    )?,
-                }
-            }
-        };
-        let measurement_baseline_digest =
-            trajectory_baseline.compute_measurement_baseline_digest()?;
-
-        // 3. Loss evidence (preferred_vector Some/None → Available/Unavailable).
-        let trajectory_loss = match preferred_vector_snapshot {
-            Some(target) => {
-                let loss_after = crate::trajectory::trajectory_loss(measurement.after(), &target);
-                CanonicalTrajectoryLossEvidence::Available {
-                    target: CanonicalRawPosition::from(target),
-                    loss_after,
-                }
-            }
-            None => CanonicalTrajectoryLossEvidence::Unavailable {
-                reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
-            },
-        };
-
-        // 4. Request + subordinate commitments.
-        let measurement_request = measurement.request().canonical_evidence();
-        let measurement_request_digest = inner_binding.request_digest().clone();
-        let canonical_delta_digest =
-            MeasurementDeltaDigest::compute_from_canonical(inner_binding.canonical_delta())?;
-        let measurement_context_digest =
-            MeasurementContextDigest::compute(inner_binding.current_context())?;
-
-        // 5. Checked basis (validate_semantics — nested commitment reverify).
-        let basis = AuthorizationBasisV2::new(
-            task_id,
-            claim_id,
-            task_claim_digest,
-            task_goal_digest,
-            measurement_digest,
-            engine_measurement_digest,
-            trajectory_baseline,
-            measurement_baseline_digest,
-            trajectory_loss,
-            measurement_request,
-            measurement_request_digest,
-            measurement_context_digest,
-            canonical_delta_digest,
-        )?;
-
-        // 6. Proof-gated context + witness/apply-target consistency.
-        AuthorizationContextV2::new(basis, gate_evaluation, witness_requirement)
-    }
+    /// **Production wiring Faz 8.**
 
     /// **7 binding validation + commitment derivation.** Check sırası: TaskMismatch →
     /// Subject → Impact → StructuralDelta → Revision → ContextDigest → CurrentContext.
@@ -1131,11 +1037,20 @@ impl SpaceEngine {
         // tek okuma → snapshot + digest (TOCTOU yok — task zaten verify sırasında okundu).
         // **Reviewer v7 P2-1:** TaskGoalDigestComputationFailed — structural DEĞİL,
         // task goal commitment hatası (semantic ayrım telemetry için korunur).
-        let task_goal_digest = crate::measurement::TaskGoalDigest::compute(task).map_err(|e| {
-            DerivErr::TaskGoalDigestComputationFailed {
-                detail: e.to_string(),
-            }
-        })?;
+        //
+        // **INV-T9 #70 Faz 5 Adım 16 (review P1-1):** Artık authoritative forward
+        // projection (`CanonicalTaskGoalEvidenceV2::try_from(task)`) üzerinden — aynı
+        // snapshot'tan hem readable evidence hem digest üretilir. `TaskGoalDigest::compute`
+        // zaten bu projection'a delege eder. TOCTOU: evidence + digest aynı task okuması.
+        let task_goal_evidence = crate::authorization::CanonicalTaskGoalEvidenceV2::try_from(task)
+            .map_err(|e| DerivErr::StructuralCanonicalizationFailed {
+                detail: format!("task_goal_evidence projection: {e}"),
+            })?;
+        let task_goal_digest =
+            crate::measurement::TaskGoalDigest::compute_from_canonical(&task_goal_evidence)
+                .map_err(|e| DerivErr::TaskGoalDigestComputationFailed {
+                    detail: e.to_string(),
+                })?;
 
         // EngineMeasurementDigest: tam artifact commitment (request + baseline + after + context).
         // **Reviewer v7 P2-1:** EngineMeasurementDigestComputationFailed — structural DEĞİL,
@@ -1154,6 +1069,10 @@ impl SpaceEngine {
         // Cryptographic binding: task_id + task_goal_digest preimage'da (frozen v8).
         // TOCTOU closure Item 17'de (evaluate_task_gate_v2 recheck) tamamlanır; burada
         // commitment capture. EffectiveImprovementPolicy::current_semantics() tek site.
+        //
+        // **INV-T9 #70 Faz 5 Adım 16 (review P1-2):** Policy digest hatası artık dedicated
+        // `PredicateGatePolicyDigestComputationFailed` variant'ına map edilir — eskiden
+        // yanlış olarak `TaskGoalDigestComputationFailed`'a map ediliyordu (epistemik ayrım).
         let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
         let predicate_gate_policy_digest =
             crate::measurement::PredicateGatePolicyDigestV2::compute(
@@ -1162,17 +1081,16 @@ impl SpaceEngine {
                 &task.policy,
                 &improvement_policy,
             )
-            .map_err(|e| DerivErr::TaskGoalDigestComputationFailed {
-                // Policy digest hatası task goal commitment hatası ile aynı kategori
-                // (semantic — structural canonicalization DEĞİL).
-                detail: format!("predicate_gate_policy_digest: {e}"),
+            .map_err(|e| DerivErr::PredicateGatePolicyDigestComputationFailed {
+                detail: e.to_string(),
             })?;
 
         // Outer proof — task/claim/measured-result identity + Faz 4+5 extension
-        // (task_goal_digest + engine_measurement_digest + preferred_vector_snapshot +
-        //  predicate_gate_policy_digest).
+        // (task_goal_digest + task_goal_evidence + engine_measurement_digest +
+        //  preferred_vector_snapshot + predicate_gate_policy_digest).
         // Cross-context substitution protection + tam artifact commitment + TOCTOU closure.
         // **P0-1 (reviewer):** claim_id proof'tan gelir — identity injection kapalı.
+        // **Adım 16 (review P1-1):** task_goal_evidence — readable canonical snapshot.
         Ok(VerifiedTaskMeasurementBinding::new(
             task.id,
             claim.id,
@@ -1183,6 +1101,7 @@ impl SpaceEngine {
             engine_measurement_digest,
             preferred_vector_snapshot,
             predicate_gate_policy_digest,
+            task_goal_evidence,
         ))
     }
 }
@@ -5818,9 +5737,10 @@ v = 0.5
         assert_eq!(task_claim_digest.to_hex().len(), 64);
         assert_eq!(measurement_digest.to_hex().len(), 64);
         let _ = inner_binding; // VerifiedMeasurementBinding (6 field)
-                               // Faz 4+5 extension — 4 field tuple.
+                               // Faz 4+5 extension — 5 field tuple (digest + evidence + digest + snapshot + digest).
         let (
             task_goal_digest,
+            task_goal_evidence,
             engine_measurement_digest,
             preferred_vector_snapshot,
             predicate_gate_policy_digest,
@@ -5830,6 +5750,8 @@ v = 0.5
         assert_eq!(preferred_vector_snapshot, None);
         // INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU) — predicate gate policy digest.
         assert_eq!(predicate_gate_policy_digest.to_hex().len(), 64);
+        // INV-T9 #70 Faz 5 Adım 16 (review P1-1) — task goal evidence (readable canonical).
+        assert_eq!(task_goal_evidence.task_id, 42);
     }
 
     #[test]
@@ -5857,18 +5779,24 @@ v = 0.5
     // (plan md:195, reviewer revize matris)
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    use crate::authorization::{
-        CanonicalGateEvaluationV2, CanonicalWitnessPolicy, CanonicalWitnessRequirementV2,
-        VerifiedGateEvaluationV2,
-    };
-    use crate::trajectory::{ApplyTarget, CommitLane, MutationDecision};
+    use crate::authorization::{CanonicalWitnessPolicy, CanonicalWitnessRequirementV2};
+    use crate::trajectory::{ApplyTarget, CommitLane};
 
-    /// Commit 2 builder test fixture — VerifiedGateEvaluationV2 + CanonicalWitnessRequirementV2.
-    /// GatePassed + AcceptAsCompleted → Mainline + Required (tutarlı).
-    fn faz4_builder_gate_passed() -> VerifiedGateEvaluationV2 {
-        let gate =
-            CanonicalGateEvaluationV2::gate_passed(MutationDecision::AcceptAsCompleted).unwrap();
-        VerifiedGateEvaluationV2::fixture(gate)
+    /// **INV-T9 #70 Faz 5 Adım 19-20:** Bundle producer test helper — verify +
+    /// evaluate_task_gate_v2 → VerifiedGateEvaluationBundleV2. Tüm build_authorization_context_v2
+    /// testleri bu helper üzerinden bundle üretir (eski standalone gate_eval kaldırıldı).
+    /// `loss_before` = 0.0 (fixture — improved hesabı measurement sabit değerlerle deterministic).
+    fn faz5_builder_bundle(
+        engine: &crate::engine::SpaceEngine,
+        task: &crate::trajectory::Task,
+        claim: &crate::witness::Claim,
+        measurement: &crate::measurement::EngineMeasurement,
+    ) -> crate::authorization::VerifiedGateEvaluationBundleV2 {
+        let binding = engine
+            .verify_measurement_binding(claim, task, measurement)
+            .expect("verify_measurement_binding");
+        crate::authorization::evaluate_task_gate_v2(binding, measurement, task, 0.0)
+            .expect("evaluate_task_gate_v2")
     }
 
     fn faz4_builder_witness_required() -> CanonicalWitnessRequirementV2 {
@@ -5886,58 +5814,53 @@ v = 0.5
 
     #[test]
     fn commit2_build_authorization_context_v2_pipeline() {
-        // Tam pipeline: verify → build → AuthorizationContextV2.
+        // Tam pipeline: verify → evaluate → build → AuthorizationContextV2.
         let engine = make_measurement_engine();
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
-        let context = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(),
-                faz4_builder_witness_required(),
-                &measurement,
-            )
-            .expect("context build success");
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+        let context = crate::authorization::build_authorization_context_v2(
+            bundle,
+            faz4_builder_witness_required(),
+            &measurement,
+        )
+        .expect("context build success");
         assert_eq!(context.basis().task_id(), 42);
     }
 
     #[test]
     fn commit2_preferred_vector_none_unavailable_loss() {
-        // preferred_vector None → Unavailable(NoPreferredVector).
+        // **INV-T9 #70 Faz 5 (review P0-2 completion-first):** preferred_vector None +
+        // predicate Completed → loss NotRequired(PredicateCompleted) (Unavailable DEĞIL).
+        // Eski builder preferred_vector'den loss üretiyordu; yeni evaluator completion-first.
+        // task_with_node_scope predicate Coupling<=0.5, measured coupling=0.5 → Completed.
         let engine = make_measurement_engine();
         let task = task_with_node_scope(1, 42); // preferred_vector: None
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
-        let context = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(),
-                faz4_builder_witness_required(),
-                &measurement,
-            )
-            .unwrap();
-        // Basis trajectory_loss Unavailable olmalı — accessor ile doğrula.
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+        let context = crate::authorization::build_authorization_context_v2(
+            bundle,
+            faz4_builder_witness_required(),
+            &measurement,
+        )
+        .unwrap();
+        // Completion-first: Completed predicate → NotRequired(PredicateCompleted).
         assert!(matches!(
             context.basis().trajectory_loss(),
-            crate::authorization::CanonicalTrajectoryLossEvidence::Unavailable { .. }
+            crate::authorization::CanonicalTrajectoryLossEvidence::NotRequired { .. }
         ));
     }
 
     #[test]
     fn commit2_preferred_vector_some_available_loss() {
-        // **P2-2 (reviewer):** preferred_vector Some → Available { target, loss_after }.
-        // target preferred_vector ile birebir, loss_after trajectory_loss(after, preferred).
-        use crate::authorization::{CanonicalRawPosition, CanonicalTrajectoryLossEvidence};
-        use crate::coords::RawPosition;
+        // **INV-T9 #70 Faz 5 (review P0-2 completion-first):** preferred_vector Some +
+        // predicate Completed → loss NotRequired(PredicateCompleted) (Available DEĞIL).
+        // Completion-first: predicate sonucu loss'dan önce belirlenir.
         let engine = make_measurement_engine();
         let mut task = task_with_node_scope(1, 42);
+        use crate::coords::RawPosition;
         let preferred = RawPosition {
             x: 0.10,
             y: 0.20,
@@ -5948,25 +5871,18 @@ v = 0.5
         task.target_predicate_set.preferred_vector = Some(preferred);
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
-        let context = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(),
-                faz4_builder_witness_required(),
-                &measurement,
-            )
-            .unwrap();
-        match context.basis().trajectory_loss() {
-            CanonicalTrajectoryLossEvidence::Available { target, loss_after } => {
-                assert_eq!(target, &CanonicalRawPosition::from(preferred));
-                let expected = crate::trajectory::trajectory_loss(measurement.after(), &preferred);
-                assert_eq!(*loss_after, expected);
-            }
-            other => panic!("expected Available loss, got {other:?}"),
-        }
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+        let context = crate::authorization::build_authorization_context_v2(
+            bundle,
+            faz4_builder_witness_required(),
+            &measurement,
+        )
+        .unwrap();
+        // Completion-first: Completed predicate → NotRequired (preferred_vector Some olsa bile).
+        assert!(matches!(
+            context.basis().trajectory_loss(),
+            crate::authorization::CanonicalTrajectoryLossEvidence::NotRequired { .. }
+        ));
     }
 
     #[test]
@@ -5978,30 +5894,22 @@ v = 0.5
         let measurement = produce_valid_measurement(&engine, &task, &claim);
 
         let ctx1 = {
-            let binding = engine
-                .verify_measurement_binding(&claim, &task, &measurement)
-                .unwrap();
-            engine
-                .build_authorization_context_v2(
-                    binding,
-                    faz4_builder_gate_passed(),
-                    faz4_builder_witness_required(),
-                    &measurement,
-                )
-                .unwrap()
+            let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+            crate::authorization::build_authorization_context_v2(
+                bundle,
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .unwrap()
         };
         let ctx2 = {
-            let binding = engine
-                .verify_measurement_binding(&claim, &task, &measurement)
-                .unwrap();
-            engine
-                .build_authorization_context_v2(
-                    binding,
-                    faz4_builder_gate_passed(),
-                    faz4_builder_witness_required(),
-                    &measurement,
-                )
-                .unwrap()
+            let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+            crate::authorization::build_authorization_context_v2(
+                bundle,
+                faz4_builder_witness_required(),
+                &measurement,
+            )
+            .unwrap()
         };
         let d1 = ctx1.compute_digest().unwrap();
         let d2 = ctx2.compute_digest().unwrap();
@@ -6015,17 +5923,13 @@ v = 0.5
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
-        let context = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(),
-                faz4_builder_witness_required(),
-                &measurement,
-            )
-            .unwrap();
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+        let context = crate::authorization::build_authorization_context_v2(
+            bundle,
+            faz4_builder_witness_required(),
+            &measurement,
+        )
+        .unwrap();
         assert_eq!(context.basis().task_id(), 42);
         assert_eq!(context.basis().claim_id(), claim.id);
     }
@@ -6034,16 +5938,14 @@ v = 0.5
 
     #[test]
     fn commit2_binding_mismatch_different_before() {
-        // **P1-1 v2 (reviewer):** proof A + artifact B/different-before → mismatch.
-        // EngineMeasurement::new kullan — sadece before mutate, request digest'i bozmaz
-        // (corrupt_request_context_digest_for_test measurement_input_digest'i de bozuyordu).
+        // **INV-T9 #70 Faz 5:** Bundle orijinal measurement'dan üretilir, sonra bad_measurement
+        // builder'a geçilir → EngineMeasurementBindingMismatch. proof (bundle'dan, orijinal)
+        // ≠ recomputed (bad_measurement'dan).
         let engine = make_measurement_engine();
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
         let bad_before = crate::measurement::MeasurementBaseline::Available(
             crate::measurement::tests::test_measured(0.99),
         );
@@ -6054,14 +5956,12 @@ v = 0.5
             measurement.request().clone(),
         )
         .expect("context matches request — only before mutated");
-        let err = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(),
-                faz4_builder_witness_required(),
-                &bad_measurement,
-            )
-            .expect_err("different before → mismatch");
+        let err = crate::authorization::build_authorization_context_v2(
+            bundle,
+            faz4_builder_witness_required(),
+            &bad_measurement,
+        )
+        .expect_err("different before → mismatch");
         // P1-1: mismatch payload pin — proof ≠ recomputed, both 64 hex.
         match err {
             crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
@@ -6078,15 +5978,12 @@ v = 0.5
 
     #[test]
     fn commit2_binding_mismatch_different_after() {
-        // **P1-1 v2 (reviewer):** proof A + artifact B/different-after → mismatch.
-        // EngineMeasurement::new — sadece after mutate.
+        // **INV-T9 #70 Faz 5:** Bundle orijinal measurement'dan, bad_measurement builder'a.
         let engine = make_measurement_engine();
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
         let bad_after = crate::measurement::tests::test_measured(0.99);
         let bad_measurement = crate::measurement::EngineMeasurement::new(
             measurement.before().clone(),
@@ -6095,14 +5992,12 @@ v = 0.5
             measurement.request().clone(),
         )
         .expect("context matches request — only after mutated");
-        let err = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(),
-                faz4_builder_witness_required(),
-                &bad_measurement,
-            )
-            .expect_err("different after → mismatch");
+        let err = crate::authorization::build_authorization_context_v2(
+            bundle,
+            faz4_builder_witness_required(),
+            &bad_measurement,
+        )
+        .expect_err("different after → mismatch");
         match err {
             crate::authorization::AuthorizationContextV2BuildError::EngineMeasurementBindingMismatch {
                 proof,
@@ -6116,36 +6011,10 @@ v = 0.5
         }
     }
 
-    #[test]
-    fn commit2_rejected_gate_with_required_witness_rejects() {
-        // RejectedByGate → NotApplied, ama Required witness → reject.
-        let engine = make_measurement_engine();
-        let task = task_with_node_scope(1, 42);
-        let claim = claim_with_node1_delta(42);
-        let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
-        let gate = {
-            let g = CanonicalGateEvaluationV2::rejected_by_gate(
-                crate::trajectory::GateDecision::RejectedBySyntax,
-            )
-            .unwrap();
-            VerifiedGateEvaluationV2::fixture(g)
-        };
-        let err = engine
-            .build_authorization_context_v2(
-                binding,
-                gate,
-                faz4_builder_witness_required(), // Required — ama RejectedByGate → NotApplied
-                &measurement,
-            )
-            .expect_err("RejectedByGate + Required → reject");
-        assert!(matches!(
-            err,
-            crate::authorization::AuthorizationContextV2BuildError::WitnessRequirement(_)
-        ));
-    }
+    // **INV-T9 #70 Faz 5:** commit2_rejected_gate_with_required_witness_rejects kaldırıldı —
+    // RejectedByGate bundle üretimi Faz 8 (hard-gate). Faz 5 evaluate_task_gate_v2 sadece
+    // GatePassed üretir (plan negatif koşulu: "RejectedByGate proof producer + NotEvaluated
+    // bu faza alınmaz (Faz 8)"). RejectedByGate + witness tutarsızlık testi Faz 8'de.
 
     #[test]
     fn commit2_gate_passed_lane_with_not_required_witness_rejects() {
@@ -6154,9 +6023,7 @@ v = 0.5
         let task = task_with_node_scope(1, 42);
         let claim = claim_with_node1_delta(42);
         let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let binding = engine
-            .verify_measurement_binding(&claim, &task, &measurement)
-            .unwrap();
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
         let policy = CanonicalWitnessPolicy {
             schema_version: 1,
             min_approvers: 2,
@@ -6165,14 +6032,12 @@ v = 0.5
         };
         let not_required =
             CanonicalWitnessRequirementV2::try_from((&policy, &ApplyTarget::NotApplied)).unwrap();
-        let err = engine
-            .build_authorization_context_v2(
-                binding,
-                faz4_builder_gate_passed(), // GatePassed + AcceptAsCompleted → Mainline
-                not_required,               // NotRequired — ama lane expected
-                &measurement,
-            )
-            .expect_err("lane + NotRequired → reject");
+        let err = crate::authorization::build_authorization_context_v2(
+            bundle,
+            not_required,
+            &measurement,
+        )
+        .expect_err("lane + NotRequired → reject");
         assert!(matches!(
             err,
             crate::authorization::AuthorizationContextV2BuildError::WitnessRequirement(_)

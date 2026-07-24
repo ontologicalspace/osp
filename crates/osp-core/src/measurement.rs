@@ -713,7 +713,6 @@ impl MeasurementDigest {
     /// reverify için kullanır. Shared writer ile `compute` byte-identical.
     /// `ProvenancedMeasuredResult` zaten `CanonicalMetricSourceTag` taşıdığı için
     /// tag→enum→tag round-trip YOK (tag direkt kullanılır).
-    #[allow(dead_code, reason = "Faz 5 validate_semantics / Item 11 consumer")]
     pub(crate) fn compute_from_canonical(
         measured: &crate::authorization::ProvenancedMeasuredResult,
     ) -> Result<Self, MeasurementDigestError> {
@@ -1330,98 +1329,24 @@ impl TaskGoalDigest {
     ///
     /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Shared writer
     /// (`write_task_goal_commitment`) çağırır — `compute_from_canonical` ile byte-identical.
+    ///
+    /// **INV-T9 #70 Faz 5 Adım 16 (review P1-1):** Authoritative forward projection
+    /// (`CanonicalTaskGoalEvidenceV2::try_from(task)`) üzerinden geçer — iki paralel
+    /// domain→canonical projection YOK. Sonra `compute_from_canonical` ile aynı shared
+    /// writer. Bu, tek projection tekniğini pinler.
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
     pub(crate) fn compute(
         task: &crate::trajectory::Task,
     ) -> Result<Self, EngineMeasurementDigestError> {
-        use crate::canonical_tags::PredicateModeTag;
-
-        let mode_tag =
-            PredicateModeTag::try_from(&task.target_predicate_set.mode).map_err(|e| {
+        // Review P1-1: tek authoritative projection → compute_from_canonical. İki paralel
+        // encoder YOK. Hata map: CanonicalizationError → StructuralCanonicalization.
+        let evidence =
+            crate::authorization::CanonicalTaskGoalEvidenceV2::try_from(task).map_err(|e| {
                 EngineMeasurementDigestError::StructuralCanonicalization {
                     detail: e.to_string(),
                 }
             })?;
-
-        // **Review P1-1 (tek source):** Domain WeightedPredicate → CanonicalWeightedPredicateV2
-        // projection → V2 encoder. Artık SADECE V2 encoder kullanılır (domain encoder
-        // kaldırıldı — iki paralel field-by-field encoder YOK). compute_from_canonical
-        // ile aynı encode_canonical_weighted_predicate_v2_to_vec tek truth source.
-        let encoded_preds: Vec<Vec<u8>> = task
-            .target_predicate_set
-            .predicates
-            .iter()
-            .map(|wp| {
-                let canonical = Self::project_weighted_predicate_to_v2(wp)?;
-                Self::encode_canonical_weighted_predicate_v2_to_vec(&canonical)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(Self::DOMAIN_SEPARATOR);
-        Self::write_task_goal_commitment(
-            &mut hasher,
-            task.id,
-            mode_tag,
-            &encoded_preds,
-            task.target_predicate_set.preferred_vector.as_ref(),
-        )?;
-        Ok(Self(hasher.finalize().into()))
-    }
-
-    /// **Review P1-1:** Domain WeightedPredicate → CanonicalWeightedPredicateV2 projection.
-    /// Tek encoder için — compute(&Task) ve compute_from_canonical aynı V2 encoder kullanır.
-    /// Bu helper domain→V2 dönüşümünü tek yerde pinler.
-    fn project_weighted_predicate_to_v2(
-        wp: &crate::trajectory::WeightedPredicate,
-    ) -> Result<crate::authorization::CanonicalWeightedPredicateV2, EngineMeasurementDigestError>
-    {
-        use crate::authorization::{
-            CanonicalPredicateScope, CanonicalSubgraphScope, CanonicalWeightedPredicateV2,
-            EffectiveSourceRequirement,
-        };
-        use crate::canonical_tags::{CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag};
-        let p = &wp.predicate;
-        Ok(CanonicalWeightedPredicateV2 {
-            axis: PredicateAxisTag::try_from(&p.metric).map_err(|e| {
-                EngineMeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
-            operator: ComparisonOpTag::try_from(&p.operator).map_err(|e| {
-                EngineMeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
-            threshold: p.threshold,
-            scope: match &p.scope {
-                crate::trajectory::PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
-                crate::trajectory::PredicateScope::Module(name) => {
-                    CanonicalPredicateScope::Module(name.clone())
-                }
-                crate::trajectory::PredicateScope::Subgraph(ids) => {
-                    CanonicalPredicateScope::Subgraph(
-                        CanonicalSubgraphScope::try_new(ids.clone()).map_err(|e| {
-                            EngineMeasurementDigestError::StructuralCanonicalization {
-                                detail: e.to_string(),
-                            }
-                        })?,
-                    )
-                }
-            },
-            required_source: match p.required_source {
-                None => EffectiveSourceRequirement::Any,
-                Some(src) => EffectiveSourceRequirement::Exact(
-                    CanonicalMetricSourceTag::try_from(&src).map_err(|e| {
-                        EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: e.to_string(),
-                        }
-                    })?,
-                ),
-            },
-            declared_weight: wp.weight,
-            tolerance: p.tolerance,
-        })
+        Self::compute_from_canonical(&evidence)
     }
 
     /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical evidence üzerinden
@@ -1430,7 +1355,6 @@ impl TaskGoalDigest {
     ///
     /// **Kritik:** V2 `declared_weight: Option<CanonicalF64>` ile `None ≠ Some(1.0)` byte
     /// ayrımı korunur — domain encoder ile aynı encoding (tek truth source).
-    #[allow(dead_code, reason = "Faz 5 validate_semantics / Item 11 consumer")]
     pub(crate) fn compute_from_canonical(
         evidence: &crate::authorization::CanonicalTaskGoalEvidenceV2,
     ) -> Result<Self, EngineMeasurementDigestError> {
@@ -1472,7 +1396,7 @@ impl TaskGoalDigest {
     ///
     /// **Kritik:** `declared_weight: Option<CanonicalF64>` ile `None ≠ Some(1.0)` byte
     /// ayrımı korunur (domain encoder ile aynı: None→[0], Some(w)→[1, <f64 bytes>]).
-    fn encode_canonical_weighted_predicate_v2_to_vec(
+    pub(crate) fn encode_canonical_weighted_predicate_v2_to_vec(
         canonical: &crate::authorization::CanonicalWeightedPredicateV2,
     ) -> Result<Vec<u8>, EngineMeasurementDigestError> {
         use crate::canonical_encoding::{push_f64, push_tag, push_u8};
@@ -1579,7 +1503,8 @@ impl TaskGoalDigest {
 
     /// **Review P1-1:** Eski domain `push_predicate_scope` kaldırıldı — V2 encoder
     /// `push_canonical_predicate_scope_v2` tek source (CanonicalPredicateScope alır).
-    /// Domain→canonical projection `project_weighted_predicate_to_v2` içinde yapılır.
+    /// Domain→canonical projection `TryFrom<&Task> for CanonicalTaskGoalEvidenceV2` içinde
+    /// yapılır (Adım 16 authoritative forward projection).
 
     #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
@@ -1719,7 +1644,6 @@ impl PredicateGatePolicyDigestV2 {
     /// evidence üzerinden digest üretir — `task_id` + `task_goal_digest` +
     /// `CanonicalPredicateEvaluationBasisV2` restore path reverify için. Shared writer
     /// ile `compute` byte-identical. task_id + task_goal_digest cryptographic binding.
-    #[allow(dead_code, reason = "Faz 5 Item 15 validate_semantics consumer")]
     pub(crate) fn compute_from_canonical(
         task_id: crate::trajectory::TaskId,
         task_goal_digest: &TaskGoalDigest,
@@ -1739,12 +1663,16 @@ impl PredicateGatePolicyDigestV2 {
         Ok(Self(hasher.finalize().into()))
     }
 
-    #[allow(dead_code, reason = "Faz 5 basis builder consumer")]
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
-    #[allow(dead_code, reason = "Faz 5 consumer")]
+    /// **INV-T9 #70 Faz 5 Adım 16:** Wire restore constructor — 32 raw byte → digest.
+    /// from_wire (V2 basis restore) tarafından çağrılır. Infallible (byte copy).
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
     pub(crate) fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
@@ -2071,6 +1999,15 @@ pub enum MeasurementBindingDerivationError {
     /// context) commitment başarısız.
     #[error("engine measurement digest computation failed: {detail}")]
     EngineMeasurementDigestComputationFailed { detail: String },
+
+    /// **INV-T9 #70 Faz 5 Adım 16 (review P1-2):** Predicate gate policy commitment
+    /// computation failure — `PredicateGatePolicyDigestV2::compute` hatası. Semantic
+    /// ayrım: task goal commitment DEĞİL, policy commitment (task_id + task_goal_digest
+    /// + policy + improvement_policy preimage). Eski kod bu hatayı
+    /// `TaskGoalDigestComputationFailed`'a map ediyordu — epistemik olarak farklıdır,
+    /// telemetry'de birleştirilmemeli.
+    #[error("predicate gate policy digest computation failed: {detail}")]
+    PredicateGatePolicyDigestComputationFailed { detail: String },
 }
 
 /// **INV-T9 #70 Commit 4b Faz 3 (reviewer v4 P2-4, v6 P1-2):** Verification epoch
@@ -3948,67 +3885,14 @@ pub(crate) mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// Helper — Task → CanonicalTaskGoalEvidenceV2 forward projection (test-only).
-    /// Item 7 compute_from_canonical ile compute(&Task) parity testi için.
+    /// **Adım 16 review P1-1:** artık authoritative `TryFrom<&Task>`'a delege eder.
+    /// Eski `unwrap()`'li inline projection kaldırıldı — tek production projection.
     fn task_to_canonical_evidence_v2(
         task: &crate::trajectory::Task,
     ) -> crate::authorization::CanonicalTaskGoalEvidenceV2 {
-        use crate::authorization::{
-            CanonicalPredicateScope, CanonicalSubgraphScope, CanonicalWeightedPredicateV2,
-            EffectiveSourceRequirement,
-        };
-        use crate::canonical_tags::{
-            CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag, PredicateModeTag,
-        };
-
-        let predicates = task
-            .target_predicate_set
-            .predicates
-            .iter()
-            .map(|wp| {
-                let p = &wp.predicate;
-                CanonicalWeightedPredicateV2 {
-                    axis: PredicateAxisTag::try_from(&p.metric).unwrap(),
-                    operator: ComparisonOpTag::try_from(&p.operator).unwrap(),
-                    threshold: p.threshold,
-                    scope: match &p.scope {
-                        crate::trajectory::PredicateScope::Node(id) => {
-                            CanonicalPredicateScope::Node(*id)
-                        }
-                        crate::trajectory::PredicateScope::Module(name) => {
-                            CanonicalPredicateScope::Module(name.clone())
-                        }
-                        crate::trajectory::PredicateScope::Subgraph(ids) => {
-                            CanonicalPredicateScope::Subgraph(
-                                CanonicalSubgraphScope::try_new(ids.clone()).unwrap(),
-                            )
-                        }
-                    },
-                    required_source: match p.required_source {
-                        None => EffectiveSourceRequirement::Any,
-                        Some(src) => EffectiveSourceRequirement::Exact(
-                            CanonicalMetricSourceTag::try_from(&src).unwrap(),
-                        ),
-                    },
-                    declared_weight: wp.weight,
-                    tolerance: p.tolerance,
-                }
-            })
-            .collect();
-
-        crate::authorization::CanonicalTaskGoalEvidenceV2 {
-            task_id: task.id,
-            mode: PredicateModeTag::try_from(&task.target_predicate_set.mode).unwrap(),
-            predicates,
-            preferred_vector: task.target_predicate_set.preferred_vector.map(|pv| {
-                crate::authorization::CanonicalRawPosition {
-                    x: pv.x,
-                    y: pv.y,
-                    z: pv.z,
-                    w: pv.w,
-                    v: pv.v,
-                }
-            }),
-        }
+        use std::convert::TryFrom;
+        crate::authorization::CanonicalTaskGoalEvidenceV2::try_from(task)
+            .expect("faz4_golden_task canonical projection infallible")
     }
 
     #[test]

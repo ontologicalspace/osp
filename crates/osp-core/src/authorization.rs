@@ -398,6 +398,88 @@ pub struct CanonicalTaskGoalEvidenceV2 {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 16 (P1-1) — Authoritative forward projection: Domain → Canonical V2
+//
+// Tek production projection: `Task → CanonicalTaskGoalEvidenceV2`. Bu, `TaskGoalDigest::compute`
+// ve `verify_measurement_binding_inner` (task_goal_evidence capture) tarafından kullanılan tek
+// domain→canonical dönüşümüdür. İki paralel projection YOK — eskiden test-only helper
+// `task_to_canonical_evidence_v2` (measurement.rs) aynı dönüşümü `unwrap()` ile yapıyordu;
+// artık bu `TryFrom`'a delege eder.
+//
+// Review P1-1: test helper `unwrap()` ile taşınamaz; tek authoritative `TryFrom<&Task>`.
+// Tag dönüşümleri `?` ile (tümü `CanonicalizationError` döndürür), `CanonicalSubgraphScope::try_new`
+// propagate edilir. Infallible DEĞİL — `CanonicalSubgraphScope` duplicate-id'yi reddedebilir.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl TryFrom<&crate::trajectory::Task> for CanonicalTaskGoalEvidenceV2 {
+    type Error = CanonicalizationError;
+
+    /// **Authoritative forward projection (P1-1):** `Task → CanonicalTaskGoalEvidenceV2`.
+    ///
+    /// Tek production domain→canonical task-goal dönüşümü. Hem `TaskGoalDigest::compute(&Task)`
+    /// hem `verify_measurement_binding_inner` (task_goal_evidence capture) bu fonksiyonu kullanır —
+    /// iki ayrı projection YOK. `task_to_canonical_evidence_v2` test helper'ı bu `TryFrom`'a redirect.
+    ///
+    /// **Infallible DEĞİL:** `CanonicalSubgraphScope::try_new` duplicate node id'yi reddedebilir.
+    /// Tag dönüşümleri (axis/operator/mode/source) tümü `CanonicalizationError` döndürür.
+    fn try_from(task: &crate::trajectory::Task) -> Result<Self, Self::Error> {
+        use crate::canonical_tags::{
+            CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag, PredicateModeTag,
+        };
+
+        let predicates = task
+            .target_predicate_set
+            .predicates
+            .iter()
+            .map::<Result<CanonicalWeightedPredicateV2, CanonicalizationError>, _>(|wp| {
+                let p = &wp.predicate;
+                Ok(CanonicalWeightedPredicateV2 {
+                    axis: PredicateAxisTag::try_from(&p.metric)?,
+                    operator: ComparisonOpTag::try_from(&p.operator)?,
+                    threshold: p.threshold,
+                    scope: match &p.scope {
+                        crate::trajectory::PredicateScope::Node(id) => {
+                            CanonicalPredicateScope::Node(*id)
+                        }
+                        crate::trajectory::PredicateScope::Module(name) => {
+                            CanonicalPredicateScope::Module(name.clone())
+                        }
+                        crate::trajectory::PredicateScope::Subgraph(ids) => {
+                            CanonicalPredicateScope::Subgraph(CanonicalSubgraphScope::try_new(
+                                ids.clone(),
+                            )?)
+                        }
+                    },
+                    required_source: match p.required_source {
+                        None => EffectiveSourceRequirement::Any,
+                        Some(src) => EffectiveSourceRequirement::Exact(
+                            CanonicalMetricSourceTag::try_from(&src)?,
+                        ),
+                    },
+                    declared_weight: wp.weight,
+                    tolerance: p.tolerance,
+                })
+            })
+            .collect::<Result<Vec<CanonicalWeightedPredicateV2>, CanonicalizationError>>()?;
+
+        Ok(Self {
+            task_id: task.id,
+            mode: PredicateModeTag::try_from(&task.target_predicate_set.mode)?,
+            predicates,
+            preferred_vector: task.target_predicate_set.preferred_vector.map(|pv| {
+                CanonicalRawPosition {
+                    x: pv.x,
+                    y: pv.y,
+                    z: pv.z,
+                    w: pv.w,
+                    v: pv.v,
+                }
+            }),
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // INV-T9 #70 Faz 5 Adım 4+5 (P1-3) — Reverse TryFrom: Canonical V2 → Domain
 //
 // Faz 5 restore evaluator'ın ihtiyaç duyduğu reverse projection (Canonical→Domain).
@@ -2610,6 +2692,24 @@ pub enum AuthorizationBasisV2Error {
     BaselineValidation(#[from] CanonicalBaselineValidationError),
     #[error("basis construction failed: {detail}")]
     Construction { detail: String },
+    // ── INV-T9 #70 Faz 5 Adım 16 (review P0-3) — 4 yeni field commitment parity ──
+    /// Task-goal evidence task_id, basis task_id ile tutarsız. Typed evidence identity —
+    /// cross-context substitution reject. `CanonicalTaskGoalEvidenceV2.task_id` ayrı field.
+    #[error("task goal evidence task_id mismatch: evidence={evidence}, basis={basis}")]
+    TaskGoalEvidenceTaskIdMismatch { evidence: u64, basis: u64 },
+    /// Task-goal evidence → digest parity mismatch. `task_goal_evidence` (readable) ile
+    /// `task_goal_digest` (commitment) aynı gerçekliği temsil etmeli.
+    #[error("task goal evidence digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    TaskGoalEvidenceDigestMismatch { stored: String, recomputed: String },
+    /// Measured-after → digest parity mismatch. `measured_after` (readable 5-axis) ile
+    /// `measurement_digest` (commitment) aynı gerçekliği temsil etmeli.
+    #[error("measured after digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    MeasuredAfterDigestMismatch { stored: String, recomputed: String },
+    /// Predicate gate policy digest parity mismatch. `predicate_basis` (readable policy +
+    /// result) üzerinden `compute_from_canonical` ile recompute, `predicate_gate_policy_digest`
+    /// (commitment) ile parity. Policy digest evaluation result HARIÇ (sadece policy fields).
+    #[error("predicate gate policy digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    PredicateGatePolicyDigestMismatch { stored: String, recomputed: String },
 }
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:146-160, reviewer P1-2):** Canonical V2
@@ -2656,6 +2756,22 @@ pub struct AuthorizationBasisV2 {
     measurement_context_digest: crate::measurement::MeasurementContextDigest,
     /// Canonical structural delta digest — claim → structural delta commitment.
     canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+    // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (13→17) ──────────────────────────
+    /// Measured-after — tek canonical after (5-axis değer + source). `measurement_digest`
+    /// bu evidence'ın commitment'ı (validate_semantics parity). Duplicate yok — baseline
+    /// ayrı (trajectory_baseline.before), after ayrı (measured_after).
+    measured_after: ProvenancedMeasuredResult,
+    /// Readable task-goal evidence — verify epoch capture (TryFrom<&Task> authoritative
+    /// projection). `task_goal_digest` bu evidence'ın commitment'ı. Restore path (Adım 17)
+    /// reverse projection + validate_predicate_goal_for_commit ile reverify.
+    task_goal_evidence: CanonicalTaskGoalEvidenceV2,
+    /// Predicate evaluation basis — evaluation sonucu (result + policy + semantics version).
+    /// Bundle-scoped (review P0-1: measurement binding epoch'unda DEĞIL). `predicate_gate_policy_digest`
+    /// bu basis'in commitment'ı (compute_from_canonical — result HARİÇ, policy fields dahil).
+    predicate_basis: CanonicalPredicateEvaluationBasisV2,
+    /// Predicate gate policy digest — task snapshot'ına bağlı policy commitment (TOCTOU).
+    /// `predicate_basis` üzerinden compute_from_canonical ile reverify (result Hariç).
+    predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
 }
 
 impl AuthorizationBasisV2 {
@@ -2678,6 +2794,11 @@ impl AuthorizationBasisV2 {
         measurement_request_digest: crate::measurement::MeasurementRequestDigest,
         measurement_context_digest: crate::measurement::MeasurementContextDigest,
         canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+        // INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (13→17):
+        measured_after: ProvenancedMeasuredResult,
+        task_goal_evidence: CanonicalTaskGoalEvidenceV2,
+        predicate_basis: CanonicalPredicateEvaluationBasisV2,
+        predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
     ) -> Result<Self, AuthorizationBasisV2Error> {
         let basis = Self {
             task_id,
@@ -2693,6 +2814,10 @@ impl AuthorizationBasisV2 {
             measurement_request_digest,
             measurement_context_digest,
             canonical_delta_digest,
+            measured_after,
+            task_goal_evidence,
+            predicate_basis,
+            predicate_gate_policy_digest,
         };
         basis.validate_semantics()?;
         Ok(basis)
@@ -2775,6 +2900,65 @@ impl AuthorizationBasisV2 {
                 basis: self.canonical_delta_digest.to_hex(),
             });
         }
+
+        // ── INV-T9 #70 Faz 5 Adım 16 (review P0-3) — 4 yeni field commitment parity ──
+        // Mevcut defense-in-depth pattern'inin devamı: readable evidence field'ları
+        // stored commitment digest'leri ile tutarlı olmalı. Cross-field substitution reject.
+
+        // (a) Task-goal evidence task_id == basis task_id (typed evidence identity).
+        // CanonicalTaskGoalEvidenceV2 kendi task_id field'ını taşır — basis identity binding.
+        if self.task_goal_evidence.task_id != self.task_id {
+            return Err(AuthorizationBasisV2Error::TaskGoalEvidenceTaskIdMismatch {
+                evidence: self.task_goal_evidence.task_id.into(),
+                basis: self.task_id.into(),
+            });
+        }
+
+        // (b) Task-goal evidence → digest parity. compute_from_canonical shared writer.
+        let recomputed_task_goal =
+            crate::measurement::TaskGoalDigest::compute_from_canonical(&self.task_goal_evidence)
+                .map_err(|e| AuthorizationBasisV2Error::Construction {
+                    detail: e.to_string(),
+                })?;
+        if recomputed_task_goal.as_bytes() != self.task_goal_digest.as_bytes() {
+            return Err(AuthorizationBasisV2Error::TaskGoalEvidenceDigestMismatch {
+                stored: self.task_goal_digest.to_hex(),
+                recomputed: recomputed_task_goal.to_hex(),
+            });
+        }
+
+        // (c) Measured-after → digest parity. MeasurementDigest shared writer.
+        let recomputed_measured =
+            crate::measurement::MeasurementDigest::compute_from_canonical(&self.measured_after)
+                .map_err(|e| AuthorizationBasisV2Error::Construction {
+                    detail: e.to_string(),
+                })?;
+        if recomputed_measured.as_bytes() != self.measurement_digest.as_bytes() {
+            return Err(AuthorizationBasisV2Error::MeasuredAfterDigestMismatch {
+                stored: self.measurement_digest.to_hex(),
+                recomputed: recomputed_measured.to_hex(),
+            });
+        }
+
+        // (d) Predicate gate policy digest parity. compute_from_canonical basis.result
+        // KULLANMAZ (policy digest evaluation sonucundan bağımsız — sadece policy fields).
+        let recomputed_policy =
+            crate::measurement::PredicateGatePolicyDigestV2::compute_from_canonical(
+                self.task_id,
+                &self.task_goal_digest,
+                &self.predicate_basis,
+            )
+            .map_err(|e| AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            })?;
+        if recomputed_policy.as_bytes() != self.predicate_gate_policy_digest.as_bytes() {
+            return Err(
+                AuthorizationBasisV2Error::PredicateGatePolicyDigestMismatch {
+                    stored: self.predicate_gate_policy_digest.to_hex(),
+                    recomputed: recomputed_policy.to_hex(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -2808,6 +2992,21 @@ impl AuthorizationBasisV2 {
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
     pub(crate) fn canonical_delta_digest(&self) -> &crate::measurement::MeasurementDeltaDigest {
         &self.canonical_delta_digest
+    }
+    // ── INV-T9 #70 Faz 5 Adım 16 — +4 accessor ──────────────────────────────────
+    pub(crate) fn measured_after(&self) -> &ProvenancedMeasuredResult {
+        &self.measured_after
+    }
+    pub(crate) fn task_goal_evidence(&self) -> &CanonicalTaskGoalEvidenceV2 {
+        &self.task_goal_evidence
+    }
+    pub(crate) fn predicate_basis(&self) -> &CanonicalPredicateEvaluationBasisV2 {
+        &self.predicate_basis
+    }
+    pub(crate) fn predicate_gate_policy_digest(
+        &self,
+    ) -> &crate::measurement::PredicateGatePolicyDigestV2 {
+        &self.predicate_gate_policy_digest
     }
     #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
     pub(crate) fn task_claim_digest(&self) -> &crate::measurement::TaskClaimDigest {
@@ -3139,6 +3338,77 @@ impl AuthorizationBasisDigestV2 {
         // Nested evidence — measurement request evidence (subject/impact/revision/digest).
         encode_canonical_measurement_request_evidence_v2(&mut hasher, &basis.measurement_request)?;
 
+        // ── INV-T9 #70 Faz 5 Adım 16 — +4 encoding (review P0-4) ─────────────────
+        // Encoding sırası frozen: measured_after → task_goal_evidence → predicate_basis →
+        // predicate_gate_policy_digest. Golden regoldening sonrası bu sıra sabit kalır.
+
+        // Measured-after — shared writer (write_measurement_result_commitment). 5-axis
+        // değer + source. MeasurementDigest ile aynı byte format (tek truth source).
+        crate::measurement::MeasurementDigest::write_measurement_result_commitment(
+            &mut hasher,
+            (
+                basis.measured_after.coupling.value,
+                basis.measured_after.coupling.source,
+            ),
+            (
+                basis.measured_after.cohesion.value,
+                basis.measured_after.cohesion.source,
+            ),
+            (
+                basis.measured_after.instability.value,
+                basis.measured_after.instability.source,
+            ),
+            (
+                basis.measured_after.entropy.value,
+                basis.measured_after.entropy.source,
+            ),
+            (
+                basis.measured_after.witness_depth.value,
+                basis.measured_after.witness_depth.source,
+            ),
+        )
+        .map_err(|e| CanonicalDigestError::EncodingFailed(e.to_string()))?;
+
+        // Task-goal evidence — shared writer (write_task_goal_commitment). Predicate'leri
+        // canonical byte dizisine çevir (encode_canonical_weighted_predicate_v2_to_vec), sonra
+        // shared writer ile encode. TaskGoalDigest ile aynı byte format (tek truth source).
+        {
+            let encoded_preds: Vec<Vec<u8>> = basis
+                .task_goal_evidence
+                .predicates
+                .iter()
+                .map(crate::measurement::TaskGoalDigest::encode_canonical_weighted_predicate_v2_to_vec)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| CanonicalDigestError::EncodingFailed(e.to_string()))?;
+            let preferred_vector = basis
+                .task_goal_evidence
+                .preferred_vector
+                .as_ref()
+                .map(|crp| crate::coords::RawPosition {
+                    x: crp.x,
+                    y: crp.y,
+                    z: crp.z,
+                    w: crp.w,
+                    v: crp.v,
+                });
+            crate::measurement::TaskGoalDigest::write_task_goal_commitment(
+                &mut hasher,
+                basis.task_goal_evidence.task_id,
+                basis.task_goal_evidence.mode,
+                &encoded_preds,
+                preferred_vector.as_ref(),
+            )
+            .map_err(|e| CanonicalDigestError::EncodingFailed(e.to_string()))?;
+        }
+
+        // Predicate basis — DEDICATED encoder (review P0-4). write_predicate_gate_policy_commitment
+        // YETERSIZ: result taşımaz. Bu encoder full field set: semantics_version + result +
+        // failure_policy + min_improvement_delta + allow_progress_checkpoint + effective_improvement.
+        encode_canonical_predicate_evaluation_basis_v2(&mut hasher, &basis.predicate_basis)?;
+
+        // Predicate gate policy digest — raw 32 bytes (commitment, recompute DEĞIL).
+        hasher.update(basis.predicate_gate_policy_digest.as_bytes());
+
         Ok(Self(hasher.finalize().into()))
     }
 
@@ -3363,6 +3633,74 @@ fn encode_canonical_measurement_request_evidence_v2(
     // Structural delta digest + measurement input digest — raw 32 bytes.
     hasher.update(evidence.structural_delta_digest.as_bytes());
     hasher.update(evidence.measurement_input_digest.as_bytes());
+    Ok(())
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P0-4):** Dedicated canonical predicate-evaluation-basis
+/// encoder. `write_predicate_gate_policy_commitment` YETERSIZ — policy digest için yazılır ve
+/// `result` taşımaz (policy digest evaluation sonucundan bağımsız). Bu encoder basis digest
+/// için full field set: semantics_version + result + failure_policy + min_improvement_delta +
+/// allow_progress_checkpoint + effective_improvement.
+///
+/// **Encoding sırası frozen** (golden byte contract):
+/// 1. `gate_evaluation_semantics_version` (u32)
+/// 2. `result` tag (u8 — PredicateSetResultTag)
+/// 3. `failure_policy` tag (u8 — PredicateFailurePolicyTag)
+/// 4. `min_improvement_delta` (f64 — NaN reject, -0.0 normalize)
+/// 5. `allow_progress_checkpoint` (bool → 0/1)
+/// 6. `effective_improvement`: max_coupling + max_instability + min_cohesion + semantics_version
+///
+/// **task_id + task_goal_digest encode EDİLMEZ** — basis digest zaten identity + digests
+/// bölümünde encode ediyor (duplicate yok).
+fn encode_canonical_predicate_evaluation_basis_v2(
+    hasher: &mut blake3::Hasher,
+    basis: &CanonicalPredicateEvaluationBasisV2,
+) -> Result<(), CanonicalDigestError> {
+    use crate::canonical_encoding::{encode_f64, encode_u32, encode_u8};
+
+    // gate_evaluation_semantics_version (u32).
+    encode_u32(
+        hasher,
+        basis.gate_evaluation_semantics_version,
+        "gate_evaluation_semantics_version",
+    );
+    // result tag (PredicateSetResultTag — evaluation sonucu, review P0-4'ün ana noktası).
+    encode_u8(hasher, basis.result.as_u8(), "predicate_set_result_tag");
+    // failure_policy tag.
+    encode_u8(hasher, basis.failure_policy.as_u8(), "failure_policy_tag");
+    // min_improvement_delta (canonical f64).
+    encode_f64(hasher, basis.min_improvement_delta, "min_improvement_delta")?;
+    // allow_progress_checkpoint (bool → 0/1).
+    encode_u8(
+        hasher,
+        if basis.allow_progress_checkpoint {
+            1
+        } else {
+            0
+        },
+        "allow_progress_checkpoint_tag",
+    );
+    // Effective improvement policy: max_coupling + max_instability + min_cohesion + semantics_version.
+    encode_f64(
+        hasher,
+        basis.effective_improvement.max_coupling,
+        "basis_max_coupling",
+    )?;
+    encode_f64(
+        hasher,
+        basis.effective_improvement.max_instability,
+        "basis_max_instability",
+    )?;
+    encode_f64(
+        hasher,
+        basis.effective_improvement.min_cohesion,
+        "basis_min_cohesion",
+    )?;
+    encode_u32(
+        hasher,
+        basis.effective_improvement.semantics_version,
+        "basis_improvement_semantics_version",
+    );
     Ok(())
 }
 
@@ -4397,9 +4735,10 @@ pub enum CanonicalizationError {
 mod gate_v2;
 
 // Re-export Faz 5 gate_v2 public API (error taxonomy + bundle consumers).
-#[allow(unused_imports, reason = "Faz 5 Item 15-17 consumers")]
+#[allow(unused_imports, reason = "Faz 8 production wiring consumer")]
 pub(crate) use gate_v2::{
-    GateEvaluationV2Error, ProducedTrajectoryLossEvidence, TrajectoryLossProductionError,
+    build_authorization_context_v2, evaluate_task_gate_v2, GateEvaluationV2Error,
+    ProducedTrajectoryLossEvidence, TrajectoryLossProductionError, VerifiedGateEvaluationBundleV2,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5036,6 +5375,20 @@ impl VerifiedGateEvaluationV2 {
     #[allow(dead_code, reason = "Faz 4 context constructor / Commit 2 consumer")]
     pub(crate) fn into_canonical(self) -> CanonicalGateEvaluationV2 {
         self.canonical
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 18 (plan md:75-79):** Production constructor —
+    /// `evaluate_task_gate_v2` (gate_v2.rs child module) çağırır. Sadece child module
+    /// erişebilir (field private + modül gizlilik). `GatePassed { mutation_decision }`
+    /// için — Faz 5'de tüm gate kararları GatePassed (RejectedByGate Faz 8 hard-gate).
+    ///
+    /// **Proof semantics:** Bu ctor kanıt üretmez; kanıt `evaluate_task_gate_v2`'nin
+    /// 3 digest recheck + tek predicate evaluation + decision core zinciridir. Bu ctor
+    /// sadece evaluated sonucu opaque proof'a sarmalar (tampering kapalı — field private).
+    pub(crate) fn from_gate_passed(mutation_decision: crate::trajectory::MutationDecision) -> Self {
+        Self {
+            canonical: CanonicalGateEvaluationV2::GatePassed { mutation_decision },
+        }
     }
 
     /// **cfg(test) fixture (plan md:79):** Test-only constructor — authorization.rs'te
@@ -6972,6 +7325,77 @@ struct RawProvenancedMeasuredResultV2 {
     witness_depth: RawAxisMeasurementV2,
 }
 
+/// **INV-T9 #70 Faz 5 Adım 16 (review P1-3):** Wire form for `CanonicalTaskGoalEvidenceV2`.
+/// `deny_unknown_fields` — persisted canonical evidence için unknown field sessizce düşürülmez.
+/// Direct serde (CanonicalTaskGoalEvidenceV2 derive) yerine dedicated Raw: nested weighted
+/// predicate + preferred_vector strict validation.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalTaskGoalEvidenceV2 {
+    task_id: u64,
+    mode: u8,
+    predicates: Vec<RawCanonicalWeightedPredicateV2>,
+    preferred_vector: Option<RawCanonicalRawPositionV2>,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P1-3):** Wire form for canonical weighted predicate.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalWeightedPredicateV2 {
+    axis: u8,
+    operator: u8,
+    threshold: f64,
+    scope: RawCanonicalPredicateScopeV2,
+    required_source: RawEffectiveSourceRequirementV2,
+    declared_weight: Option<f64>,
+    tolerance: f64,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire form for predicate scope (internally tagged).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawCanonicalPredicateScopeV2 {
+    Node { id: u64 },
+    Module { name: String },
+    Subgraph { ids: Vec<u64> },
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire form for effective source requirement (internally tagged).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawEffectiveSourceRequirementV2 {
+    Any,
+    Exact { source_tag: u8 },
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire form for canonical raw position.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalRawPositionV2 {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    v: f64,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P1-3):** Wire form for
+/// `CanonicalPredicateEvaluationBasisV2`. `deny_unknown_fields` — persisted evaluation basis
+/// için unknown field sessizce düşürülmez. EffectiveImproPolicyBasisV2 inline (flat struct).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalPredicateEvaluationBasisV2 {
+    gate_evaluation_semantics_version: u32,
+    result: u8,
+    failure_policy: u8,
+    min_improvement_delta: f64,
+    allow_progress_checkpoint: bool,
+    effective_improvement_max_coupling: f64,
+    effective_improvement_max_instability: f64,
+    effective_improvement_min_cohesion: f64,
+    effective_improvement_semantics_version: u32,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum RawSpaceViewIdV2 {
@@ -7013,6 +7437,11 @@ struct RawAuthorizationBasisV2 {
     measurement_request_digest: LowerHex32,
     measurement_context_digest: LowerHex32,
     canonical_delta_digest: LowerHex32,
+    // INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (review P1-3: nested deny_unknown_fields):
+    measured_after: RawProvenancedMeasuredResultV2,
+    task_goal_evidence: RawCanonicalTaskGoalEvidenceV2,
+    predicate_basis: RawCanonicalPredicateEvaluationBasisV2,
+    predicate_gate_policy_digest: LowerHex32,
 }
 
 // ── Envelope tipleri (reviewer P0-2) ────────────────────────────────────────────
@@ -7107,6 +7536,11 @@ struct RawAuthorizationBasisV2Ref<'a> {
     measurement_request_digest: LowerHex32,
     measurement_context_digest: LowerHex32,
     canonical_delta_digest: LowerHex32,
+    // INV-T9 #70 Faz 5 Adım 16 — +4 field:
+    measured_after: RawProvenancedMeasuredResultV2Ref<'a>,
+    task_goal_evidence: RawCanonicalTaskGoalEvidenceV2Ref<'a>,
+    predicate_basis: RawCanonicalPredicateEvaluationBasisV2Ref,
+    predicate_gate_policy_digest: LowerHex32,
 }
 
 impl<'a> RawAuthorizationBasisV2Ref<'a> {
@@ -7132,6 +7566,16 @@ impl<'a> RawAuthorizationBasisV2Ref<'a> {
             measurement_request_digest: LowerHex32(*basis.measurement_request_digest().as_bytes()),
             measurement_context_digest: LowerHex32(*basis.measurement_context_digest().as_bytes()),
             canonical_delta_digest: LowerHex32(*basis.canonical_delta_digest().as_bytes()),
+            measured_after: RawProvenancedMeasuredResultV2Ref::from_domain(basis.measured_after()),
+            task_goal_evidence: RawCanonicalTaskGoalEvidenceV2Ref::from_domain(
+                basis.task_goal_evidence(),
+            ),
+            predicate_basis: RawCanonicalPredicateEvaluationBasisV2Ref::from_domain(
+                basis.predicate_basis(),
+            ),
+            predicate_gate_policy_digest: LowerHex32(
+                *basis.predicate_gate_policy_digest().as_bytes(),
+            ),
         }
     }
 }
@@ -7317,6 +7761,153 @@ impl<'a> RawMeasurementRequestEvidenceV2Ref<'a> {
             base_revision: RawSpaceViewRevisionV2Ref::from_domain(&evidence.base_revision),
             structural_delta_digest: LowerHex32(*evidence.structural_delta_digest.as_bytes()),
             measurement_input_digest: LowerHex32(*evidence.measurement_input_digest.as_bytes()),
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for `CanonicalTaskGoalEvidenceV2` (serialize).
+/// Raw deserialize formatıyla aynı wire format (internally tagged scope/source).
+#[derive(serde::Serialize)]
+struct RawCanonicalTaskGoalEvidenceV2Ref<'a> {
+    task_id: u64,
+    mode: u8,
+    predicates: Vec<RawCanonicalWeightedPredicateV2Ref<'a>>,
+    preferred_vector: Option<RawCanonicalRawPositionV2Ref>,
+}
+
+impl<'a> RawCanonicalTaskGoalEvidenceV2Ref<'a> {
+    fn from_domain(evidence: &'a CanonicalTaskGoalEvidenceV2) -> Self {
+        Self {
+            task_id: evidence.task_id.into(),
+            mode: evidence.mode.as_u8(),
+            predicates: evidence
+                .predicates
+                .iter()
+                .map(RawCanonicalWeightedPredicateV2Ref::from_domain)
+                .collect(),
+            preferred_vector: evidence
+                .preferred_vector
+                .as_ref()
+                .map(RawCanonicalRawPositionV2Ref::from_domain),
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for canonical weighted predicate.
+#[derive(serde::Serialize)]
+struct RawCanonicalWeightedPredicateV2Ref<'a> {
+    axis: u8,
+    operator: u8,
+    threshold: f64,
+    scope: RawCanonicalPredicateScopeV2Ref<'a>,
+    required_source: RawEffectiveSourceRequirementV2Ref,
+    declared_weight: Option<f64>,
+    tolerance: f64,
+}
+
+impl<'a> RawCanonicalWeightedPredicateV2Ref<'a> {
+    fn from_domain(p: &'a CanonicalWeightedPredicateV2) -> Self {
+        Self {
+            axis: p.axis.as_u8(),
+            operator: p.operator.as_u8(),
+            threshold: p.threshold,
+            scope: RawCanonicalPredicateScopeV2Ref::from_domain(&p.scope),
+            required_source: RawEffectiveSourceRequirementV2Ref::from_domain(&p.required_source),
+            declared_weight: p.declared_weight,
+            tolerance: p.tolerance,
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for predicate scope.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawCanonicalPredicateScopeV2Ref<'a> {
+    Node { id: u64 },
+    Module { name: &'a str },
+    Subgraph { ids: &'a [u64] },
+}
+
+impl<'a> RawCanonicalPredicateScopeV2Ref<'a> {
+    fn from_domain(scope: &'a CanonicalPredicateScope) -> Self {
+        match scope {
+            CanonicalPredicateScope::Node(id) => Self::Node { id: *id },
+            CanonicalPredicateScope::Module(name) => Self::Module { name },
+            CanonicalPredicateScope::Subgraph(s) => Self::Subgraph {
+                ids: s.as_sorted_ids(),
+            },
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for effective source requirement.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawEffectiveSourceRequirementV2Ref {
+    Any,
+    Exact { source_tag: u8 },
+}
+
+impl RawEffectiveSourceRequirementV2Ref {
+    fn from_domain(req: &EffectiveSourceRequirement) -> Self {
+        match req {
+            EffectiveSourceRequirement::Any => Self::Any,
+            EffectiveSourceRequirement::Exact(tag) => Self::Exact {
+                source_tag: tag.as_u8(),
+            },
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for canonical raw position.
+#[derive(serde::Serialize)]
+struct RawCanonicalRawPositionV2Ref {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    v: f64,
+}
+
+impl RawCanonicalRawPositionV2Ref {
+    fn from_domain(pos: &CanonicalRawPosition) -> Self {
+        Self {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            w: pos.w,
+            v: pos.v,
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for `CanonicalPredicateEvaluationBasisV2`.
+/// Raw deserialize formatıyla aynı (flat effective_improvement fields).
+#[derive(serde::Serialize)]
+struct RawCanonicalPredicateEvaluationBasisV2Ref {
+    gate_evaluation_semantics_version: u32,
+    result: u8,
+    failure_policy: u8,
+    min_improvement_delta: f64,
+    allow_progress_checkpoint: bool,
+    effective_improvement_max_coupling: f64,
+    effective_improvement_max_instability: f64,
+    effective_improvement_min_cohesion: f64,
+    effective_improvement_semantics_version: u32,
+}
+
+impl RawCanonicalPredicateEvaluationBasisV2Ref {
+    fn from_domain(basis: &CanonicalPredicateEvaluationBasisV2) -> Self {
+        Self {
+            gate_evaluation_semantics_version: basis.gate_evaluation_semantics_version,
+            result: basis.result.as_u8(),
+            failure_policy: basis.failure_policy.as_u8(),
+            min_improvement_delta: basis.min_improvement_delta,
+            allow_progress_checkpoint: basis.allow_progress_checkpoint,
+            effective_improvement_max_coupling: basis.effective_improvement.max_coupling,
+            effective_improvement_max_instability: basis.effective_improvement.max_instability,
+            effective_improvement_min_cohesion: basis.effective_improvement.min_cohesion,
+            effective_improvement_semantics_version: basis.effective_improvement.semantics_version,
         }
     }
 }
@@ -7679,7 +8270,35 @@ impl AuthorizationBasisV2 {
             ),
         };
 
-        // AuthorizationBasisV2::new — validate_semantics (nested commitment reverify).
+        // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field wire → domain conversion ──────
+        // measured_after: RawProvenancedMeasuredResultV2 → ProvenancedMeasuredResult.
+        let mk_axis = |a: RawAxisMeasurementV2| -> Result<_, VersionedAuthorizationBasisError> {
+            let source = CanonicalMetricSourceTag::try_from(a.source_tag).map_err(|e| {
+                VersionedAuthorizationBasisError::V2WireConversion {
+                    detail: format!("measured_after axis source_tag: {e}"),
+                }
+            })?;
+            Ok(CanonicalAxisMeasurement {
+                value: a.value,
+                source,
+            })
+        };
+        let measured_after = ProvenancedMeasuredResult {
+            coupling: mk_axis(raw.measured_after.coupling)?,
+            cohesion: mk_axis(raw.measured_after.cohesion)?,
+            instability: mk_axis(raw.measured_after.instability)?,
+            entropy: mk_axis(raw.measured_after.entropy)?,
+            witness_depth: mk_axis(raw.measured_after.witness_depth)?,
+        };
+
+        // task_goal_evidence: RawCanonicalTaskGoalEvidenceV2 → CanonicalTaskGoalEvidenceV2.
+        let task_goal_evidence = raw_task_goal_evidence_to_domain(raw.task_goal_evidence)?;
+
+        // predicate_basis: RawCanonicalPredicateEvaluationBasisV2 → CanonicalPredicateEvaluationBasisV2.
+        let predicate_basis = raw_predicate_evaluation_basis_to_domain(raw.predicate_basis)?;
+
+        // AuthorizationBasisV2::new — validate_semantics (nested commitment reverify +
+        // 4-field parity, Faz 5 Adım 16).
         Self::new(
             raw.task_id,
             raw.claim_id,
@@ -7704,9 +8323,127 @@ impl AuthorizationBasisV2 {
             crate::measurement::MeasurementDeltaDigest::from_bytes(
                 raw.canonical_delta_digest.into_bytes(),
             ),
+            measured_after,
+            task_goal_evidence,
+            predicate_basis,
+            crate::measurement::PredicateGatePolicyDigestV2::from_bytes(
+                raw.predicate_gate_policy_digest.into_bytes(),
+            ),
         )
         .map_err(VersionedAuthorizationBasisError::V2Validation)
     }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire `RawCanonicalTaskGoalEvidenceV2` → domain
+/// `CanonicalTaskGoalEvidenceV2`. Tag dönüşümleri (mode/axis/operator/source) +
+/// scope projection. Infallible DEĞİL — geçersiz tag reject.
+fn raw_task_goal_evidence_to_domain(
+    raw: RawCanonicalTaskGoalEvidenceV2,
+) -> Result<CanonicalTaskGoalEvidenceV2, VersionedAuthorizationBasisError> {
+    use crate::canonical_tags::{
+        CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag, PredicateModeTag,
+    };
+    let mode = PredicateModeTag::try_from(raw.mode).map_err(|e| {
+        VersionedAuthorizationBasisError::V2WireConversion {
+            detail: format!("task_goal_evidence mode: {e}"),
+        }
+    })?;
+    let predicates = raw
+        .predicates
+        .into_iter()
+        .map::<Result<CanonicalWeightedPredicateV2, VersionedAuthorizationBasisError>, _>(|p| {
+            let axis = PredicateAxisTag::try_from(p.axis).map_err(|e| {
+                VersionedAuthorizationBasisError::V2WireConversion {
+                    detail: format!("task_goal_evidence axis: {e}"),
+                }
+            })?;
+            let operator = ComparisonOpTag::try_from(p.operator).map_err(|e| {
+                VersionedAuthorizationBasisError::V2WireConversion {
+                    detail: format!("task_goal_evidence operator: {e}"),
+                }
+            })?;
+            let scope = match p.scope {
+                RawCanonicalPredicateScopeV2::Node { id } => CanonicalPredicateScope::Node(id),
+                RawCanonicalPredicateScopeV2::Module { name } => {
+                    CanonicalPredicateScope::Module(name)
+                }
+                RawCanonicalPredicateScopeV2::Subgraph { ids } => {
+                    CanonicalPredicateScope::Subgraph(
+                        CanonicalSubgraphScope::try_new(ids).map_err(|e| {
+                            VersionedAuthorizationBasisError::V2WireConversion {
+                                detail: format!("task_goal_evidence subgraph: {e}"),
+                            }
+                        })?,
+                    )
+                }
+            };
+            let required_source = match p.required_source {
+                RawEffectiveSourceRequirementV2::Any => EffectiveSourceRequirement::Any,
+                RawEffectiveSourceRequirementV2::Exact { source_tag } => {
+                    EffectiveSourceRequirement::Exact(
+                        CanonicalMetricSourceTag::try_from(source_tag).map_err(|e| {
+                            VersionedAuthorizationBasisError::V2WireConversion {
+                                detail: format!("task_goal_evidence required_source: {e}"),
+                            }
+                        })?,
+                    )
+                }
+            };
+            Ok(CanonicalWeightedPredicateV2 {
+                axis,
+                operator,
+                threshold: p.threshold,
+                scope,
+                required_source,
+                declared_weight: p.declared_weight,
+                tolerance: p.tolerance,
+            })
+        })
+        .collect::<Result<Vec<CanonicalWeightedPredicateV2>, VersionedAuthorizationBasisError>>()?;
+    let preferred_vector = raw.preferred_vector.map(|p| CanonicalRawPosition {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        w: p.w,
+        v: p.v,
+    });
+    Ok(CanonicalTaskGoalEvidenceV2 {
+        task_id: raw.task_id,
+        mode,
+        predicates,
+        preferred_vector,
+    })
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire `RawCanonicalPredicateEvaluationBasisV2` → domain
+/// `CanonicalPredicateEvaluationBasisV2`. Tag dönüşümleri (result/failure_policy).
+fn raw_predicate_evaluation_basis_to_domain(
+    raw: RawCanonicalPredicateEvaluationBasisV2,
+) -> Result<CanonicalPredicateEvaluationBasisV2, VersionedAuthorizationBasisError> {
+    use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+    let result = PredicateSetResultTag::try_from(raw.result).map_err(|e| {
+        VersionedAuthorizationBasisError::V2WireConversion {
+            detail: format!("predicate_basis result: {e}"),
+        }
+    })?;
+    let failure_policy = PredicateFailurePolicyTag::try_from(raw.failure_policy).map_err(|e| {
+        VersionedAuthorizationBasisError::V2WireConversion {
+            detail: format!("predicate_basis failure_policy: {e}"),
+        }
+    })?;
+    Ok(CanonicalPredicateEvaluationBasisV2 {
+        gate_evaluation_semantics_version: raw.gate_evaluation_semantics_version,
+        result,
+        failure_policy,
+        min_improvement_delta: raw.min_improvement_delta,
+        allow_progress_checkpoint: raw.allow_progress_checkpoint,
+        effective_improvement: EffectiveImproPolicyBasisV2 {
+            max_coupling: raw.effective_improvement_max_coupling,
+            max_instability: raw.effective_improvement_max_instability,
+            min_cohesion: raw.effective_improvement_min_cohesion,
+            semantics_version: raw.effective_improvement_semantics_version,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -13336,6 +14073,10 @@ v = 0.5
             parts.measurement_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
         .expect("valid V2 basis")
     }
@@ -13356,6 +14097,11 @@ v = 0.5
         measurement_request_digest: crate::measurement::MeasurementRequestDigest,
         measurement_context_digest: crate::measurement::MeasurementContextDigest,
         canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+        // INV-T9 #70 Faz 5 Adım 16 — +4 field (self-consistent, validate_semantics geçer):
+        measured_after: ProvenancedMeasuredResult,
+        task_goal_evidence: CanonicalTaskGoalEvidenceV2,
+        predicate_basis: CanonicalPredicateEvaluationBasisV2,
+        predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
     }
 
     fn faz4_basis_v2_raw_parts(task_id: crate::trajectory::TaskId) -> Faz4BasisV2RawParts {
@@ -13414,6 +14160,46 @@ v = 0.5
         let loss_after = crate::trajectory::trajectory_loss(engine_meas.after(), &preferred);
         let trajectory_loss = CanonicalTrajectoryLossEvidence::Available { target, loss_after };
 
+        // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (self-consistent) ──────────────
+        // measured_after: engine_meas.after() → ProvenancedMeasuredResult (measurement_digest
+        // ile tutarlı — aynı after).
+        let measured_after = ProvenancedMeasuredResult::try_from(engine_meas.after())
+            .expect("measured_after projection infallible");
+        // task_goal_evidence: golden_task → canonical projection (task_goal_digest ile tutarlı —
+        // aynı task, TryFrom<&Task> authoritative projection).
+        let task_goal_evidence = CanonicalTaskGoalEvidenceV2::try_from(&golden_task)
+            .expect("golden task canonical projection infallible");
+        // predicate_basis: evaluator çıktısı formatı. golden task predicate'leri Completed
+        // varsayımıyla (fixture semantiği). policy + improvement_policy + semantics version.
+        let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
+        let predicate_basis = {
+            use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+            CanonicalPredicateEvaluationBasisV2 {
+                gate_evaluation_semantics_version: GATE_EVALUATION_SEMANTICS_V1,
+                result: PredicateSetResultTag::try_from(
+                    &crate::trajectory::PredicateSetResult::Completed,
+                )
+                .expect("Completed tag valid"),
+                failure_policy: PredicateFailurePolicyTag::try_from(
+                    &golden_task.policy.predicate_failure_policy,
+                )
+                .expect("failure policy tag valid"),
+                min_improvement_delta: golden_task.policy.min_improvement_delta,
+                allow_progress_checkpoint: golden_task.policy.allow_progress_checkpoint,
+                effective_improvement: EffectiveImproPolicyBasisV2::try_from(improvement_policy)
+                    .expect("improvement policy finite"),
+            }
+        };
+        // predicate_gate_policy_digest: predicate_basis ile tutarlı (compute_from_canonical).
+        // validate_semantics (d) parity: stored == compute_from_canonical(task_id, goal_digest, basis).
+        let predicate_gate_policy_digest =
+            crate::measurement::PredicateGatePolicyDigestV2::compute_from_canonical(
+                task_id,
+                &task_goal_digest,
+                &predicate_basis,
+            )
+            .expect("policy digest compute");
+
         Faz4BasisV2RawParts {
             task_id,
             claim_id: 1,
@@ -13428,6 +14214,10 @@ v = 0.5
             measurement_request_digest,
             measurement_context_digest,
             canonical_delta_digest,
+            measured_after,
+            task_goal_evidence,
+            predicate_basis,
+            predicate_gate_policy_digest,
         }
     }
 
@@ -13554,6 +14344,10 @@ v = 0.5
             parts.measurement_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
         .expect_err("baseline mismatch must reject");
         assert!(
@@ -13586,6 +14380,10 @@ v = 0.5
             parts.measurement_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
     }
 
@@ -13723,6 +14521,10 @@ v = 0.5
             new_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest, // eski — yeni delta ile çelişir
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
         .unwrap_err();
         assert!(
@@ -13947,7 +14749,7 @@ v = 0.5
         let basis = faz4_basis_v2_fixture();
         let digest = basis.compute_digest().expect("V2 basis digest");
         const FAZ4_BASIS_V2_GOLDEN_HEX: &str =
-            "ee3e78c4b5c3df71752d58cb94cf772816014c3709009a44a98dd1d57fe2bc64";
+            "16953c7e6a4ab9d578c10bfc4dc2b4627ac697186509e359ef233bef57333202";
         assert_eq!(
             digest.to_hex(),
             FAZ4_BASIS_V2_GOLDEN_HEX,
@@ -13973,7 +14775,7 @@ v = 0.5
         let context = AuthorizationContextV2::new(basis, verified, witness_req).unwrap();
         let digest = context.compute_digest().expect("V2 context digest");
         const FAZ4_CONTEXT_V2_GOLDEN_HEX: &str =
-            "3000ccb37928868e2506869aeb6a13f1c823e61977cdf60603b645123380d8a0";
+            "9f30608c376972c89ddd71057f09d07eefadfd31846c483eebc89c1d74ca1f7e";
         assert_eq!(
             digest.to_hex(),
             FAZ4_CONTEXT_V2_GOLDEN_HEX,
