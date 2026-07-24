@@ -1679,8 +1679,7 @@ impl PredicateGatePolicyDigestV2 {
     /// **Tek producer (review P0-3 + P1-2):** `task_id` + `task_goal_digest` + `TaskPolicy`
     /// + `EffectiveImprovementPolicy` üzerinden — gate kararını belirleyen gerçek policy
     /// girdileri + cryptographic task binding. Runtime→canonical projection (checked).
-    /// Shared writer çağırır.
-    #[allow(dead_code, reason = "Faz 5 Item 11 binding consumer")]
+    /// Shared writer çağırır. Consumer: `verify_measurement_binding_inner` (engine.rs).
     pub(crate) fn compute(
         task_id: crate::trajectory::TaskId,
         task_goal_digest: &TaskGoalDigest,
