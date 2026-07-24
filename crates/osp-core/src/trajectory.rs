@@ -368,14 +368,29 @@ impl PredicateSet {
                     PredicateSetResult::NotCompleted
                 }
             }
-            // Weighted: Aşama C'de loss function. Şimdilik All gibi davran (source check).
+            // Weighted: Aşama C'de loss function. Şimdilik All gibi davranır (source check dahil).
+            //
+            // **INV-T9 #70 Commit 4b Faz 5 (review v8 P0-6):** Önceden `all(matches!(Satisfied))`
+            // kullanıyordu — `SourceInsufficient`'ı `NotCompleted`'a collapsed ediyordu. Bu,
+            // placeholder/heuristic ölçümün Weighted task'ta `NotCompleted → AcceptAsProgress`
+            // yoluna girmesine izin vererek INV-T4'ü ihlal ediyordu. All/Any arm'ları source
+            // propagation'ı doğru yapıyor; Weighted artık onları mirror'lar.
             PredicateMode::Weighted => {
-                let all_satisfied = self
-                    .predicates
-                    .iter()
-                    .all(|wp| matches!(wp.predicate.evaluate(pos), PredicateResult::Satisfied));
+                let mut all_satisfied = true;
+                for wp in &self.predicates {
+                    match wp.predicate.evaluate(pos) {
+                        PredicateResult::Satisfied => {}
+                        PredicateResult::SourceInsufficient => {
+                            any_source_insufficient = true;
+                            all_satisfied = false;
+                        }
+                        PredicateResult::Unsatisfied => all_satisfied = false,
+                    }
+                }
                 if all_satisfied {
                     PredicateSetResult::Completed
+                } else if any_source_insufficient {
+                    PredicateSetResult::SourceInsufficient
                 } else {
                     PredicateSetResult::NotCompleted
                 }
@@ -2095,9 +2110,9 @@ mod tests {
 
     #[test]
     fn weighted_mode_with_mixed_requirement_is_source_insufficient() {
-        // Bypass 2: Weighted mode'da Mixed predicate SourceInsufficient → all()==false
-        // → NotCompleted (info loss). PredicateGate NotCompleted'i policy'ye göre
-        // AcceptAsProgress'e çevirebilirdi. Set-level guard SourceInsufficient korur.
+        // Weighted mode + Mixed requirement. Set-level preflight (has_invalid_mixed_source_requirement)
+        // bunu erken yakalar — bu test preflight'i doğrular. Faz 5 Weighted arm mirror düzeltmesi
+        // (P0-6) non-Mixed source mismatch'ları için ayrıca test edilir (aşağıdaki test).
         let set = PredicateSet {
             mode: PredicateMode::Weighted,
             predicates: vec![WeightedPredicate {
@@ -2110,6 +2125,69 @@ mod tests {
             set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
             PredicateSetResult::SourceInsufficient,
             "Weighted mode: invalid Mixed requirement NotCompleted değil SourceInsufficient olmalı"
+        );
+    }
+
+    #[test]
+    fn weighted_mode_non_mixed_source_mismatch_is_source_insufficient() {
+        // **INV-T9 #70 Commit 4b Faz 5 (review v8 P0-6):** Weighted arm eskiden
+        // `all(matches!(Satisfied))` kullanıyordu — `SourceInsufficient`'ı `NotCompleted`'a
+        // collapsed ediyordu. Bu, placeholder ölçümün Weighted task'ta
+        // `NotCompleted → AcceptAsProgress` yoluna girmesine izin vererek INV-T4'ü ihlal ediyordu.
+        //
+        // Bu test preflight YOKKEN (non-Mixed source mismatch) Weighted arm'ın kendi
+        // source propagation'ını doğrular: required_source=Scip ama measured Placeholder.
+        let set = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, Some(MetricSource::Scip)),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        // placeholder_pos coupling için Placeholder source üretir — required Scip ile uyuşmaz.
+        assert_eq!(
+            set.evaluate_completion(&placeholder_pos(0.40)),
+            PredicateSetResult::SourceInsufficient,
+            "Weighted mode: non-Mixed source mismatch artık SourceInsufficient (eski davranış NotCompleted idi — INV-T4 ihlali)"
+        );
+    }
+
+    #[test]
+    fn weighted_mode_unsatisfied_predicate_is_not_completed() {
+        // **INV-T9 #70 Commit 4b Faz 5 (P0-6):** Weighted arm source propagation ekledikten
+        // sonra normal Unsatisfied durumunun hâlâ NotCompleted döndürdüğünü doğrular
+        // (source yeterli ama değer threshold altında).
+        let set = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                // Scip required, measured_pos Placeholder — ama coupling_predicate source
+                // helper'ı Placeholder üretiyor. Doğru source için elle ProvenancedRawPosition
+                // kurmak yerine, Unsatisfied yolunu required_source=None ile test ediyoruz.
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, None),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        // coupling=0.40 ≤ 0.55 → Satisfied (Le op). Bu Completed olmalı.
+        assert_eq!(
+            set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::Completed,
+            "Weighted mode: tüm Satisfied → Completed"
+        );
+        // Şimdi threshold'ı aşalım: coupling=0.40 ≤ 0.30? Hayır → Unsatisfied.
+        let set_unsat = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.30, ComparisonOp::Le, None),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        assert_eq!(
+            set_unsat.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::NotCompleted,
+            "Weighted mode: Unsatisfied (source yeterli) → NotCompleted (SourceInsufficient değil)"
         );
     }
 
