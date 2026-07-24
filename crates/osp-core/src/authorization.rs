@@ -969,10 +969,55 @@ pub use crate::trajectory::{EffectiveImprovementPolicy, IMPROVEMENT_SEMANTICS_VE
 /// altında üretilmiş evidence geçersiz).
 pub const GATE_EVALUATION_SEMANTICS_V1: u32 = 1;
 
-/// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** `EffectiveImproPolicyBasisV2` — V2 evaluation
-/// basis'inde taşınan improvement policy canonical form. Mevcut
-/// `EffectiveImprovementPolicy` (trajectory.rs) ile aynı semantik — V2 alias.
-pub type EffectiveImproPolicyBasisV2 = EffectiveImprovementPolicy;
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2, review P1-2 düzeltme):** Effective improvement
+/// policy canonical basis V2 — ayrı canonical struct (alias DEĞİL). Runtime
+/// `EffectiveImprovementPolicy`'nin (raw f64) canonical mirror'ı; `CanonicalF64`
+/// alanları NaN/∞ reject + -0.0 normalize invariant'ı taşır.
+///
+/// **Review P1-2:** runtime tip ile canonical/wire tip AYNIlaştırılmaz. Checked
+/// conversion `TryFrom<EffectiveImprovementPolicy>` ile runtime→canonical projection.
+/// Canonical artifact yüzeyine NaN/∞ ve future runtime-field drift taşınmaz.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveImproPolicyBasisV2 {
+    pub max_coupling: CanonicalF64,
+    pub max_instability: CanonicalF64,
+    pub min_cohesion: CanonicalF64,
+    pub semantics_version: u32,
+}
+
+impl EffectiveImproPolicyBasisV2 {
+    /// Mevcut evaluator semantiği — `EffectiveImprovementPolicy::current_semantics()`
+    /// üzerinden checked canonical projection. NaN/∞ reject, -0.0 normalize.
+    pub fn current_semantics() -> Self {
+        Self::try_from(EffectiveImprovementPolicy::current_semantics())
+            .expect("current_semantics f64 değerleri finite — canonical conversion infallible")
+    }
+}
+
+/// **Review P1-2:** Checked runtime→canonical conversion. f64 değerleri finite olmalı
+/// (NaN/∞ reject). `-0.0` normalize. semantics_version direkt copy.
+impl TryFrom<EffectiveImprovementPolicy> for EffectiveImproPolicyBasisV2 {
+    type Error = CanonicalizationError;
+
+    fn try_from(policy: EffectiveImprovementPolicy) -> Result<Self, Self::Error> {
+        // CanonicalF64 = f64 alias; NaN/∞ check canonical_encoding katmanında (encode_f64).
+        // Burada structural projection — finite check encode sırasında defensive.
+        if !policy.max_coupling.is_finite()
+            || !policy.max_instability.is_finite()
+            || !policy.min_cohesion.is_finite()
+        {
+            return Err(CanonicalizationError::NonFinitePolicyField {
+                field: "improvement_policy",
+            });
+        }
+        Ok(Self {
+            max_coupling: policy.max_coupling,
+            max_instability: policy.max_instability,
+            min_cohesion: policy.min_cohesion,
+            semantics_version: policy.semantics_version,
+        })
+    }
+}
 
 /// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** Canonical predicate evaluation basis V2 —
 /// gate evaluation sonucunun canonical kanıtı. Restore path bu basis'i runtime
@@ -4335,6 +4380,10 @@ pub enum CanonicalizationError {
     /// taşır (dokümante invariant). Dışarıdan custom axis descriptor reddedilir.
     #[error("unsupported measurement axis (not core raw): {0}")]
     UnsupportedMeasurementAxis(String),
+    /// **INV-T9 #70 Faz 5 (review P1-2):** improvement policy alanı non-finite (NaN/±∞).
+    /// Canonical artifact yüzeyinde NaN/∞ reject — runtime→canonical checked conversion.
+    #[error("non-finite policy field: {field}")]
+    NonFinitePolicyField { field: &'static str },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

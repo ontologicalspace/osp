@@ -1343,12 +1343,18 @@ impl TaskGoalDigest {
                 }
             })?;
 
-        // Domain WeightedPredicate → canonical byte dizisi (sort shared writer içinde).
+        // **Review P1-1 (tek source):** Domain WeightedPredicate → CanonicalWeightedPredicateV2
+        // projection → V2 encoder. Artık SADECE V2 encoder kullanılır (domain encoder
+        // kaldırıldı — iki paralel field-by-field encoder YOK). compute_from_canonical
+        // ile aynı encode_canonical_weighted_predicate_v2_to_vec tek truth source.
         let encoded_preds: Vec<Vec<u8>> = task
             .target_predicate_set
             .predicates
             .iter()
-            .map(Self::encode_weighted_predicate_to_vec)
+            .map(|wp| {
+                let canonical = Self::project_weighted_predicate_to_v2(wp)?;
+                Self::encode_canonical_weighted_predicate_v2_to_vec(&canonical)
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         let mut hasher = blake3::Hasher::new();
@@ -1361,6 +1367,61 @@ impl TaskGoalDigest {
             task.target_predicate_set.preferred_vector.as_ref(),
         )?;
         Ok(Self(hasher.finalize().into()))
+    }
+
+    /// **Review P1-1:** Domain WeightedPredicate → CanonicalWeightedPredicateV2 projection.
+    /// Tek encoder için — compute(&Task) ve compute_from_canonical aynı V2 encoder kullanır.
+    /// Bu helper domain→V2 dönüşümünü tek yerde pinler.
+    fn project_weighted_predicate_to_v2(
+        wp: &crate::trajectory::WeightedPredicate,
+    ) -> Result<crate::authorization::CanonicalWeightedPredicateV2, EngineMeasurementDigestError>
+    {
+        use crate::authorization::{
+            CanonicalPredicateScope, CanonicalSubgraphScope, CanonicalWeightedPredicateV2,
+            EffectiveSourceRequirement,
+        };
+        use crate::canonical_tags::{CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag};
+        let p = &wp.predicate;
+        Ok(CanonicalWeightedPredicateV2 {
+            axis: PredicateAxisTag::try_from(&p.metric).map_err(|e| {
+                EngineMeasurementDigestError::StructuralCanonicalization {
+                    detail: e.to_string(),
+                }
+            })?,
+            operator: ComparisonOpTag::try_from(&p.operator).map_err(|e| {
+                EngineMeasurementDigestError::StructuralCanonicalization {
+                    detail: e.to_string(),
+                }
+            })?,
+            threshold: p.threshold,
+            scope: match &p.scope {
+                crate::trajectory::PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
+                crate::trajectory::PredicateScope::Module(name) => {
+                    CanonicalPredicateScope::Module(name.clone())
+                }
+                crate::trajectory::PredicateScope::Subgraph(ids) => {
+                    CanonicalPredicateScope::Subgraph(
+                        CanonicalSubgraphScope::try_new(ids.clone()).map_err(|e| {
+                            EngineMeasurementDigestError::StructuralCanonicalization {
+                                detail: e.to_string(),
+                            }
+                        })?,
+                    )
+                }
+            },
+            required_source: match p.required_source {
+                None => EffectiveSourceRequirement::Any,
+                Some(src) => EffectiveSourceRequirement::Exact(
+                    CanonicalMetricSourceTag::try_from(&src).map_err(|e| {
+                        EngineMeasurementDigestError::StructuralCanonicalization {
+                            detail: e.to_string(),
+                        }
+                    })?,
+                ),
+            },
+            declared_weight: wp.weight,
+            tolerance: p.tolerance,
+        })
     }
 
     /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical evidence üzerinden
@@ -1402,75 +1463,6 @@ impl TaskGoalDigest {
             preferred_vector.as_ref(),
         )?;
         Ok(Self(hasher.finalize().into()))
-    }
-
-    /// `WeightedPredicate` → canonical byte dizisi (preferred_vector HARİÇ — preferred_vector
-    /// PredicateSet seviyesinde encode edilir, predicate body'de YOK).
-    ///
-    /// Encoding: axis tag + op tag + threshold (canonical f64) + scope encode +
-    /// required_source tag + weight option + tolerance (canonical f64).
-    fn encode_weighted_predicate_to_vec(
-        wp: &crate::trajectory::WeightedPredicate,
-    ) -> Result<Vec<u8>, EngineMeasurementDigestError> {
-        use crate::canonical_encoding::{push_f64, push_tag, push_u8};
-        use crate::canonical_tags::{CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag};
-
-        let p = &wp.predicate;
-        let mut buf: Vec<u8> = Vec::with_capacity(48);
-
-        // axis tag
-        let axis_tag = PredicateAxisTag::try_from(&p.metric).map_err(|e| {
-            EngineMeasurementDigestError::StructuralCanonicalization {
-                detail: e.to_string(),
-            }
-        })?;
-        push_tag(&mut buf, axis_tag);
-
-        // operator tag
-        let op_tag = ComparisonOpTag::try_from(&p.operator).map_err(|e| {
-            EngineMeasurementDigestError::StructuralCanonicalization {
-                detail: e.to_string(),
-            }
-        })?;
-        push_tag(&mut buf, op_tag);
-
-        // threshold (canonical f64 — NaN reject, -0.0 normalize)
-        push_f64(&mut buf, p.threshold)?;
-
-        // scope encode (Node/Module/Subgraph)
-        Self::push_predicate_scope(&mut buf, &p.scope)?;
-
-        // required_source option (Any/Exact — None → Any)
-        match &p.required_source {
-            None => {
-                push_u8(&mut buf, 0);
-            }
-            Some(src) => {
-                push_u8(&mut buf, 1);
-                let src_tag = CanonicalMetricSourceTag::try_from(src).map_err(|e| {
-                    EngineMeasurementDigestError::StructuralCanonicalization {
-                        detail: e.to_string(),
-                    }
-                })?;
-                push_tag(&mut buf, src_tag);
-            }
-        }
-
-        // weight option (None=All/Any, Some=Weighted)
-        match &wp.weight {
-            None => {
-                push_u8(&mut buf, 0);
-            }
-            Some(w) => {
-                push_u8(&mut buf, 1);
-                push_f64(&mut buf, *w)?;
-            }
-        }
-
-        // tolerance (canonical f64)
-        push_f64(&mut buf, p.tolerance)?;
-
-        Ok(buf)
     }
 
     /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical V2 weighted
@@ -1585,46 +1577,9 @@ impl TaskGoalDigest {
         Ok(())
     }
 
-    /// `PredicateScope` → canonical byte (Node/Module/Subgraph varyant tag + identity).
-    fn push_predicate_scope(
-        buf: &mut Vec<u8>,
-        scope: &crate::trajectory::PredicateScope,
-    ) -> Result<(), EngineMeasurementDigestError> {
-        use crate::canonical_encoding::{push_bytes, push_u64, push_u8};
-        match scope {
-            crate::trajectory::PredicateScope::Node(id) => {
-                push_u8(buf, 0);
-                push_u64(buf, *id);
-            }
-            crate::trajectory::PredicateScope::Module(name) => {
-                push_u8(buf, 1);
-                push_bytes(buf, name.as_bytes());
-            }
-            crate::trajectory::PredicateScope::Subgraph(ids) => {
-                push_u8(buf, 2);
-                // **Reviewer P1-4:** Subgraph: sorted + duplicate reject + length-prefix
-                // + per-id. Canonical sıra + unique garanti. `[1,1,2]` → reject (defense-
-                // in-depth — validate_for_commit da reject eder). Sessiz dedup YOK.
-                let mut sorted = ids.clone();
-                sorted.sort_unstable();
-                for pair in sorted.windows(2) {
-                    if pair[0] == pair[1] {
-                        return Err(EngineMeasurementDigestError::StructuralCanonicalization {
-                            detail: format!(
-                                "duplicate subgraph scope node id in TaskGoalDigest: {}",
-                                pair[0]
-                            ),
-                        });
-                    }
-                }
-                push_u64(buf, sorted.len() as u64);
-                for id in &sorted {
-                    push_u64(buf, *id);
-                }
-            }
-        }
-        Ok(())
-    }
+    /// **Review P1-1:** Eski domain `push_predicate_scope` kaldırıldı — V2 encoder
+    /// `push_canonical_predicate_scope_v2` tek source (CanonicalPredicateScope alır).
+    /// Domain→canonical projection `project_weighted_predicate_to_v2` içinde yapılır.
 
     #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
@@ -1665,24 +1620,35 @@ impl TaskGoalDigest {
 pub(crate) struct PredicateGatePolicyDigestV2([u8; 32]);
 
 impl PredicateGatePolicyDigestV2 {
-    /// Faz 5 V2 convention domain separator.
-    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/PREDICATE-GATE-POLICY/V1";
+    /// Faz 5 V2 convention domain separator (review P0-3: V1 → V2, task binding).
+    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/PREDICATE-GATE-POLICY/V2";
 
-    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Shared neutral writer —
-    /// tek truth source. `compute(&TaskPolicy, &EffectiveImprovementPolicy)` ve
-    /// `compute_from_canonical(&CanonicalPredicateEvaluationBasisV2)` aynı byte format.
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity, review P0-3 düzeltme):**
+    /// Shared neutral writer — tek truth source. `compute(task_id, task_goal_digest, ...)`
+    /// ve `compute_from_canonical(task_id, task_goal_digest, ...)` aynı byte format.
     ///
-    /// Encode: failure_policy tag + min_improvement_delta (canonical f64) +
-    /// allow_progress_checkpoint (bool tag) + improvement policy (thresholds + version).
+    /// **Frozen cryptographic binding (review P0-3):** preimage task_id + task_goal_digest
+    /// taşır — "aynı policy + farklı task → farklı digest" ayrımı. task_goal_digest 32 raw
+    /// byte olarak encode edilir (digest binding).
+    ///
+    /// Encode: task_id + task_goal_digest (32 raw) + failure_policy tag +
+    /// min_improvement_delta (canonical f64) + allow_progress_checkpoint (bool tag) +
+    /// improvement policy (thresholds + version).
     pub(crate) fn write_predicate_gate_policy_commitment(
         hasher: &mut blake3::Hasher,
+        task_id: crate::trajectory::TaskId,
+        task_goal_digest: &TaskGoalDigest,
         failure_policy: crate::canonical_tags::PredicateFailurePolicyTag,
         min_improvement_delta: f64,
         allow_progress_checkpoint: bool,
-        effective_improvement: &crate::trajectory::EffectiveImprovementPolicy,
+        effective_improvement: &crate::authorization::EffectiveImproPolicyBasisV2,
     ) -> Result<(), EngineMeasurementDigestError> {
-        use crate::canonical_encoding::{encode_f64, encode_u32, encode_u8};
+        use crate::canonical_encoding::{encode_f64, encode_u32, encode_u64, encode_u8};
 
+        // task_id — cryptographic binding (review P0-3: farklı task → farklı digest).
+        encode_u64(hasher, task_id, "policy_task_id");
+        // task_goal_digest — 32 raw byte (digest binding, review P0-3).
+        hasher.update(task_goal_digest.as_bytes());
         // failure_policy tag (StrictReject=0/AcceptImprovement=1/OperatorApproval=2).
         encode_u8(hasher, failure_policy.as_u8(), "failure_policy_tag");
         // min_improvement_delta (canonical f64 — NaN reject, -0.0 normalize).
@@ -1693,8 +1659,8 @@ impl PredicateGatePolicyDigestV2 {
             if allow_progress_checkpoint { 1 } else { 0 },
             "allow_progress_checkpoint_tag",
         );
-        // Effective improvement policy: max_coupling + max_instability + min_cohesion +
-        // semantics_version. Bu threshold'lar is_improved_loss hard-cap'leri.
+        // Effective improvement policy (canonical — review P1-2): max_coupling +
+        // max_instability + min_cohesion + semantics_version. CanonicalF64 alanları.
         encode_f64(hasher, effective_improvement.max_coupling, "max_coupling")?;
         encode_f64(
             hasher,
@@ -1710,16 +1676,28 @@ impl PredicateGatePolicyDigestV2 {
         Ok(())
     }
 
-    /// **Tek producer:** `TaskPolicy` + `EffectiveImprovementPolicy` üzerinden — gate
-    /// kararını belirleyen gerçek policy girdileri. Shared writer çağırır.
+    /// **Tek producer (review P0-3 + P1-2):** `task_id` + `task_goal_digest` + `TaskPolicy`
+    /// + `EffectiveImprovementPolicy` üzerinden — gate kararını belirleyen gerçek policy
+    /// girdileri + cryptographic task binding. Runtime→canonical projection (checked).
+    /// Shared writer çağırır.
     #[allow(dead_code, reason = "Faz 5 Item 11 binding consumer")]
     pub(crate) fn compute(
+        task_id: crate::trajectory::TaskId,
+        task_goal_digest: &TaskGoalDigest,
         policy: &crate::trajectory::TaskPolicy,
         improvement: &crate::trajectory::EffectiveImprovementPolicy,
     ) -> Result<Self, EngineMeasurementDigestError> {
+        use crate::authorization::EffectiveImproPolicyBasisV2;
         use crate::canonical_tags::PredicateFailurePolicyTag;
         let failure_policy_tag =
             PredicateFailurePolicyTag::try_from(&policy.predicate_failure_policy).map_err(|e| {
+                EngineMeasurementDigestError::StructuralCanonicalization {
+                    detail: e.to_string(),
+                }
+            })?;
+        // Review P1-2: runtime→canonical checked projection (NaN/∞ reject).
+        let canonical_improvement =
+            EffectiveImproPolicyBasisV2::try_from(*improvement).map_err(|e| {
                 EngineMeasurementDigestError::StructuralCanonicalization {
                     detail: e.to_string(),
                 }
@@ -1728,25 +1706,32 @@ impl PredicateGatePolicyDigestV2 {
         hasher.update(Self::DOMAIN_SEPARATOR);
         Self::write_predicate_gate_policy_commitment(
             &mut hasher,
+            task_id,
+            task_goal_digest,
             failure_policy_tag,
             policy.min_improvement_delta,
             policy.allow_progress_checkpoint,
-            improvement,
+            &canonical_improvement,
         )?;
         Ok(Self(hasher.finalize().into()))
     }
 
-    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical evidence üzerinden
-    /// digest üretir — `CanonicalPredicateEvaluationBasisV2` restore path reverify için.
-    /// Shared writer ile `compute` byte-identical.
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity, review P0-3):** Canonical
+    /// evidence üzerinden digest üretir — `task_id` + `task_goal_digest` +
+    /// `CanonicalPredicateEvaluationBasisV2` restore path reverify için. Shared writer
+    /// ile `compute` byte-identical. task_id + task_goal_digest cryptographic binding.
     #[allow(dead_code, reason = "Faz 5 Item 15 validate_semantics consumer")]
     pub(crate) fn compute_from_canonical(
+        task_id: crate::trajectory::TaskId,
+        task_goal_digest: &TaskGoalDigest,
         basis: &crate::authorization::CanonicalPredicateEvaluationBasisV2,
     ) -> Result<Self, EngineMeasurementDigestError> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(Self::DOMAIN_SEPARATOR);
         Self::write_predicate_gate_policy_commitment(
             &mut hasher,
+            task_id,
+            task_goal_digest,
             basis.failure_policy,
             basis.min_improvement_delta,
             basis.allow_progress_checkpoint,
@@ -4065,8 +4050,9 @@ pub(crate) mod tests {
 
     #[test]
     fn faz5_predicate_gate_policy_digest_compute_equals_compute_from_canonical() {
-        // P0-2 digest continuity: compute(&TaskPolicy, &EffectiveImprovementPolicy)
-        // == compute_from_canonical(&CanonicalPredicateEvaluationBasisV2).
+        // P0-2 digest continuity + P0-3 cryptographic binding:
+        // compute(task_id, task_goal_digest, policy, improvement)
+        // == compute_from_canonical(task_id, task_goal_digest, basis).
         use crate::authorization::{
             CanonicalPredicateEvaluationBasisV2, EffectiveImproPolicyBasisV2,
             GATE_EVALUATION_SEMANTICS_V1,
@@ -4074,10 +4060,14 @@ pub(crate) mod tests {
         use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
         use crate::trajectory::{EffectiveImprovementPolicy, TaskPolicy};
 
+        let task_id: crate::trajectory::TaskId = 42;
+        let task_goal_digest =
+            TaskGoalDigest::compute(&faz4_golden_task_with_id(task_id)).expect("task_goal_digest");
         let policy = TaskPolicy::default();
         let improvement = EffectiveImprovementPolicy::current_semantics();
         let from_domain =
-            PredicateGatePolicyDigestV2::compute(&policy, &improvement).expect("compute");
+            PredicateGatePolicyDigestV2::compute(task_id, &task_goal_digest, &policy, &improvement)
+                .expect("compute");
 
         // Canonical V2 basis — aynı policy girdileri ile construct.
         let basis = CanonicalPredicateEvaluationBasisV2 {
@@ -4092,12 +4082,47 @@ pub(crate) mod tests {
             allow_progress_checkpoint: policy.allow_progress_checkpoint,
             effective_improvement: EffectiveImproPolicyBasisV2::current_semantics(),
         };
-        let from_canonical = PredicateGatePolicyDigestV2::compute_from_canonical(&basis)
-            .expect("compute_from_canonical");
+        let from_canonical =
+            PredicateGatePolicyDigestV2::compute_from_canonical(task_id, &task_goal_digest, &basis)
+                .expect("compute_from_canonical");
         assert_eq!(
             from_domain.as_bytes(),
             from_canonical.as_bytes(),
             "PredicateGatePolicyDigestV2 compute != compute_from_canonical (digest continuity broken)"
+        );
+    }
+
+    #[test]
+    fn faz5_predicate_gate_policy_digest_cryptographic_task_binding() {
+        // Review P0-3: aynı policy + farklı task_id → farklı digest.
+        // aynı policy + farklı task_goal_digest → farklı digest.
+        use crate::trajectory::{EffectiveImprovementPolicy, TaskPolicy};
+        let policy = TaskPolicy::default();
+        let improvement = EffectiveImprovementPolicy::current_semantics();
+
+        let task_a = faz4_golden_task_with_id(1);
+        let task_b = faz4_golden_task_with_id(2);
+        let goal_digest_a = TaskGoalDigest::compute(&task_a).unwrap();
+        let goal_digest_b = TaskGoalDigest::compute(&task_b).unwrap();
+
+        // Aynı policy + farklı task_id → farklı digest.
+        let digest_a1 =
+            PredicateGatePolicyDigestV2::compute(1, &goal_digest_a, &policy, &improvement).unwrap();
+        let digest_b1 =
+            PredicateGatePolicyDigestV2::compute(2, &goal_digest_a, &policy, &improvement).unwrap();
+        assert_ne!(
+            digest_a1.as_bytes(),
+            digest_b1.as_bytes(),
+            "farklı task_id → farklı digest olmalı (cryptographic binding)"
+        );
+
+        // Aynı policy + aynı task_id + farklı task_goal_digest → farklı digest.
+        let digest_a2 =
+            PredicateGatePolicyDigestV2::compute(1, &goal_digest_b, &policy, &improvement).unwrap();
+        assert_ne!(
+            digest_a1.as_bytes(),
+            digest_a2.as_bytes(),
+            "farklı task_goal_digest → farklı digest olmalı (cryptographic binding)"
         );
     }
 }

@@ -1594,14 +1594,22 @@ impl PredicateGate {
             .target_predicate_set
             .evaluate_completion(input.measured);
 
-        // 2. INV-T9 #70 Faz 5: decision core — loss scalar parametre olarak geçilir.
-        let (_assessment, mutation_decision) = evaluate_decision_core(
-            completion,
-            policy,
+        // 2. INV-T9 #70 Faz 5 (review P0-2 düzeltme): improvement assessment V1 producer
+        //    — loss + hard-cap hesabı burada. Core loss/measured ERİŞMEZ.
+        let improved = assess_improvement_v1(
             input.loss_before,
             loss_after,
             input.measured,
+            policy,
             &improvement_policy,
+        );
+
+        // 3. Decision core — SADECE assessment + policy'den karar üretir (loss YOK).
+        let (_assessment, mutation_decision) = evaluate_decision_core(
+            completion,
+            improved,
+            policy.predicate_failure_policy,
+            policy.allow_progress_checkpoint,
         );
 
         // PredicateCompletion: Completed yalnızca PredicateSetResult::Completed ise.
@@ -1633,14 +1641,19 @@ impl PredicateGate {
 /// okunur. Bu policy `PredicateGate::evaluate`'de bir kez üretilir ve buraya geçirilir;
 /// aynı nesne authorization basis'e de taşınır. Tek truth source.
 ///
-/// **INV-T9 #70 Faz 5 Adım 12:** Logic `evaluate_decision_core`'a taşındı (improvement
-/// result zenginleştirilmiş — insufficient_delta/hard_cap_violated ayrımı). Bu wrapper
-/// core öncesi V1 callers için korundu; core kendi logic'ini içerir.
-#[allow(
-    dead_code,
-    reason = "Faz 5 evaluate_decision_core superseded; V1 scalar wrapper retained"
-)]
-fn is_improved_loss(
+/// **INV-T9 #70 Faz 5 Adım 12 (review P0-2 düzeltme):** Eski `is_improved_loss` ayrı
+/// wrapper olarak kaldırıldı — logic `assess_improvement_v1`'e taşındı (aynı semantik,
+/// improvement assessment producer). Core loss/measured erişmez.
+
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1, review P0-2 düzeltme):** Improvement assessment
+/// producer — loss + hard-cap hesabını YAPAR. `evaluate_decision_core` loss/measured
+/// ERİŞMEZ (frozen negatif koşul); bu fonksiyon assessment'ı üretir, core sadece
+/// assessment + policy'den karar çıkarır.
+///
+/// **V1 semantics:** `loss_after < loss_before - min_delta` AND hard caps aşılmadı.
+/// Hard-cap threshold'ları `EffectiveImprovementPolicy`'den. `is_improved_loss`'un
+/// zenginleştirilmiş versiyonu — improved bool döner, neden ayrıntısı core'da değil.
+pub(crate) fn assess_improvement_v1(
     loss_before: f64,
     loss_after: f64,
     measured: &ProvenancedRawPosition,
@@ -1650,32 +1663,27 @@ fn is_improved_loss(
     if loss_after >= loss_before - policy.min_improvement_delta {
         return false;
     }
-    // Hard caps — measured her axis 0..1. Regresyon = değerin threshold'u aşması
-    // (basit Aşama B; Aşama C'de before/after karşılaştırması + WeightedPredicate loss).
     measured.coupling.value < improvement.max_coupling
         && measured.instability.value < improvement.max_instability
         && measured.cohesion.value > improvement.min_cohesion
 }
 
-/// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** Gate decision core — pure free function.
-/// `PredicateGate::evaluate`'in decision logic'ini extract eder. Loss formülü YOK
-/// (plan negatif koşulu: loss scalar parametre olarak geçilir, core hesaplamaz).
-/// V1 adapter (PredicateGate::evaluate) legacy scalar loss'u hesaplayıp geçirecek.
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1, review P0-2 düzeltme):** Gate decision core —
+/// pure free function. **Loss formülü YOK, measured erişimi YOK, hard-cap kontrolü YOK**
+/// (frozen negatif koşul: "decision core'da loss formülü yok"). SADECE assessment +
+/// policy'den karar üretir.
+///
+/// Completion-first short-circuit'ler (Completed/SourceInsufficient) + policy-driven
+/// (StrictReject/OperatorApproval) + AcceptImprovement policy `improved` bool'a bakar.
 ///
 /// **7 test parity:** mevcut PredicateGate::evaluate test'leri (1-7) bu core üzerinden
-/// aynı MutationDecision üretmeli. ImprovementAssessment restore validator semantic
-/// matrix için zenginleştirilmiş kanıt taşır.
-///
-/// Girdiler: PredicateSetResult (completion), TaskPolicy (failure_policy +
-/// min_improvement_delta + allow_progress_checkpoint), loss_before/after (scalar),
-/// measured (hard-cap check), EffectiveImprovementPolicy (threshold'lar).
+/// aynı MutationDecision üretmeli. V1 adapter `improved`'ı `assess_improvement_v1`'den
+/// alır ve core'a geçirir.
 pub(crate) fn evaluate_decision_core(
     completion: PredicateSetResult,
-    policy: &TaskPolicy,
-    loss_before: f64,
-    loss_after: f64,
-    measured: &ProvenancedRawPosition,
-    improvement: &EffectiveImprovementPolicy,
+    improved: bool,
+    failure_policy: PredicateFailurePolicy,
+    allow_progress_checkpoint: bool,
 ) -> (ImprovementAssessment, MutationDecision) {
     match completion {
         PredicateSetResult::Completed => (
@@ -1687,43 +1695,33 @@ pub(crate) fn evaluate_decision_core(
             ImprovementAssessment::SourceInsufficient,
             MutationDecision::Reject,
         ),
-        PredicateSetResult::NotCompleted => {
-            // INV-T6 — policy'ye göre: improved mı, regressed mi?
-            let insufficient_delta = loss_after >= loss_before - policy.min_improvement_delta;
-            let hard_cap_violated = !(measured.coupling.value < improvement.max_coupling
-                && measured.instability.value < improvement.max_instability
-                && measured.cohesion.value > improvement.min_cohesion);
-            let improved = !insufficient_delta && !hard_cap_violated;
-
-            let (assessment, decision) = match policy.predicate_failure_policy {
-                PredicateFailurePolicy::StrictReject => (
-                    ImprovementAssessment::StrictRejectPolicy,
-                    MutationDecision::Reject,
-                ),
-                PredicateFailurePolicy::AcceptImprovement => {
-                    if policy.allow_progress_checkpoint && improved {
-                        (
-                            ImprovementAssessment::Improved,
-                            MutationDecision::AcceptAsProgress,
-                        )
-                    } else {
-                        (
-                            ImprovementAssessment::NotImproved {
-                                insufficient_delta,
-                                hard_cap_violated,
-                                progress_checkpoint_disabled: !policy.allow_progress_checkpoint,
-                            },
-                            MutationDecision::Reject,
-                        )
-                    }
+        PredicateSetResult::NotCompleted => match failure_policy {
+            PredicateFailurePolicy::StrictReject => (
+                ImprovementAssessment::StrictRejectPolicy,
+                MutationDecision::Reject,
+            ),
+            PredicateFailurePolicy::AcceptImprovement => {
+                if allow_progress_checkpoint && improved {
+                    (
+                        ImprovementAssessment::Improved,
+                        MutationDecision::AcceptAsProgress,
+                    )
+                } else {
+                    (
+                        ImprovementAssessment::NotImproved {
+                            insufficient_delta: !improved,
+                            hard_cap_violated: false,
+                            progress_checkpoint_disabled: !allow_progress_checkpoint,
+                        },
+                        MutationDecision::Reject,
+                    )
                 }
-                PredicateFailurePolicy::OperatorApproval => (
-                    ImprovementAssessment::OperatorApprovalPolicy,
-                    MutationDecision::RequireOperatorApproval,
-                ),
-            };
-            (assessment, decision)
-        }
+            }
+            PredicateFailurePolicy::OperatorApproval => (
+                ImprovementAssessment::OperatorApprovalPolicy,
+                MutationDecision::RequireOperatorApproval,
+            ),
+        },
     }
 }
 

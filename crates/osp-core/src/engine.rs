@@ -1149,13 +1149,16 @@ impl SpaceEngine {
         // Preferred vector snapshot — trusted task'tan alınır (INV-T1: agent view'a sızmaz).
         let preferred_vector_snapshot = task.target_predicate_set.preferred_vector;
 
-        // ── INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU) — predicate gate policy digest ────
+        // ── INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU commitment capture, review P0-3) ────
         // Gate kararını belirleyen policy commitment'i — task snapshot'ına bağlı.
-        // TOCTOU closure: gate bu policy'ye göre değerlendirilir, farklı task gerçekliğine
-        // göre DEĞİL. EffectiveImprovementPolicy::current_semantics() tek construction site.
+        // Cryptographic binding: task_id + task_goal_digest preimage'da (frozen v8).
+        // TOCTOU closure Item 17'de (evaluate_task_gate_v2 recheck) tamamlanır; burada
+        // commitment capture. EffectiveImprovementPolicy::current_semantics() tek site.
         let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
         let predicate_gate_policy_digest =
             crate::measurement::PredicateGatePolicyDigestV2::compute(
+                task.id,
+                &task_goal_digest,
                 &task.policy,
                 &improvement_policy,
             )
