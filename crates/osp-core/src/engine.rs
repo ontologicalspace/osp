@@ -466,6 +466,11 @@ pub(crate) struct VerifiedTaskMeasurementBinding {
     engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
     /// Trusted task'tan snapshot — preferred_vector (Some/None).
     preferred_vector_snapshot: Option<crate::coords::RawPosition>,
+    // INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU) — predicate gate policy digest.
+    /// Gate kararını belirleyen policy commitment'i — task snapshot'ına bağlı.
+    /// TOCTOU closure: gate bu policy'ye göre değerlendirilir, farklı task gerçekliğine
+    /// göre DEĞİL. `EffectiveImprovementPolicy::current_semantics()` + `TaskPolicy`.
+    predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
 }
 
 impl VerifiedTaskMeasurementBinding {
@@ -480,6 +485,8 @@ impl VerifiedTaskMeasurementBinding {
         task_goal_digest: crate::measurement::TaskGoalDigest,
         engine_measurement_digest: crate::measurement::EngineMeasurementDigest,
         preferred_vector_snapshot: Option<crate::coords::RawPosition>,
+        // INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU):
+        predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
     ) -> Self {
         Self {
             task_id,
@@ -490,6 +497,7 @@ impl VerifiedTaskMeasurementBinding {
             task_goal_digest,
             engine_measurement_digest,
             preferred_vector_snapshot,
+            predicate_gate_policy_digest,
         }
     }
 
@@ -542,13 +550,23 @@ impl VerifiedTaskMeasurementBinding {
         self.preferred_vector_snapshot
     }
 
+    /// **INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU):** Predicate gate policy digest accessor.
+    /// Gate kararını belirleyen policy commitment'i — task snapshot'ına bağlı.
+    #[allow(dead_code, reason = "Faz 5 Item 15 validate_semantics consumer")]
+    pub(crate) fn predicate_gate_policy_digest(
+        &self,
+    ) -> &crate::measurement::PredicateGatePolicyDigestV2 {
+        &self.predicate_gate_policy_digest
+    }
+
     /// **Consuming projection (reviewer v6 P1-2):** Faz 4 basis builder move-only
     /// consume. Clone YOK — outer proof iki defa kullanılamaz. Same-context replay
     /// Faz 8 commit-ledger sorumluluğu.
     ///
-    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:128) + P0-1 (reviewer):** 6-tuple —
-    /// task_id, claim_id, task_claim_digest, measurement_digest, binding, ve Faz 4
-    /// extension (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot).
+    /// **INV-T9 #70 Commit 4b Faz 4 (plan md:128) + P0-1 (reviewer) + Faz 5 Adım 11:**
+    /// 6-tuple — task_id, claim_id, task_claim_digest, measurement_digest, binding, ve
+    /// Faz 4+5 extension (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot,
+    /// predicate_gate_policy_digest).
     #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
     pub(crate) fn into_parts(
         self,
@@ -558,11 +576,12 @@ impl VerifiedTaskMeasurementBinding {
         crate::measurement::TaskClaimDigest,
         crate::measurement::MeasurementDigest,
         VerifiedMeasurementBinding,
-        // Faz 4 extension — 3 yeni field ayrı tuple.
+        // Faz 4+5 extension — 4 field ayrı tuple.
         (
             crate::measurement::TaskGoalDigest,
             crate::measurement::EngineMeasurementDigest,
             Option<crate::coords::RawPosition>,
+            crate::measurement::PredicateGatePolicyDigestV2,
         ),
     ) {
         (
@@ -575,6 +594,7 @@ impl VerifiedTaskMeasurementBinding {
                 self.task_goal_digest,
                 self.engine_measurement_digest,
                 self.preferred_vector_snapshot,
+                self.predicate_gate_policy_digest,
             ),
         )
     }
@@ -861,7 +881,12 @@ impl SpaceEngine {
             task_claim_digest,
             measurement_digest,
             inner_binding,
-            (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot),
+            (
+                task_goal_digest,
+                engine_measurement_digest,
+                preferred_vector_snapshot,
+                _predicate_gate_policy_digest,
+            ),
         ) = binding.into_parts();
 
         // 1. Presented artifact == consumed proof? (tüm evidence projection'dan ÖNCE)
@@ -1124,9 +1149,26 @@ impl SpaceEngine {
         // Preferred vector snapshot — trusted task'tan alınır (INV-T1: agent view'a sızmaz).
         let preferred_vector_snapshot = task.target_predicate_set.preferred_vector;
 
-        // Outer proof — task/claim/measured-result identity + Faz 4 extension
-        // (task_goal_digest + engine_measurement_digest + preferred_vector_snapshot).
-        // Cross-context substitution protection + tam artifact commitment.
+        // ── INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU) — predicate gate policy digest ────
+        // Gate kararını belirleyen policy commitment'i — task snapshot'ına bağlı.
+        // TOCTOU closure: gate bu policy'ye göre değerlendirilir, farklı task gerçekliğine
+        // göre DEĞİL. EffectiveImprovementPolicy::current_semantics() tek construction site.
+        let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
+        let predicate_gate_policy_digest =
+            crate::measurement::PredicateGatePolicyDigestV2::compute(
+                &task.policy,
+                &improvement_policy,
+            )
+            .map_err(|e| DerivErr::TaskGoalDigestComputationFailed {
+                // Policy digest hatası task goal commitment hatası ile aynı kategori
+                // (semantic — structural canonicalization DEĞİL).
+                detail: format!("predicate_gate_policy_digest: {e}"),
+            })?;
+
+        // Outer proof — task/claim/measured-result identity + Faz 4+5 extension
+        // (task_goal_digest + engine_measurement_digest + preferred_vector_snapshot +
+        //  predicate_gate_policy_digest).
+        // Cross-context substitution protection + tam artifact commitment + TOCTOU closure.
         // **P0-1 (reviewer):** claim_id proof'tan gelir — identity injection kapalı.
         Ok(VerifiedTaskMeasurementBinding::new(
             task.id,
@@ -1137,6 +1179,7 @@ impl SpaceEngine {
             task_goal_digest,
             engine_measurement_digest,
             preferred_vector_snapshot,
+            predicate_gate_policy_digest,
         ))
     }
 }
@@ -5772,11 +5815,18 @@ v = 0.5
         assert_eq!(task_claim_digest.to_hex().len(), 64);
         assert_eq!(measurement_digest.to_hex().len(), 64);
         let _ = inner_binding; // VerifiedMeasurementBinding (6 field)
-                               // Faz 4 extension — 3 yeni field tuple.
-        let (task_goal_digest, engine_measurement_digest, preferred_vector_snapshot) = extension;
+                               // Faz 4+5 extension — 4 field tuple.
+        let (
+            task_goal_digest,
+            engine_measurement_digest,
+            preferred_vector_snapshot,
+            predicate_gate_policy_digest,
+        ) = extension;
         assert_eq!(task_goal_digest.to_hex().len(), 64);
         assert_eq!(engine_measurement_digest.to_hex().len(), 64);
         assert_eq!(preferred_vector_snapshot, None);
+        // INV-T9 #70 Faz 5 Adım 11 (P0-2 TOCTOU) — predicate gate policy digest.
+        assert_eq!(predicate_gate_policy_digest.to_hex().len(), 64);
     }
 
     #[test]

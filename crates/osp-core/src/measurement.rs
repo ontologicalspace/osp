@@ -1643,6 +1643,129 @@ impl TaskGoalDigest {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 7+8+11 (P0-2 digest continuity + TOCTOU) —
+// PredicateGatePolicyDigestV2
+//
+// Gate kararını belirleyen policy girdilerinin canonical digest'i. TOCTOU closure:
+// `VerifiedTaskMeasurementBinding` bu digest'i task snapshot'ına bağlar — gate
+// farklı bir task gerçekliğine göre değerlendirilemez. Restore path runtime ile
+// aynı policy byte'larını görmeli.
+//
+// Encode edilen policy girdileri (gate decision core):
+// - failure_policy (StrictReject/AcceptImprovement/OperatorApproval)
+// - min_improvement_delta (is_improved_loss girdisi)
+// - allow_progress_checkpoint (AcceptAsProgress lane)
+// - effective improvement policy (max_coupling/instability, min_cohesion, semantics_version)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 5 Adım 7+8+11 (P0-2):** Predicate gate policy digest V2 — gate
+/// kararını belirleyen policy girdilerinin canonical commitment'i. blake3 [u8; 32].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize)]
+pub(crate) struct PredicateGatePolicyDigestV2([u8; 32]);
+
+impl PredicateGatePolicyDigestV2 {
+    /// Faz 5 V2 convention domain separator.
+    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/PREDICATE-GATE-POLICY/V1";
+
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Shared neutral writer —
+    /// tek truth source. `compute(&TaskPolicy, &EffectiveImprovementPolicy)` ve
+    /// `compute_from_canonical(&CanonicalPredicateEvaluationBasisV2)` aynı byte format.
+    ///
+    /// Encode: failure_policy tag + min_improvement_delta (canonical f64) +
+    /// allow_progress_checkpoint (bool tag) + improvement policy (thresholds + version).
+    pub(crate) fn write_predicate_gate_policy_commitment(
+        hasher: &mut blake3::Hasher,
+        failure_policy: crate::canonical_tags::PredicateFailurePolicyTag,
+        min_improvement_delta: f64,
+        allow_progress_checkpoint: bool,
+        effective_improvement: &crate::trajectory::EffectiveImprovementPolicy,
+    ) -> Result<(), EngineMeasurementDigestError> {
+        use crate::canonical_encoding::{encode_f64, encode_u32, encode_u8};
+
+        // failure_policy tag (StrictReject=0/AcceptImprovement=1/OperatorApproval=2).
+        encode_u8(hasher, failure_policy.as_u8(), "failure_policy_tag");
+        // min_improvement_delta (canonical f64 — NaN reject, -0.0 normalize).
+        encode_f64(hasher, min_improvement_delta, "min_improvement_delta")?;
+        // allow_progress_checkpoint (bool → 0/1 tag).
+        encode_u8(
+            hasher,
+            if allow_progress_checkpoint { 1 } else { 0 },
+            "allow_progress_checkpoint_tag",
+        );
+        // Effective improvement policy: max_coupling + max_instability + min_cohesion +
+        // semantics_version. Bu threshold'lar is_improved_loss hard-cap'leri.
+        encode_f64(hasher, effective_improvement.max_coupling, "max_coupling")?;
+        encode_f64(
+            hasher,
+            effective_improvement.max_instability,
+            "max_instability",
+        )?;
+        encode_f64(hasher, effective_improvement.min_cohesion, "min_cohesion")?;
+        encode_u32(
+            hasher,
+            effective_improvement.semantics_version,
+            "improvement_semantics_version",
+        );
+        Ok(())
+    }
+
+    /// **Tek producer:** `TaskPolicy` + `EffectiveImprovementPolicy` üzerinden — gate
+    /// kararını belirleyen gerçek policy girdileri. Shared writer çağırır.
+    #[allow(dead_code, reason = "Faz 5 Item 11 binding consumer")]
+    pub(crate) fn compute(
+        policy: &crate::trajectory::TaskPolicy,
+        improvement: &crate::trajectory::EffectiveImprovementPolicy,
+    ) -> Result<Self, EngineMeasurementDigestError> {
+        use crate::canonical_tags::PredicateFailurePolicyTag;
+        let failure_policy_tag =
+            PredicateFailurePolicyTag::try_from(&policy.predicate_failure_policy).map_err(|e| {
+                EngineMeasurementDigestError::StructuralCanonicalization {
+                    detail: e.to_string(),
+                }
+            })?;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_predicate_gate_policy_commitment(
+            &mut hasher,
+            failure_policy_tag,
+            policy.min_improvement_delta,
+            policy.allow_progress_checkpoint,
+            improvement,
+        )?;
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical evidence üzerinden
+    /// digest üretir — `CanonicalPredicateEvaluationBasisV2` restore path reverify için.
+    /// Shared writer ile `compute` byte-identical.
+    #[allow(dead_code, reason = "Faz 5 Item 15 validate_semantics consumer")]
+    pub(crate) fn compute_from_canonical(
+        basis: &crate::authorization::CanonicalPredicateEvaluationBasisV2,
+    ) -> Result<Self, EngineMeasurementDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_predicate_gate_policy_commitment(
+            &mut hasher,
+            basis.failure_policy,
+            basis.min_improvement_delta,
+            basis.allow_progress_checkpoint,
+            &basis.effective_improvement,
+        )?;
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    #[allow(dead_code, reason = "Faz 5 basis builder consumer")]
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    #[allow(dead_code, reason = "Faz 5 consumer")]
+    pub(crate) fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+}
+
 /// Baseline unavailability sebebi. Subject member'ların base/delta dağılımını taşır.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum BaselineUnavailableReason {
@@ -3937,6 +4060,44 @@ pub(crate) mod tests {
             from_domain.as_bytes(),
             from_canonical.as_bytes(),
             "MeasurementDigest compute != compute_from_canonical (digest continuity broken)"
+        );
+    }
+
+    #[test]
+    fn faz5_predicate_gate_policy_digest_compute_equals_compute_from_canonical() {
+        // P0-2 digest continuity: compute(&TaskPolicy, &EffectiveImprovementPolicy)
+        // == compute_from_canonical(&CanonicalPredicateEvaluationBasisV2).
+        use crate::authorization::{
+            CanonicalPredicateEvaluationBasisV2, EffectiveImproPolicyBasisV2,
+            GATE_EVALUATION_SEMANTICS_V1,
+        };
+        use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+        use crate::trajectory::{EffectiveImprovementPolicy, TaskPolicy};
+
+        let policy = TaskPolicy::default();
+        let improvement = EffectiveImprovementPolicy::current_semantics();
+        let from_domain =
+            PredicateGatePolicyDigestV2::compute(&policy, &improvement).expect("compute");
+
+        // Canonical V2 basis — aynı policy girdileri ile construct.
+        let basis = CanonicalPredicateEvaluationBasisV2 {
+            gate_evaluation_semantics_version: GATE_EVALUATION_SEMANTICS_V1,
+            result: PredicateSetResultTag::try_from(
+                &crate::trajectory::PredicateSetResult::NotCompleted,
+            )
+            .unwrap(),
+            failure_policy: PredicateFailurePolicyTag::try_from(&policy.predicate_failure_policy)
+                .unwrap(),
+            min_improvement_delta: policy.min_improvement_delta,
+            allow_progress_checkpoint: policy.allow_progress_checkpoint,
+            effective_improvement: EffectiveImproPolicyBasisV2::current_semantics(),
+        };
+        let from_canonical = PredicateGatePolicyDigestV2::compute_from_canonical(&basis)
+            .expect("compute_from_canonical");
+        assert_eq!(
+            from_domain.as_bytes(),
+            from_canonical.as_bytes(),
+            "PredicateGatePolicyDigestV2 compute != compute_from_canonical (digest continuity broken)"
         );
     }
 }
