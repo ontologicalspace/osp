@@ -4937,6 +4937,60 @@ impl VerifiedGateEvaluationV2 {
     }
 }
 
+/// **INV-T9 #70 Faz 5 Adım 14 (P0-1):** VerifiedCanonicalTaskGoalEvidenceV2 — opaque
+/// restore proof. Parent authorization.rs'te private (hem parent restore validator hem
+/// child evaluator aynı proof tipini kullanır).
+///
+/// **Restore contract:** canonical evidence → `compute_from_canonical` digest parity →
+/// `PredicateSet::try_from` → `validate_predicate_goal_for_commit` → typed proof.
+/// Bu proof, restore path'inin runtime ile aynı task-goal gerçekliğine bağlandığını
+/// kanıtlar. Field private; Serialize/Deserialize/Clone YOK. Production build'de
+/// constructor YOK — Faz 5 restore validator (Item 16) üretir.
+#[derive(Debug)]
+pub(crate) struct VerifiedCanonicalTaskGoalEvidenceV2 {
+    evidence: CanonicalTaskGoalEvidenceV2,
+    /// Recomputed digest — restore sırasında `compute_from_canonical` ile üretilir,
+    /// stored task_goal_digest ile parity kanıtı. Runtime digest ile aynı byte olmalı.
+    digest: crate::measurement::TaskGoalDigest,
+}
+
+impl VerifiedCanonicalTaskGoalEvidenceV2 {
+    /// **pub(crate) consumer:** Verified proof'u canonical evidence + digest'e indirger.
+    /// Restore validator (Item 16) ve child evaluator (Item 17) bu proof'u tüketir.
+    #[allow(dead_code, reason = "Faz 5 Item 16/17 restore validator consumer")]
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        CanonicalTaskGoalEvidenceV2,
+        crate::measurement::TaskGoalDigest,
+    ) {
+        (self.evidence, self.digest)
+    }
+
+    /// **Restore constructor:** canonical evidence → compute_from_canonical digest.
+    /// Bu constructor restore path'inin digest parity'sini kanıtlar — stored digest
+    /// ile karşılaştırma caller'ın (Item 16 validate_predicate_basis_semantics_v2)
+    /// sorumluluğu. validate_predicate_goal_for_commit caller'da çağrılır (PredicateSet
+    /// restore sonrası).
+    #[allow(dead_code, reason = "Faz 5 Item 16 restore validator consumer")]
+    pub(crate) fn from_canonical_evidence(
+        evidence: CanonicalTaskGoalEvidenceV2,
+    ) -> Result<Self, crate::measurement::EngineMeasurementDigestError> {
+        let digest = crate::measurement::TaskGoalDigest::compute_from_canonical(&evidence)?;
+        Ok(Self { evidence, digest })
+    }
+
+    /// **cfg(test) fixture:** Test-only constructor — field privacy.
+    #[cfg(test)]
+    #[allow(dead_code, reason = "Faz 5 test fixture — production build'de yok")]
+    pub(crate) fn fixture(
+        evidence: CanonicalTaskGoalEvidenceV2,
+        digest: crate::measurement::TaskGoalDigest,
+    ) -> Self {
+        Self { evidence, digest }
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // INV-T9 #70 Commit 4b Faz 4 — AuthorizationContextV2 (plan md:69-72)
 //
