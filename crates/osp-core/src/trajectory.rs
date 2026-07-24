@@ -738,106 +738,17 @@ impl Task {
     ///
     /// **NOT (reviewer v3 P0):** `preferred_vector = None` geçerli — bu metod reddetmez.
     /// NoPreferredVector durumunda typed loss evidence gate içinde karar verir.
+    ///
+    /// **INV-T9 #70 Faz 5 (P0-1):** Predicate goal validation `validate_predicate_goal_for_commit`
+    /// free function'a extract edildi — restore path (canonical evidence → PredicateSet)
+    /// aynı validator'ı kullanır. Policy validation bu metodda kalır (TaskPolicy restore
+    /// path ayrı).
     pub(crate) fn validate_for_commit(&self) -> Result<(), TaskValidationError> {
+        // **INV-T9 #70 Faz 5 Adım 6 (P0-1):** Shared predicate-goal validator.
+        validate_predicate_goal_for_commit(self.id, &self.target_predicate_set)?;
+
         let task_id = self.id;
         let policy = &self.policy;
-        let pset = &self.target_predicate_set;
-
-        // PredicateSet non-empty.
-        if pset.predicates.is_empty() {
-            return Err(TaskValidationError::EmptyPredicateSet { task_id });
-        }
-
-        // Her WeightedPredicate için MetricPredicate + weight/mode shape validation.
-        for (predicate_index, wp) in pset.predicates.iter().enumerate() {
-            let pred = &wp.predicate;
-            // threshold finite.
-            if !pred.threshold.is_finite() {
-                return Err(TaskValidationError::NonFiniteThreshold {
-                    task_id,
-                    predicate_index,
-                    threshold: pred.threshold,
-                });
-            }
-            // tolerance finite + >= 0.
-            if !pred.tolerance.is_finite() || pred.tolerance < 0.0 {
-                return Err(TaskValidationError::InvalidTolerance {
-                    task_id,
-                    predicate_index,
-                    tolerance: pred.tolerance,
-                });
-            }
-            // required_source != Mixed (epistemik talep değil).
-            if pred.required_source == Some(MetricSource::Mixed) {
-                return Err(TaskValidationError::InvalidRequiredMetricSource {
-                    task_id,
-                    predicate_index,
-                    required_source: MetricSource::Mixed,
-                });
-            }
-            // **Reviewer scoped P1-1:** mode/weight shape validation.
-            // Sözleşme: Weighted → weight=Some(w); All/Any → weight=None.
-            match (pset.mode, wp.weight) {
-                (PredicateMode::Weighted, None) => {
-                    return Err(TaskValidationError::MissingWeightForWeightedMode {
-                        task_id,
-                        predicate_index,
-                    });
-                }
-                (PredicateMode::All | PredicateMode::Any, Some(weight)) => {
-                    return Err(TaskValidationError::UnexpectedWeightForUnweightedMode {
-                        task_id,
-                        predicate_index,
-                        weight,
-                        mode: pset.mode,
-                    });
-                }
-                (_, Some(weight)) if !weight.is_finite() || weight <= 0.0 => {
-                    return Err(TaskValidationError::InvalidWeight {
-                        task_id,
-                        predicate_index,
-                        weight,
-                    });
-                }
-                _ => {}
-            }
-            // **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** Subgraph scope duplicate
-            // node id kontrolü. `[1,1,2]` iki farklı digest üretürken aynı ontolojik
-            // subgraph'ı ifade edebilir. Canonical representation invariant — sessiz
-            // dedup YOK, typed reject.
-            if let PredicateScope::Subgraph(ids) = &pred.scope {
-                let mut sorted = ids.clone();
-                sorted.sort_unstable();
-                for pair in sorted.windows(2) {
-                    if pair[0] == pair[1] {
-                        return Err(TaskValidationError::DuplicateSubgraphScopeNode {
-                            task_id,
-                            predicate_index,
-                            node_id: pair[0],
-                        });
-                    }
-                }
-            }
-        }
-
-        // preferred_vector varsa beş alan finite.
-        if let Some(pv) = pset.preferred_vector {
-            if !pv.x.is_finite()
-                || !pv.y.is_finite()
-                || !pv.z.is_finite()
-                || !pv.w.is_finite()
-                || !pv.v.is_finite()
-            {
-                return Err(TaskValidationError::NonFinitePreferredVector {
-                    task_id,
-                    x: pv.x,
-                    y: pv.y,
-                    z: pv.z,
-                    w: pv.w,
-                    v: pv.v,
-                });
-            }
-        }
 
         // TaskPolicy: min_improvement_delta finite + >= 0.
         if !policy.min_improvement_delta.is_finite() || policy.min_improvement_delta < 0.0 {
@@ -863,6 +774,123 @@ impl Task {
 
         Ok(())
     }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 6 (P0-1):** Shared task-goal validator — predicate set
+/// commit-time validation. `Task::validate_for_commit`'ten extract edildi; restore
+/// path (canonical evidence → `PredicateSet::try_from` → validate_predicate_goal_for_commit
+/// → evaluate_completion) tek evaluator altyapısı için aynı validator'ı kullanır.
+///
+/// **Exact matris (reviewer v4 P2):**
+/// - MetricPredicate: threshold finite, tolerance finite + >= 0, required_source != Mixed
+/// - WeightedPredicate: weight varsa finite + > 0 (mode/weight shape: Weighted→Some, All/Any→None)
+/// - PredicateSet: predicate list non-empty, preferred_vector varsa beş alan finite,
+///   subgraph scope duplicate node id yok
+///
+/// **NOT (reviewer v3 P0):** `preferred_vector = None` geçerli — bu metod reddetmez.
+pub(crate) fn validate_predicate_goal_for_commit(
+    task_id: TaskId,
+    predicate_set: &PredicateSet,
+) -> Result<(), TaskValidationError> {
+    let pset = predicate_set;
+
+    // PredicateSet non-empty.
+    if pset.predicates.is_empty() {
+        return Err(TaskValidationError::EmptyPredicateSet { task_id });
+    }
+
+    // Her WeightedPredicate için MetricPredicate + weight/mode shape validation.
+    for (predicate_index, wp) in pset.predicates.iter().enumerate() {
+        let pred = &wp.predicate;
+        // threshold finite.
+        if !pred.threshold.is_finite() {
+            return Err(TaskValidationError::NonFiniteThreshold {
+                task_id,
+                predicate_index,
+                threshold: pred.threshold,
+            });
+        }
+        // tolerance finite + >= 0.
+        if !pred.tolerance.is_finite() || pred.tolerance < 0.0 {
+            return Err(TaskValidationError::InvalidTolerance {
+                task_id,
+                predicate_index,
+                tolerance: pred.tolerance,
+            });
+        }
+        // required_source != Mixed (epistemik talep değil).
+        if pred.required_source == Some(MetricSource::Mixed) {
+            return Err(TaskValidationError::InvalidRequiredMetricSource {
+                task_id,
+                predicate_index,
+                required_source: MetricSource::Mixed,
+            });
+        }
+        // **Reviewer scoped P1-1:** mode/weight shape validation.
+        // Sözleşme: Weighted → weight=Some(w); All/Any → weight=None.
+        match (pset.mode, wp.weight) {
+            (PredicateMode::Weighted, None) => {
+                return Err(TaskValidationError::MissingWeightForWeightedMode {
+                    task_id,
+                    predicate_index,
+                });
+            }
+            (PredicateMode::All | PredicateMode::Any, Some(weight)) => {
+                return Err(TaskValidationError::UnexpectedWeightForUnweightedMode {
+                    task_id,
+                    predicate_index,
+                    weight,
+                    mode: pset.mode,
+                });
+            }
+            (_, Some(weight)) if !weight.is_finite() || weight <= 0.0 => {
+                return Err(TaskValidationError::InvalidWeight {
+                    task_id,
+                    predicate_index,
+                    weight,
+                });
+            }
+            _ => {}
+        }
+        // **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** Subgraph scope duplicate
+        // node id kontrolü. `[1,1,2]` iki farklı digest üretürken aynı ontolojik
+        // subgraph'ı ifade edebilir. Canonical representation invariant — sessiz
+        // dedup YOK, typed reject.
+        if let PredicateScope::Subgraph(ids) = &pred.scope {
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            for pair in sorted.windows(2) {
+                if pair[0] == pair[1] {
+                    return Err(TaskValidationError::DuplicateSubgraphScopeNode {
+                        task_id,
+                        predicate_index,
+                        node_id: pair[0],
+                    });
+                }
+            }
+        }
+    }
+
+    // preferred_vector varsa beş alan finite.
+    if let Some(pv) = pset.preferred_vector {
+        if !pv.x.is_finite()
+            || !pv.y.is_finite()
+            || !pv.z.is_finite()
+            || !pv.w.is_finite()
+            || !pv.v.is_finite()
+        {
+            return Err(TaskValidationError::NonFinitePreferredVector {
+                task_id,
+                x: pv.x,
+                y: pv.y,
+                z: pv.z,
+                w: pv.w,
+                v: pv.v,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -3296,6 +3324,39 @@ mod tests {
                 task_id: 1,
                 value: 0,
             }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 6 (P0-1) — validate_predicate_goal_for_commit parity
+    //
+    // Free function extract'inin Task::validate_for_commit ile aynı validation
+    // sonucunu verdiği pinlenir. P0-1 amacı: restore path (canonical evidence →
+    // PredicateSet) aynı validator'ı kullanır — iki truth source YOK.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn faz5_validate_predicate_goal_for_commit_accepts_valid_set() {
+        // Free function valid predicate set'i kabul eder — Task metodu ile parity.
+        let task = valid_task_for_validation();
+        validate_predicate_goal_for_commit(task.id, &task.target_predicate_set)
+            .expect("valid predicate set must pass free function validation");
+    }
+
+    #[test]
+    fn faz5_validate_predicate_goal_for_commit_rejects_predicate_issues() {
+        // Predicate-goal validator predicate sorunlarını yakalar (policy DEĞİL).
+        // Bu test free function'ın policy validation YAPMADIĞINI da doğrular —
+        // maneuver_limit=0 free function'da hata vermez (Task::validate_for_commit verir).
+        let mut task = valid_task_for_validation();
+        task.policy.maneuver_limit = 0; // policy issue — free function bunu görmez
+        task.target_predicate_set.predicates.clear(); // predicate issue
+        let err = validate_predicate_goal_for_commit(task.id, &task.target_predicate_set)
+            .unwrap_err();
+        // EmptyPredicateSet (predicate issue) — InvalidManeuverLimit (policy) DEĞİL.
+        assert!(matches!(
+            err,
+            TaskValidationError::EmptyPredicateSet { task_id: 1 }
         ));
     }
 
