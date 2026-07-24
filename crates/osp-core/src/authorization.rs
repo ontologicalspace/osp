@@ -180,7 +180,7 @@ impl<'de> serde::Deserialize<'de> for CanonicalEdgeIdentity {
 pub use crate::canonical_tags::{
     CanonicalEdgeKind, CanonicalMetricSourceTag, CanonicalNodeClassification, CanonicalNodeKind,
     CanonicalNodeRole, ComparisonOpTag, PredicateAxisTag, PredicateFailurePolicyTag,
-    PredicateModeTag, WitnessIndependencePolicyTag,
+    PredicateModeTag, PredicateSetResultTag, WitnessIndependencePolicyTag,
 };
 
 /// Canonical f64 — NaN reject, -0.0 normalize, to_bits encoding.
@@ -947,6 +947,57 @@ pub struct PredicateEvaluationBasis {
 ///
 /// Detaylı dokümantasyon ve `current_semantics()` impl'i: [`crate::trajectory::EffectiveImprovementPolicy`].
 pub use crate::trajectory::{EffectiveImprovementPolicy, IMPROVEMENT_SEMANTICS_VERSION};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 8 (P0-2) — Gate evaluation semantics version + V2 basis
+//
+// **Restore version mismatch → reject.** Runtime ve restore aynı
+// `evaluate_task_gate_with_semantics(version, ...)` kullanır. Semantics version
+// predicate eval + source propagation + trajectory loss + baseline + improvement +
+// decision core süreçlerini kapsar — herhangi biri değişirse version artırılmalı.
+//
+// V2 basis, V1 `PredicateEvaluationBasis`'ten farklı olarak evaluation *sonucunu*
+// (PredicateSetResultTag) + semantics version'ı taşır — restore path'inin runtime
+// ile aynı semantics altında değerlendirildiğini kanıtlar.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** Gate evaluation semantics version.
+///
+/// Predicate eval + source propagation + trajectory loss + baseline + improvement +
+/// decision core süreçlerini kapsayan canonical semantics version. Restore path
+/// bu version'ı runtime ile karşılaştırır — mismatch = reject (farklı semantics
+/// altında üretilmiş evidence geçersiz).
+pub const GATE_EVALUATION_SEMANTICS_V1: u32 = 1;
+
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** `EffectiveImproPolicyBasisV2` — V2 evaluation
+/// basis'inde taşınan improvement policy canonical form. Mevcut
+/// `EffectiveImprovementPolicy` (trajectory.rs) ile aynı semantik — V2 alias.
+pub type EffectiveImproPolicyBasisV2 = EffectiveImprovementPolicy;
+
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** Canonical predicate evaluation basis V2 —
+/// gate evaluation sonucunun canonical kanıtı. Restore path bu basis'i runtime
+/// çıktısı ile karşılaştırır (semantics version + result + policy).
+///
+/// **V1'den farkı:** V1 (`PredicateEvaluationBasis`) evaluation *girdilerini*
+/// taşır (target_vector, loss_before/after). V2 evaluation *sonucunu* taşır —
+/// `result: PredicateSetResultTag` + `gate_evaluation_semantics_version`. İkisi
+/// farklı ontolojik katman: V1 "ne evaluate edildi", V2 "ne sonuçlandı".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalPredicateEvaluationBasisV2 {
+    /// Gate evaluation semantics version — runtime ile restore aynı olmalı.
+    /// Mismatch = reject (farklı semantics altında üretilmiş evidence).
+    pub gate_evaluation_semantics_version: u32,
+    /// Predicate set evaluation sonucu (Completed/SourceInsufficient/NotCompleted).
+    pub result: PredicateSetResultTag,
+    /// Predicate failure policy (StrictReject/AcceptImprovement/OperatorApproval).
+    pub failure_policy: PredicateFailurePolicyTag,
+    /// Gerçek `is_improved_loss` girdisi: `loss_after < loss_before - min_improvement_delta`.
+    pub min_improvement_delta: CanonicalF64,
+    /// Progress checkpoint izinli mi (AcceptImprovement policy altında).
+    pub allow_progress_checkpoint: bool,
+    /// Effective improvement policy (max_coupling/instability, min_cohesion, semantics_version).
+    pub effective_improvement: EffectiveImproPolicyBasisV2,
+}
 
 /// Canonical raw position — 5-axis, NaN reject, -0.0 normalize.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
