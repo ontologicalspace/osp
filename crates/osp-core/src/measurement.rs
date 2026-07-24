@@ -610,74 +610,123 @@ pub(crate) struct MeasurementDigest([u8; 32]);
 impl MeasurementDigest {
     const DOMAIN_SEPARATOR: &'static [u8] = b"osp.measurement-result.v1\0";
 
-    /// Measured result commitment üretir. Nötr `encode_axis_components` kullanır —
-    /// cycle risk kapalı (canonical_encoding auth/coords tipi tanımaz).
-    pub(crate) fn compute(
-        measured: &crate::coords::MeasuredRawPosition,
-    ) -> Result<Self, MeasurementDigestError> {
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Shared neutral writer —
+    /// tek truth source. `compute(&MeasuredRawPosition)` ve
+    /// `compute_from_canonical(&ProvenancedMeasuredResult)` aynı byte format üretir.
+    /// 5 axis (coupling→cohesion→instability→entropy→witness_depth) nötr
+    /// `encode_axis_components` ile encode edilir.
+    ///
+    /// Drift risk kapalı: iki ayrı field-by-field encoder YOK. Canonical evidence
+    /// zaten `CanonicalMetricSourceTag` taşıdığı için restore path tag→enum→tag
+    /// round-trip yapmaz (tag direkt kullanılır).
+    pub(crate) fn write_measurement_result_commitment(
+        hasher: &mut blake3::Hasher,
+        coupling: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+        cohesion: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+        instability: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+        entropy: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+        witness_depth: (f64, crate::canonical_tags::CanonicalMetricSourceTag),
+    ) -> Result<(), MeasurementDigestError> {
         use crate::canonical_encoding::{
             encode_axis_components, AXIS_DISCRIM_COHESION, AXIS_DISCRIM_COUPLING,
             AXIS_DISCRIM_ENTROPY, AXIS_DISCRIM_INSTABILITY, AXIS_DISCRIM_WITNESS_DEPTH,
         };
-        use crate::canonical_tags::CanonicalMetricSourceTag;
-
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_axis_components(hasher, coupling.0, coupling.1, AXIS_DISCRIM_COUPLING)
+            .map_err(MeasurementDigestError::from)?;
+        encode_axis_components(hasher, cohesion.0, cohesion.1, AXIS_DISCRIM_COHESION)
+            .map_err(MeasurementDigestError::from)?;
         encode_axis_components(
-            &mut hasher,
-            measured.coupling.value,
-            CanonicalMetricSourceTag::try_from(&measured.coupling.source).map_err(|e| {
-                MeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
-            AXIS_DISCRIM_COUPLING,
-        )
-        .map_err(MeasurementDigestError::from)?;
-        encode_axis_components(
-            &mut hasher,
-            measured.cohesion.value,
-            CanonicalMetricSourceTag::try_from(&measured.cohesion.source).map_err(|e| {
-                MeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
-            AXIS_DISCRIM_COHESION,
-        )
-        .map_err(MeasurementDigestError::from)?;
-        encode_axis_components(
-            &mut hasher,
-            measured.instability.value,
-            CanonicalMetricSourceTag::try_from(&measured.instability.source).map_err(|e| {
-                MeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
+            hasher,
+            instability.0,
+            instability.1,
             AXIS_DISCRIM_INSTABILITY,
         )
         .map_err(MeasurementDigestError::from)?;
+        encode_axis_components(hasher, entropy.0, entropy.1, AXIS_DISCRIM_ENTROPY)
+            .map_err(MeasurementDigestError::from)?;
         encode_axis_components(
-            &mut hasher,
-            measured.entropy.value,
-            CanonicalMetricSourceTag::try_from(&measured.entropy.source).map_err(|e| {
-                MeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
-            AXIS_DISCRIM_ENTROPY,
-        )
-        .map_err(MeasurementDigestError::from)?;
-        encode_axis_components(
-            &mut hasher,
-            measured.witness_depth.value,
-            CanonicalMetricSourceTag::try_from(&measured.witness_depth.source).map_err(|e| {
-                MeasurementDigestError::StructuralCanonicalization {
-                    detail: e.to_string(),
-                }
-            })?,
+            hasher,
+            witness_depth.0,
+            witness_depth.1,
             AXIS_DISCRIM_WITNESS_DEPTH,
         )
         .map_err(MeasurementDigestError::from)?;
+        Ok(())
+    }
+
+    /// Measured result commitment üretir. Shared writer (`write_measurement_result_commitment`)
+    /// çağırır — `compute_from_canonical` ile aynı byte format.
+    pub(crate) fn compute(
+        measured: &crate::coords::MeasuredRawPosition,
+    ) -> Result<Self, MeasurementDigestError> {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_measurement_result_commitment(
+            &mut hasher,
+            (
+                measured.coupling.value,
+                CanonicalMetricSourceTag::try_from(&measured.coupling.source).map_err(|e| {
+                    MeasurementDigestError::StructuralCanonicalization {
+                        detail: e.to_string(),
+                    }
+                })?,
+            ),
+            (
+                measured.cohesion.value,
+                CanonicalMetricSourceTag::try_from(&measured.cohesion.source).map_err(|e| {
+                    MeasurementDigestError::StructuralCanonicalization {
+                        detail: e.to_string(),
+                    }
+                })?,
+            ),
+            (
+                measured.instability.value,
+                CanonicalMetricSourceTag::try_from(&measured.instability.source).map_err(|e| {
+                    MeasurementDigestError::StructuralCanonicalization {
+                        detail: e.to_string(),
+                    }
+                })?,
+            ),
+            (
+                measured.entropy.value,
+                CanonicalMetricSourceTag::try_from(&measured.entropy.source).map_err(|e| {
+                    MeasurementDigestError::StructuralCanonicalization {
+                        detail: e.to_string(),
+                    }
+                })?,
+            ),
+            (
+                measured.witness_depth.value,
+                CanonicalMetricSourceTag::try_from(&measured.witness_depth.source).map_err(
+                    |e| MeasurementDigestError::StructuralCanonicalization {
+                        detail: e.to_string(),
+                    },
+                )?,
+            ),
+        )?;
+        Ok(Self(hasher.finalize().into()))
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical evidence üzerinden
+    /// digest üretir — `AuthorizationBasisV2::validate_semantics` snapshot → digest
+    /// reverify için kullanır. Shared writer ile `compute` byte-identical.
+    /// `ProvenancedMeasuredResult` zaten `CanonicalMetricSourceTag` taşıdığı için
+    /// tag→enum→tag round-trip YOK (tag direkt kullanılır).
+    #[allow(dead_code, reason = "Faz 5 validate_semantics / Item 11 consumer")]
+    pub(crate) fn compute_from_canonical(
+        measured: &crate::authorization::ProvenancedMeasuredResult,
+    ) -> Result<Self, MeasurementDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_measurement_result_commitment(
+            &mut hasher,
+            (measured.coupling.value, measured.coupling.source),
+            (measured.cohesion.value, measured.cohesion.source),
+            (measured.instability.value, measured.instability.source),
+            (measured.entropy.value, measured.entropy.source),
+            (measured.witness_depth.value, measured.witness_depth.source),
+        )?;
         Ok(Self(hasher.finalize().into()))
     }
 
@@ -1278,57 +1327,80 @@ impl TaskGoalDigest {
     /// **Tek producer (plan md:91-93):** `Task` üzerinden — task_id + predicate mode +
     /// weighted predicates (preferred_vector HARİÇ) + preferred_vector. Task tek okuma
     /// → snapshot + digest (TOCTOU yok — `verify_measurement_binding` zaten task'ı okur).
+    ///
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Shared writer
+    /// (`write_task_goal_commitment`) çağırır — `compute_from_canonical` ile byte-identical.
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
     pub(crate) fn compute(
         task: &crate::trajectory::Task,
     ) -> Result<Self, EngineMeasurementDigestError> {
-        use crate::canonical_encoding::{encode_bytes, encode_f64, encode_u64, encode_u8};
         use crate::canonical_tags::PredicateModeTag;
 
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(Self::DOMAIN_SEPARATOR);
-
-        // task_id (TaskId = u64).
-        encode_u64(&mut hasher, task.id, "task_id");
-
-        // canonical predicate mode.
         let mode_tag =
             PredicateModeTag::try_from(&task.target_predicate_set.mode).map_err(|e| {
                 EngineMeasurementDigestError::StructuralCanonicalization {
                     detail: e.to_string(),
                 }
             })?;
-        encode_u8(&mut hasher, mode_tag.as_u8(), "predicate_mode");
 
-        // canonical weighted predicates (preferred_vector HARİÇ). Sort edilir — sıra
-        // bağımsız canonical temsil. Her predicate byte dizisine çevrilip sort + length-prefix.
-        let mut encoded_preds: Vec<Vec<u8>> =
-            Vec::with_capacity(task.target_predicate_set.predicates.len());
-        for wp in &task.target_predicate_set.predicates {
-            encoded_preds.push(Self::encode_weighted_predicate_to_vec(wp)?);
-        }
-        encoded_preds.sort_unstable();
-        encode_u64(&mut hasher, encoded_preds.len() as u64, "predicate_count");
-        for buf in &encoded_preds {
-            encode_bytes(&mut hasher, buf)?;
-        }
+        // Domain WeightedPredicate → canonical byte dizisi (sort shared writer içinde).
+        let encoded_preds: Vec<Vec<u8>> = task
+            .target_predicate_set
+            .predicates
+            .iter()
+            .map(Self::encode_weighted_predicate_to_vec)
+            .collect::<Result<Vec<_>, _>>()?;
 
-        // preferred_vector option tag + canonical value (ayrı — predicate body'de YOK).
-        // Tek canonical temsil: preferred_vector iki kez encode edilmez.
-        match &task.target_predicate_set.preferred_vector {
-            None => {
-                encode_u8(&mut hasher, 0, "preferred_vector_none_tag");
-            }
-            Some(pos) => {
-                encode_u8(&mut hasher, 1, "preferred_vector_some_tag");
-                encode_f64(&mut hasher, pos.x, "preferred_vector_x")?;
-                encode_f64(&mut hasher, pos.y, "preferred_vector_y")?;
-                encode_f64(&mut hasher, pos.z, "preferred_vector_z")?;
-                encode_f64(&mut hasher, pos.w, "preferred_vector_w")?;
-                encode_f64(&mut hasher, pos.v, "preferred_vector_v")?;
-            }
-        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_task_goal_commitment(
+            &mut hasher,
+            task.id,
+            mode_tag,
+            &encoded_preds,
+            task.target_predicate_set.preferred_vector.as_ref(),
+        )?;
+        Ok(Self(hasher.finalize().into()))
+    }
 
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical evidence üzerinden
+    /// digest üretir — restore path (canonical evidence → reverify) için kullanılır.
+    /// Shared writer (`write_task_goal_commitment`) ile `compute` byte-identical.
+    ///
+    /// **Kritik:** V2 `declared_weight: Option<CanonicalF64>` ile `None ≠ Some(1.0)` byte
+    /// ayrımı korunur — domain encoder ile aynı encoding (tek truth source).
+    #[allow(dead_code, reason = "Faz 5 validate_semantics / Item 11 consumer")]
+    pub(crate) fn compute_from_canonical(
+        evidence: &crate::authorization::CanonicalTaskGoalEvidenceV2,
+    ) -> Result<Self, EngineMeasurementDigestError> {
+        // Canonical V2 → canonical byte dizisi (sort shared writer içinde).
+        let encoded_preds: Vec<Vec<u8>> = evidence
+            .predicates
+            .iter()
+            .map(Self::encode_canonical_weighted_predicate_v2_to_vec)
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let preferred_vector =
+            evidence
+                .preferred_vector
+                .as_ref()
+                .map(|crp| crate::coords::RawPosition {
+                    x: crp.x,
+                    y: crp.y,
+                    z: crp.z,
+                    w: crp.w,
+                    v: crp.v,
+                });
+
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        Self::write_task_goal_commitment(
+            &mut hasher,
+            evidence.task_id,
+            evidence.mode,
+            &encoded_preds,
+            preferred_vector.as_ref(),
+        )?;
         Ok(Self(hasher.finalize().into()))
     }
 
@@ -1399,6 +1471,118 @@ impl TaskGoalDigest {
         push_f64(&mut buf, p.tolerance)?;
 
         Ok(buf)
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Canonical V2 weighted
+    /// predicate → canonical byte dizisi. `encode_weighted_predicate_to_vec` ile aynı
+    /// byte format — tek truth source. V2 tipi zaten canonical tag'ler taşıdığı için
+    /// tag→enum→tag round-trip YOK.
+    ///
+    /// **Kritik:** `declared_weight: Option<CanonicalF64>` ile `None ≠ Some(1.0)` byte
+    /// ayrımı korunur (domain encoder ile aynı: None→[0], Some(w)→[1, <f64 bytes>]).
+    fn encode_canonical_weighted_predicate_v2_to_vec(
+        canonical: &crate::authorization::CanonicalWeightedPredicateV2,
+    ) -> Result<Vec<u8>, EngineMeasurementDigestError> {
+        use crate::canonical_encoding::{push_f64, push_tag, push_u8};
+
+        let mut buf: Vec<u8> = Vec::with_capacity(48);
+        push_tag(&mut buf, canonical.axis);
+        push_tag(&mut buf, canonical.operator);
+        push_f64(&mut buf, canonical.threshold)?;
+        Self::push_canonical_predicate_scope_v2(&mut buf, &canonical.scope)?;
+        // required_source (Any→[0], Exact(tag)→[1, tag]) — domain ile aynı.
+        match &canonical.required_source {
+            crate::authorization::EffectiveSourceRequirement::Any => {
+                push_u8(&mut buf, 0);
+            }
+            crate::authorization::EffectiveSourceRequirement::Exact(tag) => {
+                push_u8(&mut buf, 1);
+                push_tag(&mut buf, *tag);
+            }
+        }
+        // declared_weight (None→[0], Some(w)→[1, f64 bytes]) — None ≠ Some(1.0).
+        match canonical.declared_weight {
+            None => {
+                push_u8(&mut buf, 0);
+            }
+            Some(w) => {
+                push_u8(&mut buf, 1);
+                push_f64(&mut buf, w)?;
+            }
+        }
+        push_f64(&mut buf, canonical.tolerance)?;
+        Ok(buf)
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 7:** CanonicalPredicateScope → canonical byte.
+    /// `push_predicate_scope` (domain) ile aynı format. CanonicalSubgraphScope
+    /// invariant'ı (sorted+unique) zaten enforced — tekrar sort/dedup YOK, direkt
+    /// `as_sorted_ids()` kullanılır.
+    fn push_canonical_predicate_scope_v2(
+        buf: &mut Vec<u8>,
+        scope: &crate::authorization::CanonicalPredicateScope,
+    ) -> Result<(), EngineMeasurementDigestError> {
+        use crate::canonical_encoding::{push_bytes, push_u64, push_u8};
+        match scope {
+            crate::authorization::CanonicalPredicateScope::Node(id) => {
+                push_u8(buf, 0);
+                push_u64(buf, *id);
+            }
+            crate::authorization::CanonicalPredicateScope::Module(name) => {
+                push_u8(buf, 1);
+                push_bytes(buf, name.as_bytes());
+            }
+            crate::authorization::CanonicalPredicateScope::Subgraph(sub) => {
+                push_u8(buf, 2);
+                let ids = sub.as_sorted_ids();
+                push_u64(buf, ids.len() as u64);
+                for id in ids {
+                    push_u64(buf, *id);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity):** Shared neutral writer —
+    /// tek truth source. `compute(&Task)` ve `compute_from_canonical` aynı byte format
+    /// üretir. task_id + mode + sorted predicates + preferred_vector.
+    ///
+    /// Drift risk kapalı: iki ayrı field-by-field encoder YOK.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn write_task_goal_commitment(
+        hasher: &mut blake3::Hasher,
+        task_id: crate::trajectory::TaskId,
+        mode_tag: crate::canonical_tags::PredicateModeTag,
+        encoded_predicates: &[Vec<u8>],
+        preferred_vector: Option<&crate::coords::RawPosition>,
+    ) -> Result<(), EngineMeasurementDigestError> {
+        use crate::canonical_encoding::{encode_bytes, encode_f64, encode_u64, encode_u8};
+
+        encode_u64(hasher, task_id, "task_id");
+        encode_u8(hasher, mode_tag.as_u8(), "predicate_mode");
+        // Canonical sorted predicates — sıra bağımsız temsil.
+        let mut sorted = encoded_predicates.to_vec();
+        sorted.sort_unstable();
+        encode_u64(hasher, sorted.len() as u64, "predicate_count");
+        for buf in &sorted {
+            encode_bytes(hasher, buf)?;
+        }
+        // preferred_vector option tag + canonical value.
+        match preferred_vector {
+            None => {
+                encode_u8(hasher, 0, "preferred_vector_none_tag");
+            }
+            Some(pos) => {
+                encode_u8(hasher, 1, "preferred_vector_some_tag");
+                encode_f64(hasher, pos.x, "preferred_vector_x")?;
+                encode_f64(hasher, pos.y, "preferred_vector_y")?;
+                encode_f64(hasher, pos.z, "preferred_vector_z")?;
+                encode_f64(hasher, pos.w, "preferred_vector_w")?;
+                encode_f64(hasher, pos.v, "preferred_vector_v")?;
+            }
+        }
+        Ok(())
     }
 
     /// `PredicateScope` → canonical byte (Node/Module/Subgraph varyant tag + identity).
@@ -3645,6 +3829,114 @@ pub(crate) mod tests {
             digest.to_hex(),
             FAZ4_ENGINE_MEASUREMENT_V1_GOLDEN_HEX,
             "EngineMeasurementDigest golden byte contract changed (OSP/ENGINE-MEASUREMENT/V1)"
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 7 (P0-2 digest continuity) — compute == compute_from_canonical
+    //
+    // Shared neutral writer teyit: `compute(&Domain)` ve `compute_from_canonical(&Canonical)`
+    // byte-identical digest üretir. Bu, restore path'inin runtime path ile aynı byte
+    // sözleşmesine sahip olduğunu pinler — iki truth source YOK.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Helper — Task → CanonicalTaskGoalEvidenceV2 forward projection (test-only).
+    /// Item 7 compute_from_canonical ile compute(&Task) parity testi için.
+    fn task_to_canonical_evidence_v2(
+        task: &crate::trajectory::Task,
+    ) -> crate::authorization::CanonicalTaskGoalEvidenceV2 {
+        use crate::authorization::{
+            CanonicalPredicateScope, CanonicalSubgraphScope, CanonicalWeightedPredicateV2,
+            EffectiveSourceRequirement,
+        };
+        use crate::canonical_tags::{
+            CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag, PredicateModeTag,
+        };
+
+        let predicates = task
+            .target_predicate_set
+            .predicates
+            .iter()
+            .map(|wp| {
+                let p = &wp.predicate;
+                CanonicalWeightedPredicateV2 {
+                    axis: PredicateAxisTag::try_from(&p.metric).unwrap(),
+                    operator: ComparisonOpTag::try_from(&p.operator).unwrap(),
+                    threshold: p.threshold,
+                    scope: match &p.scope {
+                        crate::trajectory::PredicateScope::Node(id) => {
+                            CanonicalPredicateScope::Node(*id)
+                        }
+                        crate::trajectory::PredicateScope::Module(name) => {
+                            CanonicalPredicateScope::Module(name.clone())
+                        }
+                        crate::trajectory::PredicateScope::Subgraph(ids) => {
+                            CanonicalPredicateScope::Subgraph(
+                                CanonicalSubgraphScope::try_new(ids.clone()).unwrap(),
+                            )
+                        }
+                    },
+                    required_source: match p.required_source {
+                        None => EffectiveSourceRequirement::Any,
+                        Some(src) => EffectiveSourceRequirement::Exact(
+                            CanonicalMetricSourceTag::try_from(&src).unwrap(),
+                        ),
+                    },
+                    declared_weight: wp.weight,
+                    tolerance: p.tolerance,
+                }
+            })
+            .collect();
+
+        crate::authorization::CanonicalTaskGoalEvidenceV2 {
+            task_id: task.id,
+            mode: PredicateModeTag::try_from(&task.target_predicate_set.mode).unwrap(),
+            predicates,
+            preferred_vector: task.target_predicate_set.preferred_vector.map(|pv| {
+                crate::authorization::CanonicalRawPosition {
+                    x: pv.x,
+                    y: pv.y,
+                    z: pv.z,
+                    w: pv.w,
+                    v: pv.v,
+                }
+            }),
+        }
+    }
+
+    #[test]
+    fn faz5_task_goal_digest_compute_equals_compute_from_canonical() {
+        // P0-2 digest continuity: compute(&Task) == compute_from_canonical(forward_project(task)).
+        // Shared writer tek truth source — iki ayrı encoder YOK.
+        let task = faz4_golden_task();
+        let evidence = task_to_canonical_evidence_v2(&task);
+        let from_task = TaskGoalDigest::compute(&task).expect("compute");
+        let from_canonical =
+            TaskGoalDigest::compute_from_canonical(&evidence).expect("compute_from_canonical");
+        assert_eq!(
+            from_task.as_bytes(),
+            from_canonical.as_bytes(),
+            "TaskGoalDigest compute != compute_from_canonical (digest continuity broken)"
+        );
+        // Golden hex de korunmalı — compute refactor golden byte'ları değiştirmedi.
+        const FAZ4_TASK_GOAL_V1_GOLDEN_HEX: &str =
+            "03a3ad384d2dff383974a301ed68a52d932439f18e3c08cc4cb8a8b9c7c8201c";
+        assert_eq!(from_canonical.to_hex(), FAZ4_TASK_GOAL_V1_GOLDEN_HEX);
+    }
+
+    #[test]
+    fn faz5_measurement_digest_compute_equals_compute_from_canonical() {
+        // P0-2 digest continuity: compute(&MeasuredRawPosition) == compute_from_canonical(&ProvenancedMeasuredResult).
+        let measured = faz4_engine_measurement(0.5).after.clone();
+        let canonical =
+            crate::authorization::ProvenancedMeasuredResult::try_from(&measured).unwrap();
+        let from_domain = MeasurementDigest::compute(&measured).expect("compute");
+        let from_canonical =
+            MeasurementDigest::compute_from_canonical(&canonical).expect("compute_from_canonical");
+        assert_eq!(
+            from_domain.as_bytes(),
+            from_canonical.as_bytes(),
+            "MeasurementDigest compute != compute_from_canonical (digest continuity broken)"
         );
     }
 }
