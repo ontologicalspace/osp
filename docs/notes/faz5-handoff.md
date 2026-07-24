@@ -4,9 +4,9 @@
 
 ```
 Branch: wip/inv-t9-70-commit4b
-HEAD: cacdabd5a670bbf3fc844b069872216641c8e0aa
-Remote HEAD: b8bdd005101b9bebd725b424b0dd1c35e7685aeb
-Push status: 13 commits LOCAL-ONLY (push edilmemiş)
+HEAD: 3750fe8e8caacb666e0c7123641410121629b354
+Remote HEAD: 3750fe8e8caacb666e0c7123641410121629b354
+Push status: PUSHED — local/remote sync (0 commit local-only)
 Worktree: clean (source) — sadece untracked docs var
 Untracked files:
 - docs/design/plan-bound-task-lifecycle.md
@@ -23,7 +23,8 @@ Faz 5 review base (allow karşılaştırma): b8bdd00
 ## Last fully verified state
 
 ```
-Verified SHA: cacdabd5a670bbf3fc844b069872216641c8e0aa
+Verified SHA: cacdabd5a670bbf3fc844b069872216641c8e0aa (source code)
+              3750fe8e8caacb666e0c7123641410121629b354 (HEAD — son commit handoff doc)
 
 Commands:
   cargo fmt --all -- --check
