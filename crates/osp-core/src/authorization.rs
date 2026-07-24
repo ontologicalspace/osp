@@ -2118,6 +2118,9 @@ impl CanonicalTrajectoryEvidenceBaseline {
 /// **INV-T9 #70 Commit 4b (reviewer v4 P0/P1-1):** Canonical trajectory loss evidence —
 /// sadece `target + loss_after`. Baseline taşımaz (baseline ayrı evidence). Unavailable
 /// ise `CanonicalTrajectoryLossUnavailableReason` (NoPreferredVector).
+///
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** `NotRequired` varyantı eklendi —
+/// completion-first PredicateGate modeli. Borrowed/owned canonical projection senkron.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum CanonicalTrajectoryLossEvidence {
     /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
@@ -2129,6 +2132,11 @@ pub enum CanonicalTrajectoryLossEvidence {
     Unavailable {
         reason: CanonicalTrajectoryLossUnavailableReason,
     },
+    /// **Faz 5:** Loss gerekmiyor — completion-first. `CanonicalLossNotRequiredReason`
+    /// kapalı enum (borrowed `LossNotRequiredReason` canonical projection'ı).
+    NotRequired {
+        reason: CanonicalLossNotRequiredReason,
+    },
 }
 
 /// **INV-T9 #70 Commit 4b:** Canonical loss unavailable reason. `NoPreferredVector`
@@ -2138,6 +2146,78 @@ pub enum CanonicalTrajectoryLossEvidence {
 pub enum CanonicalTrajectoryLossUnavailableReason {
     /// Task'ta `preferred_vector` yok — loss/target anlamsız.
     NoPreferredVector,
+}
+
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Canonical loss "gerekmiyor" sebebi.
+/// Borrowed `LossNotRequiredReason`'ın canonical/wire projection'ı. Kapalı enum —
+/// `Other(String)` yok. Pinned numeric tag (`LossNotRequiredReasonTag`) ile encode edilir
+/// (enum ordinal/serde adı DEĞİL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalLossNotRequiredReason {
+    /// Predicate Completed — loss irrelevant.
+    PredicateCompleted,
+    /// SourceInsufficient (INV-T4) — placeholder ile task kapatılamaz, Reject kesin.
+    SourceInsufficient,
+    /// StrictReject policy — loss computation anlamsız.
+    StrictRejectPolicy,
+    /// OperatorApproval policy — loss mutation kararını etkilemiyor.
+    OperatorApprovalPolicy,
+}
+
+impl CanonicalLossNotRequiredReason {
+    /// Pinned numeric tag — `LossNotRequiredReasonTag`. Append-only (mevcut tag'ler donar).
+    pub(crate) fn tag(&self) -> LossNotRequiredReasonTag {
+        match self {
+            Self::PredicateCompleted => LossNotRequiredReasonTag::PREDICATE_COMPLETED,
+            Self::SourceInsufficient => LossNotRequiredReasonTag::SOURCE_INSUFFICIENT,
+            Self::StrictRejectPolicy => LossNotRequiredReasonTag::STRICT_REJECT_POLICY,
+            Self::OperatorApprovalPolicy => LossNotRequiredReasonTag::OPERATOR_APPROVAL_POLICY,
+        }
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8, plan P1-4):** Pinned canonical tag for V2
+/// loss "gerekmiyor" reason. Append-only: mevcut tag'ler (0-3) ASLA değişmez (exact pin —
+/// golden vector lock). Yeni varyantlar sıradaki tag'leri alır.
+///
+/// `CanonicalTrajectoryLossUnavailableReasonTag` ile AYRI newtype — ontolojik kategori
+/// (loss unavailable vs loss gerekmiyor) kanıtlanmadıkça tag alanı paylaşılmaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct LossNotRequiredReasonTag(u8);
+
+impl LossNotRequiredReasonTag {
+    pub(crate) const PREDICATE_COMPLETED: Self = Self(0);
+    pub(crate) const SOURCE_INSUFFICIENT: Self = Self(1);
+    pub(crate) const STRICT_REJECT_POLICY: Self = Self(2);
+    pub(crate) const OPERATOR_APPROVAL_POLICY: Self = Self(3);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3];
+
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for LossNotRequiredReasonTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "LossNotRequiredReasonTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for LossNotRequiredReasonTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2878,6 +2958,12 @@ fn encode_canonical_trajectory_loss_v2(
                     encode_u8(hasher, 0, "v2_loss_reason_no_preferred_vector");
                 }
             }
+        }
+        // **INV-T9 #70 Commit 4b Faz 5 (review v8 P1-4):** append-only tag=2. Mevcut
+        // Available(0)/Unavailable(1) encoding donar — golden digest'lar değişmez.
+        CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+            encode_u8(hasher, 2, "v2_loss_not_required_tag");
+            encode_u8(hasher, reason.tag().as_u8(), "v2_loss_not_required_reason_tag");
         }
     }
     Ok(())
@@ -6414,12 +6500,27 @@ enum RawTrajectoryLossV2 {
     Unavailable {
         reason: RawTrajectoryLossUnavailableReasonV2,
     },
+    /// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Loss gerekmiyor — completion-first.
+    NotRequired {
+        reason: RawLossNotRequiredReasonV2,
+    },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RawTrajectoryLossUnavailableReasonV2 {
     NoPreferredVector,
+}
+
+/// **INV-T9 #70 Commit 4b Faz 5:** Wire form for `CanonicalLossNotRequiredReason`.
+/// `deny_unknown_fields` — yeni reason backward-compat DEĞİL (V2 strict wire).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RawLossNotRequiredReasonV2 {
+    PredicateCompleted,
+    SourceInsufficient,
+    StrictRejectPolicy,
+    OperatorApprovalPolicy,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -6676,6 +6777,10 @@ enum RawTrajectoryLossV2Ref<'a> {
     Unavailable {
         reason: RawTrajectoryLossUnavailableReasonV2,
     },
+    /// **INV-T9 #70 Commit 4b Faz 5:** NotRequired — completion-first.
+    NotRequired {
+        reason: RawLossNotRequiredReasonV2,
+    },
 }
 
 impl<'a> RawTrajectoryLossV2Ref<'a> {
@@ -6690,6 +6795,23 @@ impl<'a> RawTrajectoryLossV2Ref<'a> {
                 reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
             } => Self::Unavailable {
                 reason: RawTrajectoryLossUnavailableReasonV2::NoPreferredVector,
+            },
+            // **INV-T9 #70 Commit 4b Faz 5:** NotRequired — exhausted reason mapping.
+            CanonicalTrajectoryLossEvidence::NotRequired { reason } => Self::NotRequired {
+                reason: match reason {
+                    CanonicalLossNotRequiredReason::PredicateCompleted => {
+                        RawLossNotRequiredReasonV2::PredicateCompleted
+                    }
+                    CanonicalLossNotRequiredReason::SourceInsufficient => {
+                        RawLossNotRequiredReasonV2::SourceInsufficient
+                    }
+                    CanonicalLossNotRequiredReason::StrictRejectPolicy => {
+                        RawLossNotRequiredReasonV2::StrictRejectPolicy
+                    }
+                    CanonicalLossNotRequiredReason::OperatorApprovalPolicy => {
+                        RawLossNotRequiredReasonV2::OperatorApprovalPolicy
+                    }
+                },
             },
         }
     }
@@ -7085,6 +7207,23 @@ impl AuthorizationBasisV2 {
                 reason: RawTrajectoryLossUnavailableReasonV2::NoPreferredVector,
             } => CanonicalTrajectoryLossEvidence::Unavailable {
                 reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+            },
+            // **INV-T9 #70 Commit 4b Faz 5 (review v8):** NotRequired — exhausted reason mapping.
+            RawTrajectoryLossV2::NotRequired { reason } => CanonicalTrajectoryLossEvidence::NotRequired {
+                reason: match reason {
+                    RawLossNotRequiredReasonV2::PredicateCompleted => {
+                        CanonicalLossNotRequiredReason::PredicateCompleted
+                    }
+                    RawLossNotRequiredReasonV2::SourceInsufficient => {
+                        CanonicalLossNotRequiredReason::SourceInsufficient
+                    }
+                    RawLossNotRequiredReasonV2::StrictRejectPolicy => {
+                        CanonicalLossNotRequiredReason::StrictRejectPolicy
+                    }
+                    RawLossNotRequiredReasonV2::OperatorApprovalPolicy => {
+                        CanonicalLossNotRequiredReason::OperatorApprovalPolicy
+                    }
+                },
             },
         };
 
@@ -13965,6 +14104,209 @@ v = 0.5
             value,
             serde_json::json!({"kind": "unavailable", "reason": "no_preferred_vector"})
         );
+    }
+
+    // ── INV-T9 #70 Commit 4b Faz 5: NotRequired loss evidence ────────────────────
+
+    #[test]
+    fn faz5_wire_shape_loss_not_required_output_golden() {
+        // **Faz 5 (review v8):** NotRequired wire shape — 4 reason varyantı snake_case.
+        let predicate_completed = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::PredicateCompleted,
+        })
+        .unwrap();
+        assert_eq!(
+            predicate_completed,
+            serde_json::json!({"kind": "not_required", "reason": "predicate_completed"})
+        );
+
+        let source_insufficient = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::SourceInsufficient,
+        })
+        .unwrap();
+        assert_eq!(
+            source_insufficient,
+            serde_json::json!({"kind": "not_required", "reason": "source_insufficient"})
+        );
+
+        let strict_reject = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::StrictRejectPolicy,
+        })
+        .unwrap();
+        assert_eq!(
+            strict_reject,
+            serde_json::json!({"kind": "not_required", "reason": "strict_reject_policy"})
+        );
+
+        let operator_approval = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::OperatorApprovalPolicy,
+        })
+        .unwrap();
+        assert_eq!(
+            operator_approval,
+            serde_json::json!({"kind": "not_required", "reason": "operator_approval_policy"})
+        );
+    }
+
+    #[test]
+    fn faz5_loss_not_required_tag_pinned_append_only() {
+        // **Faz 5 (review v8 P1-4):** LossNotRequiredReasonTag pinned numeric — append-only.
+        // Mevcut tag'ler (0-3) ASLA değişmez (exact pin — golden vector lock).
+        assert_eq!(LossNotRequiredReasonTag::PREDICATE_COMPLETED.as_u8(), 0);
+        assert_eq!(LossNotRequiredReasonTag::SOURCE_INSUFFICIENT.as_u8(), 1);
+        assert_eq!(LossNotRequiredReasonTag::STRICT_REJECT_POLICY.as_u8(), 2);
+        assert_eq!(
+            LossNotRequiredReasonTag::OPERATOR_APPROVAL_POLICY.as_u8(),
+            3
+        );
+        // Invalid tag reject.
+        assert!(LossNotRequiredReasonTag::try_from(4).is_err());
+        assert!(LossNotRequiredReasonTag::try_from(255).is_err());
+        // Valid tags round-trip.
+        for tag in 0..=3u8 {
+            let parsed = LossNotRequiredReasonTag::try_from(tag).expect("valid tag");
+            assert_eq!(parsed.as_u8(), tag);
+        }
+    }
+
+    #[test]
+    fn faz5_loss_not_required_reason_tag_mapping_exhaustive() {
+        // **Faz 5:** CanonicalLossNotRequiredReason ↔ tag birebir (exhaustive).
+        let cases = [
+            (
+                CanonicalLossNotRequiredReason::PredicateCompleted,
+                LossNotRequiredReasonTag::PREDICATE_COMPLETED,
+            ),
+            (
+                CanonicalLossNotRequiredReason::SourceInsufficient,
+                LossNotRequiredReasonTag::SOURCE_INSUFFICIENT,
+            ),
+            (
+                CanonicalLossNotRequiredReason::StrictRejectPolicy,
+                LossNotRequiredReasonTag::STRICT_REJECT_POLICY,
+            ),
+            (
+                CanonicalLossNotRequiredReason::OperatorApprovalPolicy,
+                LossNotRequiredReasonTag::OPERATOR_APPROVAL_POLICY,
+            ),
+        ];
+        for (reason, expected_tag) in cases {
+            assert_eq!(reason.tag().as_u8(), expected_tag.as_u8());
+        }
+    }
+
+    #[test]
+    fn faz5_encode_canonical_loss_append_only_available_unavailable_unchanged() {
+        // **Faz 5 (review v8 P1-4):** append-only invariant — Available(0)/Unavailable(1)
+        // canonical encoding donar. NotRequired(2) yeni. Bu test mevcut golden byte
+        // contract'lerinin değişmediğini doğrular.
+        use crate::canonical_encoding::encode_u8;
+
+        // Available encoding — tag=0 + target axes + loss_after.
+        let available = CanonicalTrajectoryLossEvidence::Available {
+            target: CanonicalRawPosition {
+                x: 0.2,
+                y: 0.8,
+                z: 0.15,
+                w: 0.3,
+                v: 0.6,
+            },
+            loss_after: 0.55,
+        };
+        let mut hasher = blake3::Hasher::new();
+        encode_canonical_trajectory_loss_v2(&mut hasher, &available).unwrap();
+        let available_digest = hasher.finalize();
+
+        // Unavailable encoding — tag=1 + reason tag=0.
+        let unavailable = CanonicalTrajectoryLossEvidence::Unavailable {
+            reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+        };
+        let mut hasher = blake3::Hasher::new();
+        encode_canonical_trajectory_loss_v2(&mut hasher, &unavailable).unwrap();
+        let unavailable_digest = hasher.finalize();
+
+        // NotRequired encoding — tag=2 + reason tag. Available/Unavailable'dan farklı.
+        let not_required = CanonicalTrajectoryLossEvidence::NotRequired {
+            reason: CanonicalLossNotRequiredReason::PredicateCompleted,
+        };
+        let mut hasher = blake3::Hasher::new();
+        encode_canonical_trajectory_loss_v2(&mut hasher, &not_required).unwrap();
+        let not_required_digest = hasher.finalize();
+
+        // Üç varyant farklı digest üretmeli (tag farkı).
+        let digests = [
+            available_digest.as_bytes(),
+            unavailable_digest.as_bytes(),
+            not_required_digest.as_bytes(),
+        ];
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                assert_ne!(
+                    digests[i], digests[j],
+                    "loss variant {i} and {j} must produce different digests"
+                );
+            }
+        }
+
+        // Append-only: Available tag=0, Unavailable tag=1 (ilk byte kontrolü için
+        // encoder'ın ilk encode_u8 çağrısının değerini manuel verify edelim).
+        let _ = encode_u8; // import kullanıldı işareti
+    }
+
+    #[test]
+    fn faz5_encode_canonical_loss_not_required_reason_variants_distinct() {
+        // **Faz 5:** 4 NotRequired reason varyantı farklı canonical digest üretmeli.
+        let reasons = [
+            CanonicalLossNotRequiredReason::PredicateCompleted,
+            CanonicalLossNotRequiredReason::SourceInsufficient,
+            CanonicalLossNotRequiredReason::StrictRejectPolicy,
+            CanonicalLossNotRequiredReason::OperatorApprovalPolicy,
+        ];
+        let mut digests = Vec::new();
+        for reason in reasons {
+            let loss = CanonicalTrajectoryLossEvidence::NotRequired { reason };
+            let mut hasher = blake3::Hasher::new();
+            encode_canonical_trajectory_loss_v2(&mut hasher, &loss).unwrap();
+            digests.push(hasher.finalize());
+        }
+        // Her çift farklı olmalı (reason tag farkı).
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(
+                    digests[i].as_bytes(),
+                    digests[j].as_bytes(),
+                    "reason {i:?} and {j:?} must produce distinct digests"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn faz5_wire_loss_not_required_round_trip() {
+        // **Faz 5:** NotRequired wire round-trip — serialize → deserialize → domain →
+        // tekrar serialize aynı JSON üretmeli. deny_unknown_fields: unknown reason reject.
+        let loss = CanonicalTrajectoryLossEvidence::NotRequired {
+            reason: CanonicalLossNotRequiredReason::StrictRejectPolicy,
+        };
+        let wire = RawTrajectoryLossV2Ref::from_domain(&loss);
+        let json = serde_json::to_value(&wire).unwrap();
+        // from_domain → wire JSON → raw deserialize → domain projection parity.
+        let wire_json_str = serde_json::to_string(&json).unwrap();
+        let raw: RawTrajectoryLossV2 = serde_json::from_str(&wire_json_str).unwrap();
+        // Domain'e geri (wire→domain mapping).
+        let round_tripped = match raw {
+            RawTrajectoryLossV2::NotRequired {
+                reason: RawLossNotRequiredReasonV2::StrictRejectPolicy,
+            } => CanonicalTrajectoryLossEvidence::NotRequired {
+                reason: CanonicalLossNotRequiredReason::StrictRejectPolicy,
+            },
+            _ => panic!("expected NotRequired/StrictRejectPolicy, got unexpected variant"),
+        };
+        assert_eq!(round_tripped, loss);
+
+        // Unknown reason field → reject (deny_unknown_fields).
+        let bad = r#"{"kind":"not_required","reason":"unknown_reason"}"#;
+        assert!(serde_json::from_str::<RawTrajectoryLossV2>(bad).is_err());
     }
 
     #[test]

@@ -1226,6 +1226,37 @@ pub enum TrajectoryLossUnavailableReason {
     NoPreferredVector,
 }
 
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Trajectory loss "gerekmiyor" sebebi —
+/// completion-first PredicateGate modeli. Loss hesaplanAMADI anlamında DEĞİL; loss
+/// hesaplanMASI GEREKMEZ (semantik olarak irrelevant).
+///
+/// **Epistemik disiplin (review v8 P0-3):** `NotRequired` hiçbir zaman error/fallback
+/// yolu değildir. Loss üretim hatası → typed operational error → fail-closed (RejectedByGate
+/// değil). `NotRequired` yalnızca predicate sonucu/policy loss hesabını gereksiz kıldığında
+/// üretilir.
+///
+/// **Kapalı enum — `Other(String)` YOK.** Reason, gate'in neden loss istemediğini
+/// denetlenebilir biçimde açıklar. Append-only pinned numeric tag (`LossNotRequiredReasonTag`
+/// authorization.rs'te — Faz 5 encoder ile).
+///
+/// **Karar matrisi (Faz 5 plan v8 pinli):**
+/// - `PredicateCompleted` — predicate satisfied → loss irrelevant → AcceptAsCompleted
+/// - `SourceInsufficient` — INV-T4 placeholder → Reject kesin, loss anlamsız
+/// - `StrictRejectPolicy` — StrictReject policy → loss computation anlamsız → Reject
+/// - `OperatorApprovalPolicy` — OperatorApproval → loss mutation kararını etkilemiyor
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LossNotRequiredReason {
+    /// Predicate Completed — task kapandı, loss irrelevant.
+    PredicateCompleted,
+    /// SourceInsufficient (INV-T4) — placeholder/heuristic ile task kapatılamaz, Reject kesin.
+    SourceInsufficient,
+    /// StrictReject policy — predicate fail'de her zaman Reject, loss computation anlamsız.
+    StrictRejectPolicy,
+    /// OperatorApproval policy — loss mutation kararını etkilemiyor, insan review.
+    OperatorApprovalPolicy,
+}
+
 /// **Borrowed gate input** — `PredicateGate::evaluate` loss evidence. Available ise
 /// target + loss_after taşır; Unavailable ise reason. Baseline ayrı parametre
 /// (`TrajectoryEvidenceBaseline<'a>`).
@@ -1235,29 +1266,21 @@ pub enum TrajectoryLossUnavailableReason {
 /// (canonicalization, non-finite) `Unavailable`'a dönüştürülmez** — terminal derivation
 /// error (`MeasurementBindingDerivationError` veya `EngineCommitError::Internal`).
 ///
-/// **INV-T9 #70 Commit 4b Faz 3 contract (Faz 5 için not — reviewer v6):** Bu enum
-/// Faz 3'te DEĞİŞTİRİLMEZ. `NotRequired` varyantı Faz 5'te completion-first PredicateGate
-/// refactor ile ATOMİK olarak eklenir (producer + consumer + owned eşlenik + gate
-/// refactor + authorization wiring aynı commit). Şu anki 2-varyantlı yapı (`Available`
-/// + `Unavailable`) mevcut PredicateGate scalar `trajectory_loss` hesabıyla uyumlu —
-/// `NotRequired`'ın consumer'ı olmadan eklenmesi dead-code yaratır.
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Bu enum artık 3-varyantlı —
+/// `NotRequired` eklendi (completion-first PredicateGate modeli). Faz 3 contract'ı
+/// (atomik ekleme) kapandı: producer + consumer + owned eşlenik + canonical/wire senkron
+/// + encoder tag=2 Faz 5 Checkpoint A'da birlikte.
 ///
-/// **Faz 5 completion-first karar matrisi (plan pinli):**
+/// **Faz 5 completion-first karar matrisi (plan v8 pinli):**
 ///
 /// | Predicate | Policy | preferred_vector | Loss evidence | Decision |
 /// |---|---|---|---|---|
 /// | Completed | any | Some/None | NotRequired(PredicateCompleted) | AcceptAsCompleted |
+/// | SourceInsufficient | any | Some/None | NotRequired(SourceInsufficient) | Reject |
 /// | NotCompleted | StrictReject | Some/None | NotRequired(StrictRejectPolicy) | Reject |
+/// | NotCompleted | OperatorApproval | Some/None | NotRequired(OperatorApprovalPolicy) | RequireOperatorApproval |
 /// | NotCompleted | AcceptImprovement + target | Available | Available | loss/regression |
-/// | NotCompleted | AcceptImprovement + None | Unavailable(PreferredVectorMissing) | Progress reject |
-///
-/// Faz 5'te eklenecekler (atomik):
-/// - `TrajectoryLossEvidence::NotRequired { reason: LossNotRequiredReason }`
-/// - `LossNotRequiredReason { PredicateCompleted, StrictRejectPolicy }`
-/// - `OwnedTrajectoryLossEvidence` eşleniği senkron
-/// - canonical loss derivation (tek truth source)
-/// - PredicateGate scalar `trajectory_loss` iç hesabı → canonical evidence consume
-/// - AuthorizationContextV2 aynı evidence consume (drift risk kapalı)
+/// | NotCompleted | AcceptImprovement + None | Unavailable(NoPreferredVector) | Reject |
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryLossEvidence<'a> {
     /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
@@ -1267,17 +1290,23 @@ pub enum TrajectoryLossEvidence<'a> {
     },
     /// Loss unavailable — yalnız `NoPreferredVector` (preferred_vector None).
     /// Computation failure ayrı terminal error — bu varyanta gömülmez.
-    ///
-    /// **Faz 5:** `NotRequired` varyantı eklenecek (completion-first). Bu varyant
-    /// yalnız "loss gerekliydi ama üretilemedi" anlamında kalır — "loss gerekmedi"
-    /// (`PredicateCompleted`/`StrictRejectPolicy`) ayrı varyant.
     Unavailable {
         reason: TrajectoryLossUnavailableReason,
+    },
+    /// **Faz 5:** Loss gerekmiyor — completion-first. Semantik olarak loss irrelevant
+    /// (predicate completed/source insufficient/policy reject/operator approval).
+    /// `LossNotRequiredReason` kapalı enum — `Other(String)` yok. Epistemik kaçış kapısı
+    /// DEĞİL: loss üretim hatası `NotRequired` yerine typed operational error olur.
+    NotRequired {
+        reason: LossNotRequiredReason,
     },
 }
 
 /// **Owned variant** — `TaskCommitResult.evaluation` ve navigator state (Faz 7) için.
 /// `TrajectoryLossEvidence<'a>` owned counterpart'i — target `RawPosition` (borrow değil).
+///
+/// **INV-T9 #70 Commit 4b Faz 5:** `NotRequired` varyantı senkron (borrowed ile aynı
+/// semantik cebirin lossless projection'ı).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum OwnedTrajectoryLossEvidence {
     Available {
@@ -1286,6 +1315,10 @@ pub enum OwnedTrajectoryLossEvidence {
     },
     Unavailable {
         reason: TrajectoryLossUnavailableReason,
+    },
+    /// **Faz 5:** Loss gerekmiyor — borrowed ile aynı reason set.
+    NotRequired {
+        reason: LossNotRequiredReason,
     },
 }
 
