@@ -339,6 +339,128 @@ pub struct EffectiveMetricPredicate {
     pub effective_tolerance: CanonicalF64,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 10 (P1-3) — Canonical task-goal evidence V2
+//
+// **Digest continuity (reviewer v8 karar):** `compute(&Task)` ve
+// `compute_from_canonical(task_id, evidence)` byte-identical olmalı. Bu, task'ın
+// declared gerçekliğinin canonical katmanda korunmasını gerektirir.
+//
+// **Kritik: `declared_weight: Option<CanonicalF64>` — `None ≠ Some(1.0)`.**
+// `EffectiveMetricPredicate.effective_weight: CanonicalF64` (f64) `unwrap_or(1.0)`
+// ile `None` ve `Some(1.0)`'i aynı byte'a çökertir. Bu, digest continuity'yi bozar:
+// `WeightedPredicate { weight: None }` ve `WeightedPredicate { weight: Some(1.0) }`
+// farklı task declaration'lar ama aynı effective_weight byte. V2 tipleri bu ayrımı
+// `declared_weight: Option<CanonicalF64>` ile korur — task'ın declared gerçekliği.
+//
+// `EffectiveMetricPredicate.effective_weight` türetilmiş normalize projection'dır
+// (`unwrap_or(1.0)`); V2 `declared_weight` task'ın declared gerçekliğidir. İkisi
+// farklı ontolojik katman — encoder declared'i encode eder, evaluator effective'i
+// kullanır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 5 Adım 10 (P1-3):** Canonical weighted predicate V2 — task'ın
+/// declared gerçekliğinin canonical mirror'ı. `WeightedPredicate`'in (trajectory.rs)
+/// canonical karşılığı.
+///
+/// **`declared_weight: Option<CanonicalF64>`** — `None ≠ Some(1.0)` byte ayrımı.
+/// All/Any mode'da `None` (ağırlıksız), Weighted mode'da `Some(w)` (loss katkısı).
+/// `EffectiveMetricPredicate.effective_weight` (`unwrap_or(1.0)`) türetilmiş projection;
+/// bu tip task'ın declared gerçekliğini korur — digest continuity için kritik.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalWeightedPredicateV2 {
+    pub axis: PredicateAxisTag,
+    pub operator: ComparisonOpTag,
+    pub threshold: CanonicalF64,
+    pub scope: CanonicalPredicateScope,
+    pub required_source: EffectiveSourceRequirement,
+    /// Task'ın declared ağırlığı — `None` (All/Any) veya `Some(w)` (Weighted).
+    /// `Some(1.0)` geçerli bir Weighted declaration'dır, `None`'den farklı byte.
+    pub declared_weight: Option<CanonicalF64>,
+    pub tolerance: CanonicalF64,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 10 (P1-3):** Canonical task-goal evidence V2 — task'ın
+/// declared predicate goal'ının canonical mirror'ı. `PredicateSet`'in (trajectory.rs)
+/// canonical karşılığı + task_id binding.
+///
+/// `compute_from_canonical(task_id, &CanonicalTaskGoalEvidenceV2)` ile
+/// `TaskGoalDigest::compute(&Task)` byte-identical digest üretir. preferred_vector
+/// dahil — `PredicateSet.preferred_vector` canonical katmanda korunur.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalTaskGoalEvidenceV2 {
+    /// Bu evidence'ın bağlandığı task (digest binding).
+    pub task_id: crate::trajectory::TaskId,
+    pub mode: PredicateModeTag,
+    pub predicates: Vec<CanonicalWeightedPredicateV2>,
+    /// preferred_vector — `None` (NoPreferredVector) veya `Some(CanonicalRawPosition)`.
+    pub preferred_vector: Option<CanonicalRawPosition>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 4+5 (P1-3) — Reverse TryFrom: Canonical V2 → Domain
+//
+// Faz 5 restore evaluator'ın ihtiyaç duyduğu reverse projection (Canonical→Domain).
+// Item 10 V2 tipleri ile domain tipleri arasında. Item 2 projection'larını
+// (CanonicalPredicateScope→PredicateScope, EffectiveSourceRequirement→Option<MetricSource>)
+// ve Adım 1 reverse From'larını (Tag→Domain enum) kullanır.
+//
+// Restore path: canonical evidence → TryFrom → domain → validate_predicate_goal_for_commit
+// → evaluate_completion (tek evaluator). İki paralel evaluator YOK.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl TryFrom<&CanonicalWeightedPredicateV2> for crate::trajectory::WeightedPredicate {
+    type Error = CanonicalizationError;
+
+    /// Canonical weighted predicate V2 → domain WeightedPredicate.
+    ///
+    /// axis/operator tag→enum (Adım 1 reverse From), scope/source projection (Adım 2),
+    /// declared_weight direkt (Option<f64>). `None ≠ Some(1.0)` korunur — V2 tip ayrımı.
+    fn try_from(canonical: &CanonicalWeightedPredicateV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            predicate: crate::trajectory::MetricPredicate {
+                metric: canonical.axis.into(),
+                operator: canonical.operator.into(),
+                threshold: canonical.threshold,
+                scope: (&canonical.scope).into(),
+                required_source: (&canonical.required_source).into(),
+                tolerance: canonical.tolerance,
+            },
+            weight: canonical.declared_weight,
+        })
+    }
+}
+
+impl TryFrom<&CanonicalTaskGoalEvidenceV2> for crate::trajectory::PredicateSet {
+    type Error = CanonicalizationError;
+
+    /// Canonical task-goal evidence V2 → domain PredicateSet.
+    ///
+    /// mode tag→enum (Adım 1), her predicate TryFrom (Adım 4), preferred_vector
+    /// CanonicalRawPosition→RawPosition (trivial field copy). task_id restore'da
+    /// kullanılmaz — PredicateSet task_id taşımaz (task binding ayrı).
+    fn try_from(canonical: &CanonicalTaskGoalEvidenceV2) -> Result<Self, Self::Error> {
+        let predicates = canonical
+            .predicates
+            .iter()
+            .map(crate::trajectory::WeightedPredicate::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            mode: canonical.mode.into(),
+            predicates,
+            preferred_vector: canonical.preferred_vector.as_ref().map(|crp| {
+                crate::coords::RawPosition {
+                    x: crp.x,
+                    y: crp.y,
+                    z: crp.z,
+                    w: crp.w,
+                    v: crp.v,
+                }
+            }),
+        })
+    }
+}
+
 /// **reviewer P1-1 (subgraph invariant):** Validated canonical subgraph scope.
 ///
 /// **Type-level invariant:** sorted + deduplicated node ids. Bu newtype constructor
@@ -3046,7 +3168,11 @@ fn encode_canonical_trajectory_loss_v2(
         // Available(0)/Unavailable(1) encoding donar — golden digest'lar değişmez.
         CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
             encode_u8(hasher, 2, "v2_loss_not_required_tag");
-            encode_u8(hasher, reason.tag().as_u8(), "v2_loss_not_required_reason_tag");
+            encode_u8(
+                hasher,
+                reason.tag().as_u8(),
+                "v2_loss_not_required_reason_tag",
+            );
         }
     }
     Ok(())
@@ -6584,9 +6710,7 @@ enum RawTrajectoryLossV2 {
         reason: RawTrajectoryLossUnavailableReasonV2,
     },
     /// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Loss gerekmiyor — completion-first.
-    NotRequired {
-        reason: RawLossNotRequiredReasonV2,
-    },
+    NotRequired { reason: RawLossNotRequiredReasonV2 },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -6861,9 +6985,7 @@ enum RawTrajectoryLossV2Ref<'a> {
         reason: RawTrajectoryLossUnavailableReasonV2,
     },
     /// **INV-T9 #70 Commit 4b Faz 5:** NotRequired — completion-first.
-    NotRequired {
-        reason: RawLossNotRequiredReasonV2,
-    },
+    NotRequired { reason: RawLossNotRequiredReasonV2 },
 }
 
 impl<'a> RawTrajectoryLossV2Ref<'a> {
@@ -7292,22 +7414,24 @@ impl AuthorizationBasisV2 {
                 reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
             },
             // **INV-T9 #70 Commit 4b Faz 5 (review v8):** NotRequired — exhausted reason mapping.
-            RawTrajectoryLossV2::NotRequired { reason } => CanonicalTrajectoryLossEvidence::NotRequired {
-                reason: match reason {
-                    RawLossNotRequiredReasonV2::PredicateCompleted => {
-                        CanonicalLossNotRequiredReason::PredicateCompleted
-                    }
-                    RawLossNotRequiredReasonV2::SourceInsufficient => {
-                        CanonicalLossNotRequiredReason::SourceInsufficient
-                    }
-                    RawLossNotRequiredReasonV2::StrictRejectPolicy => {
-                        CanonicalLossNotRequiredReason::StrictRejectPolicy
-                    }
-                    RawLossNotRequiredReasonV2::OperatorApprovalPolicy => {
-                        CanonicalLossNotRequiredReason::OperatorApprovalPolicy
-                    }
-                },
-            },
+            RawTrajectoryLossV2::NotRequired { reason } => {
+                CanonicalTrajectoryLossEvidence::NotRequired {
+                    reason: match reason {
+                        RawLossNotRequiredReasonV2::PredicateCompleted => {
+                            CanonicalLossNotRequiredReason::PredicateCompleted
+                        }
+                        RawLossNotRequiredReasonV2::SourceInsufficient => {
+                            CanonicalLossNotRequiredReason::SourceInsufficient
+                        }
+                        RawLossNotRequiredReasonV2::StrictRejectPolicy => {
+                            CanonicalLossNotRequiredReason::StrictRejectPolicy
+                        }
+                        RawLossNotRequiredReasonV2::OperatorApprovalPolicy => {
+                            CanonicalLossNotRequiredReason::OperatorApprovalPolicy
+                        }
+                    },
+                }
+            }
         };
 
         // Measurement request evidence conversion.
@@ -14634,5 +14758,194 @@ v = 0.5
                 "Exact({src:?}) should project to Some({src:?})"
             );
         }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 10 + 4+5 (P1-3) — Canonical V2 tipleri + reverse TryFrom
+    //
+    // CanonicalWeightedPredicateV2 / CanonicalTaskGoalEvidenceV2 round-trip testleri.
+    // Kritik: `declared_weight` ile `None ≠ Some(1.0)` byte ayrımı korunur — bu, digest
+    // continuity'nin temelidir (EffectiveMetricPredicate.effective_weight çökertmez).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Helper — domain WeightedPredicate'den canonical V2'ye forward projection.
+    /// Item 7'de compute_from_canonical için kullanılacak; burada round-trip için.
+    fn forward_weighted_predicate_to_v2(
+        wp: &crate::trajectory::WeightedPredicate,
+    ) -> Result<CanonicalWeightedPredicateV2, CanonicalizationError> {
+        use crate::canonical_tags::{CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag};
+        let p = &wp.predicate;
+        Ok(CanonicalWeightedPredicateV2 {
+            axis: PredicateAxisTag::try_from(&p.metric)?,
+            operator: ComparisonOpTag::try_from(&p.operator)?,
+            threshold: p.threshold,
+            scope: match &p.scope {
+                crate::trajectory::PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
+                crate::trajectory::PredicateScope::Module(name) => {
+                    CanonicalPredicateScope::Module(name.clone())
+                }
+                crate::trajectory::PredicateScope::Subgraph(ids) => {
+                    CanonicalPredicateScope::Subgraph(CanonicalSubgraphScope::try_new(ids.clone())?)
+                }
+            },
+            required_source: match p.required_source {
+                None => EffectiveSourceRequirement::Any,
+                Some(src) => {
+                    EffectiveSourceRequirement::Exact(CanonicalMetricSourceTag::try_from(&src)?)
+                }
+            },
+            declared_weight: wp.weight,
+            tolerance: p.tolerance,
+        })
+    }
+
+    #[test]
+    fn faz5_canonical_weighted_predicate_v2_round_trips_through_domain() {
+        use crate::coords::MetricSource;
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateScope, WeightedPredicate,
+        };
+        // Farklı axis/op/scope/source/weight kombinasyonları — hepsi round-trip etmeli.
+        let cases = [
+            // All/Any mode — weight None.
+            WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 0.5,
+                    scope: PredicateScope::Node(1),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            },
+            // Weighted mode — weight Some(1.0). KRİTİK: None'dan farklı byte.
+            WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Entropy,
+                    operator: ComparisonOp::Gt,
+                    threshold: 0.3,
+                    scope: PredicateScope::Module("mod".to_string()),
+                    required_source: Some(MetricSource::Scip),
+                    tolerance: 0.01,
+                },
+                weight: Some(1.0),
+            },
+            // Weighted mode — farklı weight. Subgraph sorted (canonical invariant).
+            WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Cohesion,
+                    operator: ComparisonOp::Ge,
+                    threshold: 0.7,
+                    scope: PredicateScope::Subgraph(vec![1, 2, 3]),
+                    required_source: Some(MetricSource::TreeSitter),
+                    tolerance: 0.05,
+                },
+                weight: Some(2.5),
+            },
+        ];
+        for original in cases {
+            let canonical = forward_weighted_predicate_to_v2(&original).unwrap();
+            let restored: WeightedPredicate = (&canonical).try_into().unwrap();
+            assert_eq!(restored, original, "round-trip failed for {original:?}");
+        }
+    }
+
+    #[test]
+    fn faz5_declared_weight_none_distinct_from_some_one() {
+        // KRİTİK digest continuity test: None ≠ Some(1.0). EffectiveMetricPredicate
+        // bunları çökertir (unwrap_or(1.0)); V2 declared_weight ayrımı korur.
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateScope, WeightedPredicate,
+        };
+        let base_pred = MetricPredicate {
+            metric: PredicateAxis::Coupling,
+            operator: ComparisonOp::Le,
+            threshold: 0.5,
+            scope: PredicateScope::Node(1),
+            required_source: None,
+            tolerance: 0.0,
+        };
+        let none_wp = WeightedPredicate {
+            predicate: base_pred.clone(),
+            weight: None,
+        };
+        let some_one_wp = WeightedPredicate {
+            predicate: base_pred,
+            weight: Some(1.0),
+        };
+        let none_canonical = forward_weighted_predicate_to_v2(&none_wp).unwrap();
+        let some_one_canonical = forward_weighted_predicate_to_v2(&some_one_wp).unwrap();
+        // declared_weight ayrımı — None ≠ Some(1.0).
+        assert_ne!(
+            none_canonical.declared_weight, some_one_canonical.declared_weight,
+            "None and Some(1.0) must be distinct (digest continuity)"
+        );
+        assert_eq!(none_canonical.declared_weight, None);
+        assert_eq!(some_one_canonical.declared_weight, Some(1.0));
+    }
+
+    #[test]
+    fn faz5_canonical_task_goal_evidence_v2_round_trips_through_domain() {
+        use crate::coords::MetricSource;
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
+            PredicateSet, WeightedPredicate,
+        };
+        let original = PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![
+                WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Coupling,
+                        operator: ComparisonOp::Le,
+                        threshold: 0.5,
+                        scope: PredicateScope::Node(1),
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                },
+                WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Entropy,
+                        operator: ComparisonOp::Gt,
+                        threshold: 0.3,
+                        scope: PredicateScope::Module("mod".to_string()),
+                        required_source: Some(MetricSource::Scip),
+                        tolerance: 0.01,
+                    },
+                    weight: Some(1.5),
+                },
+            ],
+            preferred_vector: Some(crate::coords::RawPosition {
+                x: 0.1,
+                y: 0.2,
+                z: 0.3,
+                w: 0.4,
+                v: 0.5,
+            }),
+        };
+        // Forward: Domain → Canonical V2.
+        let canonical = CanonicalTaskGoalEvidenceV2 {
+            task_id: 1,
+            mode: crate::canonical_tags::PredicateModeTag::try_from(&original.mode).unwrap(),
+            predicates: original
+                .predicates
+                .iter()
+                .map(forward_weighted_predicate_to_v2)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            preferred_vector: original.preferred_vector.map(|pv| CanonicalRawPosition {
+                x: pv.x,
+                y: pv.y,
+                z: pv.z,
+                w: pv.w,
+                v: pv.v,
+            }),
+        };
+        // Reverse: Canonical V2 → Domain.
+        let restored: PredicateSet = (&canonical).try_into().unwrap();
+        assert_eq!(restored, original, "round-trip failed for PredicateSet");
     }
 }
