@@ -1,0 +1,17 @@
+[toolchain]
+# INV-T9 #70 CI fix: trybuild .stderr snapshot'ları compiler diagnostics'e duyarlıdır.
+# Floating stable (dtolnay/rust-toolchain@stable), dependency/compiler drift'inde
+# snapshot'ları sessizce kırar. Bu pin trybuild snapshot compiler'ını sabitler.
+#
+# rust-version (workspace Cargo.toml MSRV=1.75) desteklenen minimum sürümdür — ayrı kavram.
+# Bu pin günlük geliştirme + trybuild snapshot compiler'ıdır; MSRV iddiasından bağımsızdır.
+#
+# Toolchain bump artık bilinçli bir bakım commit'idir:
+#   bump → TRYBUILD=overwrite (refresh-trybuild-snapshots workflow) →
+#   stderr diff review → snapshot commit.
+#
+# Kanıt (CI fail run 30054857233, job 89364343885, 2026-07-23):
+#   rustc 1.97.1 (8bab26f4f 2026-07-14), latest update 2026-07-16.
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

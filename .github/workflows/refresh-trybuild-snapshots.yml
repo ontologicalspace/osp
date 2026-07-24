@@ -1,0 +1,132 @@
+name: Refresh trybuild snapshots
+
+# INV-T9 #70 CI fix: trybuild .stderr snapshot'ları (compiler + dependency graph +
+# compiler flags) üçlüsünün snapshot'ıdır. Bu workflow snapshot'ı CI ortamında
+# (Ubuntu, pinned toolchain, --locked) üretir ve artifact olarak yükler —
+# ASLA repo'ya commit atmaz. Doğrulayan taraf, doğruladığı snapshot'ı yazmaz
+# (OSP authority/evidence felsefesi). İnsan artifact'i indirir, diff'i inceler,
+# manuel commit'ler. Normal CI (ci.yml) committed snapshot'ları doğrular, overwrite yapmaz.
+#
+# Tetikleme:
+#   - workflow_dispatch: kalıcı manuel refresh (toolchain bump / dep update).
+#   - pull_request: bootstrap — ilk kullanımda bu workflow main'de olmadığı için
+#     PR #69 branch'inde refresh job'u çalıştırır. Commit B'de kaldırılır.
+#     (GitHub workflow_dispatch yalnız default branch'teki dosyayı çalıştırır.)
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Refresh sebebi (toolchain bump / dep update / manual)"
+        required: false
+        default: "manual"
+  pull_request:
+    branches: [main]
+
+# Snapshot üreten ortam, doğrulayan normal CI ile BİREBİR aynı olmalı.
+# exact compiler + locked dependency graph + exact compiler flags üçlüsü.
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+# Workflow sözleşmesini repository default'una bırakmayalım, açıkça pinleyelim.
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    # workflow_dispatch her zaman; pull_request yalnız PR #69'un same-repository
+    # branch'inde (fork taklidi kapalı — head.repo.full_name kontrolü).
+    # Bootstrap sonrası pull_request trigger'ı Commit B'de kaldırılır.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.head.ref == 'fix/inv-t9-witness-suspension'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # PR event'inde gerçek branch head'i (synthetic merge commit değil).
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+
+      - name: Read pinned Rust toolchain
+        id: rust-toolchain
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import tomllib
+          with open("rust-toolchain.toml", "rb") as f:
+              tc = tomllib.load(f)["toolchain"]
+          print(f"channel={tc['channel']}")
+          print(f"components={','.join(tc.get('components', []))}")
+          PY
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9  # v1, pinned SHA
+        with:
+          toolchain: ${{ steps.rust-toolchain.outputs.channel }}
+          components: ${{ steps.rust-toolchain.outputs.components }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-trybuild-refresh-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
+
+      - name: Record snapshot environment
+        # Security: workflow input/context'u shell'e direkt enjekte etme — env üzerinden.
+        env:
+          SNAPSHOT_REASON: ${{ inputs.reason || 'pull_request-bootstrap' }}
+          SNAPSHOT_EVENT: ${{ github.event_name }}
+          SNAPSHOT_SHA: ${{ github.sha }}
+          SNAPSHOT_REF: ${{ github.ref }}
+        run: |
+          {
+            printf 'reason=%s\n' "$SNAPSHOT_REASON"
+            printf 'event=%s\n' "$SNAPSHOT_EVENT"
+            printf 'github_sha=%s\n' "$SNAPSHOT_SHA"
+            printf 'repository_head=%s\n' "$(git rev-parse HEAD)"
+            printf 'github_ref=%s\n' "$SNAPSHOT_REF"
+            echo
+            rustc --version --verbose
+            cargo --version
+            echo
+            cargo tree --locked -p osp-core -i serde_json -e features
+          } | tee trybuild-refresh-metadata.txt
+
+      - name: Regenerate trybuild stderr
+        id: trybuild-refresh
+        env:
+          TRYBUILD: overwrite
+        run: cargo test --locked -p osp-core --test anchoring_typelevel
+
+      - name: Write review patch
+        # trybuild fail'inde bile patch/changed-files üret — tam olarak inceleme
+        # gereken durumda diagnostic parçaları eksik kalmasın.
+        if: always()
+        run: |
+          git --no-pager diff -- \
+            crates/osp-core/tests/compile_fail/ \
+            > trybuild-stderr.patch
+          git --no-pager diff --stat -- \
+            crates/osp-core/tests/compile_fail/ \
+            | tee -a trybuild-refresh-metadata.txt
+          git --no-pager diff --name-only -- \
+            crates/osp-core/tests/compile_fail/ \
+            | tee trybuild-changed-files.txt
+          printf 'trybuild_outcome=%s\n' \
+            '${{ steps.trybuild-refresh.outcome }}' \
+            >> trybuild-refresh-metadata.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trybuild-stderr-${{ github.run_id }}
+          path: |
+            crates/osp-core/tests/compile_fail/*.stderr
+            trybuild-stderr.patch
+            trybuild-changed-files.txt
+            trybuild-refresh-metadata.txt
+          if-no-files-found: error
