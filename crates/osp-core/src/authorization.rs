@@ -1137,7 +1137,6 @@ pub struct CanonicalPredicateEvaluationBasisV2 {
 /// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Predicate basis consistency error — restore
 /// path predicate basis validation hatası. `validate_predicate_basis_semantics_v2`
 /// (Item 16) üretir. Typed variant mapping — hatanın kaynağı lokalize.
-#[allow(dead_code, reason = "Faz 5 Item 16 restore validator consumer")]
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum PredicateBasisConsistencyError {
     /// Gate evaluation semantics version mismatch — restore vs runtime farklı semantics.
@@ -1154,7 +1153,6 @@ pub enum PredicateBasisConsistencyError {
 /// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Gate semantic consistency error — restore
 /// path gate decision semantic matrix validation hatası. `validate_gate_decision_semantics_v2`
 /// (Item 16) üretir. Typed variant mapping — branch-aware restore matrix ihlali.
-#[allow(dead_code, reason = "Faz 5 Item 16 restore validator consumer")]
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum GateSemanticConsistencyError {
     /// Stored loss evidence ile recomputed loss parity ihlali.
@@ -2958,6 +2956,249 @@ impl AuthorizationBasisV2 {
                     recomputed: recomputed_policy.to_hex(),
                 },
             );
+        }
+
+        // ── INV-T9 #70 Faz 5 Adım 17 (review P0-B + P0-C) — semantic parity ────────
+        // Digest parity (yukarıdaki 4 alan) structural commitment doğrular. Adım 17
+        // validator'ları **semantic** parity doğrular: restore edilen basis'in readable
+        // field'ları (predicate_basis + task_goal_evidence + loss_evidence + gate
+        // decision) birbirleriyle ve runtime evaluator semantiğiyle tutarlı olmalı.
+        //
+        // P0-B: Restore task-goal production validation — evidence → PredicateSet →
+        // validate_predicate_goal_for_commit (boş/Mixed/mode-weight/threshold/tolerance).
+        // P0-C: Persisted gate evaluation semantics version kapsamı — predicate
+        // composition + source propagation + trajectory loss + baseline + improvement +
+        // mutation decision semantiğini bağlar. Unsupported version → fail-closed.
+        self.validate_predicate_basis_semantics_v2().map_err(|e| {
+            AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            }
+        })?;
+        self.validate_gate_decision_semantics_v2().map_err(|e| {
+            AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            }
+        })?;
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 17 (P0-B):** Restore predicate basis semantic validation.
+    ///
+    /// Restore edilen `CanonicalPredicateEvaluationBasisV2` + `CanonicalTaskGoalEvidenceV2`
+    /// semantic tutarlılık doğrulaması:
+    /// 1. **Semantics version (P0-C kapsam):** `gate_evaluation_semantics_version ==
+    ///    GATE_EVALUATION_SEMANTICS_V1` — farklı semantics altında üretilmiş evidence reject.
+    /// 2. **Task-goal evidence → PredicateSet restore:** `PredicateSet::try_from` (Adım 5
+    ///    reverse projection). Canonicalization hatası reject.
+    /// 3. **Predicate goal validation (P0-B):** `validate_predicate_goal_for_commit` —
+    ///    boş predicate set, mode/weight shape, finite threshold/tolerance, Mixed source
+    ///    reddi, weight positivity, preferred vector finite. Restore edilen evidence
+    ///    production-valid olmalı (geçersiz declaration reject).
+    ///
+    /// **Kritik (P0-B):** `All + Some(1.0)` digest continuity test'inde temsil edilebilir
+    /// AMA authorization restore semantiğinde geçersiz declaration olarak reddedilir
+    /// (`validate_predicate_goal_for_commit` UnexpectedWeightForUnweightedMode döner).
+    fn validate_predicate_basis_semantics_v2(&self) -> Result<(), PredicateBasisConsistencyError> {
+        // (1) Semantics version — P0-C kapsamı bağlama (fail-closed).
+        if self.predicate_basis.gate_evaluation_semantics_version != GATE_EVALUATION_SEMANTICS_V1 {
+            return Err(
+                PredicateBasisConsistencyError::UnsupportedGateEvaluationSemantics {
+                    stored: self.predicate_basis.gate_evaluation_semantics_version,
+                    expected: GATE_EVALUATION_SEMANTICS_V1,
+                },
+            );
+        }
+
+        // (2) Task-goal evidence → PredicateSet restore (Adım 5 reverse projection).
+        let predicate_set = crate::trajectory::PredicateSet::try_from(&self.task_goal_evidence)
+            .map_err(PredicateBasisConsistencyError::TaskGoalEvidenceRestore)?;
+
+        // (3) P0-B — restore task-goal production validation. Evidence, commit için
+        // production-valid olmalı (runtime Task::validate_for_commit ile aynı validator).
+        crate::trajectory::validate_predicate_goal_for_commit(self.task_id, &predicate_set)
+            .map_err(PredicateBasisConsistencyError::PredicateGoalValidation)?;
+
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 17 (P0-C):** Restore gate decision semantic validation.
+    ///
+    /// Restore edilen `CanonicalPredicateEvaluationBasisV2` + `CanonicalTrajectoryLossEvidence`
+    /// + stored gate decision (`CanonicalGateEvaluationV2`) tutarlılık doğrulaması.
+    /// Runtime `evaluate_task_gate_v2`'nin completion-first matrisi ile restore edilen
+    /// stored değerler çelişmemeli.
+    ///
+    /// **Matris (GatePassed exhaustive, issue #83):**
+    /// - Completed → AcceptAsCompleted (loss irrelevant)
+    /// - SourceInsufficient → Reject
+    /// - NotCompleted + StrictReject → Reject
+    /// - NotCompleted + OperatorApproval → RequireOperatorApproval
+    /// - NotCompleted + AcceptImprovement + Unavailable(NoPreferredVector) → Reject
+    /// - NotCompleted + AcceptImprovement + Available + improved → AcceptAsProgress
+    ///
+    /// **Limitasyon:** `improved` bilgisi basis'te saklanmaz (loss_before gerek). Available
+    /// loss dalında AcceptAsProgress ↔ Reject ayırt edilemez — bu dalda stored decision
+    /// AcceptAsProgress VEYA Reject olabilir (loose check, fail-closed değil). Diğer
+    /// dallar exact match.
+    ///
+    /// **RejectedByGate:** Faz 5'te matris uygulanmaz (Faz 8 hard-gate).
+    fn validate_gate_decision_semantics_v2(&self) -> Result<(), GateSemanticConsistencyError> {
+        // Basis, gate decision (`CanonicalGateEvaluationV2`) taşımaz — bu validator
+        // basis-level semantic tutarlılık doğrular: predicate_basis.result + failure_policy
+        // ↔ trajectory_loss category (completion-first matris). Decision parity
+        // (expected MutationDecision ↔ stored gate) AuthorizationContextV2 restore
+        // katmanında (basis + gate_evaluation birlikte restore edilince).
+
+        // Matris dalı: result + failure_policy → expected loss category.
+        let result = self.predicate_basis.result;
+        let failure_policy = self.predicate_basis.failure_policy;
+
+        // Stored loss evidence — matris dalına göre expected category ile parity.
+        // Tag değerleri (canonical_tags.rs): Completed=0, SourceInsufficient=1,
+        // NotCompleted=2; StrictReject=0, AcceptImprovement=1, OperatorApproval=2.
+        match result.as_u8() {
+            0 => {
+                // Completed → NotRequired(PredicateCompleted). Loss hesap YOK.
+                match &self.trajectory_loss {
+                    CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                        if *reason != CanonicalLossNotRequiredReason::PredicateCompleted {
+                            return Err(GateSemanticConsistencyError::LossEvidenceMismatch {
+                                stored: format!("{:?}", reason),
+                                recomputed: "PredicateCompleted".to_string(),
+                            });
+                        }
+                    }
+                    other => {
+                        return Err(GateSemanticConsistencyError::MatrixViolation {
+                            detail: format!(
+                                "Completed predicate expects NotRequired(PredicateCompleted), got {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+            1 => {
+                // SourceInsufficient → NotRequired(SourceInsufficient).
+                match &self.trajectory_loss {
+                    CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                        if *reason != CanonicalLossNotRequiredReason::SourceInsufficient {
+                            return Err(GateSemanticConsistencyError::LossEvidenceMismatch {
+                                stored: format!("{:?}", reason),
+                                recomputed: "SourceInsufficient".to_string(),
+                            });
+                        }
+                    }
+                    other => {
+                        return Err(GateSemanticConsistencyError::MatrixViolation {
+                            detail: format!(
+                                "SourceInsufficient expects NotRequired(SourceInsufficient), got {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+            2 => {
+                // NotCompleted → failure policy determines expected loss.
+                match failure_policy.as_u8() {
+                    0 => {
+                        // StrictReject → NotRequired(StrictRejectPolicy).
+                        match &self.trajectory_loss {
+                            CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                                if *reason != CanonicalLossNotRequiredReason::StrictRejectPolicy {
+                                    return Err(
+                                        GateSemanticConsistencyError::LossEvidenceMismatch {
+                                            stored: format!("{:?}", reason),
+                                            recomputed: "StrictRejectPolicy".to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            other => {
+                                return Err(GateSemanticConsistencyError::MatrixViolation {
+                                    detail: format!(
+                                        "NotCompleted+StrictReject expects NotRequired(StrictRejectPolicy), got {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    2 => {
+                        // OperatorApproval → NotRequired(OperatorApprovalPolicy).
+                        match &self.trajectory_loss {
+                            CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                                if *reason != CanonicalLossNotRequiredReason::OperatorApprovalPolicy
+                                {
+                                    return Err(
+                                        GateSemanticConsistencyError::LossEvidenceMismatch {
+                                            stored: format!("{:?}", reason),
+                                            recomputed: "OperatorApprovalPolicy".to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            other => {
+                                return Err(GateSemanticConsistencyError::MatrixViolation {
+                                    detail: format!(
+                                        "NotCompleted+OperatorApproval expects NotRequired(OperatorApprovalPolicy), got {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    1 => {
+                        // AcceptImprovement — loss category check.
+                        // AcceptImprovement + Available: improved bilgisi olmadan
+                        // AcceptAsProgress ↔ Reject ayırt edilemez — loose check.
+                        // Unavailable(NoPreferredVector) → Reject (exact).
+                        match &self.trajectory_loss {
+                            CanonicalTrajectoryLossEvidence::Unavailable { reason } => {
+                                if *reason
+                                    != CanonicalTrajectoryLossUnavailableReason::NoPreferredVector
+                                {
+                                    return Err(GateSemanticConsistencyError::MatrixViolation {
+                                        detail: format!(
+                                            "AcceptImprovement+Unavailable expects NoPreferredVector, got {:?}",
+                                            reason
+                                        ),
+                                    });
+                                }
+                            }
+                            CanonicalTrajectoryLossEvidence::Available { .. } => {
+                                // Available: improved unknown — AcceptAsProgress veya Reject
+                                // olabilir. Loose check (decision parity context katmanında).
+                            }
+                            CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                                // AcceptImprovement altında NotRequired beklenmez —
+                                // completion-first matris'te AcceptImprovement sadece
+                                // NotCompleted dalında ve loss üretilir/Unavailable.
+                                return Err(GateSemanticConsistencyError::MatrixViolation {
+                                    detail: format!(
+                                        "AcceptImprovement policy + NotRequired({:?}) — matris dışı kombinasyon",
+                                        reason
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    invalid => {
+                        // Geçersiz failure_policy tag — deserialize validation zaten
+                        // reject etmiş olmalı, ama fail-closed.
+                        return Err(GateSemanticConsistencyError::MatrixViolation {
+                            detail: format!("invalid failure_policy tag: {invalid}"),
+                        });
+                    }
+                }
+            }
+            invalid => {
+                // Geçersiz result tag — deserialize validation zaten reject etmiş olmalı.
+                return Err(GateSemanticConsistencyError::MatrixViolation {
+                    detail: format!("invalid predicate result tag: {invalid}"),
+                });
+            }
         }
         Ok(())
     }
@@ -5409,6 +5650,14 @@ impl VerifiedGateEvaluationV2 {
 /// Bu proof, restore path'inin runtime ile aynı task-goal gerçekliğine bağlandığını
 /// kanıtlar. Field private; Serialize/Deserialize/Clone YOK. Production build'de
 /// constructor YOK — Faz 5 restore validator (Item 16) üretir.
+///
+/// **Faz 5 Adım 17 notu:** `validate_predicate_basis_semantics_v2` doğrudan `PredicateSet::try_from`
+/// kullandığı için bu tip henüz constructed değil. Context-katmanı restore (basis + gate_evaluation
+/// birlikte) ve Faz 8 wiring consumer bekleyen.
+#[allow(
+    dead_code,
+    reason = "Faz 8 context-restore + production wiring consumer"
+)]
 #[derive(Debug)]
 pub(crate) struct VerifiedCanonicalTaskGoalEvidenceV2 {
     evidence: CanonicalTaskGoalEvidenceV2,
@@ -5417,10 +5666,13 @@ pub(crate) struct VerifiedCanonicalTaskGoalEvidenceV2 {
     digest: crate::measurement::TaskGoalDigest,
 }
 
+#[allow(
+    dead_code,
+    reason = "Faz 8 context-restore + production wiring consumer"
+)]
 impl VerifiedCanonicalTaskGoalEvidenceV2 {
     /// **pub(crate) consumer:** Verified proof'u canonical evidence + digest'e indirger.
     /// Restore validator (Item 16) ve child evaluator (Item 17) bu proof'u tüketir.
-    #[allow(dead_code, reason = "Faz 5 Item 16/17 restore validator consumer")]
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -5435,7 +5687,6 @@ impl VerifiedCanonicalTaskGoalEvidenceV2 {
     /// ile karşılaştırma caller'ın (Item 16 validate_predicate_basis_semantics_v2)
     /// sorumluluğu. validate_predicate_goal_for_commit caller'da çağrılır (PredicateSet
     /// restore sonrası).
-    #[allow(dead_code, reason = "Faz 5 Item 16 restore validator consumer")]
     pub(crate) fn from_canonical_evidence(
         evidence: CanonicalTaskGoalEvidenceV2,
     ) -> Result<Self, crate::measurement::EngineMeasurementDigestError> {
@@ -14158,7 +14409,14 @@ v = 0.5
             v: preferred.v,
         };
         let loss_after = crate::trajectory::trajectory_loss(engine_meas.after(), &preferred);
-        let trajectory_loss = CanonicalTrajectoryLossEvidence::Available { target, loss_after };
+        // **INV-T9 #70 Faz 5 Adım 17 (matris consistency):** predicate_basis.result = Completed
+        // ile tutarlı loss — completion-first matris: Completed → NotRequired(PredicateCompleted).
+        // Eski Available loss Adım 17 matris validator ile çelişiyordu (Completed+Available
+        // matris dışı). Fixture artık completion-first semantiğe uyumlu.
+        let _ = (target, loss_after); // preferred_vector Some olsa bile Completed → loss YOK
+        let trajectory_loss = CanonicalTrajectoryLossEvidence::NotRequired {
+            reason: CanonicalLossNotRequiredReason::PredicateCompleted,
+        };
 
         // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (self-consistent) ──────────────
         // measured_after: engine_meas.after() → ProvenancedMeasuredResult (measurement_digest
@@ -14749,7 +15007,7 @@ v = 0.5
         let basis = faz4_basis_v2_fixture();
         let digest = basis.compute_digest().expect("V2 basis digest");
         const FAZ4_BASIS_V2_GOLDEN_HEX: &str =
-            "16953c7e6a4ab9d578c10bfc4dc2b4627ac697186509e359ef233bef57333202";
+            "696d39df204325cfb9781c621c8dcd6cfcfde42557f9731a0c7f32064ce36c17";
         assert_eq!(
             digest.to_hex(),
             FAZ4_BASIS_V2_GOLDEN_HEX,
@@ -14775,7 +15033,7 @@ v = 0.5
         let context = AuthorizationContextV2::new(basis, verified, witness_req).unwrap();
         let digest = context.compute_digest().expect("V2 context digest");
         const FAZ4_CONTEXT_V2_GOLDEN_HEX: &str =
-            "9f30608c376972c89ddd71057f09d07eefadfd31846c483eebc89c1d74ca1f7e";
+            "f2818b8bf55b9cc22d6f0fbe68f968fcf5afc3be326547ceb94d954dab568890";
         assert_eq!(
             digest.to_hex(),
             FAZ4_CONTEXT_V2_GOLDEN_HEX,
@@ -15212,9 +15470,16 @@ v = 0.5
 
     #[test]
     fn commit1b_v2_negative_loss_after_rejects() {
-        // P2: negative loss_after → local invariant reject.
+        // P2: negative loss_after → local invariant reject (parse-time, validate_semantics öncesi).
+        // **INV-T9 #70 Faz 5 Adım 17:** fixture artık NotRequired loss (Completed predicate).
+        // Bu test Available loss + negatif loss_after parse-time reject doğrular —
+        // trajectory_loss'u Available'a çevirip negatif loss_after verelim.
         let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
-        value["basis"]["trajectory_loss"]["loss_after"] = serde_json::json!(-0.5);
+        value["basis"]["trajectory_loss"] = serde_json::json!({
+            "kind": "available",
+            "target": { "x": 0.2, "y": 0.8, "z": 0.15, "w": 0.3, "v": 0.6 },
+            "loss_after": -0.5
+        });
         let json = serde_json::to_string(&value).unwrap();
         let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
             .expect_err("negative loss_after reject");

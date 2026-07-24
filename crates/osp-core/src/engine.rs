@@ -3905,7 +3905,10 @@ v = 0.5
             mode: PredicateMode::All,
             predicates: vec![WeightedPredicate {
                 predicate,
-                weight: Some(1.0),
+                // **INV-T9 #70 Faz 5 Adım 17 (P0-B):** All mode + None weight —
+                // validate_predicate_goal_for_commit All+Some reject eder. Eski Some(1.0)
+                // P0-B restore validator ile geçersiz declaration.
+                weight: None,
             }],
             preferred_vector: None,
         };
@@ -3989,7 +3992,10 @@ v = 0.5
             mode: PredicateMode::All,
             predicates: vec![WeightedPredicate {
                 predicate,
-                weight: Some(1.0),
+                // **INV-T9 #70 Faz 5 Adım 17 (P0-B):** All mode + None weight —
+                // validate_predicate_goal_for_commit All+Some reject eder. Eski Some(1.0)
+                // P0-B restore validator ile geçersiz declaration.
+                weight: None,
             }],
             preferred_vector: None,
         };
@@ -4159,7 +4165,10 @@ v = 0.5
             mode: PredicateMode::All,
             predicates: vec![WeightedPredicate {
                 predicate,
-                weight: Some(1.0),
+                // **INV-T9 #70 Faz 5 Adım 17 (P0-B):** All mode + None weight —
+                // validate_predicate_goal_for_commit All+Some reject eder. Eski Some(1.0)
+                // P0-B restore validator ile geçersiz declaration.
+                weight: None,
             }],
             preferred_vector: None,
         };

@@ -34,15 +34,8 @@
     },
     "measurement_baseline_digest": "64e29d0b16258734535965f04a0db98fb3469e7040df064a2422b00aa4719f86",
     "trajectory_loss": {
-      "kind": "available",
-      "target": {
-        "x": 0.2,
-        "y": 0.8,
-        "z": 0.15,
-        "w": 0.3,
-        "v": 0.6
-      },
-      "loss_after": 0.55
+      "kind": "not_required",
+      "reason": "predicate_completed"
     },
     "measurement_request": {
       "subject": {
