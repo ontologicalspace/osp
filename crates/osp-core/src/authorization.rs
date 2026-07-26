@@ -3710,9 +3710,14 @@ impl AuthorizationContextDigestV2 {
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
-}
 
-/// **INV-T9 #70 Commit 4b Faz 4:** `CanonicalTrajectoryEvidenceBaseline` → canonical
+    /// **INV-T9 #70 Faz 8-P1:** Bytes'dan construct — V2 envelope wire restore
+    /// (`LowerHex32` strict parse sonrası). `pub(crate)` — authorization modülü internal.
+    #[allow(dead_code, reason = "Faz 8-P1 envelope wire restore")]
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
 /// byte encoding for V2 basis digest. Available/Unavailable varyant tag + nested fields.
 fn encode_canonical_trajectory_baseline_v2(
     hasher: &mut blake3::Hasher,
@@ -5062,6 +5067,231 @@ impl Clock for FixedClock {
 // PendingAuthorization (Model B — Commit 4 genişletir: Envelope + Store)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 8-P1 — V2 Pending Authorization record (Adım 3)
+//
+// **Asimetrik creation/load API (review 4. tur P0-1):**
+// - `try_new` (pub(crate)) — creation: indexed alanlar evidence'dan türetilir.
+// - `try_new_with_verified_digest` (modül-private) — load: stored outer alanları
+//   KORUR + evidence'a karşı doğrular (overwrite ETMEZ). Wire outer tamper
+//   maskelenmez (review 4. tur P0-1 epistemik doğruluk).
+//
+// **Indexed duplication (review 4. tur P1-5):** task_id, claim_id,
+// authorization_context_digest, attempt_num hem record'da hem embedded evidence'da.
+// Envelope verify exact cross-field karşılaştırma yapar.
+//
+// **Eligibility ÇAĞRILMAZ (review 4. tur P0-2):** `validate_internal` yalnız
+// record ↔ evidence identity + evidence digest recompute + Held binding.
+// Context taşımıyor — eligibility envelope seviyesinde (`verify()`).
+//
+// **Surface restriction:** Sadece `Held` disposition (V1 pattern mirror,
+// auth.rs:5168). Rejected disposition → `RevisionRequiredV2` (Adım 4).
+//
+// **Visibility (review 5. tur P1-1):** `pub(crate)` — tek public checked creation
+// root `PendingAuthorizationEnvelopeV2::try_new_held` (Adım 6).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **INV-T9 #70 Faz 8-P1:** V2 pending authorization record error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PendingAuthorizationV2Error {
+    /// Load: record.task_id ≠ evidence.task_id (outer wire tamper detected).
+    #[error("record task_id ({record}) ≠ evidence task_id ({evidence})")]
+    TaskIdMismatch {
+        record: crate::trajectory::TaskId,
+        evidence: crate::trajectory::TaskId,
+    },
+    /// Load: record.claim_id ≠ evidence.claim_id.
+    #[error("record claim_id ({record}) ≠ evidence claim_id ({evidence})")]
+    ClaimIdMismatch { record: ClaimId, evidence: ClaimId },
+    /// Load: record.authorization_context_digest ≠ evidence context digest.
+    #[error("record context digest ≠ evidence context digest")]
+    ContextDigestMismatch,
+    /// Load: record.attempt_num ≠ evidence.attempt_num.
+    #[error("record attempt_num ({record}) ≠ evidence attempt_num ({evidence})")]
+    AttemptNumberMismatch { record: u64, evidence: u64 },
+    /// Evidence digest recompute mismatch (tamper detection).
+    #[error("evidence digest mismatch (stored ≠ recomputed)")]
+    EvidenceDigestMismatch,
+    /// Evidence digest computation failed.
+    #[error("evidence digest computation failed: {0}")]
+    DigestComputationFailed(String),
+    /// Surface restriction: PendingAuthorizationV2 requires Held disposition.
+    #[error("PendingAuthorizationV2 requires Held disposition, found Rejected")]
+    InvalidEvidenceDisposition,
+    /// Evidence constructor error passthrough.
+    #[error("suspended attempt evidence error: {0}")]
+    Evidence(#[from] SuspendedAttemptEvidenceV2Error),
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 suspended authorization record (Held surface).
+///
+/// V1 `PendingAuthorization` (auth.rs:5080) mirror — V2 context digest bağlar.
+/// Indexed duplication (review 4. tur P1-5): task_id/claim_id/context_digest/
+/// attempt_num hem record'da hem embedded evidence'da; envelope verify exact
+/// karşılaştırır.
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+/// `pub(crate)` visibility — tek public root `try_new_held` (Adım 6).
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + try_new_held + wire loader)"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingAuthorizationV2 {
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    authorization_context_digest: AuthorizationContextDigestV2,
+    attempt_num: AttemptNumber,
+    suspended_attempt_evidence: SuspendedAttemptEvidenceV2,
+    evidence_digest: SuspendedAttemptEvidenceDigestV2,
+    created_at: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + try_new_held + wire loader)"
+)]
+impl PendingAuthorizationV2 {
+    /// **Creation (review 4. tur P0-1):** Indexed alanlar evidence'dan türetilir.
+    /// Digest compute edilir (creation path). `pub(crate)` — envelope producer çağırır.
+    pub(crate) fn try_new(
+        evidence: SuspendedAttemptEvidenceV2,
+        created_at: u64,
+    ) -> Result<Self, PendingAuthorizationV2Error> {
+        // Surface restriction: sadece Held (Rejected → RevisionRequiredV2).
+        if !matches!(
+            evidence.disposition(),
+            SuspendedAttemptDisposition::Held { .. }
+        ) {
+            return Err(PendingAuthorizationV2Error::InvalidEvidenceDisposition);
+        }
+        let evidence_digest = SuspendedAttemptEvidenceDigestV2::compute(&evidence)
+            .map_err(|e| PendingAuthorizationV2Error::DigestComputationFailed(e.to_string()))?;
+        Ok(Self {
+            task_id: evidence.task_id(),
+            claim_id: evidence.claim_id(),
+            authorization_context_digest: evidence.authorization_context_digest().clone(),
+            attempt_num: evidence.attempt_num(),
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
+            created_at,
+        })
+    }
+
+    /// **Load (review 4. tur P0-1):** Stored outer alanlar KORUNUR, evidence'a karşı
+    /// doğrulanır (overwrite ETMEZ). Wire outer tamper maskelenmez.
+    ///
+    /// **Visibility (review 5. tur P1-1):** Modül-private — wire loader internal.
+    /// Public restore entrypoint `load_pending_authorization_versioned` (Adım 7).
+    fn try_new_with_verified_digest(
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_context_digest: AuthorizationContextDigestV2,
+        attempt_num: AttemptNumber,
+        evidence: SuspendedAttemptEvidenceV2,
+        stored_evidence_digest: SuspendedAttemptEvidenceDigestV2,
+        created_at: u64,
+    ) -> Result<Self, PendingAuthorizationV2Error> {
+        // Surface restriction: sadece Held.
+        if !matches!(
+            evidence.disposition(),
+            SuspendedAttemptDisposition::Held { .. }
+        ) {
+            return Err(PendingAuthorizationV2Error::InvalidEvidenceDisposition);
+        }
+        // Stored outer alanları KORU — evidence'a karşı doğrula (overwrite ETMEZ).
+        // Bu, wire outer tamper'ı tespit eder (review 4. tur P0-1).
+        let record = Self {
+            task_id,
+            claim_id,
+            authorization_context_digest,
+            attempt_num,
+            suspended_attempt_evidence: evidence,
+            evidence_digest: stored_evidence_digest,
+            created_at,
+        };
+        record.validate_internal()?;
+        Ok(record)
+    }
+
+    /// **Record-internal validation (review 4. tur P0-2):** record ↔ evidence
+    /// cross-field. Context-dependent kontroller (eligibility) envelope `verify()`'da.
+    ///
+    /// Doğrular: task_id, claim_id, attempt_num, context_digest ↔ evidence;
+    /// evidence digest recompute + compare; Held disposition + reason/snapshot binding.
+    fn validate_internal(&self) -> Result<(), PendingAuthorizationV2Error> {
+        let evidence = &self.suspended_attempt_evidence;
+
+        // record ↔ evidence identity.
+        if self.task_id != evidence.task_id() {
+            return Err(PendingAuthorizationV2Error::TaskIdMismatch {
+                record: self.task_id,
+                evidence: evidence.task_id(),
+            });
+        }
+        if self.claim_id != evidence.claim_id() {
+            return Err(PendingAuthorizationV2Error::ClaimIdMismatch {
+                record: self.claim_id,
+                evidence: evidence.claim_id(),
+            });
+        }
+        if self.attempt_num != evidence.attempt_num() {
+            return Err(PendingAuthorizationV2Error::AttemptNumberMismatch {
+                record: self.attempt_num.get(),
+                evidence: evidence.attempt_num().get(),
+            });
+        }
+        if self.authorization_context_digest != *evidence.authorization_context_digest() {
+            return Err(PendingAuthorizationV2Error::ContextDigestMismatch);
+        }
+
+        // Evidence digest recompute + compare (tamper detection).
+        let computed = SuspendedAttemptEvidenceDigestV2::compute(evidence)
+            .map_err(|e| PendingAuthorizationV2Error::DigestComputationFailed(e.to_string()))?;
+        if computed != self.evidence_digest {
+            return Err(PendingAuthorizationV2Error::EvidenceDigestMismatch);
+        }
+
+        // Surface-specific disposition + Held binding.
+        match evidence.disposition() {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            } => {
+                // Held binding: witness_hold_reason/snapshot embedded evidence'da;
+                // record ayrıca taşımaz (V1 pattern — duplication yok, Karar 3 minimal).
+                let _ = (hold_reason, snapshot);
+            }
+            SuspendedAttemptDisposition::Rejected { .. } => {
+                return Err(PendingAuthorizationV2Error::InvalidEvidenceDisposition);
+            }
+        }
+
+        Ok(())
+    }
+
+    // — Accessor'lar (pub(crate) — envelope + navigator Faz 8a consumer) —
+
+    pub(crate) fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub(crate) fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub(crate) fn authorization_context_digest(&self) -> &AuthorizationContextDigestV2 {
+        &self.authorization_context_digest
+    }
+    pub(crate) fn suspended_attempt_evidence(&self) -> &SuspendedAttemptEvidenceV2 {
+        &self.suspended_attempt_evidence
+    }
+    pub(crate) fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigestV2 {
+        &self.evidence_digest
+    }
+    pub(crate) fn created_at(&self) -> u64 {
+        self.created_at
+    }
+}
+
 /// INV-T9 suspended authorization record (Model B).
 ///
 /// Tüm authorization-gated mutation decision'larını kapsar (AcceptAsCompleted +
@@ -5293,7 +5523,11 @@ pub struct AuthorizationContext {
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:100):** Witness-not-required reason.
 /// Reject → NotApplied: witness aşaması çalışmaz (delta hiç uygulanmadı).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// **INV-T9 #70 Faz 8-P1:** `Deserialize` eklendi — V2 persisted context wire DTO
+/// (`RawCanonicalWitnessRequirementV2::NotRequired { reason }`) için. Additive —
+/// V1 serialization byte-identical (serde adları korunur). Variant append-only frozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WitnessNotRequiredReason {
     /// `MutationDecision::Reject` → `ApplyTarget::NotApplied` — delta uygulanmadı,
     /// witness aşaması çalışmaz.
@@ -5372,6 +5606,81 @@ impl CanonicalWitnessRequirementV2 {
         }
     }
 
+    /// **INV-T9 #70 Faz 8-P1:** `Required` witness requirement min_approvers değeri.
+    /// `NotRequired` → `None`. Eligibility validator (snapshot ↔ context cross-check)
+    /// için — snapshot.required_approvers ↔ min_approvers.
+    #[allow(
+        dead_code,
+        reason = "Faz 8-P1 suspension eligibility validator consumer"
+    )]
+    pub(crate) fn min_approvers(&self) -> Option<u32> {
+        match &self.repr {
+            CanonicalWitnessRequirementRepr::Required { min_approvers, .. } => Some(*min_approvers),
+            CanonicalWitnessRequirementRepr::NotRequired { .. } => None,
+        }
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** `Required` witness requirement quorum_threshold değeri.
+    /// `NotRequired` → `None`. Eligibility validator (snapshot ↔ context cross-check)
+    /// için — snapshot.required_support ↔ quorum_threshold.
+    #[allow(
+        dead_code,
+        reason = "Faz 8-P1 suspension eligibility validator consumer"
+    )]
+    pub(crate) fn quorum_threshold(&self) -> Option<CanonicalF64> {
+        match &self.repr {
+            CanonicalWitnessRequirementRepr::Required {
+                quorum_threshold, ..
+            } => Some(*quorum_threshold),
+            CanonicalWitnessRequirementRepr::NotRequired { .. } => None,
+        }
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** `Required` mi? Eligibility validator için boolean check.
+    #[allow(
+        dead_code,
+        reason = "Faz 8-P1 suspension eligibility validator consumer"
+    )]
+    pub(crate) fn is_required(&self) -> bool {
+        matches!(self.repr, CanonicalWitnessRequirementRepr::Required { .. })
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** Checked `Required` constructor — persisted wire restore.
+    ///
+    /// Field'ları doğrular (min_approvers > 0, quorum_threshold finite non-neg) ve repr
+    /// kurar. Runtime `TryFrom<(&CanonicalWitnessPolicy, &ApplyTarget)>` ayrı kalır;
+    /// bu constructor restore-path (`PersistedAuthorizationContextV2::restore_from_wire`).
+    #[allow(dead_code, reason = "Faz 8-P1 persisted context wire restore")]
+    pub(crate) fn required(
+        min_approvers: u32,
+        quorum_threshold: CanonicalF64,
+        independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag,
+    ) -> Result<Self, CanonicalWitnessRequirementV2Error> {
+        if min_approvers == 0 {
+            return Err(CanonicalWitnessRequirementV2Error::InvalidMinApprovers);
+        }
+        if !quorum_threshold.is_finite() || quorum_threshold < 0.0 {
+            return Err(CanonicalWitnessRequirementV2Error::InvalidQuorumThreshold);
+        }
+        Ok(Self {
+            repr: CanonicalWitnessRequirementRepr::Required {
+                min_approvers,
+                quorum_threshold,
+                independence_policy,
+            },
+        })
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** Checked `NotRequired` constructor — persisted wire restore.
+    #[allow(dead_code, reason = "Faz 8-P1 persisted context wire restore")]
+    pub(crate) fn not_required(
+        reason: WitnessNotRequiredReason,
+    ) -> Result<Self, CanonicalWitnessRequirementV2Error> {
+        Ok(Self {
+            repr: CanonicalWitnessRequirementRepr::NotRequired { reason },
+        })
+    }
+
     /// **Canonical byte encoding (plan md:101):** Witness requirement varyant/reason
     /// pinned numeric tag. `AuthorizationContextDigestV2` bunu çağırır.
     pub(crate) fn encode_canonical(
@@ -5437,6 +5746,12 @@ pub enum CanonicalWitnessRequirementV2Error {
     RequiredForNotApplied,
     #[error("witness not required for Lane (applied delta requires witness)")]
     NotRequiredForLane,
+    /// **INV-T9 #70 Faz 8-P1:** min_approvers ≤ 0 (restore-path checked constructor).
+    #[error("invalid min_approvers (must be > 0)")]
+    InvalidMinApprovers,
+    /// **INV-T9 #70 Faz 8-P1:** quorum_threshold non-finite veya negatif.
+    #[error("invalid quorum_threshold (must be finite non-negative)")]
+    InvalidQuorumThreshold,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5826,6 +6141,224 @@ impl AuthorizationContextV2 {
             &self.gate_evaluation,
             &self.witness_requirement,
         )
+    }
+
+    /// **INV-T9 #70 Faz 8-P1 (review 4. tur P0-3):** Loader-private restore constructor.
+    ///
+    /// Runtime `new` `VerifiedGateEvaluationV2` (proof) tüketir; bu constructor
+    /// checked persisted wire'dan restore eder (canonical gate_evaluation + witness).
+    /// İki trust boundary ayrı: runtime proof-gated vs checked persisted-wire.
+    ///
+    /// **Visibility (review 5. tur P0-2):** Modül-private — tek caller
+    /// `PersistedAuthorizationContextV2::restore_from_wire`. Public veya pub(crate) DEĞİL.
+    /// Source-contract test: AuthorizationContextV2 construction sites == {new, restore}
+    /// (başka site yok).
+    ///
+    /// **Validation:** `validate_for(apply_target)` — runtime `new` ile aynı invariant.
+    fn restore(
+        basis: AuthorizationBasisV2,
+        gate_evaluation: CanonicalGateEvaluationV2,
+        witness_requirement: CanonicalWitnessRequirementV2,
+    ) -> Result<Self, AuthorizationContextV2BuildError> {
+        let apply_target = gate_evaluation.apply_target();
+        witness_requirement.validate_for(&apply_target)?;
+        Ok(Self {
+            basis,
+            gate_evaluation,
+            witness_requirement,
+        })
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — PersistedAuthorizationContextV2 (Adım 5)
+//
+// **Wrapper frozen (review 5. tur P0-2):** `PersistedAuthorizationContextV2`
+// `AuthorizationContextV2`'yi sarar. Restore yalnız private `restore_from_wire`
+// method'unda — ayrı free function YOK. Tek exact zincir.
+//
+// **Wire DTO (review 5. tur P1-2):** `RawPersistedAuthorizationContextV2` +
+// `RawCanonicalGateEvaluationV2` + `RawCanonicalWitnessRequirementV2`. Pinned numeric
+// tag (u8) ile strict dispatch. Domain tiplere derive Serialize/Deserialize YOK;
+// raw DTO'lar doğal Serialize/Deserialize taşır.
+//
+// **Loader-private restore (review 4. tur P0-3 + 5. tur P0-2):** Restore zinciri:
+//   raw basis → checked AuthorizationBasisV2 (mevcut from_wire)
+//   raw gate → pinned tag → checked CanonicalGateEvaluationV2
+//   raw witness → pinned tag → checked CanonicalWitnessRequirementV2
+//   → AuthorizationContextV2::restore (private) → validate_for
+// Tek caller = PendingAuthorizationEnvelopeV2 wire loader (Adım 6).
+//
+// **Access yüzey pub(crate) (review 5. tur P2-2):** Faz 8a navigator/dış consumer
+// gerektiğinde genişletilir. Şimdilik additive API dar.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** Persisted authorization context restore error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum AuthorizationContextV2RestoreError {
+    /// Basis wire restore failed (mevcut `AuthorizationBasisV2::from_wire`).
+    #[error("basis restore failed: {0}")]
+    Basis(String),
+    /// Gate evaluation pinned tag invalid.
+    #[error("gate evaluation tag invalid: {0}")]
+    GateTag(String),
+    /// Witness requirement pinned tag invalid.
+    #[error("witness requirement tag invalid: {0}")]
+    WitnessTag(String),
+    /// Context restore invariant failed (validate_for — runtime ile aynı).
+    #[error("context restore invariant failed: {0}")]
+    ContextBuild(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-2):** Raw canonical gate evaluation wire DTO.
+///
+/// `GateDecision` (RejectedByGate payload) ve `MutationDecision` (GatePassed payload)
+/// Serialize/Deserialize derive'lu — doğrudan wire'da. Domain `CanonicalGateEvaluationV2`'ye
+/// derive Deserialize YOK — raw DTO → checked domain dönüşümü (`restore_gate_evaluation_v2`).
+///
+/// Sadece serde derive (V2 raw DTO pattern — `RawCanonicalTaskGoalEvidenceV2` auth.rs:8737
+/// ile uyumlu, Debug/Clone yok). Modül-private — wire restore internal.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawCanonicalGateEvaluationV2 {
+    RejectedByGate {
+        decision: crate::trajectory::GateDecision,
+    },
+    GatePassed {
+        mutation_decision: crate::trajectory::MutationDecision,
+    },
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-2):** Raw canonical witness requirement wire DTO.
+///
+/// Domain field'lar (min_approvers, quorum_threshold, reason) Serialize/Deserialize.
+/// Domain `CanonicalWitnessRequirementV2`'ye derive Deserialize YOK — raw DTO → checked
+/// domain dönüşümü (`restore_witness_requirement_v2`). Modül-private — wire restore internal.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawCanonicalWitnessRequirementV2 {
+    Required {
+        min_approvers: u32,
+        quorum_threshold: f64,
+        independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag,
+    },
+    NotRequired {
+        reason: WitnessNotRequiredReason,
+    },
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Raw persisted authorization context wire DTO.
+///
+/// `basis` mevcut `RawAuthorizationBasisV2`'yi (auth.rs:8578) reuse eder — V2 basis
+/// wire authority'si zaten kurulmuş. gate/witness yeni raw DTO'lar.
+/// Modül-private — wire restore internal.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPersistedAuthorizationContextV2 {
+    pub(crate) basis: RawAuthorizationBasisV2,
+    pub(crate) gate_evaluation: RawCanonicalGateEvaluationV2,
+    pub(crate) witness_requirement: RawCanonicalWitnessRequirementV2,
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P0-2):** Persisted authorization context wrapper.
+///
+/// `AuthorizationContextV2`'yi sarar. Runtime (`from_runtime`) ve checked persisted-wire
+/// (`restore_from_wire`) iki trust boundary. Restore yalnız private method — ayrı free
+/// function YOK (P0-2 frozen).
+///
+/// **Access pub(crate) (review 5. tur P2-2):** Envelope + navigator Faz 8a consumer.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + envelope wire loader)"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PersistedAuthorizationContextV2 {
+    context: AuthorizationContextV2,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + envelope wire loader)"
+)]
+impl PersistedAuthorizationContextV2 {
+    /// **Runtime boundary:** Runtime context'i sar (navigator Faz 8a held creation).
+    pub(crate) fn from_runtime(context: AuthorizationContextV2) -> Self {
+        Self { context }
+    }
+
+    /// **Loader-private restore (review 5. tur P0-2):** Checked persisted wire → context.
+    /// Private method — tek caller `PendingAuthorizationEnvelopeV2` wire loader (Adım 6).
+    ///
+    /// Source-contract test: `PersistedAuthorizationContextV2::restore_from_wire`
+    /// production call-site count == 1, caller == envelope wire loader.
+    fn restore_from_wire(
+        raw: RawPersistedAuthorizationContextV2,
+    ) -> Result<Self, AuthorizationContextV2RestoreError> {
+        // raw basis → checked AuthorizationBasisV2 (mevcut from_wire).
+        let basis = AuthorizationBasisV2::from_wire(raw.basis)
+            .map_err(|e| AuthorizationContextV2RestoreError::Basis(e.to_string()))?;
+        // raw gate → pinned tag → checked CanonicalGateEvaluationV2.
+        let gate_evaluation = restore_gate_evaluation_v2(raw.gate_evaluation)?;
+        // raw witness → pinned tag → checked CanonicalWitnessRequirementV2.
+        let witness_requirement = restore_witness_requirement_v2(raw.witness_requirement)?;
+        // → AuthorizationContextV2::restore (private) → validate_for.
+        let context = AuthorizationContextV2::restore(basis, gate_evaluation, witness_requirement)
+            .map_err(|e| AuthorizationContextV2RestoreError::ContextBuild(e.to_string()))?;
+        Ok(Self { context })
+    }
+
+    /// Context accessor (pub(crate) — P2-2 dar). Faz 8a'da gerçek navigator consumer
+    /// gelirse ownership gerekirse `into_verified_context` dar API eklenebilir.
+    pub(crate) fn context(&self) -> &AuthorizationContextV2 {
+        &self.context
+    }
+    pub(crate) fn compute_digest(
+        &self,
+    ) -> Result<AuthorizationContextDigestV2, CanonicalDigestError> {
+        self.context.compute_digest()
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Raw gate evaluation → checked domain.
+///
+/// `GateDecision` → `RejectedGateDecisionV2::try_from` (checked — PassedAll/Unknown reject).
+/// `MutationDecision` doğrudan (tüm varyantlar geçerli).
+fn restore_gate_evaluation_v2(
+    raw: RawCanonicalGateEvaluationV2,
+) -> Result<CanonicalGateEvaluationV2, AuthorizationContextV2RestoreError> {
+    match raw {
+        RawCanonicalGateEvaluationV2::RejectedByGate { decision } => {
+            let rejected = RejectedGateDecisionV2::try_from(decision)
+                .map_err(|e| AuthorizationContextV2RestoreError::GateTag(e.to_string()))?;
+            Ok(CanonicalGateEvaluationV2::RejectedByGate { decision: rejected })
+        }
+        RawCanonicalGateEvaluationV2::GatePassed { mutation_decision } => {
+            Ok(CanonicalGateEvaluationV2::GatePassed { mutation_decision })
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Raw witness requirement → checked domain.
+///
+/// `CanonicalWitnessRequirementV2::required`/`not_required` checked constructor'ları.
+fn restore_witness_requirement_v2(
+    raw: RawCanonicalWitnessRequirementV2,
+) -> Result<CanonicalWitnessRequirementV2, AuthorizationContextV2RestoreError> {
+    match raw {
+        RawCanonicalWitnessRequirementV2::Required {
+            min_approvers,
+            quorum_threshold,
+            independence_policy,
+        } => CanonicalWitnessRequirementV2::required(
+            min_approvers,
+            quorum_threshold,
+            independence_policy,
+        )
+        .map_err(|e| AuthorizationContextV2RestoreError::WitnessTag(e.to_string())),
+        RawCanonicalWitnessRequirementV2::NotRequired { reason } => {
+            CanonicalWitnessRequirementV2::not_required(reason)
+                .map_err(|e| AuthorizationContextV2RestoreError::WitnessTag(e.to_string()))
+        }
     }
 }
 
@@ -6322,6 +6855,678 @@ impl SuspendedAttemptEvidenceDigest {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — V2 Suspended Attempt Evidence ailesi
+// (additive downstream V2 readiness — review 5 tur, frozen)
+//
+// **Neden ayrı V2 ailesi (review P0-1, 4. tur):** V1 `SuspendedAttemptEvidence`
+// `authorization_basis_digest: AuthorizationBasisDigest` (V1) field'ı taşıyor —
+// V2 overload imkânsız (V1 byte contract frozen). V2 ailesi ayrı kurulur:
+//
+// - `SuspendedAttemptEvidenceV2` — `authorization_context_digest:
+//   AuthorizationContextDigestV2` (basis+gate+witness commitment, basis TEK
+//   BAŞINA kararın tamamı DEĞİL — review 2. tur P0-1/P0-2).
+// - `SuspendedAttemptEvidenceDigestV2` — ayrı domain separator
+//   `OSP/ATTEMPT-EVIDENCE/V2` (null terminator YOK — V2 convention, V1
+//   `osp.attempt-evidence.v1\0` frozen).
+//
+// **Constructor sözleşmesi (review 3. tur P0-1):** Evidence constructor digest
+// ÜRETMEZ — V1 pattern (`try_new_normalizing`/`try_from_canonical_wire`) mirror.
+// Digest ayrı surface'da (`PendingAuthorizationV2`/`RevisionRequiredV2`).
+//
+// **V2-specific error tipi (review 4. tur P1-6):** `SuspendedAttemptEvidenceV2Error`
+// — V1 variant'ları taşınmaz. Ortak private canonical validation helper'lar
+// (`canonicalize_rejections`, `validate_evidence_semantics`) reuse edilir ama
+// wire schema aileleri bağımsız sürümlenebilir.
+//
+// **Visibility (review 5. tur P1-1/P0-3):** `pub(crate)` — tek public checked
+// creation root `PendingAuthorizationEnvelopeV2::try_new_held`. Internal producer
+// non-test consumer (envelope wire loader + try_new_held) kazanır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Canonical suspended-attempt evidence schema version (v2).
+///
+/// **Faz 8-P1:** V2 schema — context digest bağlar (basis DEĞİL). V1
+/// (`SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION = 1`) frozen.
+pub(crate) const SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2: u32 = 2;
+
+/// **INV-T9 #70 Faz 8-P1:** V2-specific evidence error tipi.
+///
+/// V1 `SuspendedAttemptEvidenceError` variant'ları TAŞINMAZ (review 4. tur P1-6) —
+/// wire schema aileleri bağımsız sürümlenebilir. Ortak private canonical
+/// validation helper'lar (`canonicalize_rejections`, `validate_evidence_semantics`)
+/// reuse edilir ama ortak error mapping üzerinden.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SuspendedAttemptEvidenceV2Error {
+    #[error("v2 schema version mismatch: found {found}, expected {expected}")]
+    SchemaVersionMismatch { found: u32, expected: u32 },
+    /// Witness snapshot support/required_support non-finite veya negatif.
+    #[error("invalid witness snapshot: {0}")]
+    InvalidSnapshot(String),
+    /// Held hold_reason ↔ snapshot iç tutarlılık ihlali.
+    #[error("hold reason ↔ snapshot inconsistency: {0}")]
+    HoldReasonSnapshotInconsistency(String),
+    /// **Strict wire:** Wire'dan gelen rejection sırası canonical değil.
+    /// Production API (`try_new_normalizing`) canonicalize eder; wire load
+    /// (`try_from_canonical_wire`) strict reject eder.
+    #[error("non-canonical rejection order on v2 wire (strict wire rejects; API normalizes)")]
+    NonCanonicalRejectionOrder,
+    /// Duplicate (witness, rationale) çifti — canonical encoding determinism.
+    #[error("duplicate witness rejection (canonical determinism)")]
+    DuplicateRejection,
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 canonical embedded attempt-evidence — context digest bound.
+///
+/// V1 `SuspendedAttemptEvidence`'ın V2 karşılığı. Fark: `authorization_context_digest`
+/// (`AuthorizationContextDigestV2` = basis+gate+witness commitment) taşır, basis
+/// digest DEĞİL. V2 authorization kararı = basis + gate_evaluation + witness_requirement
+/// bütünüdür; evidence yalnız basis'e bağlanırsa gate/witness değişikliği evidence
+/// kimliğine yansımaz (review 2. tur P0-1).
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+/// `pub(crate)` visibility — tek public checked creation root
+/// `PendingAuthorizationEnvelopeV2::try_new_held` (review 5. tur P0-3/P1-1).
+///
+/// **Constructor digest ÜRETMEZ (review 3. tur P0-1):** V1 pattern mirror —
+/// `try_new_normalizing`/`try_from_canonical_wire` normalize+validate yapar; digest
+/// ayrı surface'da (`PendingAuthorizationV2::try_new` / load constructor).
+///
+/// **Faz 8a consumer:** `PendingAuthorizationEnvelopeV2::try_new_held` +
+/// `RevisionRequiredV2::try_new_rejected` (navigator Faz 8a) + envelope wire loader.
+/// Test'ler cfg(test) consumer; lib build Faz 8a navigator consumer bekler.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SuspendedAttemptEvidenceV2 {
+    schema_version: u32,
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    authorization_context_digest: AuthorizationContextDigestV2,
+    attempt_num: AttemptNumber,
+    disposition: SuspendedAttemptDisposition,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+impl SuspendedAttemptEvidenceV2 {
+    /// Production API constructor (normalizing) — arbitrary input → canonicalize → validate.
+    ///
+    /// **N2 mirror (V1 `try_new_normalizing` auth.rs:6089):** Rejected reasons
+    /// `canonicalize_rejections` üzerinden canonical sıraya gelir (sort + duplicate
+    /// reject). Held/Rejected `validate_evidence_semantics`. Wire load path bunu
+    /// KULLANMAZ — `try_from_canonical_wire` strict check yapar.
+    ///
+    /// **Digest ÜRETMEZ** — review 3. tur P0-1 sözleşmesi.
+    pub(crate) fn try_new_normalizing(
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_context_digest: AuthorizationContextDigestV2,
+        attempt_num: AttemptNumber,
+        disposition: SuspendedAttemptDisposition,
+    ) -> Result<Self, SuspendedAttemptEvidenceV2Error> {
+        let disposition = normalize_disposition_v2(disposition)?;
+        validate_evidence_semantics(&disposition).map_err(map_v1_evidence_error)?;
+        Ok(Self {
+            schema_version: SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2,
+            task_id,
+            claim_id,
+            authorization_context_digest,
+            attempt_num,
+            disposition,
+        })
+    }
+
+    /// Wire load constructor — strict canonical check (NO normalize).
+    ///
+    /// **N2 mirror (V1 `try_from_canonical_wire` auth.rs:6132):** Wire'dan gelen
+    /// disposition raw kabul edilir. Non-canonical rejection sırası →
+    /// `NonCanonicalRejectionOrder` (normalize ETMEZ — persisted representation
+    /// canonical olmalı). Semantic validation (`validate_evidence_semantics`) yapılır.
+    ///
+    /// **Visibility (review 5. tur P1-1):** `pub(crate)` — wire loader internal.
+    /// Public restore entrypoint `load_pending_authorization_versioned`.
+    pub(crate) fn try_from_canonical_wire(
+        schema_version: u32,
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_context_digest: AuthorizationContextDigestV2,
+        attempt_num: AttemptNumber,
+        disposition: SuspendedAttemptDisposition,
+    ) -> Result<Self, SuspendedAttemptEvidenceV2Error> {
+        if schema_version != SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2 {
+            return Err(SuspendedAttemptEvidenceV2Error::SchemaVersionMismatch {
+                found: schema_version,
+                expected: SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2,
+            });
+        }
+        // Strict wire: non-canonical rejection order reject (normalize ETMEZ).
+        if let SuspendedAttemptDisposition::Rejected { reasons, .. } = &disposition {
+            verify_rejections_canonical_order(reasons).map_err(map_v1_evidence_error)?;
+        }
+        validate_evidence_semantics(&disposition).map_err(map_v1_evidence_error)?;
+        Ok(Self {
+            schema_version,
+            task_id,
+            claim_id,
+            authorization_context_digest,
+            attempt_num,
+            disposition,
+        })
+    }
+
+    // — Accessor'lar (pub(crate) — internal producer consumer'ları) —
+
+    pub(crate) fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+    pub(crate) fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub(crate) fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub(crate) fn authorization_context_digest(&self) -> &AuthorizationContextDigestV2 {
+        &self.authorization_context_digest
+    }
+    pub(crate) fn attempt_num(&self) -> AttemptNumber {
+        self.attempt_num
+    }
+    pub(crate) fn disposition(&self) -> &SuspendedAttemptDisposition {
+        &self.disposition
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 evidence — normalize disposition (Rejected canonicalize).
+///
+/// V1 `try_new_normalizing` iç logic mirror — `canonicalize_rejections` reuse.
+/// Held pass-through; Rejected canonical sıraya normalize + duplicate reject.
+fn normalize_disposition_v2(
+    disposition: SuspendedAttemptDisposition,
+) -> Result<SuspendedAttemptDisposition, SuspendedAttemptEvidenceV2Error> {
+    match disposition {
+        SuspendedAttemptDisposition::Held {
+            hold_reason,
+            snapshot,
+        } => Ok(SuspendedAttemptDisposition::Held {
+            hold_reason,
+            snapshot,
+        }),
+        SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+            let canonical_reasons =
+                canonicalize_rejections(reasons).map_err(map_v1_evidence_error)?;
+            Ok(SuspendedAttemptDisposition::Rejected {
+                reasons: canonical_reasons,
+                snapshot,
+            })
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V1 evidence error → V2 error mapping (review 4. tur P1-6).
+///
+/// Ortak private canonical validation helper'lar (`canonicalize_rejections`,
+/// `validate_evidence_semantics`) V1 error döner; V2 wire schema bağımsız olduğu
+/// için V1 variant'ları doğrudan V2 contract'a taşınmaz. Mapping:
+fn map_v1_evidence_error(e: SuspendedAttemptEvidenceError) -> SuspendedAttemptEvidenceV2Error {
+    match e {
+        SuspendedAttemptEvidenceError::SchemaVersionMismatch { found, expected } => {
+            SuspendedAttemptEvidenceV2Error::SchemaVersionMismatch { found, expected }
+        }
+        SuspendedAttemptEvidenceError::InvalidSnapshot(s) => {
+            SuspendedAttemptEvidenceV2Error::InvalidSnapshot(s)
+        }
+        SuspendedAttemptEvidenceError::HoldReasonSnapshotInconsistency(s) => {
+            SuspendedAttemptEvidenceV2Error::HoldReasonSnapshotInconsistency(s)
+        }
+        SuspendedAttemptEvidenceError::NonCanonicalRejectionOrder => {
+            SuspendedAttemptEvidenceV2Error::NonCanonicalRejectionOrder
+        }
+        SuspendedAttemptEvidenceError::DuplicateRejection => {
+            SuspendedAttemptEvidenceV2Error::DuplicateRejection
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 evidence digest — domain-separated BLAKE3.
+///
+/// V1 `SuspendedAttemptEvidenceDigest` (`osp.attempt-evidence.v1\0`) frozen —
+/// ayrı V2 digest newtype. Domain separator `OSP/ATTEMPT-EVIDENCE/V2` (null
+/// terminator YOK — V2 convention, `OSP/AUTHORIZATION-CONTEXT/V2` ile uyumlu).
+///
+/// **v2 byte contract (review 5. tur P2-1 exact varyant sırası):**
+/// 1. `schema_version` (u32 LE)
+/// 2. `task_id` (u64 LE)
+/// 3. `claim_id` (u64 LE)
+/// 4. `authorization_context_digest` (raw 32 bytes — context commitment)
+/// 5. `attempt_num` (u64 LE)
+/// 6. Disposition varyant:
+///    - **Held:** variant tag (u8: 1) → `WitnessQuorumSnapshot` → `WitnessHoldReason`
+///    - **Rejected:** variant tag (u8: 2) → `WitnessQuorumSnapshot` →
+///      rejection_count (u64 LE) → canonical-sorted `NonEmptyWitnessRejections`
+///
+/// Encoder + golden test aynı sıra. Canonical rejection sıralama V1 helper reuse
+/// (`encode_non_empty_witness_rejections`).
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SuspendedAttemptEvidenceDigestV2([u8; 32]);
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+impl SuspendedAttemptEvidenceDigestV2 {
+    /// V2 convention domain separator (null terminator YOK).
+    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/ATTEMPT-EVIDENCE/V2";
+
+    /// Evidence'dan BLAKE3 digest hesapla.
+    ///
+    /// **Constructor DEĞİL (review 3. tur P0-1):** Ayrı free function — surface
+    /// (`PendingAuthorizationV2::try_new`) creation'da çağırır, load constructor
+    /// stored digest korur + bu fonksiyonla recompute + compare yapar.
+    pub(crate) fn compute(
+        evidence: &SuspendedAttemptEvidenceV2,
+    ) -> Result<Self, CanonicalDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u32(
+            &mut hasher,
+            evidence.schema_version,
+            "v2_evidence_schema_version",
+        );
+        encode_u64(&mut hasher, evidence.task_id, "v2_evidence_task_id");
+        encode_u64(
+            &mut hasher,
+            evidence.claim_id.into(),
+            "v2_evidence_claim_id",
+        );
+        hasher.update(evidence.authorization_context_digest.as_bytes());
+        encode_u64(
+            &mut hasher,
+            evidence.attempt_num.get(),
+            "v2_evidence_attempt_num",
+        );
+
+        match &evidence.disposition {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            } => {
+                encode_u8(&mut hasher, 1, "v2_disposition_held_tag");
+                encode_witness_quorum_snapshot(&mut hasher, snapshot)?;
+                encode_witness_hold_reason(&mut hasher, hold_reason)?;
+            }
+            SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+                encode_u8(&mut hasher, 2, "v2_disposition_rejected_tag");
+                encode_witness_quorum_snapshot(&mut hasher, snapshot)?;
+                encode_non_empty_witness_rejections(&mut hasher, reasons)?;
+            }
+        }
+
+        let hash = hasher.finalize();
+        Ok(Self(hash.into()))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub(crate) fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// Bytes'dan construct — wire restore (Adım 9 `LowerHex32` ile strict parse).
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — V2 Suspension Eligibility Validator (Adım 2)
+//
+// **Neden (review 3. tur P0-2):** Context ile Held/Rejected disposition arasındaki
+// witness-eligibility doğrulanmaz. Şu senaryo yapısal olarak mümkün:
+//   gate_evaluation = GatePassed { Reject }
+//   witness_requirement = NotRequired { RejectedBeforeWitness }
+//   apply_target = NotApplied
+// Bu context witness aşamasına HİÇ ulaşmamış. Ama caller
+// `SuspendedAttemptEvidenceV2::try_new(... Held{...})` kurabilir, context digest
+// parity geçer, evidence digest parity geçer → tarihsel imkânsız maskelenir.
+//
+// **Context digest preimage DEĞİL (review 3. tur P0-2):** Context digest'ten
+// gate/witness geri çıkarılamaz. Eligibility context gerektirir — record seviyesi
+// `validate_internal` (context taşımıyor) ÇAĞIRAMAZ. Sadece context'e erişebilen
+// yerde (envelope verify + surface checked constructor) çalışır.
+//
+// **Semantic reuse (review 5. tur P1-3):** Mevcut `gate_evaluation.apply_target()`
+// + `witness_requirement.validate_for()` semantiğini reuse eder. Yeni mapping
+// yazmaz. `RequireOperatorApproval` → witness aşamasına girer (operator = witness);
+// `Reject` → `NotApplied`.
+//
+// **Visibility:** Private fn (review 5. tur P1-3). Faz 8a'da engine production
+// caller ile `witness_dispatch_requirement_v2` public API eklenir.
+//
+// **Kullanım yerleri (review 3. tur P0-2 — ortak):**
+// - `PendingAuthorizationEnvelopeV2::verify()` (Adım 6)
+// - `PendingAuthorizationEnvelopeV2::try_new_held` (Adım 6 — erken typed reject)
+// - `RevisionRequiredV2::try_new_rejected` (Adım 4)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** V2 suspension eligibility error — context ↔ disposition
+/// witness-eligibility ihlali.
+///
+/// **Not `Eq`:** `SnapshotRequiredSupportMismatch` `f64` field içerir (quorum threshold).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub(crate) enum SuspensionEligibilityV2Error {
+    /// `gate_evaluation` `GatePassed` DEĞİL (`RejectedByGate`) — witness'a ulaşılmamış.
+    #[error("gate evaluation not GatePassed (RejectedByGate — witness never reached)")]
+    GateNotPassed,
+    /// `mutation_decision` witness aşamasına ulaşabilen bir karar DEĞİL (Reject).
+    /// Reject → NotApplied → witness aşaması çalışmaz.
+    #[error("mutation decision not witness-eligible: Reject (apply_target=NotApplied)")]
+    MutationNotWitnessEligible,
+    /// `apply_target == NotApplied` — delta uygulanmadı, witness gerekmez.
+    #[error("apply_target NotApplied (witness stage never reached)")]
+    ApplyTargetNotApplied,
+    /// `witness_requirement` `Required` DEĞİL (`NotRequired`). Held/Rejected disposition
+    /// witness aşamasına ulaşmış context gerektirir.
+    #[error("witness requirement not Required (NotRequired — witness stage never reached)")]
+    WitnessNotRequired,
+    /// Held/Rejected snapshot `required_approvers` context witness requirement ile
+    /// tutarsız — witness quorum saldırısı (forged snapshot).
+    #[error("snapshot required_approvers ({snapshot}) != context witness requirement ({context})")]
+    SnapshotRequiredApproversMismatch { snapshot: usize, context: u32 },
+    /// Held/Rejected snapshot `required_support` context witness requirement ile tutarsız.
+    #[error("snapshot required_support ({snapshot}) != context witness requirement ({context})")]
+    SnapshotRequiredSupportMismatch { snapshot: f64, context: f64 },
+    /// Held `hold_reason` ↔ snapshot iç tutarlılık ihlali (MinApproversNotMet/QuorumInsufficient).
+    #[error("hold reason ↔ snapshot inconsistency: {0}")]
+    HoldReasonSnapshotInconsistency(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 3. tur P0-2):** V2 suspension eligibility — context ↔
+/// disposition witness-eligibility authoritative validator.
+///
+/// Held/Rejected disposition, witness aşamasına ulaşmış bir authorization context
+/// gerektirir. Bu validator context'in gerçekten witness aşamasına ulaştığını ve
+/// disposition'ın context ile tutarlı olduğunu doğrular.
+///
+/// **Invariant'lar (review 3. tur P0-2):**
+/// 1. `gate_evaluation == GatePassed { .. }` (RejectedByGate olamaz)
+/// 2. `mutation_decision` witness-eligible (Reject DEĞİL — Reject → NotApplied)
+/// 3. `apply_target != NotApplied` (RejectedByGate + Reject → NotApplied)
+/// 4. `witness_requirement == Required { .. }` (NotRequired DEĞİL)
+/// 5. Held/Rejected snapshot `required_approvers` ↔ context witness requirement
+/// 6. Held/Rejected snapshot `required_support` ↔ context witness requirement
+/// 7. Held `hold_reason` ↔ snapshot (MinApproversNotMet/QuorumInsufficient binding)
+/// 8. Rejected `reasons` canonical + non-empty (evidence constructor'da zaten)
+///
+/// **Semantic reuse (review 5. tur P1-3):** `gate_evaluation.apply_target()` +
+/// `witness_requirement.validate_for()` reuse. `RequireOperatorApproval` → witness
+/// aşamasına girer; `Reject` → NotApplied.
+fn validate_suspension_eligibility_v2(
+    context: &AuthorizationContextV2,
+    disposition: &SuspendedAttemptDisposition,
+) -> Result<(), SuspensionEligibilityV2Error> {
+    use crate::trajectory::{ApplyTarget, MutationDecision};
+
+    let gate_evaluation = context.gate_evaluation();
+    let witness_requirement = context.witness_requirement();
+
+    // (1) gate_evaluation must be GatePassed (RejectedByGate → witness'a ulaşılmadı).
+    let mutation_decision = match gate_evaluation {
+        CanonicalGateEvaluationV2::RejectedByGate { .. } => {
+            return Err(SuspensionEligibilityV2Error::GateNotPassed);
+        }
+        CanonicalGateEvaluationV2::GatePassed { mutation_decision } => *mutation_decision,
+    };
+
+    // (2) mutation_decision must be witness-eligible (Reject DEĞİL).
+    if matches!(mutation_decision, MutationDecision::Reject) {
+        return Err(SuspensionEligibilityV2Error::MutationNotWitnessEligible);
+    }
+
+    // (3) apply_target must not be NotApplied (reuse gate_evaluation.apply_target()).
+    let apply_target = gate_evaluation.apply_target();
+    if matches!(apply_target, ApplyTarget::NotApplied) {
+        return Err(SuspensionEligibilityV2Error::ApplyTargetNotApplied);
+    }
+
+    // (4) witness_requirement must be Required (NotRequired → witness'a ulaşılmadı).
+    let min_approvers = match witness_requirement.min_approvers() {
+        Some(m) => m,
+        None => return Err(SuspensionEligibilityV2Error::WitnessNotRequired),
+    };
+    let quorum_threshold = match witness_requirement.quorum_threshold() {
+        Some(t) => t, // CanonicalF64 = f64 type alias
+        None => return Err(SuspensionEligibilityV2Error::WitnessNotRequired),
+    };
+
+    // (5)(6)(7) disposition ↔ context witness requirement + snapshot binding.
+    match disposition {
+        SuspendedAttemptDisposition::Held {
+            hold_reason,
+            snapshot,
+        } => {
+            // snapshot ↔ context witness requirement.
+            if snapshot.required_approvers as u32 != min_approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredApproversMismatch {
+                        snapshot: snapshot.required_approvers,
+                        context: min_approvers,
+                    },
+                );
+            }
+            if (snapshot.required_support - quorum_threshold).abs() > f64::EPSILON {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredSupportMismatch {
+                        snapshot: snapshot.required_support,
+                        context: quorum_threshold,
+                    },
+                );
+            }
+            // Held hold_reason ↔ snapshot (MinApproversNotMet/QuorumInsufficient binding).
+            validate_hold_reason_snapshot_v2(hold_reason, snapshot)?;
+        }
+        SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+            // Rejected reasons canonical+non-empty — evidence constructor'da zaten
+            // (canonicalize_rejections/verify_rejections_canonical_order). snapshot ↔ context.
+            if snapshot.required_approvers as u32 != min_approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredApproversMismatch {
+                        snapshot: snapshot.required_approvers,
+                        context: min_approvers,
+                    },
+                );
+            }
+            if (snapshot.required_support - quorum_threshold).abs() > f64::EPSILON {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredSupportMismatch {
+                        snapshot: snapshot.required_support,
+                        context: quorum_threshold,
+                    },
+                );
+            }
+            // reasons non-empty invariant — NonEmptyWitnessRejections smart ctor garantiler.
+            let _ = reasons;
+        }
+    }
+
+    Ok(())
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Held `hold_reason` ↔ snapshot iç tutarlılık.
+///
+/// `MinApproversNotMet { distinct, required }` ↔ snapshot.approvers/required_approvers,
+/// `QuorumInsufficient { support, threshold }` ↔ snapshot.support/required_support.
+/// `EvidenceNotLocallyObservable` snapshot-neutral (geçerli).
+fn validate_hold_reason_snapshot_v2(
+    hold_reason: &crate::witness::WitnessHoldReason,
+    snapshot: &crate::witness::WitnessQuorumSnapshot,
+) -> Result<(), SuspensionEligibilityV2Error> {
+    use crate::witness::WitnessHoldReason;
+    match hold_reason {
+        WitnessHoldReason::MinApproversNotMet { distinct, required } => {
+            if required != &snapshot.required_approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "MinApproversNotMet.required ({required}) != snapshot.required_approvers ({})",
+                        snapshot.required_approvers
+                    )),
+                );
+            }
+            // distinct ≤ required (invariant — otherwise Held nonsensical).
+            if distinct > required {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "MinApproversNotMet.distinct ({distinct}) > required ({required})"
+                    )),
+                );
+            }
+        }
+        WitnessHoldReason::QuorumInsufficient { support, threshold } => {
+            if (threshold - snapshot.required_support).abs() > f64::EPSILON {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "QuorumInsufficient.threshold ({threshold}) != snapshot.required_support ({})",
+                        snapshot.required_support
+                    )),
+                );
+            }
+            // support < threshold (invariant — otherwise not insufficient).
+            if support >= threshold {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "QuorumInsufficient.support ({support}) >= threshold ({threshold})"
+                    )),
+                );
+            }
+        }
+        WitnessHoldReason::EvidenceNotLocallyObservable { .. } => {
+            // snapshot-neutral — geçerli (evidence erişilemiyor, quorum hesaplanamadı).
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 8-P1 — V2 Revision Required (Adım 4, runtime-only)
+//
+// **Runtime-only, NO Serialize/Deserialize (review 5. tur P0-1):** Bir domain
+// tipi Serialize taşıyorsa herhangi bir katman onu persist edebilir. Ama Deserialize
+// + checked restore yolu yoksa artifact write-only olur — planın "persist edilen
+// V2 state full context ile checked restore edilmeli" ilkesiyle çelişir.
+//
+// **Neden runtime-only:** V2 evidence `authorization_context_digest` taşır (basis+
+// gate+witness commitment). Standalone restore'da context digest preimage olmadığı
+// için eligibility (review 3. tur P0-2) doğrulanamaz — context geri çıkarılamaz.
+// V1 `RevisionRequired` persisted (auth.rs:6483 Deserialize) ama V1 evidence basis
+// digest (context değil).
+//
+// **Durable restore gerekirse:** `RevisionRequiredEnvelopeV2` (full context) —
+// Faz 8a navigator Rejected path gerektiğinde.
+//
+// **Public constructor (review 4. tur P0-2):** `try_new_rejected(context, ...)`
+// — context'ten context digest üretir, eligibility doğrular, V2 evidence oluşturur.
+// Direct evidence kabul ETMEZ (structural guard — Held disposition sunulamaz).
+//
+// **Presentation:** Ayrı `RevisionRequiredViewV2<'a>` read model (serialize
+// edilebilir ama durable artifact iddia edilmez) — Faz 8a navigator gerektiğinde.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **INV-T9 #70 Faz 8-P1:** V2 revision required error.
+#[allow(dead_code, reason = "Faz 8a navigator consumer (try_new_rejected)")]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub(crate) enum RevisionRequiredV2Error {
+    /// Eligibility validation failed (review 3. tur P0-2).
+    #[error("suspension eligibility validation failed: {0}")]
+    Eligibility(#[from] SuspensionEligibilityV2Error),
+    /// Context digest computation failed.
+    #[error("authorization context digest computation failed: {0}")]
+    ContextDigest(String),
+    /// Evidence constructor error.
+    #[error("suspended attempt evidence error: {0}")]
+    Evidence(#[from] SuspendedAttemptEvidenceV2Error),
+    /// Evidence digest computation failed.
+    #[error("evidence digest computation failed: {0}")]
+    DigestComputationFailed(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P0-1):** V2 explicit witness rejection
+/// sonucu — runtime-only.
+///
+/// `NavigatorResult::RequiresRevision` bu struct'ı taşır (Faz 8a). Budget tüketmez,
+/// LLM reinvocation YOK. Agent yeni structural proposal üretmeli.
+///
+/// **Runtime-only (P0-1):** `Serialize` YOK, `Deserialize` YOK. V2 evidence context
+/// digest bağlar; standalone restore eligibility doğrulayamaz (context preimage
+/// değil). Durable restore gerekirse `RevisionRequiredEnvelopeV2` (full context) —
+/// Faz 8a.
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+/// `try_new_rejected` public — direct evidence kabul ETMEZ (structural guard).
+///
+/// **pub(crate):** Internal V2 tipler pub(crate) — Faz 8a navigator aynı crate.
+#[derive(Debug, Clone, PartialEq)]
+/// **Faz 8a consumer:** navigator `RequiresRevision` (Faz 8a). Runtime-only —
+/// `try_new_rejected` test'ler + Faz 8a navigator çağırır.
+#[allow(dead_code, reason = "Faz 8a navigator consumer (try_new_rejected)")]
+pub(crate) struct RevisionRequiredV2 {
+    evidence_digest: SuspendedAttemptEvidenceDigestV2,
+    suspended_attempt_evidence: SuspendedAttemptEvidenceV2,
+}
+
+#[allow(dead_code, reason = "Faz 8a navigator consumer (try_new_rejected)")]
+impl RevisionRequiredV2 {
+    /// **Runtime-only creation (review 4. tur P0-2 + 5. tur P0-1):** Context'ten
+    /// context digest üretir, eligibility doğrular, V2 evidence oluşturur.
+    ///
+    /// Caller direct evidence/context digest veremez — structural guard: Held
+    /// disposition sunulamaz (constructor Held reject eder via eligibility).
+    pub(crate) fn try_new_rejected(
+        context: &AuthorizationContextV2,
+        reasons: crate::witness::NonEmptyWitnessRejections,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+        attempt_num: AttemptNumber,
+    ) -> Result<Self, RevisionRequiredV2Error> {
+        let disposition = SuspendedAttemptDisposition::Rejected { reasons, snapshot };
+        // Eligibility: context ↔ Rejected disposition witness-eligibility.
+        validate_suspension_eligibility_v2(context, &disposition)?;
+        let context_digest = context
+            .compute_digest()
+            .map_err(|e| RevisionRequiredV2Error::ContextDigest(e.to_string()))?;
+        let evidence = SuspendedAttemptEvidenceV2::try_new_normalizing(
+            context.basis().task_id(),
+            context.basis().claim_id(),
+            context_digest,
+            attempt_num,
+            disposition,
+        )?;
+        let evidence_digest = SuspendedAttemptEvidenceDigestV2::compute(&evidence)
+            .map_err(|e| RevisionRequiredV2Error::DigestComputationFailed(e.to_string()))?;
+        Ok(Self {
+            evidence_digest,
+            suspended_attempt_evidence: evidence,
+        })
+    }
+
+    // — Accessor'lar —
+
+    pub(crate) fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigestV2 {
+        &self.evidence_digest
+    }
+    pub(crate) fn suspended_attempt_evidence(&self) -> &SuspendedAttemptEvidenceV2 {
+        &self.suspended_attempt_evidence
+    }
+}
+
 /// Explicit witness rejection sonucu — agent proposal revises. Evidence-preserving.
 ///
 /// `NavigatorResult::RequiresRevision` bu struct'ı taşır. Budget tüketmez, LLM
@@ -6497,6 +7702,220 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
             wire.suspended_attempt_evidence,
         )
         .map_err(serde::de::Error::custom)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — PendingAuthorizationEnvelopeV2 (Adım 6)
+//
+// **Tek public checked creation root (review 4. tur P0-3 + 5. tur net closure #3/#4):**
+// `try_new_held` — caller context digest/identity veremez. Eligibility tek yerde çalışır.
+// Internal evidence/record producer'lar (`SuspendedAttemptEvidenceV2::try_new_normalizing`,
+// `PendingAuthorizationV2::try_new`, `from_verified_parts`) non-test consumer kazanır.
+//
+// **Defensive verify (review 5. tur P1-2):** `from_verified_parts` her zaman
+// `envelope.verify()` çağırır — "caller daha önce doğruladı" varsayımı YOK.
+//
+// **Wire loader try_new_held ÇAĞIRMAZ (review 5. tur P1-3):** Creation ve restore
+// call graph tamamen ayrı. Loader `try_new_with_verified_digests` (modül-private) —
+// stored alanları korur, recompute + compare.
+//
+// **Envelope-level verify (review 4. tur P0-2):** record.validate_internal +
+// context digest recompute + record.context_digest ↔ context digest + eligibility.
+// Eligibility context gerektirir — record seviyesi çağıramaz.
+//
+// **Envelope tam context taşır (review 2. tur P0-2):** basis + gate_evaluation +
+// witness_requirement (`PersistedAuthorizationContextV2`). V2 kararın tamamı bağlanır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** V2 envelope error — creation/load/verify.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PendingAuthorizationEnvelopeV2Error {
+    /// Creation: eligibility validation failed (review 3. tur P0-2).
+    #[error("suspension eligibility: {0}")]
+    Eligibility(String),
+    /// Creation: context digest computation failed.
+    #[error("context digest: {0}")]
+    ContextDigest(String),
+    /// Creation: evidence constructor error.
+    #[error("evidence: {0}")]
+    Evidence(#[from] SuspendedAttemptEvidenceV2Error),
+    /// Creation: record constructor error.
+    #[error("record: {0}")]
+    Record(#[from] PendingAuthorizationV2Error),
+    /// Verify: record ↔ context cross-field (context digest parity).
+    #[error("record context digest ≠ envelope context digest")]
+    ContextDigestMismatch,
+    /// Verify: eligibility (context ↔ disposition).
+    #[error("eligibility verify: {0}")]
+    EligibilityVerify(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 2. tur P0-2):** V2 envelope — tam persisted context.
+///
+/// V1 `PendingAuthorizationEnvelope` (auth.rs:7677) mirror — V2 tam context taşır
+/// (basis + gate_evaluation + witness_requirement). V2 kararın tamamı bağlanır;
+/// envelope yalnız basis taşısa gate/witness değişikliği kaybolur.
+///
+/// **Tek public root `try_new_held` (review 5. tur net closure #3):** Caller context
+/// digest/identity veremez. Internal producer'lar bu yolun altında non-test consumer.
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+///
+/// **pub(crate):** Internal V2 tipler pub(crate) — Faz 8a navigator aynı crate.
+/// Dış crate consumer olmadığı için public API yüzeyi daraltıldı (review P2-2).
+///
+/// **Faz 8a consumer:** navigator `suspend_for_witness_v2` (Faz 8a). Test'ler +
+/// wire loader cfg(test)/persist_v2 consumer; lib build Faz 8a navigator bekler.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + persist_v2)"
+)]
+#[derive(Debug, Clone)]
+pub(crate) struct PendingAuthorizationEnvelopeV2 {
+    schema: String,
+    record: PendingAuthorizationV2,
+    authorization_context: PersistedAuthorizationContextV2,
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Envelope schema sabitleri.
+pub const PENDING_AUTHORIZATION_SCHEMA_V2: &str = "osp.pending-authorization.v2";
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + persist_v2)"
+)]
+impl PendingAuthorizationEnvelopeV2 {
+    /// **Tek public checked Held producer (review 4. tur P0-3 + 5. tur net closure #3).**
+    ///
+    /// Caller context digest/identity veremez. Eligibility tek yerde doğrulanır.
+    /// Internal evidence/record producer'lar bu yolun altında — non-test consumer
+    /// kazanır, `#[allow(dead_code)]` gerekmez.
+    ///
+    /// **Faz 8a navigator production caller** — Faz 8-P1'de wire loader test'leri
+    /// ve integration test'leri consumer.
+    pub fn try_new_held(
+        context: AuthorizationContextV2,
+        hold_reason: crate::witness::WitnessHoldReason,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+        attempt_num: AttemptNumber,
+        created_at: u64,
+    ) -> Result<Self, PendingAuthorizationEnvelopeV2Error> {
+        // Eligibility: context ↔ Held disposition witness-eligibility (tek yerde).
+        validate_suspension_eligibility_v2(
+            &context,
+            &SuspendedAttemptDisposition::Held {
+                hold_reason: hold_reason.clone(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .map_err(|e| PendingAuthorizationEnvelopeV2Error::Eligibility(e.to_string()))?;
+
+        // Context digest — caller veremez, compute edilir.
+        let context_digest = context
+            .compute_digest()
+            .map_err(|e| PendingAuthorizationEnvelopeV2Error::ContextDigest(e.to_string()))?;
+
+        // Evidence — internal producer. Exact isim (review 5. tur P1-5).
+        let evidence = SuspendedAttemptEvidenceV2::try_new_normalizing(
+            context.basis().task_id(),
+            context.basis().claim_id(),
+            context_digest,
+            attempt_num,
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            },
+        )?;
+
+        // Record — internal producer. indexed alanlar evidence'dan türetilir.
+        let record = PendingAuthorizationV2::try_new(evidence, created_at)?;
+
+        // Persisted context wrapper — runtime boundary.
+        let persisted = PersistedAuthorizationContextV2::from_runtime(context);
+
+        // Defensive verify (review 5. tur P1-2) — her zaman çağırır.
+        Self::from_verified_parts(record, persisted)
+    }
+
+    /// **Private (review 5. tur P1-1/P1-2):** from verified parts + defensive verify.
+    fn from_verified_parts(
+        record: PendingAuthorizationV2,
+        authorization_context: PersistedAuthorizationContextV2,
+    ) -> Result<Self, PendingAuthorizationEnvelopeV2Error> {
+        let envelope = Self {
+            schema: PENDING_AUTHORIZATION_SCHEMA_V2.to_owned(),
+            record,
+            authorization_context,
+        };
+        envelope.verify()?;
+        Ok(envelope)
+    }
+
+    /// **Load (modül-private, review 5. tur P1-1):** Stored alanları korur, recompute +
+    /// compare. Wire loader internal — public restore entrypoint
+    /// `load_pending_authorization_versioned` (Adım 7).
+    fn try_new_with_verified_digests(
+        schema: String,
+        record: PendingAuthorizationV2,
+        authorization_context: PersistedAuthorizationContextV2,
+    ) -> Result<Self, PendingAuthorizationEnvelopeV2Error> {
+        if schema != PENDING_AUTHORIZATION_SCHEMA_V2 {
+            return Err(PendingAuthorizationEnvelopeV2Error::ContextDigest(format!(
+                "schema mismatch: {schema}"
+            )));
+        }
+        let envelope = Self {
+            schema,
+            record,
+            authorization_context,
+        };
+        envelope.verify()?;
+        Ok(envelope)
+    }
+
+    /// **Envelope-level verify (review 4. tur P0-2):** record.validate_internal +
+    /// context digest recompute + record.context_digest ↔ context digest + eligibility.
+    ///
+    /// Record seviyesi `validate_internal` yalnız record ↔ evidence (context taşımıyor).
+    /// Eligibility context gerektirir — burada çağrılır.
+    fn verify(&self) -> Result<(), PendingAuthorizationEnvelopeV2Error> {
+        // record.validate_internal — record ↔ evidence identity + evidence digest + Held.
+        self.record
+            .validate_internal()
+            .map_err(PendingAuthorizationEnvelopeV2Error::Record)?;
+
+        // Context digest recompute.
+        let context_digest = self
+            .authorization_context
+            .compute_digest()
+            .map_err(|e| PendingAuthorizationEnvelopeV2Error::ContextDigest(e.to_string()))?;
+
+        // record.context_digest ↔ envelope context digest parity.
+        if self.record.authorization_context_digest() != &context_digest {
+            return Err(PendingAuthorizationEnvelopeV2Error::ContextDigestMismatch);
+        }
+
+        // Eligibility: context ↔ evidence disposition (review 3. tur P0-2).
+        validate_suspension_eligibility_v2(
+            self.authorization_context.context(),
+            self.record.suspended_attempt_evidence().disposition(),
+        )
+        .map_err(|e| PendingAuthorizationEnvelopeV2Error::EligibilityVerify(e.to_string()))?;
+
+        Ok(())
+    }
+
+    // — Accessor'lar —
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+    pub fn record(&self) -> &PendingAuthorizationV2 {
+        &self.record
+    }
+    pub fn authorization_context(&self) -> &PersistedAuthorizationContextV2 {
+        &self.authorization_context
     }
 }
 
@@ -6994,6 +8413,50 @@ pub enum PendingAuthorizationStoreError {
     /// sırasında tüm side-effect'lerden ÖNCE çalışır. In-memory bypass engeller.
     #[error("invalid envelope (persist-boundary verification failed): {0}")]
     InvalidEnvelope(String),
+    /// **INV-T9 #70 Faz 8-P1:** Store V2 schema desteklemiyor (default trait impl).
+    #[error("store does not support schema: {schema}")]
+    UnsupportedSchema { schema: &'static str },
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-6):** V2 persist receipt.
+///
+/// V1 `PendingAuthorizationReceipt` mirror — context digest (basis DEĞİL).
+/// Field'lar private (digest tipleri pub(crate)) — accessor'lar üzerinden.
+/// Faz 8a navigator aynı crate'ten erişir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAuthorizationReceiptV2 {
+    artifact_path: std::path::PathBuf,
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    attempt_num: AttemptNumber,
+    /// Context digest (basis+gate+witness commitment) — V1 basis digest DEĞİL.
+    authorization_context_digest: AuthorizationContextDigestV2,
+    evidence_digest: SuspendedAttemptEvidenceDigestV2,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (context/evidence digest accessor)"
+)]
+impl PendingAuthorizationReceiptV2 {
+    pub fn artifact_path(&self) -> &std::path::Path {
+        &self.artifact_path
+    }
+    pub fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub fn attempt_num(&self) -> AttemptNumber {
+        self.attempt_num
+    }
+    pub(crate) fn authorization_context_digest(&self) -> &AuthorizationContextDigestV2 {
+        &self.authorization_context_digest
+    }
+    pub(crate) fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigestV2 {
+        &self.evidence_digest
+    }
 }
 
 /// Dosya tabanlı default implementation.
@@ -7039,6 +8502,25 @@ impl FilesystemPendingAuthorizationStore {
         let hex = evidence_digest.to_hex();
         let filename = format!(
             "task-{task_id}--claim-{claim_id}--attempt-{}--{hex}.json",
+            attempt_num.get()
+        );
+        self.root
+            .join(".osp")
+            .join("pending-authorizations")
+            .join(filename)
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** V2 artifact path — V2 evidence digest.
+    fn artifact_path_v2(
+        &self,
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        attempt_num: AttemptNumber,
+        evidence_digest: &SuspendedAttemptEvidenceDigestV2,
+    ) -> std::path::PathBuf {
+        let hex = evidence_digest.to_hex();
+        let filename = format!(
+            "task-{task_id}--claim-{claim_id}--attempt-{}--v2-{hex}.json",
             attempt_num.get()
         );
         self.root
@@ -7183,6 +8665,125 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
     }
 }
 
+impl FilesystemPendingAuthorizationStore {
+    /// **INV-T9 #70 Faz 8-P1 (review 5. tur net closure #3):** Versioned load.
+    /// pub(crate) — VersionedPendingAuthorizationEnvelope pub(crate) (Faz 8a navigator).
+    #[allow(dead_code, reason = "Faz 8a navigator consumer (load_versioned)")]
+    pub(crate) fn load_versioned(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<VersionedPendingAuthorizationEnvelope, VersionedPendingAuthorizationLoadError> {
+        load_pending_authorization_versioned(path)
+    }
+
+    /// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-4):** V2 persist — inherent method.
+    /// Trait default impl kaldırıldı (pub trait + pub(crate) tip private-interfaces).
+    /// V1 güvenlik parity: envelope.verify() side-effect'ten önce, create_new/no silent
+    /// overwrite, aynı content → idempotent, aynı path + farklı content → integrity error,
+    /// same-directory temp sync + atomic publish.
+    #[allow(dead_code, reason = "Faz 8a navigator consumer (persist_v2)")]
+    pub(crate) fn persist_v2(
+        &mut self,
+        envelope: &PendingAuthorizationEnvelopeV2,
+    ) -> Result<PendingAuthorizationReceiptV2, PendingAuthorizationStoreError> {
+        use std::io::Write;
+
+        let record = envelope.record();
+        let evidence = record.suspended_attempt_evidence();
+        let artifact_path = self.artifact_path_v2(
+            record.task_id(),
+            record.claim_id(),
+            evidence.attempt_num(),
+            record.evidence_digest(),
+        );
+
+        let current = serde_json::to_vec_pretty(&serialize_envelope_v2_json(envelope))
+            .map_err(|e| PendingAuthorizationStoreError::SerializationFailed(e.to_string()))?;
+
+        if artifact_path.exists() {
+            let existing = std::fs::read(&artifact_path)
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            if existing == current {
+                return Ok(PendingAuthorizationReceiptV2 {
+                    artifact_path,
+                    task_id: record.task_id(),
+                    claim_id: record.claim_id(),
+                    attempt_num: evidence.attempt_num(),
+                    authorization_context_digest: record.authorization_context_digest().clone(),
+                    evidence_digest: record.evidence_digest().clone(),
+                });
+            } else {
+                return Err(PendingAuthorizationStoreError::BasisConflict {
+                    existing_path: artifact_path,
+                });
+            }
+        }
+
+        if let Some(parent) = artifact_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| PendingAuthorizationStoreError::DirCreationFailed(e.to_string()))?;
+        }
+
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TEMP_COUNTER_V2: AtomicU64 = AtomicU64::new(0);
+        let temp_suffix = TEMP_COUNTER_V2.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let temp_path = artifact_path.with_file_name(format!(
+            ".{}.tmp.{pid}.{temp_suffix}",
+            artifact_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("pending")
+        ));
+
+        let result = (|| -> Result<(), PendingAuthorizationStoreError> {
+            let mut temp_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            temp_file
+                .write_all(&current)
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            temp_file
+                .sync_all()
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            drop(temp_file);
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return result.map(|_| unreachable!());
+        }
+
+        std::fs::rename(&temp_path, &artifact_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            PendingAuthorizationStoreError::WriteFailed(e.to_string())
+        })?;
+
+        #[cfg(unix)]
+        {
+            if let Some(parent) = artifact_path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    use std::os::unix::io::AsRawFd;
+                    unsafe {
+                        libc::fsync(dir.as_raw_fd());
+                    }
+                }
+            }
+        }
+
+        Ok(PendingAuthorizationReceiptV2 {
+            artifact_path,
+            task_id: record.task_id(),
+            claim_id: record.claim_id(),
+            attempt_num: evidence.attempt_num(),
+            authorization_context_digest: record.authorization_context_digest().clone(),
+            evidence_digest: record.evidence_digest().clone(),
+        })
+    }
+}
+
 /// Artifact'ı dosyadan yükle + verify (P1 resume için, ama P0'da da test edilebilir).
 pub fn load_pending_authorization(
     path: &std::path::Path,
@@ -7193,6 +8794,313 @@ pub fn load_pending_authorization(
         .map_err(|e| PendingAuthorizationLoadError::DeserializationFailed(e.to_string()))?;
     envelope.verify()?;
     Ok(envelope)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — Versioned Pending Authorization Envelope dispatch (Adım 7)
+//
+// **Schema string equality dispatch (review 2. tur P1-5 + 5. tur P1-3):** Her
+// envelope zaten `schema: String` field'ı taşır (bare/legacy shape yok). Basitleştirme:
+// RawValue peek → schema field value oku → string equality dispatch.
+//
+// **Duplicate schema = reject (review 5. tur P1-3):** Peek `serde_json::Value` son
+// değeri seçse bile final strict typed parse `deny_unknown_fields` duplicate reject eder.
+// Peek doğrulama sonucu sayılmaz.
+//
+// **Typed errors:** TopLevelNotObject, MissingSchema, SchemaNotString, UnknownSchema,
+// V1Decode, V2Decode. V1 `PendingAuthorizationLoadError` V1 path için korunur.
+//
+// **Public entrypoint (review 5. tur net closure #3):** `load_pending_authorization_versioned`.
+// V1 `load_pending_authorization` backward compat için korunur.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** Versioned pending authorization envelope — V1/V2 sum-type.
+///
+/// **pub(crate):** V2 arm pub(crate) tip içerir — Faz 8a navigator aynı crate.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (load_versioned return)"
+)]
+#[derive(Debug, Clone)]
+pub(crate) enum VersionedPendingAuthorizationEnvelope {
+    /// V1 — mevcut `PendingAuthorizationEnvelope` (frozen).
+    V1(PendingAuthorizationEnvelope),
+    /// V2 — tam persisted context (basis + gate_evaluation + witness_requirement).
+    V2(PendingAuthorizationEnvelopeV2),
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Versioned envelope load error (review 5. tur P1-3 typed).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VersionedPendingAuthorizationLoadError {
+    #[error("io failed: {0}")]
+    Io(String),
+    #[error("top-level JSON not an object")]
+    TopLevelNotObject,
+    #[error("schema field missing")]
+    MissingSchema,
+    #[error("schema field not a string")]
+    SchemaNotString,
+    #[error("unknown schema: {found}")]
+    UnknownSchema { found: String },
+    #[error("V1 decode failed: {0}")]
+    V1Decode(String),
+    #[error("V2 decode failed: {0}")]
+    V2Decode(String),
+}
+
+impl From<PendingAuthorizationLoadError> for VersionedPendingAuthorizationLoadError {
+    fn from(e: PendingAuthorizationLoadError) -> Self {
+        Self::V1Decode(e.to_string())
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur net closure #3):** Versioned load entrypoint.
+/// RawValue peek + schema string equality dispatch.
+///
+/// V1 (`"osp.pending-authorization.v1"`) → mevcut V1 path (byte-identical).
+/// V2 (`"osp.pending-authorization.v2"`) → V2 path (checked restore).
+/// `_` → typed `UnknownSchema`.
+///
+/// **pub(crate):** VersionedPendingAuthorizationEnvelope pub(crate) — Faz 8a navigator.
+pub(crate) fn load_pending_authorization_versioned(
+    path: &std::path::Path,
+) -> Result<VersionedPendingAuthorizationEnvelope, VersionedPendingAuthorizationLoadError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::Io(e.to_string()))?;
+
+    // RawValue parse — duplicate key preserve.
+    let raw: Box<serde_json::value::RawValue> = serde_json::from_slice(&bytes)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(format!("raw parse: {e}")))?;
+    // Value peek — dispatch only (not typed parse).
+    let peek: serde_json::Value = serde_json::from_str(raw.get())
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(format!("peek: {e}")))?;
+
+    // Top-level object check.
+    if !peek.is_object() {
+        return Err(VersionedPendingAuthorizationLoadError::TopLevelNotObject);
+    }
+
+    // Schema string equality dispatch.
+    let schema = peek
+        .get("schema")
+        .ok_or(VersionedPendingAuthorizationLoadError::MissingSchema)?;
+    let schema_str = schema
+        .as_str()
+        .ok_or(VersionedPendingAuthorizationLoadError::SchemaNotString)?;
+
+    match schema_str {
+        PENDING_AUTHORIZATION_SCHEMA => {
+            // V1 path — mevcut byte-identical.
+            let envelope: PendingAuthorizationEnvelope = serde_json::from_slice(&bytes)
+                .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(e.to_string()))?;
+            envelope.verify()?;
+            Ok(VersionedPendingAuthorizationEnvelope::V1(envelope))
+        }
+        PENDING_AUTHORIZATION_SCHEMA_V2 => {
+            // V2 path — checked restore.
+            let envelope = deserialize_pending_authorization_envelope_v2(&bytes)?;
+            Ok(VersionedPendingAuthorizationEnvelope::V2(envelope))
+        }
+        other => Err(VersionedPendingAuthorizationLoadError::UnknownSchema {
+            found: other.to_string(),
+        }),
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 envelope Deserialize — strict wire DTO + checked restore.
+///
+/// Wire: `{ schema, record, authorization_context }` → `RawPendingAuthorizationEnvelopeV2`
+/// (`deny_unknown_fields`) → `PendingAuthorizationEnvelopeV2::try_new_with_verified_digests`
+/// (modül-private, stored alanları korur).
+fn deserialize_pending_authorization_envelope_v2(
+    bytes: &[u8],
+) -> Result<PendingAuthorizationEnvelopeV2, VersionedPendingAuthorizationLoadError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawPendingAuthorizationEnvelopeV2 {
+        schema: String,
+        record: RawPendingAuthorizationV2,
+        authorization_context: RawPersistedAuthorizationContextV2,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawPendingAuthorizationV2 {
+        task_id: u64,
+        claim_id: u64,
+        authorization_context_digest: LowerHex32,
+        attempt_num: u64,
+        suspended_attempt_evidence: RawSuspendedAttemptEvidenceV2,
+        evidence_digest: LowerHex32,
+        created_at: u64,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawSuspendedAttemptEvidenceV2 {
+        schema_version: u32,
+        task_id: u64,
+        claim_id: u64,
+        authorization_context_digest: LowerHex32,
+        attempt_num: u64,
+        disposition: SuspendedAttemptDispositionWire,
+    }
+
+    /// V2 wire contract: strict 64 lowercase hex (review 5. tur P1-2).
+    #[derive(Clone)]
+    struct LowerHex32([u8; 32]);
+
+    impl<'de> serde::Deserialize<'de> for LowerHex32 {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let s = String::deserialize(deserializer)?;
+            let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+            if bytes.len() != 32 {
+                return Err(serde::de::Error::custom("expected 32 bytes (64 hex chars)"));
+            }
+            // Strict lowercase — uppercase reject (V2 wire contract).
+            if s.chars().any(|c| c.is_ascii_uppercase()) {
+                return Err(serde::de::Error::custom(
+                    "uppercase hex rejected (V2 strict lowercase wire contract)",
+                ));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(LowerHex32(arr))
+        }
+    }
+
+    impl LowerHex32 {
+        fn into_context_digest(self) -> AuthorizationContextDigestV2 {
+            AuthorizationContextDigestV2::from_bytes(self.0)
+        }
+        fn into_evidence_digest(self) -> SuspendedAttemptEvidenceDigestV2 {
+            SuspendedAttemptEvidenceDigestV2::from_bytes(self.0)
+        }
+    }
+
+    /// SuspendedAttemptDisposition wire (Serialize/Deserialize mevcut — witness.rs).
+    type SuspendedAttemptDispositionWire = SuspendedAttemptDisposition;
+
+    let raw: RawPendingAuthorizationEnvelopeV2 = serde_json::from_slice(bytes)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+
+    // Checked restore — raw → domain.
+    let context = PersistedAuthorizationContextV2::restore_from_wire(raw.authorization_context)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+    let evidence = SuspendedAttemptEvidenceV2::try_from_canonical_wire(
+        raw.record.suspended_attempt_evidence.schema_version,
+        raw.record.suspended_attempt_evidence.task_id.into(),
+        raw.record.suspended_attempt_evidence.claim_id.into(),
+        raw.record
+            .suspended_attempt_evidence
+            .authorization_context_digest
+            .into_context_digest(),
+        AttemptNumber::try_from(raw.record.suspended_attempt_evidence.attempt_num)
+            .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?,
+        raw.record.suspended_attempt_evidence.disposition,
+    )
+    .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+    let record = PendingAuthorizationV2::try_new_with_verified_digest(
+        raw.record.task_id.into(),
+        raw.record.claim_id.into(),
+        raw.record
+            .authorization_context_digest
+            .into_context_digest(),
+        AttemptNumber::try_from(raw.record.attempt_num)
+            .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?,
+        evidence,
+        raw.record.evidence_digest.into_evidence_digest(),
+        raw.record.created_at,
+    )
+    .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+
+    PendingAuthorizationEnvelopeV2::try_new_with_verified_digests(raw.schema, record, context)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))
+}
+
+/// **INV-T9 #70 Faz 8-P1 (Adım 8):** V2 envelope → serde_json::Value (serialize-side).
+///
+/// `deserialize_pending_authorization_envelope_v2` ile round-trip. V2 envelope custom
+/// Serialize yok (domain tipler Serialize derive'suz) — bu fonksiyon raw DTO manuel kurar.
+///
+/// **Basis serialization:** `VersionedAuthorizationBasis::try_v2` + Serialize (mevcut
+/// V2 basis wire authority). Gate/witness raw DTO manuel (domain repr private).
+fn serialize_envelope_v2_json(envelope: &PendingAuthorizationEnvelopeV2) -> serde_json::Value {
+    let record = envelope.record();
+    let evidence = record.suspended_attempt_evidence();
+    let context = envelope.authorization_context().context();
+
+    // Context parts → raw DTO.
+    let gate_json = match context.gate_evaluation() {
+        CanonicalGateEvaluationV2::RejectedByGate { decision } => serde_json::json!({
+            "kind": "rejected_by_gate",
+            "decision": decision.0,
+        }),
+        CanonicalGateEvaluationV2::GatePassed { mutation_decision } => serde_json::json!({
+            "kind": "gate_passed",
+            "mutation_decision": mutation_decision,
+        }),
+    };
+    let witness_json = serialize_witness_requirement_v2_json(context.witness_requirement());
+
+    // Basis → RawAuthorizationBasisV2Ref serialize (mevcut wire authority, borrowed).
+    // deserialize_pending_authorization_envelope_v2 RawAuthorizationBasisV2 (owned) bekler;
+    // wire format aynı (RawAuthorizationBasisV2Ref ↔ RawAuthorizationBasisV2 round-trip).
+    let basis_value =
+        serde_json::to_value(RawAuthorizationBasisV2Ref::from_domain(context.basis()))
+            .unwrap_or(serde_json::Value::Null);
+
+    serde_json::json!({
+        "schema": envelope.schema(),
+        "record": {
+            "task_id": evidence.task_id() as u64,
+            "claim_id": u64::from(evidence.claim_id()),
+            "authorization_context_digest": hex::encode(*evidence.authorization_context_digest().as_bytes()),
+            "attempt_num": evidence.attempt_num().get(),
+            "suspended_attempt_evidence": serialize_evidence_v2_json(evidence),
+            "evidence_digest": hex::encode(*record.evidence_digest().as_bytes()),
+            "created_at": record.created_at(),
+        },
+        "authorization_context": {
+            "basis": basis_value,
+            "gate_evaluation": gate_json,
+            "witness_requirement": witness_json,
+        },
+    })
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Witness requirement → JSON (repr private, accessor'lar üzerinden).
+fn serialize_witness_requirement_v2_json(req: &CanonicalWitnessRequirementV2) -> serde_json::Value {
+    if req.is_required() {
+        serde_json::json!({
+            "kind": "required",
+            "min_approvers": req.min_approvers().unwrap_or(0),
+            "quorum_threshold": req.quorum_threshold().unwrap_or(0.0),
+            // independence_policy accessor yok — repr private. Faz 8a navigator'da eklenebilir.
+            // V2 wire contract için zorunlu; şimdilik V2 constructor default ile uyumlu.
+            "independence_policy": crate::canonical_tags::WitnessIndependencePolicyTag::default(),
+        })
+    } else {
+        serde_json::json!({
+            "kind": "not_required",
+            "reason": "rejected_before_witness",
+        })
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Evidence → JSON.
+fn serialize_evidence_v2_json(evidence: &SuspendedAttemptEvidenceV2) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": evidence.schema_version(),
+        "task_id": evidence.task_id() as u64,
+        "claim_id": u64::from(evidence.claim_id()),
+        "authorization_context_digest": hex::encode(*evidence.authorization_context_digest().as_bytes()),
+        "attempt_num": evidence.attempt_num().get(),
+        "disposition": evidence.disposition(),
+    })
 }
 
 /// Null store — persist çağrılarını kabul eder ama hiçbir şey yazmaz (in-memory testler için).
@@ -13628,7 +15536,9 @@ v = 0.5
     fn persisted_artifact_tamper_schema_rejected_on_load() {
         let envelope = sample_valid_envelope();
         let mut json = serde_json::to_value(&envelope).unwrap();
-        json["schema"] = serde_json::json!("osp.pending-authorization.v2");
+        // **INV-T9 #70 Faz 8-P1:** `.v2` artık geçerli schema (V2 support eklendi).
+        // Genuinely unknown schema ile retarget (review 2. tur önerisi).
+        json["schema"] = serde_json::json!("osp.pending-authorization.v99");
         let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
 
         let dir = temp_dir();
@@ -16229,5 +18139,200 @@ v = 0.5
         // Reverse: Canonical V2 → Domain.
         let restored: PredicateSet = (&canonical).try_into().unwrap();
         assert_eq!(restored, original, "round-trip failed for PredicateSet");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Faz 8-P1 — V2 Pending Authorization Envelope + Persistence tests
+    //
+    // **Adım 10:** V2 adversarial test matrisi. `faz4_basis_v2_fixture` +
+    // `VerifiedGateEvaluationV2::fixture` pattern reuse → AuthorizationContextV2 →
+    // PendingAuthorizationEnvelopeV2::try_new_held.
+    //
+    // **Test fixture:** Held disposition için valid context (GatePassed{AcceptAsCompleted}
+    // + Required witness). Bu test'ler authorization.rs test modülünde — lib build
+    // cfg(test) ile consumer görür (review: "test'ler production-visible API üzerinden").
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    use crate::witness::{WitnessHoldReason, WitnessQuorumSnapshot};
+
+    /// **Faz 8-P1 test helper:** Valid Held context (GatePassed + Required witness).
+    fn faz8_p1_held_context() -> AuthorizationContextV2 {
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::gate_passed(
+            crate::trajectory::MutationDecision::AcceptAsCompleted,
+        )
+        .unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &faz4_witness_policy(),
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        AuthorizationContextV2::new(basis, verified, witness_req).expect("V2 context build")
+    }
+
+    /// **Faz 8-P1 test helper:** Held hold_reason (min_approvers=2 required).
+    fn faz8_p1_held_hold_reason() -> WitnessHoldReason {
+        WitnessHoldReason::MinApproversNotMet {
+            distinct: 1,
+            required: 2,
+        }
+    }
+
+    /// **Faz 8-P1 test helper:** Held snapshot (required_approvers=2, quorum=1.5).
+    /// faz4_witness_policy ile tutarlı (min_approvers=2, quorum_threshold=1.5).
+    fn faz8_p1_held_snapshot() -> WitnessQuorumSnapshot {
+        WitnessQuorumSnapshot {
+            approvers: 1,
+            required_approvers: 2,
+            support: 1.0,
+            required_support: 1.5,
+        }
+    }
+
+    /// **Faz 8-P1 test helper:** Unique temp dir per test (isolation).
+    fn faz8_p1_test_temp_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join("osp-faz8-p1-tests")
+            .join(format!("{test_name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// **Faz 8-P1 test helper:** V2 envelope (Held, attempt_num=1).
+    fn faz8_p1_held_envelope() -> PendingAuthorizationEnvelopeV2 {
+        PendingAuthorizationEnvelopeV2::try_new_held(
+            faz8_p1_held_context(),
+            faz8_p1_held_hold_reason(),
+            faz8_p1_held_snapshot(),
+            AttemptNumber::try_from(1).unwrap(),
+            1_700_000_000,
+        )
+        .expect("V2 envelope held creation")
+    }
+
+    #[test]
+    fn faz8_p1_envelope_held_creation_succeeds() {
+        let envelope = faz8_p1_held_envelope();
+        assert_eq!(envelope.schema(), "osp.pending-authorization.v2");
+        assert_eq!(envelope.record().task_id(), 42);
+        // attempt_num: evidence accessor (record.attempt_num kaldırıldı — review).
+        assert_eq!(
+            envelope
+                .record()
+                .suspended_attempt_evidence()
+                .attempt_num()
+                .get(),
+            1
+        );
+        assert_eq!(envelope.record().created_at(), 1_700_000_000);
+        // into_context kaldırıldı — context() borrow (review).
+        assert_eq!(
+            envelope.authorization_context().context().basis().task_id(),
+            42
+        );
+    }
+
+    #[test]
+    fn faz8_p1_envelope_held_round_trip_persist_load() {
+        let envelope = faz8_p1_held_envelope();
+        let dir = faz8_p1_test_temp_dir("round_trip");
+        let mut store = FilesystemPendingAuthorizationStore::new(dir.clone());
+        let receipt = store.persist_v2(&envelope).expect("V2 persist");
+        assert_eq!(receipt.task_id(), 42);
+        assert_eq!(receipt.attempt_num().get(), 1);
+        let loaded = store
+            .load_versioned(receipt.artifact_path())
+            .expect("V2 load");
+        match loaded {
+            VersionedPendingAuthorizationEnvelope::V2(v2) => {
+                assert_eq!(v2.schema(), "osp.pending-authorization.v2");
+                assert_eq!(v2.record().task_id(), 42);
+                assert_eq!(
+                    v2.record().suspended_attempt_evidence().attempt_num().get(),
+                    1
+                );
+            }
+            other => panic!("expected V2, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_envelope_idempotent_persist() {
+        let envelope = faz8_p1_held_envelope();
+        let dir = faz8_p1_test_temp_dir("idempotent");
+        let mut store = FilesystemPendingAuthorizationStore::new(dir.clone());
+        let receipt1 = store.persist_v2(&envelope).expect("first persist");
+        let receipt2 = store
+            .persist_v2(&envelope)
+            .expect("idempotent second persist");
+        assert_eq!(receipt1.artifact_path(), receipt2.artifact_path());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_envelope_conflict_different_content_same_path() {
+        let envelope = faz8_p1_held_envelope();
+        let dir = faz8_p1_test_temp_dir("conflict");
+        let mut store = FilesystemPendingAuthorizationStore::new(dir.clone());
+        let receipt = store.persist_v2(&envelope).expect("persist");
+        let path = receipt.artifact_path().to_path_buf();
+        std::fs::write(&path, b"{\"tampered\": true}").unwrap();
+        let err = store.persist_v2(&envelope).expect_err("conflict expected");
+        assert!(matches!(
+            err,
+            PendingAuthorizationStoreError::BasisConflict { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_v1_schema_frozen() {
+        // V1 schema constant frozen (V2 support eklendi ama V1 backward compat).
+        assert_eq!(PENDING_AUTHORIZATION_SCHEMA, "osp.pending-authorization.v1");
+        assert_eq!(
+            PENDING_AUTHORIZATION_SCHEMA_V2,
+            "osp.pending-authorization.v2"
+        );
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_unknown_schema_rejects() {
+        let dir = faz8_p1_test_temp_dir("unknown_schema");
+        let path = dir.join("unknown.json");
+        std::fs::write(&path, b"{\"schema\": \"osp.bogus.v1\", \"record\": {}}").unwrap();
+        let err = load_pending_authorization_versioned(&path).expect_err("unknown schema rejected");
+        assert!(matches!(
+            err,
+            VersionedPendingAuthorizationLoadError::UnknownSchema { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_missing_schema_rejects() {
+        let dir = faz8_p1_test_temp_dir("missing_schema");
+        let path = dir.join("missing.json");
+        std::fs::write(&path, b"{\"record\": {}}").unwrap();
+        let err = load_pending_authorization_versioned(&path).expect_err("missing schema rejected");
+        assert!(matches!(
+            err,
+            VersionedPendingAuthorizationLoadError::MissingSchema
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_top_level_not_object_rejects() {
+        let dir = faz8_p1_test_temp_dir("not_object");
+        let path = dir.join("array.json");
+        std::fs::write(&path, b"[1, 2, 3]").unwrap();
+        let err = load_pending_authorization_versioned(&path).expect_err("non-object rejected");
+        assert!(matches!(
+            err,
+            VersionedPendingAuthorizationLoadError::TopLevelNotObject
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

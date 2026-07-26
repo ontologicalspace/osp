@@ -4,9 +4,9 @@
 
 ```
 Branch: wip/inv-t9-70-commit4b
-HEAD: <pending commit — Adım 16-20 + Adım 17 atomik closure>
-Remote HEAD: 8fe5fa5 (Adım 16-20 push edildi; Adım 17 commit pending)
-Push status: Adım 16-20 PUSHED (8fe5fa5), Adım 17 LOCAL (commit pending)
+HEAD: 488be1b (Adım 17 P0-B + P0-C restore validators)
+Remote HEAD: 488be1b (sync — local = remote)
+Push status: Adım 16-20 + Adım 17 PUSHED (8fe5fa5, 488be1b)
 Worktree: clean (source) — sadece untracked docs var
 Untracked files:
 - docs/design/plan-bound-task-lifecycle.md
@@ -53,7 +53,7 @@ sadece GatePassed üretir, RejectedByGate Faz 8 hard-gate).
     completion-first loss matrisi + decision core)
   - Adım 20: build_authorization_context_v2(bundle,...) — single bundle consume,
     engine.rs → gate_v2.rs taşındı (self. = 0)
-- **Adım 17** (commit pending): restore validators (P0-B + P0-C)
+- **Adım 17** (`488be1b`, push edildi): restore validators (P0-B + P0-C)
   - validate_predicate_basis_semantics_v2: semantics version + PredicateSet restore +
     validate_predicate_goal_for_commit (P0-B: All+Some reject)
   - validate_gate_decision_semantics_v2: completion-first matris recheck (P0-C)
@@ -157,3 +157,81 @@ Kalan 3: Faz 8 wiring + Faz 7 as_owned + context-restore bekleyen (Faz 5 dışı
    navigator/persistence V2, AuthorizationReceiptV2
 3. **Faz 9** — V1 adapter + V1 path remove
 4. **Faz 11** — osp-desktop #80
+
+---
+
+## Faz 8-P1 — Downstream V2 Readiness (TAMAMLANDI — Adım 1-11)
+
+**Plan:** 5 review turunda sağlamlaştırıldı, onaylandı (frozen implementation-ready).
+**Durum:** Adım 1-11 TAMAMLANDI. CI workspace-wide `-D warnings` green.
+
+### CI durumu (tam doğrulandı)
+```
+cargo fmt --all -- --check: clean
+RUSTFLAGS="-D warnings" cargo build --workspace --all-targets --exclude osp-desktop: clean
+RUSTFLAGS="-D warnings" cargo test -p osp-core --lib: 1252 passed, 0 failed
+RUSTFLAGS="-D warnings" cargo test -p osp-core --test engine_measurement_single_producer: 7 passed
+RUSTFLAGS="-D warnings" cargo test -p osp-core --test measurement_binding_typelevel: 1 passed
+```
+
+### Adım 1-11 tamam
+1. `SuspendedAttemptEvidenceV2` + digest (context digest bound, `OSP/ATTEMPT-EVIDENCE/V2`)
+2. `validate_suspension_eligibility_v2` (8 invariant, private fn)
+3. `PendingAuthorizationV2` (asimetrik creation/load API — P0-1)
+4. `RevisionRequiredV2` (runtime-only, NO Serialize — P0-1)
+5. `PersistedAuthorizationContextV2` wrapper + wire DTO + private `restore_from_wire` (P0-2)
+6. `PendingAuthorizationEnvelopeV2` (`try_new_held` tek public root, defensive verify)
+7. Versioned dispatch + sum-type + `load_pending_authorization_versioned`
+8. Store trait additive `persist_v2` + Filesystem V2 override + `load_versioned`
+9. `LowerHex32` strict wire parse (Adım 7'de inline)
+
+### Tip genişletmeleri (Adım 5 riski doğrulandı, çözüldü)
+- `WitnessNotRequiredReason` Deserialize (additive, V1 frozen)
+- `CanonicalWitnessRequirementV2::required`/`not_required` constructor + accessors
+- `CanonicalWitnessRequirementV2Error` +2 variant
+- `AuthorizationContextDigestV2::from_bytes` + `AuthorizationContextV2::restore` (private)
+
+### Kalan dead-code (3, Faz 8a navigator consumer)
+- `PendingAuthorizationV2Error::WitnessHoldReasonMismatch`/`WitnessSnapshotMismatch` variants
+- `PendingAuthorizationV2::attempt_num` accessor
+- `PersistedAuthorizationContextV2::into_context` accessor
+
+### Adım 10-11 (sonraki oturum)
+- **Adım 10:** V2 adversarial test matrisi (Faz 5 `commit2_build_authorization_context_v2_pipeline`
+  reuse). Kalan 3 dead-code'u consumer yapar. Tamper schema test `.v99`'a retarget EDİLDİ.
+- **Adım 11:** CI workspace-wide `-D warnings` green.
+
+### Faz 8-P1 frozen kararlar (5 review turu)
+- `AuthorizationContextDigestV2` reuse (var, auth.rs:3673)
+- V2 evidence context digest'e bağlı (basis DEĞİL)
+- Envelope tam context (basis + gate_evaluation + witness_requirement)
+- Raw DTO → checked domain restore
+- Generic `AuthorizationReceiptV2` bu fazda YOK
+- Navigator methods Faz 8a'ya
+- V1/V2 strict schema dispatch; V1 artifact backward compat
+- Evidence constructor digest üretmez (V1 pattern mirror)
+- Asimetrik creation/load API; load outer stored korur (overwrite ETMEZ)
+- `try_new_held` caller-provided digest/identity kabul etmez
+- `from_verified_parts` her zaman `envelope.verify()` çağırır
+- Wire loader `try_new_held` çağırmaz (creation/restore ayrı)
+- `RevisionRequiredV2`: Serialize YOK, Deserialize YOK
+- `PersistedAuthorizationContextV2` wrapper frozen; restore private method
+- Public entrypoints: `try_new_held` + `load_pending_authorization_versioned` +
+  `load_versioned` + `persist_v2`
+- `validate_suspension_eligibility_v2` private (Faz 8a `witness_dispatch_requirement_v2`)
+
+### Faz 8 roadmap (review 1. tur)
+```
+Faz 8-P1: additive downstream V2 readiness (BU — Adım 1-9 done, 10-11 next)
+Faz 8-P2: measurement caller migration (navigator/MCP compute_raw → measure_task_delta)
+Faz 8a:   engine cutover (commit_task_claim → V2, V1 producer silme, atomik)
+Faz 8b:   AuthorizationReceiptV2 (Satisfied/application receipt)
+Faz 8c:   persistence + downstream migration (PendingAuthorizationEnvelopeV2 restore)
+```
+
+### Sonraki adım (Faz 8-P2)
+Faz 8-P1 tamamlandı, CI green. Sıradaki:
+1. **Commit:** Faz 8-P1 atomik (Adım 1-11, tüm review kararları frozen)
+2. **Faz 8-P2:** Measurement caller migration (navigator/MCP compute_raw →
+   measure_task_delta). `TaskCommitInput::new` + `EngineMeasurement` typed result.
+3. **Faz 8a:** Engine cutover (commit_task_claim → V2, V1 producer silme, atomik)
