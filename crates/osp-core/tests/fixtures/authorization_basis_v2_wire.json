@@ -10,27 +10,59 @@
     "trajectory_baseline": {
       "kind": "available",
       "before": {
-        "coupling": { "value": 0.5, "source_tag": 1 },
-        "cohesion": { "value": 0.5, "source_tag": 1 },
-        "instability": { "value": 0.5, "source_tag": 1 },
-        "entropy": { "value": 0.5, "source_tag": 1 },
-        "witness_depth": { "value": 0.5, "source_tag": 1 }
+        "coupling": {
+          "value": 0.5,
+          "source_tag": 1
+        },
+        "cohesion": {
+          "value": 0.5,
+          "source_tag": 1
+        },
+        "instability": {
+          "value": 0.5,
+          "source_tag": 1
+        },
+        "entropy": {
+          "value": 0.5,
+          "source_tag": 1
+        },
+        "witness_depth": {
+          "value": 0.5,
+          "source_tag": 1
+        }
       }
     },
     "measurement_baseline_digest": "64e29d0b16258734535965f04a0db98fb3469e7040df064a2422b00aa4719f86",
     "trajectory_loss": {
-      "kind": "available",
-      "target": { "x": 0.2, "y": 0.8, "z": 0.15, "w": 0.3, "v": 0.6 },
-      "loss_after": 0.55
+      "kind": "not_required",
+      "reason": "predicate_completed"
     },
     "measurement_request": {
-      "subject": { "member_ids": [1, 2] },
+      "subject": {
+        "member_ids": [
+          1,
+          2
+        ]
+      },
       "impact": {
-        "node_ids": [1, 2, 3],
-        "edge_ids": [{ "from": 1, "to": 2, "kind": 0 }]
+        "node_ids": [
+          1,
+          2,
+          3
+        ],
+        "edge_ids": [
+          {
+            "from": 1,
+            "to": 2,
+            "kind": 0
+          }
+        ]
       },
       "base_revision": {
-        "view_id": { "kind": "ephemeral", "id": 1 },
+        "view_id": {
+          "kind": "ephemeral",
+          "id": 1
+        },
         "sequence": 1,
         "content_digest": "6c999586ed7a03b562fc5b0a992f05bf6d59232a1e6ac0b93b21960db665e41f"
       },
@@ -39,6 +71,86 @@
     },
     "measurement_request_digest": "bcc98fc016a150621c704660d0417277b2532f5bdfbf9a3465ce580e6448f739",
     "measurement_context_digest": "6c95d2fa06c6f74e062424d19d6ad356874fdf094c9c53bb07a79643b0016ee3",
-    "canonical_delta_digest": "071b94001b33e71415479910c0ee69f68b2a859dd0b5b052faf36a9d5b156bb3"
+    "canonical_delta_digest": "071b94001b33e71415479910c0ee69f68b2a859dd0b5b052faf36a9d5b156bb3",
+    "measured_after": {
+      "coupling": {
+        "value": 0.5,
+        "source_tag": 1
+      },
+      "cohesion": {
+        "value": 0.5,
+        "source_tag": 1
+      },
+      "instability": {
+        "value": 0.5,
+        "source_tag": 1
+      },
+      "entropy": {
+        "value": 0.5,
+        "source_tag": 1
+      },
+      "witness_depth": {
+        "value": 0.5,
+        "source_tag": 1
+      }
+    },
+    "task_goal_evidence": {
+      "task_id": 42,
+      "mode": 2,
+      "predicates": [
+        {
+          "axis": 0,
+          "operator": 1,
+          "threshold": 0.55,
+          "scope": {
+            "kind": "subgraph",
+            "ids": [
+              1,
+              2,
+              3
+            ]
+          },
+          "required_source": {
+            "kind": "exact",
+            "source_tag": 1
+          },
+          "declared_weight": 1.25,
+          "tolerance": 0.02
+        },
+        {
+          "axis": 3,
+          "operator": 0,
+          "threshold": 0.4,
+          "scope": {
+            "kind": "module",
+            "name": "osp-core"
+          },
+          "required_source": {
+            "kind": "any"
+          },
+          "declared_weight": 0.75,
+          "tolerance": 0.01
+        }
+      ],
+      "preferred_vector": {
+        "x": 0.2,
+        "y": 0.8,
+        "z": 0.15,
+        "w": 0.3,
+        "v": 0.6
+      }
+    },
+    "predicate_basis": {
+      "gate_evaluation_semantics_version": 1,
+      "result": 0,
+      "failure_policy": 0,
+      "min_improvement_delta": 0.02,
+      "allow_progress_checkpoint": false,
+      "effective_improvement_max_coupling": 0.85,
+      "effective_improvement_max_instability": 0.85,
+      "effective_improvement_min_cohesion": 0.15,
+      "effective_improvement_semantics_version": 1
+    },
+    "predicate_gate_policy_digest": "85909720a7a3a1aec1c991064ed4396f7e03be97d88215565de60f239f9e584d"
   }
 }

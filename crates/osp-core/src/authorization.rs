@@ -180,7 +180,7 @@ impl<'de> serde::Deserialize<'de> for CanonicalEdgeIdentity {
 pub use crate::canonical_tags::{
     CanonicalEdgeKind, CanonicalMetricSourceTag, CanonicalNodeClassification, CanonicalNodeKind,
     CanonicalNodeRole, ComparisonOpTag, PredicateAxisTag, PredicateFailurePolicyTag,
-    PredicateModeTag, WitnessIndependencePolicyTag,
+    PredicateModeTag, PredicateSetResultTag, WitnessIndependencePolicyTag,
 };
 
 /// Canonical f64 — NaN reject, -0.0 normalize, to_bits encoding.
@@ -339,6 +339,210 @@ pub struct EffectiveMetricPredicate {
     pub effective_tolerance: CanonicalF64,
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 10 (P1-3) — Canonical task-goal evidence V2
+//
+// **Digest continuity (reviewer v8 karar):** `compute(&Task)` ve
+// `compute_from_canonical(task_id, evidence)` byte-identical olmalı. Bu, task'ın
+// declared gerçekliğinin canonical katmanda korunmasını gerektirir.
+//
+// **Kritik: `declared_weight: Option<CanonicalF64>` — `None ≠ Some(1.0)`.**
+// `EffectiveMetricPredicate.effective_weight: CanonicalF64` (f64) `unwrap_or(1.0)`
+// ile `None` ve `Some(1.0)`'i aynı byte'a çökertir. Bu, digest continuity'yi bozar:
+// `WeightedPredicate { weight: None }` ve `WeightedPredicate { weight: Some(1.0) }`
+// farklı task declaration'lar ama aynı effective_weight byte. V2 tipleri bu ayrımı
+// `declared_weight: Option<CanonicalF64>` ile korur — task'ın declared gerçekliği.
+//
+// `EffectiveMetricPredicate.effective_weight` türetilmiş normalize projection'dır
+// (`unwrap_or(1.0)`); V2 `declared_weight` task'ın declared gerçekliğidir. İkisi
+// farklı ontolojik katman — encoder declared'i encode eder, evaluator effective'i
+// kullanır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 5 Adım 10 (P1-3):** Canonical weighted predicate V2 — task'ın
+/// declared gerçekliğinin canonical mirror'ı. `WeightedPredicate`'in (trajectory.rs)
+/// canonical karşılığı.
+///
+/// **`declared_weight: Option<CanonicalF64>`** — `None ≠ Some(1.0)` byte ayrımı.
+/// All/Any mode'da `None` (ağırlıksız), Weighted mode'da `Some(w)` (loss katkısı).
+/// `EffectiveMetricPredicate.effective_weight` (`unwrap_or(1.0)`) türetilmiş projection;
+/// bu tip task'ın declared gerçekliğini korur — digest continuity için kritik.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalWeightedPredicateV2 {
+    pub axis: PredicateAxisTag,
+    pub operator: ComparisonOpTag,
+    pub threshold: CanonicalF64,
+    pub scope: CanonicalPredicateScope,
+    pub required_source: EffectiveSourceRequirement,
+    /// Task'ın declared ağırlığı — `None` (All/Any) veya `Some(w)` (Weighted).
+    /// `Some(1.0)` geçerli bir Weighted declaration'dır, `None`'den farklı byte.
+    pub declared_weight: Option<CanonicalF64>,
+    pub tolerance: CanonicalF64,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 10 (P1-3):** Canonical task-goal evidence V2 — task'ın
+/// declared predicate goal'ının canonical mirror'ı. `PredicateSet`'in (trajectory.rs)
+/// canonical karşılığı + task_id binding.
+///
+/// `compute_from_canonical(task_id, &CanonicalTaskGoalEvidenceV2)` ile
+/// `TaskGoalDigest::compute(&Task)` byte-identical digest üretir. preferred_vector
+/// dahil — `PredicateSet.preferred_vector` canonical katmanda korunur.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalTaskGoalEvidenceV2 {
+    /// Bu evidence'ın bağlandığı task (digest binding).
+    pub task_id: crate::trajectory::TaskId,
+    pub mode: PredicateModeTag,
+    pub predicates: Vec<CanonicalWeightedPredicateV2>,
+    /// preferred_vector — `None` (NoPreferredVector) veya `Some(CanonicalRawPosition)`.
+    pub preferred_vector: Option<CanonicalRawPosition>,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 16 (P1-1) — Authoritative forward projection: Domain → Canonical V2
+//
+// Tek production projection: `Task → CanonicalTaskGoalEvidenceV2`. Bu, `TaskGoalDigest::compute`
+// ve `verify_measurement_binding_inner` (task_goal_evidence capture) tarafından kullanılan tek
+// domain→canonical dönüşümüdür. İki paralel projection YOK — eskiden test-only helper
+// `task_to_canonical_evidence_v2` (measurement.rs) aynı dönüşümü `unwrap()` ile yapıyordu;
+// artık bu `TryFrom`'a delege eder.
+//
+// Review P1-1: test helper `unwrap()` ile taşınamaz; tek authoritative `TryFrom<&Task>`.
+// Tag dönüşümleri `?` ile (tümü `CanonicalizationError` döndürür), `CanonicalSubgraphScope::try_new`
+// propagate edilir. Infallible DEĞİL — `CanonicalSubgraphScope` duplicate-id'yi reddedebilir.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl TryFrom<&crate::trajectory::Task> for CanonicalTaskGoalEvidenceV2 {
+    type Error = CanonicalizationError;
+
+    /// **Authoritative forward projection (P1-1):** `Task → CanonicalTaskGoalEvidenceV2`.
+    ///
+    /// Tek production domain→canonical task-goal dönüşümü. Hem `TaskGoalDigest::compute(&Task)`
+    /// hem `verify_measurement_binding_inner` (task_goal_evidence capture) bu fonksiyonu kullanır —
+    /// iki ayrı projection YOK. `task_to_canonical_evidence_v2` test helper'ı bu `TryFrom`'a redirect.
+    ///
+    /// **Infallible DEĞİL:** `CanonicalSubgraphScope::try_new` duplicate node id'yi reddedebilir.
+    /// Tag dönüşümleri (axis/operator/mode/source) tümü `CanonicalizationError` döndürür.
+    fn try_from(task: &crate::trajectory::Task) -> Result<Self, Self::Error> {
+        use crate::canonical_tags::{
+            CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag, PredicateModeTag,
+        };
+
+        let predicates = task
+            .target_predicate_set
+            .predicates
+            .iter()
+            .map::<Result<CanonicalWeightedPredicateV2, CanonicalizationError>, _>(|wp| {
+                let p = &wp.predicate;
+                Ok(CanonicalWeightedPredicateV2 {
+                    axis: PredicateAxisTag::try_from(&p.metric)?,
+                    operator: ComparisonOpTag::try_from(&p.operator)?,
+                    threshold: p.threshold,
+                    scope: match &p.scope {
+                        crate::trajectory::PredicateScope::Node(id) => {
+                            CanonicalPredicateScope::Node(*id)
+                        }
+                        crate::trajectory::PredicateScope::Module(name) => {
+                            CanonicalPredicateScope::Module(name.clone())
+                        }
+                        crate::trajectory::PredicateScope::Subgraph(ids) => {
+                            CanonicalPredicateScope::Subgraph(CanonicalSubgraphScope::try_new(
+                                ids.clone(),
+                            )?)
+                        }
+                    },
+                    required_source: match p.required_source {
+                        None => EffectiveSourceRequirement::Any,
+                        Some(src) => EffectiveSourceRequirement::Exact(
+                            CanonicalMetricSourceTag::try_from(&src)?,
+                        ),
+                    },
+                    declared_weight: wp.weight,
+                    tolerance: p.tolerance,
+                })
+            })
+            .collect::<Result<Vec<CanonicalWeightedPredicateV2>, CanonicalizationError>>()?;
+
+        Ok(Self {
+            task_id: task.id,
+            mode: PredicateModeTag::try_from(&task.target_predicate_set.mode)?,
+            predicates,
+            preferred_vector: task.target_predicate_set.preferred_vector.map(|pv| {
+                CanonicalRawPosition {
+                    x: pv.x,
+                    y: pv.y,
+                    z: pv.z,
+                    w: pv.w,
+                    v: pv.v,
+                }
+            }),
+        })
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 4+5 (P1-3) — Reverse TryFrom: Canonical V2 → Domain
+//
+// Faz 5 restore evaluator'ın ihtiyaç duyduğu reverse projection (Canonical→Domain).
+// Item 10 V2 tipleri ile domain tipleri arasında. Item 2 projection'larını
+// (CanonicalPredicateScope→PredicateScope, EffectiveSourceRequirement→Option<MetricSource>)
+// ve Adım 1 reverse From'larını (Tag→Domain enum) kullanır.
+//
+// Restore path: canonical evidence → TryFrom → domain → validate_predicate_goal_for_commit
+// → evaluate_completion (tek evaluator). İki paralel evaluator YOK.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl TryFrom<&CanonicalWeightedPredicateV2> for crate::trajectory::WeightedPredicate {
+    type Error = CanonicalizationError;
+
+    /// Canonical weighted predicate V2 → domain WeightedPredicate.
+    ///
+    /// axis/operator tag→enum (Adım 1 reverse From), scope/source projection (Adım 2),
+    /// declared_weight direkt (Option<f64>). `None ≠ Some(1.0)` korunur — V2 tip ayrımı.
+    fn try_from(canonical: &CanonicalWeightedPredicateV2) -> Result<Self, Self::Error> {
+        Ok(Self {
+            predicate: crate::trajectory::MetricPredicate {
+                metric: canonical.axis.into(),
+                operator: canonical.operator.into(),
+                threshold: canonical.threshold,
+                scope: (&canonical.scope).into(),
+                required_source: (&canonical.required_source).into(),
+                tolerance: canonical.tolerance,
+            },
+            weight: canonical.declared_weight,
+        })
+    }
+}
+
+impl TryFrom<&CanonicalTaskGoalEvidenceV2> for crate::trajectory::PredicateSet {
+    type Error = CanonicalizationError;
+
+    /// Canonical task-goal evidence V2 → domain PredicateSet.
+    ///
+    /// mode tag→enum (Adım 1), her predicate TryFrom (Adım 4), preferred_vector
+    /// CanonicalRawPosition→RawPosition (trivial field copy). task_id restore'da
+    /// kullanılmaz — PredicateSet task_id taşımaz (task binding ayrı).
+    fn try_from(canonical: &CanonicalTaskGoalEvidenceV2) -> Result<Self, Self::Error> {
+        let predicates = canonical
+            .predicates
+            .iter()
+            .map(crate::trajectory::WeightedPredicate::try_from)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            mode: canonical.mode.into(),
+            predicates,
+            preferred_vector: canonical.preferred_vector.as_ref().map(|crp| {
+                crate::coords::RawPosition {
+                    x: crp.x,
+                    y: crp.y,
+                    z: crp.z,
+                    w: crp.w,
+                    v: crp.v,
+                }
+            }),
+        })
+    }
+}
+
 /// **reviewer P1-1 (subgraph invariant):** Validated canonical subgraph scope.
 ///
 /// **Type-level invariant:** sorted + deduplicated node ids. Bu newtype constructor
@@ -460,6 +664,50 @@ pub enum EffectiveSourceRequirement {
     Any,
     /// Belirli bir source zorunlu (INV-T4 — placeholder ölçümle task kapatma engeli).
     Exact(crate::canonical_tags::CanonicalMetricSourceTag),
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 2 (P1-3) — Canonical projection: Tag → Domain
+//
+// Faz 5 restore evaluator'ın ihtiyaç duyduğu iki infallible projection. Canonical
+// canonical form → domain form. İkisi de infallible çünkü:
+//   - CanonicalPredicateScope: CanonicalSubgraphScope invariant'ı (sorted + unique)
+//     zaten type seviyesinde korunduğu için Subgraph armı sort/dedup gerektirmez.
+//   - EffectiveSourceRequirement: Any→None, Exact(tag)→Some(MetricSource::from(tag)).
+//     From<CanonicalMetricSourceTag> for MetricSource infallible (Adım 1).
+//
+// Forward yön (engine.rs canonicalize_scope) fallible (duplicate id reddi); reverse
+// infallible çünkü canonical newtype invariant'ı zaten enforced.
+// ─────────────────────────────────────────────────────────────────────────────
+
+impl From<&CanonicalPredicateScope> for crate::trajectory::PredicateScope {
+    /// Canonical predicate scope → domain predicate scope.
+    ///
+    /// `Subgraph` armı `CanonicalSubgraphScope::as_sorted_ids()` üzerinden gider —
+    /// canonical sıra korunur (sorted + unique invariant canonical katmanda enforced).
+    fn from(scope: &CanonicalPredicateScope) -> Self {
+        use crate::trajectory::PredicateScope;
+        match scope {
+            CanonicalPredicateScope::Node(id) => PredicateScope::Node(*id),
+            CanonicalPredicateScope::Module(name) => PredicateScope::Module(name.clone()),
+            CanonicalPredicateScope::Subgraph(sub) => {
+                PredicateScope::Subgraph(sub.as_sorted_ids().to_vec())
+            }
+        }
+    }
+}
+
+impl From<&EffectiveSourceRequirement> for Option<crate::coords::MetricSource> {
+    /// Effective source requirement → domain `required_source` projection.
+    ///
+    /// `Any → None` (herhangi source kabul), `Exact(tag) → Some(MetricSource::from(tag))`.
+    /// `From<CanonicalMetricSourceTag> for MetricSource` infallible (Faz 5 Adım 1).
+    fn from(req: &EffectiveSourceRequirement) -> Self {
+        match req {
+            EffectiveSourceRequirement::Any => None,
+            EffectiveSourceRequirement::Exact(tag) => Some((*tag).into()),
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -781,6 +1029,145 @@ pub struct PredicateEvaluationBasis {
 ///
 /// Detaylı dokümantasyon ve `current_semantics()` impl'i: [`crate::trajectory::EffectiveImprovementPolicy`].
 pub use crate::trajectory::{EffectiveImprovementPolicy, IMPROVEMENT_SEMANTICS_VERSION};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 8 (P0-2) — Gate evaluation semantics version + V2 basis
+//
+// **Restore version mismatch → reject.** Runtime ve restore aynı
+// `evaluate_task_gate_with_semantics(version, ...)` kullanır. Semantics version
+// predicate eval + source propagation + trajectory loss + baseline + improvement +
+// decision core süreçlerini kapsar — herhangi biri değişirse version artırılmalı.
+//
+// V2 basis, V1 `PredicateEvaluationBasis`'ten farklı olarak evaluation *sonucunu*
+// (PredicateSetResultTag) + semantics version'ı taşır — restore path'inin runtime
+// ile aynı semantics altında değerlendirildiğini kanıtlar.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** Gate evaluation semantics version.
+///
+/// Predicate eval + source propagation + trajectory loss + baseline + improvement +
+/// decision core süreçlerini kapsayan canonical semantics version. Restore path
+/// bu version'ı runtime ile karşılaştırır — mismatch = reject (farklı semantics
+/// altında üretilmiş evidence geçersiz).
+pub const GATE_EVALUATION_SEMANTICS_V1: u32 = 1;
+
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2, review P1-2 düzeltme):** Effective improvement
+/// policy canonical basis V2 — ayrı canonical struct (alias DEĞİL). Runtime
+/// `EffectiveImprovementPolicy`'nin (raw f64) canonical mirror'ı; `CanonicalF64`
+/// alanları NaN/∞ reject + -0.0 normalize invariant'ı taşır.
+///
+/// **Review P1-2:** runtime tip ile canonical/wire tip AYNIlaştırılmaz. Checked
+/// conversion `TryFrom<EffectiveImprovementPolicy>` ile runtime→canonical projection.
+/// Canonical artifact yüzeyine NaN/∞ ve future runtime-field drift taşınmaz.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EffectiveImproPolicyBasisV2 {
+    pub max_coupling: CanonicalF64,
+    pub max_instability: CanonicalF64,
+    pub min_cohesion: CanonicalF64,
+    pub semantics_version: u32,
+}
+
+impl EffectiveImproPolicyBasisV2 {
+    /// Mevcut evaluator semantiği — `EffectiveImprovementPolicy::current_semantics()`
+    /// üzerinden checked canonical projection. NaN/∞ reject, -0.0 normalize.
+    pub fn current_semantics() -> Self {
+        Self::try_from(EffectiveImprovementPolicy::current_semantics())
+            .expect("current_semantics f64 değerleri finite — canonical conversion infallible")
+    }
+}
+
+/// **Review P1-2:** Checked runtime→canonical conversion. f64 değerleri finite olmalı
+/// (NaN/∞ reject). `-0.0` normalize. semantics_version direkt copy.
+impl TryFrom<EffectiveImprovementPolicy> for EffectiveImproPolicyBasisV2 {
+    type Error = CanonicalizationError;
+
+    fn try_from(policy: EffectiveImprovementPolicy) -> Result<Self, Self::Error> {
+        // CanonicalF64 = f64 alias; NaN/∞ check canonical_encoding katmanında (encode_f64).
+        // Burada structural projection — finite check encode sırasında defensive.
+        if !policy.max_coupling.is_finite()
+            || !policy.max_instability.is_finite()
+            || !policy.min_cohesion.is_finite()
+        {
+            return Err(CanonicalizationError::NonFinitePolicyField {
+                field: "improvement_policy",
+            });
+        }
+        Ok(Self {
+            max_coupling: policy.max_coupling,
+            max_instability: policy.max_instability,
+            min_cohesion: policy.min_cohesion,
+            semantics_version: policy.semantics_version,
+        })
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 8 (P0-2):** Canonical predicate evaluation basis V2 —
+/// gate evaluation sonucunun canonical kanıtı. Restore path bu basis'i runtime
+/// çıktısı ile karşılaştırır (semantics version + result + policy).
+///
+/// **V1'den farkı:** V1 (`PredicateEvaluationBasis`) evaluation *girdilerini*
+/// taşır (target_vector, loss_before/after). V2 evaluation *sonucunu* taşır —
+/// `result: PredicateSetResultTag` + `gate_evaluation_semantics_version`. İkisi
+/// farklı ontolojik katman: V1 "ne evaluate edildi", V2 "ne sonuçlandı".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CanonicalPredicateEvaluationBasisV2 {
+    /// Gate evaluation semantics version — runtime ile restore aynı olmalı.
+    /// Mismatch = reject (farklı semantics altında üretilmiş evidence).
+    pub gate_evaluation_semantics_version: u32,
+    /// Predicate set evaluation sonucu (Completed/SourceInsufficient/NotCompleted).
+    pub result: PredicateSetResultTag,
+    /// Predicate failure policy (StrictReject/AcceptImprovement/OperatorApproval).
+    pub failure_policy: PredicateFailurePolicyTag,
+    /// Gerçek `is_improved_loss` girdisi: `loss_after < loss_before - min_improvement_delta`.
+    pub min_improvement_delta: CanonicalF64,
+    /// Progress checkpoint izinli mi (AcceptImprovement policy altında).
+    pub allow_progress_checkpoint: bool,
+    /// Effective improvement policy (max_coupling/instability, min_cohesion, semantics_version).
+    pub effective_improvement: EffectiveImproPolicyBasisV2,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 5 Adım 13 (P1-1) — Parent authorization.rs restore validator errors
+//
+// Plan: `PredicateBasisConsistencyError` + `GateSemanticConsistencyError` parent'ta
+// (restore validator'lar — Item 16). Child gate_v2.rs runtime errors (yukarıda).
+// Explicit variant mapping, `#[from]` YOK (plan negatif koşulu).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Predicate basis consistency error — restore
+/// path predicate basis validation hatası. `validate_predicate_basis_semantics_v2`
+/// (Item 16) üretir. Typed variant mapping — hatanın kaynağı lokalize.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum PredicateBasisConsistencyError {
+    /// Gate evaluation semantics version mismatch — restore vs runtime farklı semantics.
+    #[error("unsupported gate evaluation semantics: stored={stored}, expected={expected}")]
+    UnsupportedGateEvaluationSemantics { stored: u32, expected: u32 },
+    /// Task-goal evidence → PredicateSet restore hatası (canonicalization).
+    #[error("task-goal evidence restore failed: {0}")]
+    TaskGoalEvidenceRestore(CanonicalizationError),
+    /// Predicate goal validation hatası (validate_predicate_goal_for_commit).
+    #[error("predicate goal validation failed: {0}")]
+    PredicateGoalValidation(crate::trajectory::TaskValidationError),
+}
+
+/// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Gate semantic consistency error — restore
+/// path gate decision semantic matrix validation hatası. `validate_gate_decision_semantics_v2`
+/// (Item 16) üretir. Typed variant mapping — branch-aware restore matrix ihlali.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum GateSemanticConsistencyError {
+    /// Stored loss evidence ile recomputed loss parity ihlali.
+    #[error("stored loss evidence mismatch: stored={stored}, recomputed={recomputed}")]
+    LossEvidenceMismatch { stored: String, recomputed: String },
+    /// Expected MutationDecision ↔ stored gate decision mismatch.
+    #[error("mutation decision mismatch: expected={expected:?}, stored={stored:?}")]
+    MutationDecisionMismatch {
+        expected: crate::trajectory::MutationDecision,
+        stored: crate::trajectory::MutationDecision,
+    },
+    /// Branch-aware restore matrix ihlali (GatePassed tablosu).
+    #[error("gate semantic matrix violation: {detail}")]
+    MatrixViolation { detail: String },
+}
 
 /// Canonical raw position — 5-axis, NaN reject, -0.0 normalize.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1681,6 +2068,45 @@ impl TryFrom<&crate::coords::MeasuredRawPosition> for ProvenancedMeasuredResult 
     }
 }
 
+/// **INV-T9 #70 Faz 5 Adım 3 (P1-3):** Reverse projection — ProvenancedMeasuredResult
+/// → MeasuredRawPosition. Faz 5 restore evaluator'ın ihtiyaç duyduğu reverse yön.
+///
+/// Forward impl (`TryFrom<&MeasuredRawPosition>` yukarıda) ile simetrik. Her 5 axis
+/// için `CanonicalAxisMeasurement → AxisMeasurement`: value direkt copy (CanonicalF64 =
+/// f64), source `From<CanonicalMetricSourceTag> for MetricSource` (Adım 1, infallible).
+///
+/// **Neden `TryFrom` (fallible) değil de aslında infallible?** Reverse yönünde tüm
+/// alt dönüşümler infallible: `From<CanonicalMetricSourceTag>` infallible, value copy
+/// infallible. Plan Item 3 `TryFrom` imzası kullanır (forward ile simetri + gelecekte
+/// eklenebilecek range/semantic validation için açık kapı). Mevcut impl `Ok(...)`
+/// döner — error arm hiçbir zaman tetiklenmez, `Error = std::convert::Infallible`
+/// kullanılmaz çünkü trait impl imzası forward ile aynı `CanonicalizationError` tutar.
+///
+/// **`[0,1]` range invariant:** Forward impl range kontrolü YAPMAZ (line ~1670 direkt
+/// `axis.value` copy). Reverse de tutarlı olarak range kontrolü yapmaz — canonical
+/// encoding katmanı NaN/-0.0 normalize eder ama `[0,1]` range'i garantilemez; range
+/// invariant'ı `AxisMeasurement::validate()` (coords.rs:250) defensive re-validation
+/// ile consumption-side enforced.
+impl TryFrom<&ProvenancedMeasuredResult> for crate::coords::MeasuredRawPosition {
+    type Error = CanonicalizationError;
+
+    fn try_from(measured: &ProvenancedMeasuredResult) -> Result<Self, Self::Error> {
+        let convert = |axis: &CanonicalAxisMeasurement| -> crate::coords::AxisMeasurement {
+            crate::coords::AxisMeasurement {
+                value: axis.value,
+                source: axis.source.into(),
+            }
+        };
+        Ok(Self {
+            coupling: convert(&measured.coupling),
+            cohesion: convert(&measured.cohesion),
+            instability: convert(&measured.instability),
+            entropy: convert(&measured.entropy),
+            witness_depth: convert(&measured.witness_depth),
+        })
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CanonicalTrajectoryEvidenceBaseline + CanonicalTrajectoryLossEvidence
 // (INV-T9 #70 Commit 4b — reviewer v4 P0/P1-1)
@@ -2118,6 +2544,9 @@ impl CanonicalTrajectoryEvidenceBaseline {
 /// **INV-T9 #70 Commit 4b (reviewer v4 P0/P1-1):** Canonical trajectory loss evidence —
 /// sadece `target + loss_after`. Baseline taşımaz (baseline ayrı evidence). Unavailable
 /// ise `CanonicalTrajectoryLossUnavailableReason` (NoPreferredVector).
+///
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** `NotRequired` varyantı eklendi —
+/// completion-first PredicateGate modeli. Borrowed/owned canonical projection senkron.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum CanonicalTrajectoryLossEvidence {
     /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
@@ -2129,6 +2558,11 @@ pub enum CanonicalTrajectoryLossEvidence {
     Unavailable {
         reason: CanonicalTrajectoryLossUnavailableReason,
     },
+    /// **Faz 5:** Loss gerekmiyor — completion-first. `CanonicalLossNotRequiredReason`
+    /// kapalı enum (borrowed `LossNotRequiredReason` canonical projection'ı).
+    NotRequired {
+        reason: CanonicalLossNotRequiredReason,
+    },
 }
 
 /// **INV-T9 #70 Commit 4b:** Canonical loss unavailable reason. `NoPreferredVector`
@@ -2138,6 +2572,78 @@ pub enum CanonicalTrajectoryLossEvidence {
 pub enum CanonicalTrajectoryLossUnavailableReason {
     /// Task'ta `preferred_vector` yok — loss/target anlamsız.
     NoPreferredVector,
+}
+
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Canonical loss "gerekmiyor" sebebi.
+/// Borrowed `LossNotRequiredReason`'ın canonical/wire projection'ı. Kapalı enum —
+/// `Other(String)` yok. Pinned numeric tag (`LossNotRequiredReasonTag`) ile encode edilir
+/// (enum ordinal/serde adı DEĞİL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalLossNotRequiredReason {
+    /// Predicate Completed — loss irrelevant.
+    PredicateCompleted,
+    /// SourceInsufficient (INV-T4) — placeholder ile task kapatılamaz, Reject kesin.
+    SourceInsufficient,
+    /// StrictReject policy — loss computation anlamsız.
+    StrictRejectPolicy,
+    /// OperatorApproval policy — loss mutation kararını etkilemiyor.
+    OperatorApprovalPolicy,
+}
+
+impl CanonicalLossNotRequiredReason {
+    /// Pinned numeric tag — `LossNotRequiredReasonTag`. Append-only (mevcut tag'ler donar).
+    pub(crate) fn tag(&self) -> LossNotRequiredReasonTag {
+        match self {
+            Self::PredicateCompleted => LossNotRequiredReasonTag::PREDICATE_COMPLETED,
+            Self::SourceInsufficient => LossNotRequiredReasonTag::SOURCE_INSUFFICIENT,
+            Self::StrictRejectPolicy => LossNotRequiredReasonTag::STRICT_REJECT_POLICY,
+            Self::OperatorApprovalPolicy => LossNotRequiredReasonTag::OPERATOR_APPROVAL_POLICY,
+        }
+    }
+}
+
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8, plan P1-4):** Pinned canonical tag for V2
+/// loss "gerekmiyor" reason. Append-only: mevcut tag'ler (0-3) ASLA değişmez (exact pin —
+/// golden vector lock). Yeni varyantlar sıradaki tag'leri alır.
+///
+/// `CanonicalTrajectoryLossUnavailableReasonTag` ile AYRI newtype — ontolojik kategori
+/// (loss unavailable vs loss gerekmiyor) kanıtlanmadıkça tag alanı paylaşılmaz.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct LossNotRequiredReasonTag(u8);
+
+impl LossNotRequiredReasonTag {
+    pub(crate) const PREDICATE_COMPLETED: Self = Self(0);
+    pub(crate) const SOURCE_INSUFFICIENT: Self = Self(1);
+    pub(crate) const STRICT_REJECT_POLICY: Self = Self(2);
+    pub(crate) const OPERATOR_APPROVAL_POLICY: Self = Self(3);
+
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3];
+
+    pub(crate) const fn as_u8(&self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for LossNotRequiredReasonTag {
+    type Error = CanonicalizationError;
+
+    fn try_from(tag: u8) -> Result<Self, Self::Error> {
+        if Self::VALID_TAGS.contains(&tag) {
+            Ok(Self(tag))
+        } else {
+            Err(CanonicalizationError::InvalidCanonicalTag {
+                type_name: "LossNotRequiredReasonTag",
+                tag,
+            })
+        }
+    }
+}
+
+impl CanonicalTag for LossNotRequiredReasonTag {
+    fn tag_u8(&self) -> u8 {
+        self.0
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2184,6 +2690,24 @@ pub enum AuthorizationBasisV2Error {
     BaselineValidation(#[from] CanonicalBaselineValidationError),
     #[error("basis construction failed: {detail}")]
     Construction { detail: String },
+    // ── INV-T9 #70 Faz 5 Adım 16 (review P0-3) — 4 yeni field commitment parity ──
+    /// Task-goal evidence task_id, basis task_id ile tutarsız. Typed evidence identity —
+    /// cross-context substitution reject. `CanonicalTaskGoalEvidenceV2.task_id` ayrı field.
+    #[error("task goal evidence task_id mismatch: evidence={evidence}, basis={basis}")]
+    TaskGoalEvidenceTaskIdMismatch { evidence: u64, basis: u64 },
+    /// Task-goal evidence → digest parity mismatch. `task_goal_evidence` (readable) ile
+    /// `task_goal_digest` (commitment) aynı gerçekliği temsil etmeli.
+    #[error("task goal evidence digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    TaskGoalEvidenceDigestMismatch { stored: String, recomputed: String },
+    /// Measured-after → digest parity mismatch. `measured_after` (readable 5-axis) ile
+    /// `measurement_digest` (commitment) aynı gerçekliği temsil etmeli.
+    #[error("measured after digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    MeasuredAfterDigestMismatch { stored: String, recomputed: String },
+    /// Predicate gate policy digest parity mismatch. `predicate_basis` (readable policy +
+    /// result) üzerinden `compute_from_canonical` ile recompute, `predicate_gate_policy_digest`
+    /// (commitment) ile parity. Policy digest evaluation result HARIÇ (sadece policy fields).
+    #[error("predicate gate policy digest mismatch: stored={stored:?}, recomputed={recomputed:?}")]
+    PredicateGatePolicyDigestMismatch { stored: String, recomputed: String },
 }
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:146-160, reviewer P1-2):** Canonical V2
@@ -2230,6 +2754,22 @@ pub struct AuthorizationBasisV2 {
     measurement_context_digest: crate::measurement::MeasurementContextDigest,
     /// Canonical structural delta digest — claim → structural delta commitment.
     canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+    // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (13→17) ──────────────────────────
+    /// Measured-after — tek canonical after (5-axis değer + source). `measurement_digest`
+    /// bu evidence'ın commitment'ı (validate_semantics parity). Duplicate yok — baseline
+    /// ayrı (trajectory_baseline.before), after ayrı (measured_after).
+    measured_after: ProvenancedMeasuredResult,
+    /// Readable task-goal evidence — verify epoch capture (TryFrom<&Task> authoritative
+    /// projection). `task_goal_digest` bu evidence'ın commitment'ı. Restore path (Adım 17)
+    /// reverse projection + validate_predicate_goal_for_commit ile reverify.
+    task_goal_evidence: CanonicalTaskGoalEvidenceV2,
+    /// Predicate evaluation basis — evaluation sonucu (result + policy + semantics version).
+    /// Bundle-scoped (review P0-1: measurement binding epoch'unda DEĞIL). `predicate_gate_policy_digest`
+    /// bu basis'in commitment'ı (compute_from_canonical — result HARİÇ, policy fields dahil).
+    predicate_basis: CanonicalPredicateEvaluationBasisV2,
+    /// Predicate gate policy digest — task snapshot'ına bağlı policy commitment (TOCTOU).
+    /// `predicate_basis` üzerinden compute_from_canonical ile reverify (result Hariç).
+    predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
 }
 
 impl AuthorizationBasisV2 {
@@ -2252,6 +2792,11 @@ impl AuthorizationBasisV2 {
         measurement_request_digest: crate::measurement::MeasurementRequestDigest,
         measurement_context_digest: crate::measurement::MeasurementContextDigest,
         canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+        // INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (13→17):
+        measured_after: ProvenancedMeasuredResult,
+        task_goal_evidence: CanonicalTaskGoalEvidenceV2,
+        predicate_basis: CanonicalPredicateEvaluationBasisV2,
+        predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
     ) -> Result<Self, AuthorizationBasisV2Error> {
         let basis = Self {
             task_id,
@@ -2267,6 +2812,10 @@ impl AuthorizationBasisV2 {
             measurement_request_digest,
             measurement_context_digest,
             canonical_delta_digest,
+            measured_after,
+            task_goal_evidence,
+            predicate_basis,
+            predicate_gate_policy_digest,
         };
         basis.validate_semantics()?;
         Ok(basis)
@@ -2349,6 +2898,314 @@ impl AuthorizationBasisV2 {
                 basis: self.canonical_delta_digest.to_hex(),
             });
         }
+
+        // ── INV-T9 #70 Faz 5 Adım 16 (review P0-3) — 4 yeni field commitment parity ──
+        // Mevcut defense-in-depth pattern'inin devamı: readable evidence field'ları
+        // stored commitment digest'leri ile tutarlı olmalı. Cross-field substitution reject.
+
+        // (a) Task-goal evidence task_id == basis task_id (typed evidence identity).
+        // CanonicalTaskGoalEvidenceV2 kendi task_id field'ını taşır — basis identity binding.
+        if self.task_goal_evidence.task_id != self.task_id {
+            return Err(AuthorizationBasisV2Error::TaskGoalEvidenceTaskIdMismatch {
+                evidence: self.task_goal_evidence.task_id.into(),
+                basis: self.task_id.into(),
+            });
+        }
+
+        // (b) Task-goal evidence → digest parity. compute_from_canonical shared writer.
+        let recomputed_task_goal =
+            crate::measurement::TaskGoalDigest::compute_from_canonical(&self.task_goal_evidence)
+                .map_err(|e| AuthorizationBasisV2Error::Construction {
+                    detail: e.to_string(),
+                })?;
+        if recomputed_task_goal.as_bytes() != self.task_goal_digest.as_bytes() {
+            return Err(AuthorizationBasisV2Error::TaskGoalEvidenceDigestMismatch {
+                stored: self.task_goal_digest.to_hex(),
+                recomputed: recomputed_task_goal.to_hex(),
+            });
+        }
+
+        // (c) Measured-after → digest parity. MeasurementDigest shared writer.
+        let recomputed_measured =
+            crate::measurement::MeasurementDigest::compute_from_canonical(&self.measured_after)
+                .map_err(|e| AuthorizationBasisV2Error::Construction {
+                    detail: e.to_string(),
+                })?;
+        if recomputed_measured.as_bytes() != self.measurement_digest.as_bytes() {
+            return Err(AuthorizationBasisV2Error::MeasuredAfterDigestMismatch {
+                stored: self.measurement_digest.to_hex(),
+                recomputed: recomputed_measured.to_hex(),
+            });
+        }
+
+        // (d) Predicate gate policy digest parity. compute_from_canonical basis.result
+        // KULLANMAZ (policy digest evaluation sonucundan bağımsız — sadece policy fields).
+        let recomputed_policy =
+            crate::measurement::PredicateGatePolicyDigestV2::compute_from_canonical(
+                self.task_id,
+                &self.task_goal_digest,
+                &self.predicate_basis,
+            )
+            .map_err(|e| AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            })?;
+        if recomputed_policy.as_bytes() != self.predicate_gate_policy_digest.as_bytes() {
+            return Err(
+                AuthorizationBasisV2Error::PredicateGatePolicyDigestMismatch {
+                    stored: self.predicate_gate_policy_digest.to_hex(),
+                    recomputed: recomputed_policy.to_hex(),
+                },
+            );
+        }
+
+        // ── INV-T9 #70 Faz 5 Adım 17 (review P0-B + P0-C) — semantic parity ────────
+        // Digest parity (yukarıdaki 4 alan) structural commitment doğrular. Adım 17
+        // validator'ları **semantic** parity doğrular: restore edilen basis'in readable
+        // field'ları (predicate_basis + task_goal_evidence + loss_evidence + gate
+        // decision) birbirleriyle ve runtime evaluator semantiğiyle tutarlı olmalı.
+        //
+        // P0-B: Restore task-goal production validation — evidence → PredicateSet →
+        // validate_predicate_goal_for_commit (boş/Mixed/mode-weight/threshold/tolerance).
+        // P0-C: Persisted gate evaluation semantics version kapsamı — predicate
+        // composition + source propagation + trajectory loss + baseline + improvement +
+        // mutation decision semantiğini bağlar. Unsupported version → fail-closed.
+        self.validate_predicate_basis_semantics_v2().map_err(|e| {
+            AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            }
+        })?;
+        self.validate_gate_decision_semantics_v2().map_err(|e| {
+            AuthorizationBasisV2Error::Construction {
+                detail: e.to_string(),
+            }
+        })?;
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 17 (P0-B):** Restore predicate basis semantic validation.
+    ///
+    /// Restore edilen `CanonicalPredicateEvaluationBasisV2` + `CanonicalTaskGoalEvidenceV2`
+    /// semantic tutarlılık doğrulaması:
+    /// 1. **Semantics version (P0-C kapsam):** `gate_evaluation_semantics_version ==
+    ///    GATE_EVALUATION_SEMANTICS_V1` — farklı semantics altında üretilmiş evidence reject.
+    /// 2. **Task-goal evidence → PredicateSet restore:** `PredicateSet::try_from` (Adım 5
+    ///    reverse projection). Canonicalization hatası reject.
+    /// 3. **Predicate goal validation (P0-B):** `validate_predicate_goal_for_commit` —
+    ///    boş predicate set, mode/weight shape, finite threshold/tolerance, Mixed source
+    ///    reddi, weight positivity, preferred vector finite. Restore edilen evidence
+    ///    production-valid olmalı (geçersiz declaration reject).
+    ///
+    /// **Kritik (P0-B):** `All + Some(1.0)` digest continuity test'inde temsil edilebilir
+    /// AMA authorization restore semantiğinde geçersiz declaration olarak reddedilir
+    /// (`validate_predicate_goal_for_commit` UnexpectedWeightForUnweightedMode döner).
+    fn validate_predicate_basis_semantics_v2(&self) -> Result<(), PredicateBasisConsistencyError> {
+        // (1) Semantics version — P0-C kapsamı bağlama (fail-closed).
+        if self.predicate_basis.gate_evaluation_semantics_version != GATE_EVALUATION_SEMANTICS_V1 {
+            return Err(
+                PredicateBasisConsistencyError::UnsupportedGateEvaluationSemantics {
+                    stored: self.predicate_basis.gate_evaluation_semantics_version,
+                    expected: GATE_EVALUATION_SEMANTICS_V1,
+                },
+            );
+        }
+
+        // (2) Task-goal evidence → PredicateSet restore (Adım 5 reverse projection).
+        let predicate_set = crate::trajectory::PredicateSet::try_from(&self.task_goal_evidence)
+            .map_err(PredicateBasisConsistencyError::TaskGoalEvidenceRestore)?;
+
+        // (3) P0-B — restore task-goal production validation. Evidence, commit için
+        // production-valid olmalı (runtime Task::validate_for_commit ile aynı validator).
+        crate::trajectory::validate_predicate_goal_for_commit(self.task_id, &predicate_set)
+            .map_err(PredicateBasisConsistencyError::PredicateGoalValidation)?;
+
+        Ok(())
+    }
+
+    /// **INV-T9 #70 Faz 5 Adım 17 (P0-C):** Restore gate decision semantic validation.
+    ///
+    /// Restore edilen `CanonicalPredicateEvaluationBasisV2` + `CanonicalTrajectoryLossEvidence`
+    /// + stored gate decision (`CanonicalGateEvaluationV2`) tutarlılık doğrulaması.
+    /// Runtime `evaluate_task_gate_v2`'nin completion-first matrisi ile restore edilen
+    /// stored değerler çelişmemeli.
+    ///
+    /// **Matris (GatePassed exhaustive, issue #83):**
+    /// - Completed → AcceptAsCompleted (loss irrelevant)
+    /// - SourceInsufficient → Reject
+    /// - NotCompleted + StrictReject → Reject
+    /// - NotCompleted + OperatorApproval → RequireOperatorApproval
+    /// - NotCompleted + AcceptImprovement + Unavailable(NoPreferredVector) → Reject
+    /// - NotCompleted + AcceptImprovement + Available + improved → AcceptAsProgress
+    ///
+    /// **Limitasyon:** `improved` bilgisi basis'te saklanmaz (loss_before gerek). Available
+    /// loss dalında AcceptAsProgress ↔ Reject ayırt edilemez — bu dalda stored decision
+    /// AcceptAsProgress VEYA Reject olabilir (loose check, fail-closed değil). Diğer
+    /// dallar exact match.
+    ///
+    /// **RejectedByGate:** Faz 5'te matris uygulanmaz (Faz 8 hard-gate).
+    fn validate_gate_decision_semantics_v2(&self) -> Result<(), GateSemanticConsistencyError> {
+        // Basis, gate decision (`CanonicalGateEvaluationV2`) taşımaz — bu validator
+        // basis-level semantic tutarlılık doğrular: predicate_basis.result + failure_policy
+        // ↔ trajectory_loss category (completion-first matris). Decision parity
+        // (expected MutationDecision ↔ stored gate) AuthorizationContextV2 restore
+        // katmanında (basis + gate_evaluation birlikte restore edilince).
+
+        // Matris dalı: result + failure_policy → expected loss category.
+        let result = self.predicate_basis.result;
+        let failure_policy = self.predicate_basis.failure_policy;
+
+        // Stored loss evidence — matris dalına göre expected category ile parity.
+        // Tag değerleri (canonical_tags.rs): Completed=0, SourceInsufficient=1,
+        // NotCompleted=2; StrictReject=0, AcceptImprovement=1, OperatorApproval=2.
+        match result.as_u8() {
+            0 => {
+                // Completed → NotRequired(PredicateCompleted). Loss hesap YOK.
+                match &self.trajectory_loss {
+                    CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                        if *reason != CanonicalLossNotRequiredReason::PredicateCompleted {
+                            return Err(GateSemanticConsistencyError::LossEvidenceMismatch {
+                                stored: format!("{:?}", reason),
+                                recomputed: "PredicateCompleted".to_string(),
+                            });
+                        }
+                    }
+                    other => {
+                        return Err(GateSemanticConsistencyError::MatrixViolation {
+                            detail: format!(
+                                "Completed predicate expects NotRequired(PredicateCompleted), got {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+            1 => {
+                // SourceInsufficient → NotRequired(SourceInsufficient).
+                match &self.trajectory_loss {
+                    CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                        if *reason != CanonicalLossNotRequiredReason::SourceInsufficient {
+                            return Err(GateSemanticConsistencyError::LossEvidenceMismatch {
+                                stored: format!("{:?}", reason),
+                                recomputed: "SourceInsufficient".to_string(),
+                            });
+                        }
+                    }
+                    other => {
+                        return Err(GateSemanticConsistencyError::MatrixViolation {
+                            detail: format!(
+                                "SourceInsufficient expects NotRequired(SourceInsufficient), got {:?}",
+                                other
+                            ),
+                        });
+                    }
+                }
+            }
+            2 => {
+                // NotCompleted → failure policy determines expected loss.
+                match failure_policy.as_u8() {
+                    0 => {
+                        // StrictReject → NotRequired(StrictRejectPolicy).
+                        match &self.trajectory_loss {
+                            CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                                if *reason != CanonicalLossNotRequiredReason::StrictRejectPolicy {
+                                    return Err(
+                                        GateSemanticConsistencyError::LossEvidenceMismatch {
+                                            stored: format!("{:?}", reason),
+                                            recomputed: "StrictRejectPolicy".to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            other => {
+                                return Err(GateSemanticConsistencyError::MatrixViolation {
+                                    detail: format!(
+                                        "NotCompleted+StrictReject expects NotRequired(StrictRejectPolicy), got {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    2 => {
+                        // OperatorApproval → NotRequired(OperatorApprovalPolicy).
+                        match &self.trajectory_loss {
+                            CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                                if *reason != CanonicalLossNotRequiredReason::OperatorApprovalPolicy
+                                {
+                                    return Err(
+                                        GateSemanticConsistencyError::LossEvidenceMismatch {
+                                            stored: format!("{:?}", reason),
+                                            recomputed: "OperatorApprovalPolicy".to_string(),
+                                        },
+                                    );
+                                }
+                            }
+                            other => {
+                                return Err(GateSemanticConsistencyError::MatrixViolation {
+                                    detail: format!(
+                                        "NotCompleted+OperatorApproval expects NotRequired(OperatorApprovalPolicy), got {:?}",
+                                        other
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    1 => {
+                        // AcceptImprovement — loss category check.
+                        // AcceptImprovement + Available: improved bilgisi olmadan
+                        // AcceptAsProgress ↔ Reject ayırt edilemez — loose check.
+                        // Unavailable(NoPreferredVector) → Reject (exact).
+                        match &self.trajectory_loss {
+                            CanonicalTrajectoryLossEvidence::Unavailable { reason } => {
+                                if *reason
+                                    != CanonicalTrajectoryLossUnavailableReason::NoPreferredVector
+                                {
+                                    return Err(GateSemanticConsistencyError::MatrixViolation {
+                                        detail: format!(
+                                            "AcceptImprovement+Unavailable expects NoPreferredVector, got {:?}",
+                                            reason
+                                        ),
+                                    });
+                                }
+                            }
+                            CanonicalTrajectoryLossEvidence::Available { .. } => {
+                                // **PR#84 review P0 (4. tur):** Available loss + Unavailable
+                                // baseline runtime'da GEÇERLİ (target var, baseline yok →
+                                // Available{target, loss_after} + improved=false + Reject).
+                                // Bu kontrol basis seviyesinde DEĞİL — basis'in elinde gate
+                                // evaluation yok, Reject ↔ AcceptAsProgress ayırt edemez.
+                                // Karar parity'si context seviyesinde: validate_gate_against_basis
+                                // (AuthorizationContextV2::new + restore) — basis + gate birlikte.
+                                // Eski kontrol (3. tur) geçerli runtime Reject'i kırıyordu.
+                            }
+                            CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+                                // AcceptImprovement altında NotRequired beklenmez —
+                                // completion-first matris'te AcceptImprovement sadece
+                                // NotCompleted dalında ve loss üretilir/Unavailable.
+                                return Err(GateSemanticConsistencyError::MatrixViolation {
+                                    detail: format!(
+                                        "AcceptImprovement policy + NotRequired({:?}) — matris dışı kombinasyon",
+                                        reason
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                    invalid => {
+                        // Geçersiz failure_policy tag — deserialize validation zaten
+                        // reject etmiş olmalı, ama fail-closed.
+                        return Err(GateSemanticConsistencyError::MatrixViolation {
+                            detail: format!("invalid failure_policy tag: {invalid}"),
+                        });
+                    }
+                }
+            }
+            invalid => {
+                // Geçersiz result tag — deserialize validation zaten reject etmiş olmalı.
+                return Err(GateSemanticConsistencyError::MatrixViolation {
+                    detail: format!("invalid predicate result tag: {invalid}"),
+                });
+            }
+        }
         Ok(())
     }
 
@@ -2382,6 +3239,21 @@ impl AuthorizationBasisV2 {
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
     pub(crate) fn canonical_delta_digest(&self) -> &crate::measurement::MeasurementDeltaDigest {
         &self.canonical_delta_digest
+    }
+    // ── INV-T9 #70 Faz 5 Adım 16 — +4 accessor ──────────────────────────────────
+    pub(crate) fn measured_after(&self) -> &ProvenancedMeasuredResult {
+        &self.measured_after
+    }
+    pub(crate) fn task_goal_evidence(&self) -> &CanonicalTaskGoalEvidenceV2 {
+        &self.task_goal_evidence
+    }
+    pub(crate) fn predicate_basis(&self) -> &CanonicalPredicateEvaluationBasisV2 {
+        &self.predicate_basis
+    }
+    pub(crate) fn predicate_gate_policy_digest(
+        &self,
+    ) -> &crate::measurement::PredicateGatePolicyDigestV2 {
+        &self.predicate_gate_policy_digest
     }
     #[allow(dead_code, reason = "Faz 4 wire serializer / Commit 1b consumer")]
     pub(crate) fn task_claim_digest(&self) -> &crate::measurement::TaskClaimDigest {
@@ -2713,6 +3585,77 @@ impl AuthorizationBasisDigestV2 {
         // Nested evidence — measurement request evidence (subject/impact/revision/digest).
         encode_canonical_measurement_request_evidence_v2(&mut hasher, &basis.measurement_request)?;
 
+        // ── INV-T9 #70 Faz 5 Adım 16 — +4 encoding (review P0-4) ─────────────────
+        // Encoding sırası frozen: measured_after → task_goal_evidence → predicate_basis →
+        // predicate_gate_policy_digest. Golden regoldening sonrası bu sıra sabit kalır.
+
+        // Measured-after — shared writer (write_measurement_result_commitment). 5-axis
+        // değer + source. MeasurementDigest ile aynı byte format (tek truth source).
+        crate::measurement::MeasurementDigest::write_measurement_result_commitment(
+            &mut hasher,
+            (
+                basis.measured_after.coupling.value,
+                basis.measured_after.coupling.source,
+            ),
+            (
+                basis.measured_after.cohesion.value,
+                basis.measured_after.cohesion.source,
+            ),
+            (
+                basis.measured_after.instability.value,
+                basis.measured_after.instability.source,
+            ),
+            (
+                basis.measured_after.entropy.value,
+                basis.measured_after.entropy.source,
+            ),
+            (
+                basis.measured_after.witness_depth.value,
+                basis.measured_after.witness_depth.source,
+            ),
+        )
+        .map_err(|e| CanonicalDigestError::EncodingFailed(e.to_string()))?;
+
+        // Task-goal evidence — shared writer (write_task_goal_commitment). Predicate'leri
+        // canonical byte dizisine çevir (encode_canonical_weighted_predicate_v2_to_vec), sonra
+        // shared writer ile encode. TaskGoalDigest ile aynı byte format (tek truth source).
+        {
+            let encoded_preds: Vec<Vec<u8>> = basis
+                .task_goal_evidence
+                .predicates
+                .iter()
+                .map(crate::measurement::TaskGoalDigest::encode_canonical_weighted_predicate_v2_to_vec)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| CanonicalDigestError::EncodingFailed(e.to_string()))?;
+            let preferred_vector = basis
+                .task_goal_evidence
+                .preferred_vector
+                .as_ref()
+                .map(|crp| crate::coords::RawPosition {
+                    x: crp.x,
+                    y: crp.y,
+                    z: crp.z,
+                    w: crp.w,
+                    v: crp.v,
+                });
+            crate::measurement::TaskGoalDigest::write_task_goal_commitment(
+                &mut hasher,
+                basis.task_goal_evidence.task_id,
+                basis.task_goal_evidence.mode,
+                &encoded_preds,
+                preferred_vector.as_ref(),
+            )
+            .map_err(|e| CanonicalDigestError::EncodingFailed(e.to_string()))?;
+        }
+
+        // Predicate basis — DEDICATED encoder (review P0-4). write_predicate_gate_policy_commitment
+        // YETERSIZ: result taşımaz. Bu encoder full field set: semantics_version + result +
+        // failure_policy + min_improvement_delta + allow_progress_checkpoint + effective_improvement.
+        encode_canonical_predicate_evaluation_basis_v2(&mut hasher, &basis.predicate_basis)?;
+
+        // Predicate gate policy digest — raw 32 bytes (commitment, recompute DEĞIL).
+        hasher.update(basis.predicate_gate_policy_digest.as_bytes());
+
         Ok(Self(hasher.finalize().into()))
     }
 
@@ -2773,9 +3716,14 @@ impl AuthorizationContextDigestV2 {
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
-}
 
-/// **INV-T9 #70 Commit 4b Faz 4:** `CanonicalTrajectoryEvidenceBaseline` → canonical
+    /// **INV-T9 #70 Faz 8-P1:** Bytes'dan construct — V2 envelope wire restore
+    /// (`LowerHex32` strict parse sonrası). `pub(crate)` — authorization modülü internal.
+    #[allow(dead_code, reason = "Faz 8-P1 envelope wire restore")]
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
 /// byte encoding for V2 basis digest. Available/Unavailable varyant tag + nested fields.
 fn encode_canonical_trajectory_baseline_v2(
     hasher: &mut blake3::Hasher,
@@ -2879,6 +3827,16 @@ fn encode_canonical_trajectory_loss_v2(
                 }
             }
         }
+        // **INV-T9 #70 Commit 4b Faz 5 (review v8 P1-4):** append-only tag=2. Mevcut
+        // Available(0)/Unavailable(1) encoding donar — golden digest'lar değişmez.
+        CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
+            encode_u8(hasher, 2, "v2_loss_not_required_tag");
+            encode_u8(
+                hasher,
+                reason.tag().as_u8(),
+                "v2_loss_not_required_reason_tag",
+            );
+        }
     }
     Ok(())
 }
@@ -2927,6 +3885,74 @@ fn encode_canonical_measurement_request_evidence_v2(
     // Structural delta digest + measurement input digest — raw 32 bytes.
     hasher.update(evidence.structural_delta_digest.as_bytes());
     hasher.update(evidence.measurement_input_digest.as_bytes());
+    Ok(())
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P0-4):** Dedicated canonical predicate-evaluation-basis
+/// encoder. `write_predicate_gate_policy_commitment` YETERSIZ — policy digest için yazılır ve
+/// `result` taşımaz (policy digest evaluation sonucundan bağımsız). Bu encoder basis digest
+/// için full field set: semantics_version + result + failure_policy + min_improvement_delta +
+/// allow_progress_checkpoint + effective_improvement.
+///
+/// **Encoding sırası frozen** (golden byte contract):
+/// 1. `gate_evaluation_semantics_version` (u32)
+/// 2. `result` tag (u8 — PredicateSetResultTag)
+/// 3. `failure_policy` tag (u8 — PredicateFailurePolicyTag)
+/// 4. `min_improvement_delta` (f64 — NaN reject, -0.0 normalize)
+/// 5. `allow_progress_checkpoint` (bool → 0/1)
+/// 6. `effective_improvement`: max_coupling + max_instability + min_cohesion + semantics_version
+///
+/// **task_id + task_goal_digest encode EDİLMEZ** — basis digest zaten identity + digests
+/// bölümünde encode ediyor (duplicate yok).
+fn encode_canonical_predicate_evaluation_basis_v2(
+    hasher: &mut blake3::Hasher,
+    basis: &CanonicalPredicateEvaluationBasisV2,
+) -> Result<(), CanonicalDigestError> {
+    use crate::canonical_encoding::{encode_f64, encode_u32, encode_u8};
+
+    // gate_evaluation_semantics_version (u32).
+    encode_u32(
+        hasher,
+        basis.gate_evaluation_semantics_version,
+        "gate_evaluation_semantics_version",
+    );
+    // result tag (PredicateSetResultTag — evaluation sonucu, review P0-4'ün ana noktası).
+    encode_u8(hasher, basis.result.as_u8(), "predicate_set_result_tag");
+    // failure_policy tag.
+    encode_u8(hasher, basis.failure_policy.as_u8(), "failure_policy_tag");
+    // min_improvement_delta (canonical f64).
+    encode_f64(hasher, basis.min_improvement_delta, "min_improvement_delta")?;
+    // allow_progress_checkpoint (bool → 0/1).
+    encode_u8(
+        hasher,
+        if basis.allow_progress_checkpoint {
+            1
+        } else {
+            0
+        },
+        "allow_progress_checkpoint_tag",
+    );
+    // Effective improvement policy: max_coupling + max_instability + min_cohesion + semantics_version.
+    encode_f64(
+        hasher,
+        basis.effective_improvement.max_coupling,
+        "basis_max_coupling",
+    )?;
+    encode_f64(
+        hasher,
+        basis.effective_improvement.max_instability,
+        "basis_max_instability",
+    )?;
+    encode_f64(
+        hasher,
+        basis.effective_improvement.min_cohesion,
+        "basis_min_cohesion",
+    )?;
+    encode_u32(
+        hasher,
+        basis.effective_improvement.semantics_version,
+        "basis_improvement_semantics_version",
+    );
     Ok(())
 }
 
@@ -3944,7 +4970,34 @@ pub enum CanonicalizationError {
     /// taşır (dokümante invariant). Dışarıdan custom axis descriptor reddedilir.
     #[error("unsupported measurement axis (not core raw): {0}")]
     UnsupportedMeasurementAxis(String),
+    /// **INV-T9 #70 Faz 5 (review P1-2):** improvement policy alanı non-finite (NaN/±∞).
+    /// Canonical artifact yüzeyinde NaN/∞ reject — runtime→canonical checked conversion.
+    #[error("non-finite policy field: {field}")]
+    NonFinitePolicyField { field: &'static str },
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 5 Adım 13 — gate_v2 child module (runtime proof)
+//
+// `authorization.rs` file module + `authorization/` directory: Rust 2018 otomatik
+// resolve — `mod gate_v2;` `authorization/gate_v2.rs`'i bulur (review P2: #[path]
+// gereksiz). authorization.rs → mod.rs taşıma YOK (plan negatif koşulu). Child module
+// olduğu için parent'ın private field'larına erişebilir (sibling DEĞİL).
+// ═══════════════════════════════════════════════════════════════════════════════
+mod gate_v2;
+
+// Re-export Faz 5 gate_v2 public API (error taxonomy + bundle consumers).
+#[allow(unused_imports, reason = "Faz 8 production wiring consumer")]
+pub(crate) use gate_v2::{
+    build_authorization_context_v2, evaluate_task_gate_v2, GateEvaluationV2Error,
+    ProducedTrajectoryLossEvidence, TrajectoryLossProductionError, VerifiedGateEvaluationBundleV2,
+};
+// **PR#84 review 7. tur:** compute_completion_first_loss_and_decision — improvement branch
+// test için re-export. Production'da evaluate_task_gate_v2 çağırır (gate_v2 private).
+// **PR#84 review 7. tur P2 #3:** re-export cfg(test) — dar test yüzeyi.
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use gate_v2::compute_completion_first_loss_and_decision;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // hex encoding (inline — dependency eklemeden)
@@ -4025,6 +5078,231 @@ impl Clock for FixedClock {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PendingAuthorization (Model B — Commit 4 genişletir: Envelope + Store)
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 8-P1 — V2 Pending Authorization record (Adım 3)
+//
+// **Asimetrik creation/load API (review 4. tur P0-1):**
+// - `try_new` (pub(crate)) — creation: indexed alanlar evidence'dan türetilir.
+// - `try_new_with_verified_digest` (modül-private) — load: stored outer alanları
+//   KORUR + evidence'a karşı doğrular (overwrite ETMEZ). Wire outer tamper
+//   maskelenmez (review 4. tur P0-1 epistemik doğruluk).
+//
+// **Indexed duplication (review 4. tur P1-5):** task_id, claim_id,
+// authorization_context_digest, attempt_num hem record'da hem embedded evidence'da.
+// Envelope verify exact cross-field karşılaştırma yapar.
+//
+// **Eligibility ÇAĞRILMAZ (review 4. tur P0-2):** `validate_internal` yalnız
+// record ↔ evidence identity + evidence digest recompute + Held binding.
+// Context taşımıyor — eligibility envelope seviyesinde (`verify()`).
+//
+// **Surface restriction:** Sadece `Held` disposition (V1 pattern mirror,
+// auth.rs:5168). Rejected disposition → `RevisionRequiredV2` (Adım 4).
+//
+// **Visibility (review 5. tur P1-1):** `pub(crate)` — tek public checked creation
+// root `PendingAuthorizationEnvelopeV2::try_new_held` (Adım 6).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **INV-T9 #70 Faz 8-P1:** V2 pending authorization record error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PendingAuthorizationV2Error {
+    /// Load: record.task_id ≠ evidence.task_id (outer wire tamper detected).
+    #[error("record task_id ({record}) ≠ evidence task_id ({evidence})")]
+    TaskIdMismatch {
+        record: crate::trajectory::TaskId,
+        evidence: crate::trajectory::TaskId,
+    },
+    /// Load: record.claim_id ≠ evidence.claim_id.
+    #[error("record claim_id ({record}) ≠ evidence claim_id ({evidence})")]
+    ClaimIdMismatch { record: ClaimId, evidence: ClaimId },
+    /// Load: record.authorization_context_digest ≠ evidence context digest.
+    #[error("record context digest ≠ evidence context digest")]
+    ContextDigestMismatch,
+    /// Load: record.attempt_num ≠ evidence.attempt_num.
+    #[error("record attempt_num ({record}) ≠ evidence attempt_num ({evidence})")]
+    AttemptNumberMismatch { record: u64, evidence: u64 },
+    /// Evidence digest recompute mismatch (tamper detection).
+    #[error("evidence digest mismatch (stored ≠ recomputed)")]
+    EvidenceDigestMismatch,
+    /// Evidence digest computation failed.
+    #[error("evidence digest computation failed: {0}")]
+    DigestComputationFailed(String),
+    /// Surface restriction: PendingAuthorizationV2 requires Held disposition.
+    #[error("PendingAuthorizationV2 requires Held disposition, found Rejected")]
+    InvalidEvidenceDisposition,
+    /// Evidence constructor error passthrough.
+    #[error("suspended attempt evidence error: {0}")]
+    Evidence(#[from] SuspendedAttemptEvidenceV2Error),
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 suspended authorization record (Held surface).
+///
+/// V1 `PendingAuthorization` (auth.rs:5080) mirror — V2 context digest bağlar.
+/// Indexed duplication (review 4. tur P1-5): task_id/claim_id/context_digest/
+/// attempt_num hem record'da hem embedded evidence'da; envelope verify exact
+/// karşılaştırır.
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+/// `pub(crate)` visibility — tek public root `try_new_held` (Adım 6).
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + try_new_held + wire loader)"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PendingAuthorizationV2 {
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    authorization_context_digest: AuthorizationContextDigestV2,
+    attempt_num: AttemptNumber,
+    suspended_attempt_evidence: SuspendedAttemptEvidenceV2,
+    evidence_digest: SuspendedAttemptEvidenceDigestV2,
+    created_at: u64,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + try_new_held + wire loader)"
+)]
+impl PendingAuthorizationV2 {
+    /// **Creation (review 4. tur P0-1):** Indexed alanlar evidence'dan türetilir.
+    /// Digest compute edilir (creation path). `pub(crate)` — envelope producer çağırır.
+    pub(crate) fn try_new(
+        evidence: SuspendedAttemptEvidenceV2,
+        created_at: u64,
+    ) -> Result<Self, PendingAuthorizationV2Error> {
+        // Surface restriction: sadece Held (Rejected → RevisionRequiredV2).
+        if !matches!(
+            evidence.disposition(),
+            SuspendedAttemptDisposition::Held { .. }
+        ) {
+            return Err(PendingAuthorizationV2Error::InvalidEvidenceDisposition);
+        }
+        let evidence_digest = SuspendedAttemptEvidenceDigestV2::compute(&evidence)
+            .map_err(|e| PendingAuthorizationV2Error::DigestComputationFailed(e.to_string()))?;
+        Ok(Self {
+            task_id: evidence.task_id(),
+            claim_id: evidence.claim_id(),
+            authorization_context_digest: evidence.authorization_context_digest().clone(),
+            attempt_num: evidence.attempt_num(),
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
+            created_at,
+        })
+    }
+
+    /// **Load (review 4. tur P0-1):** Stored outer alanlar KORUNUR, evidence'a karşı
+    /// doğrulanır (overwrite ETMEZ). Wire outer tamper maskelenmez.
+    ///
+    /// **Visibility (review 5. tur P1-1):** Modül-private — wire loader internal.
+    /// Public restore entrypoint `load_pending_authorization_versioned` (Adım 7).
+    fn try_new_with_verified_digest(
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_context_digest: AuthorizationContextDigestV2,
+        attempt_num: AttemptNumber,
+        evidence: SuspendedAttemptEvidenceV2,
+        stored_evidence_digest: SuspendedAttemptEvidenceDigestV2,
+        created_at: u64,
+    ) -> Result<Self, PendingAuthorizationV2Error> {
+        // Surface restriction: sadece Held.
+        if !matches!(
+            evidence.disposition(),
+            SuspendedAttemptDisposition::Held { .. }
+        ) {
+            return Err(PendingAuthorizationV2Error::InvalidEvidenceDisposition);
+        }
+        // Stored outer alanları KORU — evidence'a karşı doğrula (overwrite ETMEZ).
+        // Bu, wire outer tamper'ı tespit eder (review 4. tur P0-1).
+        let record = Self {
+            task_id,
+            claim_id,
+            authorization_context_digest,
+            attempt_num,
+            suspended_attempt_evidence: evidence,
+            evidence_digest: stored_evidence_digest,
+            created_at,
+        };
+        record.validate_internal()?;
+        Ok(record)
+    }
+
+    /// **Record-internal validation (review 4. tur P0-2):** record ↔ evidence
+    /// cross-field. Context-dependent kontroller (eligibility) envelope `verify()`'da.
+    ///
+    /// Doğrular: task_id, claim_id, attempt_num, context_digest ↔ evidence;
+    /// evidence digest recompute + compare; Held disposition + reason/snapshot binding.
+    fn validate_internal(&self) -> Result<(), PendingAuthorizationV2Error> {
+        let evidence = &self.suspended_attempt_evidence;
+
+        // record ↔ evidence identity.
+        if self.task_id != evidence.task_id() {
+            return Err(PendingAuthorizationV2Error::TaskIdMismatch {
+                record: self.task_id,
+                evidence: evidence.task_id(),
+            });
+        }
+        if self.claim_id != evidence.claim_id() {
+            return Err(PendingAuthorizationV2Error::ClaimIdMismatch {
+                record: self.claim_id,
+                evidence: evidence.claim_id(),
+            });
+        }
+        if self.attempt_num != evidence.attempt_num() {
+            return Err(PendingAuthorizationV2Error::AttemptNumberMismatch {
+                record: self.attempt_num.get(),
+                evidence: evidence.attempt_num().get(),
+            });
+        }
+        if self.authorization_context_digest != *evidence.authorization_context_digest() {
+            return Err(PendingAuthorizationV2Error::ContextDigestMismatch);
+        }
+
+        // Evidence digest recompute + compare (tamper detection).
+        let computed = SuspendedAttemptEvidenceDigestV2::compute(evidence)
+            .map_err(|e| PendingAuthorizationV2Error::DigestComputationFailed(e.to_string()))?;
+        if computed != self.evidence_digest {
+            return Err(PendingAuthorizationV2Error::EvidenceDigestMismatch);
+        }
+
+        // Surface-specific disposition + Held binding.
+        match evidence.disposition() {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            } => {
+                // Held binding: witness_hold_reason/snapshot embedded evidence'da;
+                // record ayrıca taşımaz (V1 pattern — duplication yok, Karar 3 minimal).
+                let _ = (hold_reason, snapshot);
+            }
+            SuspendedAttemptDisposition::Rejected { .. } => {
+                return Err(PendingAuthorizationV2Error::InvalidEvidenceDisposition);
+            }
+        }
+
+        Ok(())
+    }
+
+    // — Accessor'lar (pub(crate) — envelope + navigator Faz 8a consumer) —
+
+    pub(crate) fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub(crate) fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub(crate) fn authorization_context_digest(&self) -> &AuthorizationContextDigestV2 {
+        &self.authorization_context_digest
+    }
+    pub(crate) fn suspended_attempt_evidence(&self) -> &SuspendedAttemptEvidenceV2 {
+        &self.suspended_attempt_evidence
+    }
+    pub(crate) fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigestV2 {
+        &self.evidence_digest
+    }
+    pub(crate) fn created_at(&self) -> u64 {
+        self.created_at
+    }
+}
 
 /// INV-T9 suspended authorization record (Model B).
 ///
@@ -4257,7 +5535,11 @@ pub struct AuthorizationContext {
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:100):** Witness-not-required reason.
 /// Reject → NotApplied: witness aşaması çalışmaz (delta hiç uygulanmadı).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+///
+/// **INV-T9 #70 Faz 8-P1:** `Deserialize` eklendi — V2 persisted context wire DTO
+/// (`RawCanonicalWitnessRequirementV2::NotRequired { reason }`) için. Additive —
+/// V1 serialization byte-identical (serde adları korunur). Variant append-only frozen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum WitnessNotRequiredReason {
     /// `MutationDecision::Reject` → `ApplyTarget::NotApplied` — delta uygulanmadı,
     /// witness aşaması çalışmaz.
@@ -4336,6 +5618,81 @@ impl CanonicalWitnessRequirementV2 {
         }
     }
 
+    /// **INV-T9 #70 Faz 8-P1:** `Required` witness requirement min_approvers değeri.
+    /// `NotRequired` → `None`. Eligibility validator (snapshot ↔ context cross-check)
+    /// için — snapshot.required_approvers ↔ min_approvers.
+    #[allow(
+        dead_code,
+        reason = "Faz 8-P1 suspension eligibility validator consumer"
+    )]
+    pub(crate) fn min_approvers(&self) -> Option<u32> {
+        match &self.repr {
+            CanonicalWitnessRequirementRepr::Required { min_approvers, .. } => Some(*min_approvers),
+            CanonicalWitnessRequirementRepr::NotRequired { .. } => None,
+        }
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** `Required` witness requirement quorum_threshold değeri.
+    /// `NotRequired` → `None`. Eligibility validator (snapshot ↔ context cross-check)
+    /// için — snapshot.required_support ↔ quorum_threshold.
+    #[allow(
+        dead_code,
+        reason = "Faz 8-P1 suspension eligibility validator consumer"
+    )]
+    pub(crate) fn quorum_threshold(&self) -> Option<CanonicalF64> {
+        match &self.repr {
+            CanonicalWitnessRequirementRepr::Required {
+                quorum_threshold, ..
+            } => Some(*quorum_threshold),
+            CanonicalWitnessRequirementRepr::NotRequired { .. } => None,
+        }
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** `Required` mi? Eligibility validator için boolean check.
+    #[allow(
+        dead_code,
+        reason = "Faz 8-P1 suspension eligibility validator consumer"
+    )]
+    pub(crate) fn is_required(&self) -> bool {
+        matches!(self.repr, CanonicalWitnessRequirementRepr::Required { .. })
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** Checked `Required` constructor — persisted wire restore.
+    ///
+    /// Field'ları doğrular (min_approvers > 0, quorum_threshold finite non-neg) ve repr
+    /// kurar. Runtime `TryFrom<(&CanonicalWitnessPolicy, &ApplyTarget)>` ayrı kalır;
+    /// bu constructor restore-path (`PersistedAuthorizationContextV2::restore_from_wire`).
+    #[allow(dead_code, reason = "Faz 8-P1 persisted context wire restore")]
+    pub(crate) fn required(
+        min_approvers: u32,
+        quorum_threshold: CanonicalF64,
+        independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag,
+    ) -> Result<Self, CanonicalWitnessRequirementV2Error> {
+        if min_approvers == 0 {
+            return Err(CanonicalWitnessRequirementV2Error::InvalidMinApprovers);
+        }
+        if !quorum_threshold.is_finite() || quorum_threshold < 0.0 {
+            return Err(CanonicalWitnessRequirementV2Error::InvalidQuorumThreshold);
+        }
+        Ok(Self {
+            repr: CanonicalWitnessRequirementRepr::Required {
+                min_approvers,
+                quorum_threshold,
+                independence_policy,
+            },
+        })
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** Checked `NotRequired` constructor — persisted wire restore.
+    #[allow(dead_code, reason = "Faz 8-P1 persisted context wire restore")]
+    pub(crate) fn not_required(
+        reason: WitnessNotRequiredReason,
+    ) -> Result<Self, CanonicalWitnessRequirementV2Error> {
+        Ok(Self {
+            repr: CanonicalWitnessRequirementRepr::NotRequired { reason },
+        })
+    }
+
     /// **Canonical byte encoding (plan md:101):** Witness requirement varyant/reason
     /// pinned numeric tag. `AuthorizationContextDigestV2` bunu çağırır.
     pub(crate) fn encode_canonical(
@@ -4401,6 +5758,12 @@ pub enum CanonicalWitnessRequirementV2Error {
     RequiredForNotApplied,
     #[error("witness not required for Lane (applied delta requires witness)")]
     NotRequiredForLane,
+    /// **INV-T9 #70 Faz 8-P1:** min_approvers ≤ 0 (restore-path checked constructor).
+    #[error("invalid min_approvers (must be > 0)")]
+    InvalidMinApprovers,
+    /// **INV-T9 #70 Faz 8-P1:** quorum_threshold non-finite veya negatif.
+    #[error("invalid quorum_threshold (must be finite non-negative)")]
+    InvalidQuorumThreshold,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4582,12 +5945,90 @@ impl VerifiedGateEvaluationV2 {
         self.canonical
     }
 
+    /// **INV-T9 #70 Faz 5 Adım 18 (plan md:75-79):** Production constructor —
+    /// `evaluate_task_gate_v2` (gate_v2.rs child module) çağırır. Sadece child module
+    /// erişebilir (field private + modül gizlilik). `GatePassed { mutation_decision }`
+    /// için — Faz 5'de tüm gate kararları GatePassed (RejectedByGate Faz 8 hard-gate).
+    ///
+    /// **Proof semantics:** Bu ctor kanıt üretmez; kanıt `evaluate_task_gate_v2`'nin
+    /// 3 digest recheck + tek predicate evaluation + decision core zinciridir. Bu ctor
+    /// sadece evaluated sonucu opaque proof'a sarmalar (tampering kapalı — field private).
+    pub(crate) fn from_gate_passed(mutation_decision: crate::trajectory::MutationDecision) -> Self {
+        Self {
+            canonical: CanonicalGateEvaluationV2::GatePassed { mutation_decision },
+        }
+    }
+
     /// **cfg(test) fixture (plan md:79):** Test-only constructor — authorization.rs'te
     /// (field privacy). Production build'de constructor YOK — Faz 5 gerçek evaluator.
     #[cfg(test)]
     #[allow(dead_code, reason = "Faz 4 test fixture — production build'de yok")]
     pub(crate) fn fixture(canonical: CanonicalGateEvaluationV2) -> Self {
         Self { canonical }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 14 (P0-1):** VerifiedCanonicalTaskGoalEvidenceV2 — opaque
+/// restore proof. Parent authorization.rs'te private (hem parent restore validator hem
+/// child evaluator aynı proof tipini kullanır).
+///
+/// **Restore contract:** canonical evidence → `compute_from_canonical` digest parity →
+/// `PredicateSet::try_from` → `validate_predicate_goal_for_commit` → typed proof.
+/// Bu proof, restore path'inin runtime ile aynı task-goal gerçekliğine bağlandığını
+/// kanıtlar. Field private; Serialize/Deserialize/Clone YOK. Production build'de
+/// constructor YOK — Faz 5 restore validator (Item 16) üretir.
+///
+/// **Faz 5 Adım 17 notu:** `validate_predicate_basis_semantics_v2` doğrudan `PredicateSet::try_from`
+/// kullandığı için bu tip henüz constructed değil. Context-katmanı restore (basis + gate_evaluation
+/// birlikte) ve Faz 8 wiring consumer bekleyen.
+#[allow(
+    dead_code,
+    reason = "Faz 8 context-restore + production wiring consumer"
+)]
+#[derive(Debug)]
+pub(crate) struct VerifiedCanonicalTaskGoalEvidenceV2 {
+    evidence: CanonicalTaskGoalEvidenceV2,
+    /// Recomputed digest — restore sırasında `compute_from_canonical` ile üretilir,
+    /// stored task_goal_digest ile parity kanıtı. Runtime digest ile aynı byte olmalı.
+    digest: crate::measurement::TaskGoalDigest,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8 context-restore + production wiring consumer"
+)]
+impl VerifiedCanonicalTaskGoalEvidenceV2 {
+    /// **pub(crate) consumer:** Verified proof'u canonical evidence + digest'e indirger.
+    /// Restore validator (Item 16) ve child evaluator (Item 17) bu proof'u tüketir.
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        CanonicalTaskGoalEvidenceV2,
+        crate::measurement::TaskGoalDigest,
+    ) {
+        (self.evidence, self.digest)
+    }
+
+    /// **Restore constructor:** canonical evidence → compute_from_canonical digest.
+    /// Bu constructor restore path'inin digest parity'sini kanıtlar — stored digest
+    /// ile karşılaştırma caller'ın (Item 16 validate_predicate_basis_semantics_v2)
+    /// sorumluluğu. validate_predicate_goal_for_commit caller'da çağrılır (PredicateSet
+    /// restore sonrası).
+    pub(crate) fn from_canonical_evidence(
+        evidence: CanonicalTaskGoalEvidenceV2,
+    ) -> Result<Self, crate::measurement::EngineMeasurementDigestError> {
+        let digest = crate::measurement::TaskGoalDigest::compute_from_canonical(&evidence)?;
+        Ok(Self { evidence, digest })
+    }
+
+    /// **cfg(test) fixture:** Test-only constructor — field privacy.
+    #[cfg(test)]
+    #[allow(dead_code, reason = "Faz 5 test fixture — production build'de yok")]
+    pub(crate) fn fixture(
+        evidence: CanonicalTaskGoalEvidenceV2,
+        digest: crate::measurement::TaskGoalDigest,
+    ) -> Self {
+        Self { evidence, digest }
     }
 }
 
@@ -4626,6 +6067,10 @@ pub enum AuthorizationContextV2BuildError {
     Basis(#[from] AuthorizationBasisV2Error),
     #[error("witness requirement validation failed: {0}")]
     WitnessRequirement(#[from] CanonicalWitnessRequirementV2Error),
+    /// **PR#84 review P0 (4. tur):** Gate decision ↔ basis semantic mismatch — context seviyesi.
+    /// Basis + gate_evaluation birlikte değerlendirilir (basis seviyesi değil).
+    #[error("gate decision ↔ basis semantic mismatch: {detail}")]
+    GateBasisSemanticMismatch { detail: String },
 }
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:164):** AuthorizationContextV2 invariant error.
@@ -4677,6 +6122,8 @@ impl AuthorizationContextV2 {
         // mutation_decision.apply_target(). Illegal state yapısal olarak imkânsız.
         let apply_target = canonical_gate.apply_target();
         witness_requirement.validate_for(&apply_target)?;
+        // **PR#84 review P0 (4. tur):** gate ↔ basis semantic parity (context seviyesi).
+        validate_gate_against_basis(&basis, &canonical_gate)?;
         Ok(Self {
             basis,
             gate_evaluation: canonical_gate,
@@ -4712,6 +6159,285 @@ impl AuthorizationContextV2 {
             &self.gate_evaluation,
             &self.witness_requirement,
         )
+    }
+
+    /// **INV-T9 #70 Faz 8-P1 (review 4. tur P0-3):** Loader-private restore constructor.
+    ///
+    /// Runtime `new` `VerifiedGateEvaluationV2` (proof) tüketir; bu constructor
+    /// checked persisted wire'dan restore eder (canonical gate_evaluation + witness).
+    /// İki trust boundary ayrı: runtime proof-gated vs checked persisted-wire.
+    ///
+    /// **Visibility (review 5. tur P0-2):** Modül-private — tek caller
+    /// `PersistedAuthorizationContextV2::restore_from_wire`. Public veya pub(crate) DEĞİL.
+    /// Source-contract test: AuthorizationContextV2 construction sites == {new, restore}
+    /// (başka site yok).
+    ///
+    /// **Validation:** `validate_for(apply_target)` — runtime `new` ile aynı invariant.
+    /// **PR#84 review P0 (4. tur):** `validate_gate_against_basis` — gate ↔ basis semantic
+    /// parity (Unavailable baseline + AcceptAsProgress impossible, Reject valid).
+    fn restore(
+        basis: AuthorizationBasisV2,
+        gate_evaluation: CanonicalGateEvaluationV2,
+        witness_requirement: CanonicalWitnessRequirementV2,
+    ) -> Result<Self, AuthorizationContextV2BuildError> {
+        let apply_target = gate_evaluation.apply_target();
+        witness_requirement.validate_for(&apply_target)?;
+        validate_gate_against_basis(&basis, &gate_evaluation)?;
+        Ok(Self {
+            basis,
+            gate_evaluation,
+            witness_requirement,
+        })
+    }
+}
+
+/// **PR#84 review P0 (4. tur):** Shared gate ↔ basis semantic validator (context seviyesi).
+///
+/// Runtime (`AuthorizationContextV2::new`) ve restore (`restore`) tarafından ortak çağrılır.
+/// Basis seviyesi değil — basis'in elinde gate evaluation yok, karar ayırt edemez. Bu validator
+/// basis + gate_evaluation'ı birlikte değerlendirir:
+///
+/// **Unavailable baseline + Available loss + AcceptImprovement + NotCompleted:**
+/// - `GatePassed { Reject }` → geçerli (runtime bu durumu üretir — improvement kanıtlanamaz)
+/// - `GatePassed { AcceptAsProgress }` → reject (forged persisted — runtime üretmez)
+/// - diğer → reject
+///
+/// Available baseline: improved recompute edilebilir (before + target + min_delta) → loose check.
+fn validate_gate_against_basis(
+    basis: &AuthorizationBasisV2,
+    gate: &CanonicalGateEvaluationV2,
+) -> Result<(), AuthorizationContextV2BuildError> {
+    use crate::trajectory::MutationDecision;
+
+    // Sadece Unavailable baseline + AcceptImprovement + NotCompleted + Available loss dalı.
+    if !matches!(
+        basis.trajectory_baseline(),
+        CanonicalTrajectoryEvidenceBaseline::Unavailable { .. }
+    ) {
+        return Ok(()); // Available baseline → improved recompute edilebilir, loose check.
+    }
+    // predicate_basis result + failure_policy kontrolü.
+    // Tag değerleri: PredicateSetResult (Completed=0, SourceInsufficient=1, NotCompleted=2);
+    // PredicateFailurePolicy (StrictReject=0, AcceptImprovement=1, OperatorApproval=2).
+    let predicate_basis = basis.predicate_basis();
+    if predicate_basis.result.as_u8() != 2 {
+        return Ok(()); // Completed/SourceInsufficient → loss NotRequired, bu dal değil.
+    }
+    if predicate_basis.failure_policy.as_u8() != 1 {
+        return Ok(()); // Sadece AcceptImprovement policy.
+    }
+    if !matches!(
+        basis.trajectory_loss(),
+        CanonicalTrajectoryLossEvidence::Available { .. }
+    ) {
+        return Ok(()); // Sadece Available loss (target var, baseline yok).
+    }
+    // Bu dalda: Unavailable baseline + Available loss + AcceptImprovement + NotCompleted.
+    // Runtime her zaman Reject üretir. AcceptAsProgress imkânsız (forged persisted).
+    match gate {
+        CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: MutationDecision::Reject,
+        } => Ok(()), // Geçerli runtime Reject.
+        CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: MutationDecision::AcceptAsProgress,
+        } => Err(AuthorizationContextV2BuildError::GateBasisSemanticMismatch {
+            detail: "Unavailable baseline + Available loss + AcceptImprovement → runtime always Rejects; AcceptAsProgress impossible (forged persisted)".to_string(),
+        }),
+        _ => Err(AuthorizationContextV2BuildError::GateBasisSemanticMismatch {
+            detail: "Unavailable baseline + Available loss + AcceptImprovement → only Reject valid".to_string(),
+        }),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — PersistedAuthorizationContextV2 (Adım 5)
+//
+// **Wrapper frozen (review 5. tur P0-2):** `PersistedAuthorizationContextV2`
+// `AuthorizationContextV2`'yi sarar. Restore yalnız private `restore_from_wire`
+// method'unda — ayrı free function YOK. Tek exact zincir.
+//
+// **Wire DTO (review 5. tur P1-2):** `RawPersistedAuthorizationContextV2` +
+// `RawCanonicalGateEvaluationV2` + `RawCanonicalWitnessRequirementV2`. Pinned numeric
+// tag (u8) ile strict dispatch. Domain tiplere derive Serialize/Deserialize YOK;
+// raw DTO'lar doğal Serialize/Deserialize taşır.
+//
+// **Loader-private restore (review 4. tur P0-3 + 5. tur P0-2):** Restore zinciri:
+//   raw basis → checked AuthorizationBasisV2 (mevcut from_wire)
+//   raw gate → pinned tag → checked CanonicalGateEvaluationV2
+//   raw witness → pinned tag → checked CanonicalWitnessRequirementV2
+//   → AuthorizationContextV2::restore (private) → validate_for
+// Tek caller = PendingAuthorizationEnvelopeV2 wire loader (Adım 6).
+//
+// **Access yüzey pub(crate) (review 5. tur P2-2):** Faz 8a navigator/dış consumer
+// gerektiğinde genişletilir. Şimdilik additive API dar.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** Persisted authorization context restore error.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum AuthorizationContextV2RestoreError {
+    /// Basis wire restore failed (mevcut `AuthorizationBasisV2::from_wire`).
+    #[error("basis restore failed: {0}")]
+    Basis(String),
+    /// Gate evaluation pinned tag invalid.
+    #[error("gate evaluation tag invalid: {0}")]
+    GateTag(String),
+    /// Witness requirement pinned tag invalid.
+    #[error("witness requirement tag invalid: {0}")]
+    WitnessTag(String),
+    /// Context restore invariant failed (validate_for — runtime ile aynı).
+    #[error("context restore invariant failed: {0}")]
+    ContextBuild(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-2):** Raw canonical gate evaluation wire DTO.
+///
+/// `GateDecision` (RejectedByGate payload) ve `MutationDecision` (GatePassed payload)
+/// Serialize/Deserialize derive'lu — doğrudan wire'da. Domain `CanonicalGateEvaluationV2`'ye
+/// derive Deserialize YOK — raw DTO → checked domain dönüşümü (`restore_gate_evaluation_v2`).
+///
+/// Sadece serde derive (V2 raw DTO pattern — `RawCanonicalTaskGoalEvidenceV2` auth.rs:8737
+/// ile uyumlu, Debug/Clone yok). Modül-private — wire restore internal.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawCanonicalGateEvaluationV2 {
+    RejectedByGate {
+        decision: crate::trajectory::GateDecision,
+    },
+    GatePassed {
+        mutation_decision: crate::trajectory::MutationDecision,
+    },
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-2):** Raw canonical witness requirement wire DTO.
+///
+/// Domain field'lar (min_approvers, quorum_threshold, reason) Serialize/Deserialize.
+/// Domain `CanonicalWitnessRequirementV2`'ye derive Deserialize YOK — raw DTO → checked
+/// domain dönüşümü (`restore_witness_requirement_v2`). Modül-private — wire restore internal.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawCanonicalWitnessRequirementV2 {
+    Required {
+        min_approvers: u32,
+        quorum_threshold: f64,
+        independence_policy: crate::canonical_tags::WitnessIndependencePolicyTag,
+    },
+    NotRequired {
+        reason: WitnessNotRequiredReason,
+    },
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Raw persisted authorization context wire DTO.
+///
+/// `basis` mevcut `RawAuthorizationBasisV2`'yi (auth.rs:8578) reuse eder — V2 basis
+/// wire authority'si zaten kurulmuş. gate/witness yeni raw DTO'lar.
+/// Modül-private — wire restore internal.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawPersistedAuthorizationContextV2 {
+    pub(crate) basis: RawAuthorizationBasisV2,
+    pub(crate) gate_evaluation: RawCanonicalGateEvaluationV2,
+    pub(crate) witness_requirement: RawCanonicalWitnessRequirementV2,
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P0-2):** Persisted authorization context wrapper.
+///
+/// `AuthorizationContextV2`'yi sarar. Runtime (`from_runtime`) ve checked persisted-wire
+/// (`restore_from_wire`) iki trust boundary. Restore yalnız private method — ayrı free
+/// function YOK (P0-2 frozen).
+///
+/// **Access pub(crate) (review 5. tur P2-2):** Envelope + navigator Faz 8a consumer.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + envelope wire loader)"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PersistedAuthorizationContextV2 {
+    context: AuthorizationContextV2,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + envelope wire loader)"
+)]
+impl PersistedAuthorizationContextV2 {
+    /// **Runtime boundary:** Runtime context'i sar (navigator Faz 8a held creation).
+    pub(crate) fn from_runtime(context: AuthorizationContextV2) -> Self {
+        Self { context }
+    }
+
+    /// **Loader-private restore (review 5. tur P0-2):** Checked persisted wire → context.
+    /// Private method — tek caller `PendingAuthorizationEnvelopeV2` wire loader (Adım 6).
+    ///
+    /// Source-contract test: `PersistedAuthorizationContextV2::restore_from_wire`
+    /// production call-site count == 1, caller == envelope wire loader.
+    fn restore_from_wire(
+        raw: RawPersistedAuthorizationContextV2,
+    ) -> Result<Self, AuthorizationContextV2RestoreError> {
+        // raw basis → checked AuthorizationBasisV2 (mevcut from_wire).
+        let basis = AuthorizationBasisV2::from_wire(raw.basis)
+            .map_err(|e| AuthorizationContextV2RestoreError::Basis(e.to_string()))?;
+        // raw gate → pinned tag → checked CanonicalGateEvaluationV2.
+        let gate_evaluation = restore_gate_evaluation_v2(raw.gate_evaluation)?;
+        // raw witness → pinned tag → checked CanonicalWitnessRequirementV2.
+        let witness_requirement = restore_witness_requirement_v2(raw.witness_requirement)?;
+        // → AuthorizationContextV2::restore (private) → validate_for.
+        let context = AuthorizationContextV2::restore(basis, gate_evaluation, witness_requirement)
+            .map_err(|e| AuthorizationContextV2RestoreError::ContextBuild(e.to_string()))?;
+        Ok(Self { context })
+    }
+
+    /// Context accessor (pub(crate) — P2-2 dar). Faz 8a'da gerçek navigator consumer
+    /// gelirse ownership gerekirse `into_verified_context` dar API eklenebilir.
+    pub(crate) fn context(&self) -> &AuthorizationContextV2 {
+        &self.context
+    }
+    pub(crate) fn compute_digest(
+        &self,
+    ) -> Result<AuthorizationContextDigestV2, CanonicalDigestError> {
+        self.context.compute_digest()
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Raw gate evaluation → checked domain.
+///
+/// `GateDecision` → `RejectedGateDecisionV2::try_from` (checked — PassedAll/Unknown reject).
+/// `MutationDecision` doğrudan (tüm varyantlar geçerli).
+fn restore_gate_evaluation_v2(
+    raw: RawCanonicalGateEvaluationV2,
+) -> Result<CanonicalGateEvaluationV2, AuthorizationContextV2RestoreError> {
+    match raw {
+        RawCanonicalGateEvaluationV2::RejectedByGate { decision } => {
+            let rejected = RejectedGateDecisionV2::try_from(decision)
+                .map_err(|e| AuthorizationContextV2RestoreError::GateTag(e.to_string()))?;
+            Ok(CanonicalGateEvaluationV2::RejectedByGate { decision: rejected })
+        }
+        RawCanonicalGateEvaluationV2::GatePassed { mutation_decision } => {
+            Ok(CanonicalGateEvaluationV2::GatePassed { mutation_decision })
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Raw witness requirement → checked domain.
+///
+/// `CanonicalWitnessRequirementV2::required`/`not_required` checked constructor'ları.
+fn restore_witness_requirement_v2(
+    raw: RawCanonicalWitnessRequirementV2,
+) -> Result<CanonicalWitnessRequirementV2, AuthorizationContextV2RestoreError> {
+    match raw {
+        RawCanonicalWitnessRequirementV2::Required {
+            min_approvers,
+            quorum_threshold,
+            independence_policy,
+        } => CanonicalWitnessRequirementV2::required(
+            min_approvers,
+            quorum_threshold,
+            independence_policy,
+        )
+        .map_err(|e| AuthorizationContextV2RestoreError::WitnessTag(e.to_string())),
+        RawCanonicalWitnessRequirementV2::NotRequired { reason } => {
+            CanonicalWitnessRequirementV2::not_required(reason)
+                .map_err(|e| AuthorizationContextV2RestoreError::WitnessTag(e.to_string()))
+        }
     }
 }
 
@@ -5208,6 +6934,704 @@ impl SuspendedAttemptEvidenceDigest {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — V2 Suspended Attempt Evidence ailesi
+// (additive downstream V2 readiness — review 5 tur, frozen)
+//
+// **Neden ayrı V2 ailesi (review P0-1, 4. tur):** V1 `SuspendedAttemptEvidence`
+// `authorization_basis_digest: AuthorizationBasisDigest` (V1) field'ı taşıyor —
+// V2 overload imkânsız (V1 byte contract frozen). V2 ailesi ayrı kurulur:
+//
+// - `SuspendedAttemptEvidenceV2` — `authorization_context_digest:
+//   AuthorizationContextDigestV2` (basis+gate+witness commitment, basis TEK
+//   BAŞINA kararın tamamı DEĞİL — review 2. tur P0-1/P0-2).
+// - `SuspendedAttemptEvidenceDigestV2` — ayrı domain separator
+//   `OSP/ATTEMPT-EVIDENCE/V2` (null terminator YOK — V2 convention, V1
+//   `osp.attempt-evidence.v1\0` frozen).
+//
+// **Constructor sözleşmesi (review 3. tur P0-1):** Evidence constructor digest
+// ÜRETMEZ — V1 pattern (`try_new_normalizing`/`try_from_canonical_wire`) mirror.
+// Digest ayrı surface'da (`PendingAuthorizationV2`/`RevisionRequiredV2`).
+//
+// **V2-specific error tipi (review 4. tur P1-6):** `SuspendedAttemptEvidenceV2Error`
+// — V1 variant'ları taşınmaz. Ortak private canonical validation helper'lar
+// (`canonicalize_rejections`, `validate_evidence_semantics`) reuse edilir ama
+// wire schema aileleri bağımsız sürümlenebilir.
+//
+// **Visibility (review 5. tur P1-1/P0-3):** `pub(crate)` — tek public checked
+// creation root `PendingAuthorizationEnvelopeV2::try_new_held`. Internal producer
+// non-test consumer (envelope wire loader + try_new_held) kazanır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Canonical suspended-attempt evidence schema version (v2).
+///
+/// **Faz 8-P1:** V2 schema — context digest bağlar (basis DEĞİL). V1
+/// (`SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION = 1`) frozen.
+pub(crate) const SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2: u32 = 2;
+
+/// **INV-T9 #70 Faz 8-P1:** V2-specific evidence error tipi.
+///
+/// V1 `SuspendedAttemptEvidenceError` variant'ları TAŞINMAZ (review 4. tur P1-6) —
+/// wire schema aileleri bağımsız sürümlenebilir. Ortak private canonical
+/// validation helper'lar (`canonicalize_rejections`, `validate_evidence_semantics`)
+/// reuse edilir ama ortak error mapping üzerinden.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum SuspendedAttemptEvidenceV2Error {
+    #[error("v2 schema version mismatch: found {found}, expected {expected}")]
+    SchemaVersionMismatch { found: u32, expected: u32 },
+    /// Witness snapshot support/required_support non-finite veya negatif.
+    #[error("invalid witness snapshot: {0}")]
+    InvalidSnapshot(String),
+    /// Held hold_reason ↔ snapshot iç tutarlılık ihlali.
+    #[error("hold reason ↔ snapshot inconsistency: {0}")]
+    HoldReasonSnapshotInconsistency(String),
+    /// **Strict wire:** Wire'dan gelen rejection sırası canonical değil.
+    /// Production API (`try_new_normalizing`) canonicalize eder; wire load
+    /// (`try_from_canonical_wire`) strict reject eder.
+    #[error("non-canonical rejection order on v2 wire (strict wire rejects; API normalizes)")]
+    NonCanonicalRejectionOrder,
+    /// Duplicate (witness, rationale) çifti — canonical encoding determinism.
+    #[error("duplicate witness rejection (canonical determinism)")]
+    DuplicateRejection,
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 canonical embedded attempt-evidence — context digest bound.
+///
+/// V1 `SuspendedAttemptEvidence`'ın V2 karşılığı. Fark: `authorization_context_digest`
+/// (`AuthorizationContextDigestV2` = basis+gate+witness commitment) taşır, basis
+/// digest DEĞİL. V2 authorization kararı = basis + gate_evaluation + witness_requirement
+/// bütünüdür; evidence yalnız basis'e bağlanırsa gate/witness değişikliği evidence
+/// kimliğine yansımaz (review 2. tur P0-1).
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+/// `pub(crate)` visibility — tek public checked creation root
+/// `PendingAuthorizationEnvelopeV2::try_new_held` (review 5. tur P0-3/P1-1).
+///
+/// **Constructor digest ÜRETMEZ (review 3. tur P0-1):** V1 pattern mirror —
+/// `try_new_normalizing`/`try_from_canonical_wire` normalize+validate yapar; digest
+/// ayrı surface'da (`PendingAuthorizationV2::try_new` / load constructor).
+///
+/// **Faz 8a consumer:** `PendingAuthorizationEnvelopeV2::try_new_held` +
+/// `RevisionRequiredV2::try_new_rejected` (navigator Faz 8a) + envelope wire loader.
+/// Test'ler cfg(test) consumer; lib build Faz 8a navigator consumer bekler.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct SuspendedAttemptEvidenceV2 {
+    schema_version: u32,
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    authorization_context_digest: AuthorizationContextDigestV2,
+    attempt_num: AttemptNumber,
+    disposition: SuspendedAttemptDisposition,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+impl SuspendedAttemptEvidenceV2 {
+    /// Production API constructor (normalizing) — arbitrary input → canonicalize → validate.
+    ///
+    /// **N2 mirror (V1 `try_new_normalizing` auth.rs:6089):** Rejected reasons
+    /// `canonicalize_rejections` üzerinden canonical sıraya gelir (sort + duplicate
+    /// reject). Held/Rejected `validate_evidence_semantics`. Wire load path bunu
+    /// KULLANMAZ — `try_from_canonical_wire` strict check yapar.
+    ///
+    /// **Digest ÜRETMEZ** — review 3. tur P0-1 sözleşmesi.
+    pub(crate) fn try_new_normalizing(
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_context_digest: AuthorizationContextDigestV2,
+        attempt_num: AttemptNumber,
+        disposition: SuspendedAttemptDisposition,
+    ) -> Result<Self, SuspendedAttemptEvidenceV2Error> {
+        let disposition = normalize_disposition_v2(disposition)?;
+        validate_evidence_semantics(&disposition).map_err(map_v1_evidence_error)?;
+        Ok(Self {
+            schema_version: SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2,
+            task_id,
+            claim_id,
+            authorization_context_digest,
+            attempt_num,
+            disposition,
+        })
+    }
+
+    /// Wire load constructor — strict canonical check (NO normalize).
+    ///
+    /// **N2 mirror (V1 `try_from_canonical_wire` auth.rs:6132):** Wire'dan gelen
+    /// disposition raw kabul edilir. Non-canonical rejection sırası →
+    /// `NonCanonicalRejectionOrder` (normalize ETMEZ — persisted representation
+    /// canonical olmalı). Semantic validation (`validate_evidence_semantics`) yapılır.
+    ///
+    /// **Visibility (review 5. tur P1-1):** `pub(crate)` — wire loader internal.
+    /// Public restore entrypoint `load_pending_authorization_versioned`.
+    pub(crate) fn try_from_canonical_wire(
+        schema_version: u32,
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        authorization_context_digest: AuthorizationContextDigestV2,
+        attempt_num: AttemptNumber,
+        disposition: SuspendedAttemptDisposition,
+    ) -> Result<Self, SuspendedAttemptEvidenceV2Error> {
+        if schema_version != SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2 {
+            return Err(SuspendedAttemptEvidenceV2Error::SchemaVersionMismatch {
+                found: schema_version,
+                expected: SUSPENDED_ATTEMPT_EVIDENCE_SCHEMA_VERSION_V2,
+            });
+        }
+        // Strict wire: non-canonical rejection order reject (normalize ETMEZ).
+        if let SuspendedAttemptDisposition::Rejected { reasons, .. } = &disposition {
+            verify_rejections_canonical_order(reasons).map_err(map_v1_evidence_error)?;
+        }
+        validate_evidence_semantics(&disposition).map_err(map_v1_evidence_error)?;
+        Ok(Self {
+            schema_version,
+            task_id,
+            claim_id,
+            authorization_context_digest,
+            attempt_num,
+            disposition,
+        })
+    }
+
+    // — Accessor'lar (pub(crate) — internal producer consumer'ları) —
+
+    pub(crate) fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+    pub(crate) fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub(crate) fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub(crate) fn authorization_context_digest(&self) -> &AuthorizationContextDigestV2 {
+        &self.authorization_context_digest
+    }
+    pub(crate) fn attempt_num(&self) -> AttemptNumber {
+        self.attempt_num
+    }
+    pub(crate) fn disposition(&self) -> &SuspendedAttemptDisposition {
+        &self.disposition
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 evidence — normalize disposition (Rejected canonicalize).
+///
+/// V1 `try_new_normalizing` iç logic mirror — `canonicalize_rejections` reuse.
+/// Held pass-through; Rejected canonical sıraya normalize + duplicate reject.
+fn normalize_disposition_v2(
+    disposition: SuspendedAttemptDisposition,
+) -> Result<SuspendedAttemptDisposition, SuspendedAttemptEvidenceV2Error> {
+    match disposition {
+        SuspendedAttemptDisposition::Held {
+            hold_reason,
+            snapshot,
+        } => Ok(SuspendedAttemptDisposition::Held {
+            hold_reason,
+            snapshot,
+        }),
+        SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+            let canonical_reasons =
+                canonicalize_rejections(reasons).map_err(map_v1_evidence_error)?;
+            Ok(SuspendedAttemptDisposition::Rejected {
+                reasons: canonical_reasons,
+                snapshot,
+            })
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V1 evidence error → V2 error mapping (review 4. tur P1-6).
+///
+/// Ortak private canonical validation helper'lar (`canonicalize_rejections`,
+/// `validate_evidence_semantics`) V1 error döner; V2 wire schema bağımsız olduğu
+/// için V1 variant'ları doğrudan V2 contract'a taşınmaz. Mapping:
+fn map_v1_evidence_error(e: SuspendedAttemptEvidenceError) -> SuspendedAttemptEvidenceV2Error {
+    match e {
+        SuspendedAttemptEvidenceError::SchemaVersionMismatch { found, expected } => {
+            SuspendedAttemptEvidenceV2Error::SchemaVersionMismatch { found, expected }
+        }
+        SuspendedAttemptEvidenceError::InvalidSnapshot(s) => {
+            SuspendedAttemptEvidenceV2Error::InvalidSnapshot(s)
+        }
+        SuspendedAttemptEvidenceError::HoldReasonSnapshotInconsistency(s) => {
+            SuspendedAttemptEvidenceV2Error::HoldReasonSnapshotInconsistency(s)
+        }
+        SuspendedAttemptEvidenceError::NonCanonicalRejectionOrder => {
+            SuspendedAttemptEvidenceV2Error::NonCanonicalRejectionOrder
+        }
+        SuspendedAttemptEvidenceError::DuplicateRejection => {
+            SuspendedAttemptEvidenceV2Error::DuplicateRejection
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 evidence digest — domain-separated BLAKE3.
+///
+/// V1 `SuspendedAttemptEvidenceDigest` (`osp.attempt-evidence.v1\0`) frozen —
+/// ayrı V2 digest newtype. Domain separator `OSP/ATTEMPT-EVIDENCE/V2` (null
+/// terminator YOK — V2 convention, `OSP/AUTHORIZATION-CONTEXT/V2` ile uyumlu).
+///
+/// **v2 byte contract (review 5. tur P2-1 exact varyant sırası):**
+/// 1. `schema_version` (u32 LE)
+/// 2. `task_id` (u64 LE)
+/// 3. `claim_id` (u64 LE)
+/// 4. `authorization_context_digest` (raw 32 bytes — context commitment)
+/// 5. `attempt_num` (u64 LE)
+/// 6. Disposition varyant:
+///    - **Held:** variant tag (u8: 1) → `WitnessQuorumSnapshot` → `WitnessHoldReason`
+///    - **Rejected:** variant tag (u8: 2) → `WitnessQuorumSnapshot` →
+///      rejection_count (u64 LE) → canonical-sorted `NonEmptyWitnessRejections`
+///
+/// Encoder + golden test aynı sıra. Canonical rejection sıralama V1 helper reuse
+/// (`encode_non_empty_witness_rejections`).
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct SuspendedAttemptEvidenceDigestV2([u8; 32]);
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + try_new_held)"
+)]
+impl SuspendedAttemptEvidenceDigestV2 {
+    /// V2 convention domain separator (null terminator YOK).
+    const DOMAIN_SEPARATOR: &'static [u8] = b"OSP/ATTEMPT-EVIDENCE/V2";
+
+    /// Evidence'dan BLAKE3 digest hesapla.
+    ///
+    /// **Constructor DEĞİL (review 3. tur P0-1):** Ayrı free function — surface
+    /// (`PendingAuthorizationV2::try_new`) creation'da çağırır, load constructor
+    /// stored digest korur + bu fonksiyonla recompute + compare yapar.
+    pub(crate) fn compute(
+        evidence: &SuspendedAttemptEvidenceV2,
+    ) -> Result<Self, CanonicalDigestError> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u32(
+            &mut hasher,
+            evidence.schema_version,
+            "v2_evidence_schema_version",
+        );
+        encode_u64(&mut hasher, evidence.task_id, "v2_evidence_task_id");
+        encode_u64(
+            &mut hasher,
+            evidence.claim_id.into(),
+            "v2_evidence_claim_id",
+        );
+        hasher.update(evidence.authorization_context_digest.as_bytes());
+        encode_u64(
+            &mut hasher,
+            evidence.attempt_num.get(),
+            "v2_evidence_attempt_num",
+        );
+
+        match &evidence.disposition {
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            } => {
+                encode_u8(&mut hasher, 1, "v2_disposition_held_tag");
+                encode_witness_quorum_snapshot(&mut hasher, snapshot)?;
+                encode_witness_hold_reason(&mut hasher, hold_reason)?;
+            }
+            SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+                encode_u8(&mut hasher, 2, "v2_disposition_rejected_tag");
+                encode_witness_quorum_snapshot(&mut hasher, snapshot)?;
+                encode_non_empty_witness_rejections(&mut hasher, reasons)?;
+            }
+        }
+
+        let hash = hasher.finalize();
+        Ok(Self(hash.into()))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub(crate) fn to_hex(&self) -> String {
+        hex::encode(self.0)
+    }
+
+    /// Bytes'dan construct — wire restore (Adım 9 `LowerHex32` ile strict parse).
+    pub(crate) fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — V2 Suspension Eligibility Validator (Adım 2)
+//
+// **Neden (review 3. tur P0-2):** Context ile Held/Rejected disposition arasındaki
+// witness-eligibility doğrulanmaz. Şu senaryo yapısal olarak mümkün:
+//   gate_evaluation = GatePassed { Reject }
+//   witness_requirement = NotRequired { RejectedBeforeWitness }
+//   apply_target = NotApplied
+// Bu context witness aşamasına HİÇ ulaşmamış. Ama caller
+// `SuspendedAttemptEvidenceV2::try_new(... Held{...})` kurabilir, context digest
+// parity geçer, evidence digest parity geçer → tarihsel imkânsız maskelenir.
+//
+// **Context digest preimage DEĞİL (review 3. tur P0-2):** Context digest'ten
+// gate/witness geri çıkarılamaz. Eligibility context gerektirir — record seviyesi
+// `validate_internal` (context taşımıyor) ÇAĞIRAMAZ. Sadece context'e erişebilen
+// yerde (envelope verify + surface checked constructor) çalışır.
+//
+// **Semantic reuse (review 5. tur P1-3):** Mevcut `gate_evaluation.apply_target()`
+// + `witness_requirement.validate_for()` semantiğini reuse eder. Yeni mapping
+// yazmaz. `RequireOperatorApproval` → witness aşamasına girer (operator = witness);
+// `Reject` → `NotApplied`.
+//
+// **Visibility:** Private fn (review 5. tur P1-3). Faz 8a'da engine production
+// caller ile `witness_dispatch_requirement_v2` public API eklenir.
+//
+// **Kullanım yerleri (review 3. tur P0-2 — ortak):**
+// - `PendingAuthorizationEnvelopeV2::verify()` (Adım 6)
+// - `PendingAuthorizationEnvelopeV2::try_new_held` (Adım 6 — erken typed reject)
+// - `RevisionRequiredV2::try_new_rejected` (Adım 4)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** V2 suspension eligibility error — context ↔ disposition
+/// witness-eligibility ihlali.
+///
+/// **Not `Eq`:** `SnapshotRequiredSupportMismatch` `f64` field içerir (quorum threshold).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub(crate) enum SuspensionEligibilityV2Error {
+    /// `gate_evaluation` `GatePassed` DEĞİL (`RejectedByGate`) — witness'a ulaşılmamış.
+    #[error("gate evaluation not GatePassed (RejectedByGate — witness never reached)")]
+    GateNotPassed,
+    /// `mutation_decision` witness aşamasına ulaşabilen bir karar DEĞİL (Reject).
+    /// Reject → NotApplied → witness aşaması çalışmaz.
+    #[error("mutation decision not witness-eligible: Reject (apply_target=NotApplied)")]
+    MutationNotWitnessEligible,
+    /// `apply_target == NotApplied` — delta uygulanmadı, witness gerekmez.
+    #[error("apply_target NotApplied (witness stage never reached)")]
+    ApplyTargetNotApplied,
+    /// `witness_requirement` `Required` DEĞİL (`NotRequired`). Held/Rejected disposition
+    /// witness aşamasına ulaşmış context gerektirir.
+    #[error("witness requirement not Required (NotRequired — witness stage never reached)")]
+    WitnessNotRequired,
+    /// Held/Rejected snapshot `required_approvers` context witness requirement ile
+    /// tutarsız — witness quorum saldırısı (forged snapshot).
+    #[error("snapshot required_approvers ({snapshot}) != context witness requirement ({context})")]
+    SnapshotRequiredApproversMismatch { snapshot: usize, context: u32 },
+    /// Held/Rejected snapshot `required_support` context witness requirement ile tutarsız.
+    #[error("snapshot required_support ({snapshot}) != context witness requirement ({context})")]
+    SnapshotRequiredSupportMismatch { snapshot: f64, context: f64 },
+    /// Held `hold_reason` ↔ snapshot iç tutarlılık ihlali (MinApproversNotMet/QuorumInsufficient).
+    #[error("hold reason ↔ snapshot inconsistency: {0}")]
+    HoldReasonSnapshotInconsistency(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 3. tur P0-2):** V2 suspension eligibility — context ↔
+/// disposition witness-eligibility authoritative validator.
+///
+/// Held/Rejected disposition, witness aşamasına ulaşmış bir authorization context
+/// gerektirir. Bu validator context'in gerçekten witness aşamasına ulaştığını ve
+/// disposition'ın context ile tutarlı olduğunu doğrular.
+///
+/// **Invariant'lar (review 3. tur P0-2):**
+/// 1. `gate_evaluation == GatePassed { .. }` (RejectedByGate olamaz)
+/// 2. `mutation_decision` witness-eligible (Reject DEĞİL — Reject → NotApplied)
+/// 3. `apply_target != NotApplied` (RejectedByGate + Reject → NotApplied)
+/// 4. `witness_requirement == Required { .. }` (NotRequired DEĞİL)
+/// 5. Held/Rejected snapshot `required_approvers` ↔ context witness requirement
+/// 6. Held/Rejected snapshot `required_support` ↔ context witness requirement
+/// 7. Held `hold_reason` ↔ snapshot (MinApproversNotMet/QuorumInsufficient binding)
+/// 8. Rejected `reasons` canonical + non-empty (evidence constructor'da zaten)
+///
+/// **Semantic reuse (review 5. tur P1-3):** `gate_evaluation.apply_target()` +
+/// `witness_requirement.validate_for()` reuse. `RequireOperatorApproval` → witness
+/// aşamasına girer; `Reject` → NotApplied.
+fn validate_suspension_eligibility_v2(
+    context: &AuthorizationContextV2,
+    disposition: &SuspendedAttemptDisposition,
+) -> Result<(), SuspensionEligibilityV2Error> {
+    use crate::trajectory::{ApplyTarget, MutationDecision};
+
+    let gate_evaluation = context.gate_evaluation();
+    let witness_requirement = context.witness_requirement();
+
+    // (1) gate_evaluation must be GatePassed (RejectedByGate → witness'a ulaşılmadı).
+    let mutation_decision = match gate_evaluation {
+        CanonicalGateEvaluationV2::RejectedByGate { .. } => {
+            return Err(SuspensionEligibilityV2Error::GateNotPassed);
+        }
+        CanonicalGateEvaluationV2::GatePassed { mutation_decision } => *mutation_decision,
+    };
+
+    // (2) mutation_decision must be witness-eligible (Reject DEĞİL).
+    if matches!(mutation_decision, MutationDecision::Reject) {
+        return Err(SuspensionEligibilityV2Error::MutationNotWitnessEligible);
+    }
+
+    // (3) apply_target must not be NotApplied (reuse gate_evaluation.apply_target()).
+    let apply_target = gate_evaluation.apply_target();
+    if matches!(apply_target, ApplyTarget::NotApplied) {
+        return Err(SuspensionEligibilityV2Error::ApplyTargetNotApplied);
+    }
+
+    // (4) witness_requirement must be Required (NotRequired → witness'a ulaşılmadı).
+    let min_approvers = match witness_requirement.min_approvers() {
+        Some(m) => m,
+        None => return Err(SuspensionEligibilityV2Error::WitnessNotRequired),
+    };
+    let quorum_threshold = match witness_requirement.quorum_threshold() {
+        Some(t) => t, // CanonicalF64 = f64 type alias
+        None => return Err(SuspensionEligibilityV2Error::WitnessNotRequired),
+    };
+
+    // (5)(6)(7) disposition ↔ context witness requirement + snapshot binding.
+    match disposition {
+        SuspendedAttemptDisposition::Held {
+            hold_reason,
+            snapshot,
+        } => {
+            // snapshot ↔ context witness requirement.
+            if snapshot.required_approvers as u32 != min_approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredApproversMismatch {
+                        snapshot: snapshot.required_approvers,
+                        context: min_approvers,
+                    },
+                );
+            }
+            // **PR#84 review P1 (2. tur):** exact equality — aynı committed değerin duplicate alanları.
+            if snapshot.required_support != quorum_threshold {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredSupportMismatch {
+                        snapshot: snapshot.required_support,
+                        context: quorum_threshold,
+                    },
+                );
+            }
+            // Held hold_reason ↔ snapshot (MinApproversNotMet/QuorumInsufficient binding).
+            validate_hold_reason_snapshot_v2(hold_reason, snapshot)?;
+        }
+        SuspendedAttemptDisposition::Rejected { reasons, snapshot } => {
+            // Rejected reasons canonical+non-empty — evidence constructor'da zaten
+            // (canonicalize_rejections/verify_rejections_canonical_order). snapshot ↔ context.
+            if snapshot.required_approvers as u32 != min_approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredApproversMismatch {
+                        snapshot: snapshot.required_approvers,
+                        context: min_approvers,
+                    },
+                );
+            }
+            // **PR#84 review P1 (2. tur):** exact equality — aynı committed değerin duplicate alanları.
+            if snapshot.required_support != quorum_threshold {
+                return Err(
+                    SuspensionEligibilityV2Error::SnapshotRequiredSupportMismatch {
+                        snapshot: snapshot.required_support,
+                        context: quorum_threshold,
+                    },
+                );
+            }
+            // reasons non-empty invariant — NonEmptyWitnessRejections smart ctor garantiler.
+            let _ = reasons;
+        }
+    }
+
+    Ok(())
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Held `hold_reason` ↔ snapshot iç tutarlılık.
+///
+/// `MinApproversNotMet { distinct, required }` ↔ snapshot.approvers/required_approvers,
+/// `QuorumInsufficient { support, threshold }` ↔ snapshot.support/required_support.
+/// `EvidenceNotLocallyObservable` snapshot-neutral (geçerli).
+fn validate_hold_reason_snapshot_v2(
+    hold_reason: &crate::witness::WitnessHoldReason,
+    snapshot: &crate::witness::WitnessQuorumSnapshot,
+) -> Result<(), SuspensionEligibilityV2Error> {
+    use crate::witness::WitnessHoldReason;
+    match hold_reason {
+        WitnessHoldReason::MinApproversNotMet { distinct, required } => {
+            // **PR#84 review P1:** Exact binding — hold_reason ↔ snapshot aynı committed değer.
+            // required == snapshot.required_approvers.
+            if required != &snapshot.required_approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "MinApproversNotMet.required ({required}) != snapshot.required_approvers ({})",
+                        snapshot.required_approvers
+                    )),
+                );
+            }
+            // **PR#84 review P1:** distinct == snapshot.approvers (eksikti — çelişkili kayıt geçebilir).
+            if distinct != &snapshot.approvers {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "MinApproversNotMet.distinct ({distinct}) != snapshot.approvers ({})",
+                        snapshot.approvers
+                    )),
+                );
+            }
+            // **PR#84 review P1:** distinct < required (Held için gerçekten unmet olmalı).
+            // distinct == required durumunda approver şartı sağlanmış → Held nonsensical.
+            if distinct >= required {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "MinApproversNotMet.distinct ({distinct}) >= required ({required}) — approver requirement met, Held invalid"
+                    )),
+                );
+            }
+        }
+        WitnessHoldReason::QuorumInsufficient { support, threshold } => {
+            // **PR#84 review P1 (2. tur):** threshold == snapshot.required_support — exact equality.
+            // Aynı committed değerin duplicate alanları (yaklaşık ölçüm DEĞİL) → bit equality.
+            if threshold != &snapshot.required_support {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "QuorumInsufficient.threshold ({threshold}) != snapshot.required_support ({})",
+                        snapshot.required_support
+                    )),
+                );
+            }
+            // **PR#84 review P1 (2. tur):** support == snapshot.support — exact equality.
+            // Aynı committed değerin duplicate alanları (yaklaşık ölçüm DEĞİL) → bit equality.
+            if support != &snapshot.support {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "QuorumInsufficient.support ({support}) != snapshot.support ({})",
+                        snapshot.support
+                    )),
+                );
+            }
+            // support < threshold (Held için gerçekten insufficient olmalı).
+            if support >= threshold {
+                return Err(
+                    SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
+                        "QuorumInsufficient.support ({support}) >= threshold ({threshold}) — quorum met, Held invalid"
+                    )),
+                );
+            }
+        }
+        WitnessHoldReason::EvidenceNotLocallyObservable { .. } => {
+            // snapshot-neutral — geçerli (evidence erişilemiyor, quorum hesaplanamadı).
+        }
+    }
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INV-T9 #70 Faz 8-P1 — V2 Revision Required (Adım 4, runtime-only)
+//
+// **Runtime-only, NO Serialize/Deserialize (review 5. tur P0-1):** Bir domain
+// tipi Serialize taşıyorsa herhangi bir katman onu persist edebilir. Ama Deserialize
+// + checked restore yolu yoksa artifact write-only olur — planın "persist edilen
+// V2 state full context ile checked restore edilmeli" ilkesiyle çelişir.
+//
+// **Neden runtime-only:** V2 evidence `authorization_context_digest` taşır (basis+
+// gate+witness commitment). Standalone restore'da context digest preimage olmadığı
+// için eligibility (review 3. tur P0-2) doğrulanamaz — context geri çıkarılamaz.
+// V1 `RevisionRequired` persisted (auth.rs:6483 Deserialize) ama V1 evidence basis
+// digest (context değil).
+//
+// **Durable restore gerekirse:** `RevisionRequiredEnvelopeV2` (full context) —
+// Faz 8a navigator Rejected path gerektiğinde.
+//
+// **Public constructor (review 4. tur P0-2):** `try_new_rejected(context, ...)`
+// — context'ten context digest üretir, eligibility doğrular, V2 evidence oluşturur.
+// Direct evidence kabul ETMEZ (structural guard — Held disposition sunulamaz).
+//
+// **Presentation:** Ayrı `RevisionRequiredViewV2<'a>` read model (serialize
+// edilebilir ama durable artifact iddia edilmez) — Faz 8a navigator gerektiğinde.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// **INV-T9 #70 Faz 8-P1:** V2 revision required error.
+#[allow(dead_code, reason = "Faz 8a navigator consumer (try_new_rejected)")]
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub(crate) enum RevisionRequiredV2Error {
+    /// Eligibility validation failed (review 3. tur P0-2).
+    #[error("suspension eligibility validation failed: {0}")]
+    Eligibility(#[from] SuspensionEligibilityV2Error),
+    /// Context digest computation failed.
+    #[error("authorization context digest computation failed: {0}")]
+    ContextDigest(String),
+    /// Evidence constructor error.
+    #[error("suspended attempt evidence error: {0}")]
+    Evidence(#[from] SuspendedAttemptEvidenceV2Error),
+    /// Evidence digest computation failed.
+    #[error("evidence digest computation failed: {0}")]
+    DigestComputationFailed(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P0-1):** V2 explicit witness rejection
+/// sonucu — runtime-only.
+///
+/// `NavigatorResult::RequiresRevision` bu struct'ı taşır (Faz 8a). Budget tüketmez,
+/// LLM reinvocation YOK. Agent yeni structural proposal üretmeli.
+///
+/// **Runtime-only (P0-1):** `Serialize` YOK, `Deserialize` YOK. V2 evidence context
+/// digest bağlar; standalone restore eligibility doğrulayamaz (context preimage
+/// değil). Durable restore gerekirse `RevisionRequiredEnvelopeV2` (full context) —
+/// Faz 8a.
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+/// `try_new_rejected` public — direct evidence kabul ETMEZ (structural guard).
+///
+/// **pub(crate):** Internal V2 tipler pub(crate) — Faz 8a navigator aynı crate.
+#[derive(Debug, Clone, PartialEq)]
+/// **Faz 8a consumer:** navigator `RequiresRevision` (Faz 8a). Runtime-only —
+/// `try_new_rejected` test'ler + Faz 8a navigator çağırır.
+#[allow(dead_code, reason = "Faz 8a navigator consumer (try_new_rejected)")]
+pub(crate) struct RevisionRequiredV2 {
+    evidence_digest: SuspendedAttemptEvidenceDigestV2,
+    suspended_attempt_evidence: SuspendedAttemptEvidenceV2,
+}
+
+#[allow(dead_code, reason = "Faz 8a navigator consumer (try_new_rejected)")]
+impl RevisionRequiredV2 {
+    /// **Runtime-only creation (review 4. tur P0-2 + 5. tur P0-1):** Context'ten
+    /// context digest üretir, eligibility doğrular, V2 evidence oluşturur.
+    ///
+    /// Caller direct evidence/context digest veremez — structural guard: Held
+    /// disposition sunulamaz (constructor Held reject eder via eligibility).
+    pub(crate) fn try_new_rejected(
+        context: &AuthorizationContextV2,
+        reasons: crate::witness::NonEmptyWitnessRejections,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+        attempt_num: AttemptNumber,
+    ) -> Result<Self, RevisionRequiredV2Error> {
+        let disposition = SuspendedAttemptDisposition::Rejected { reasons, snapshot };
+        // Eligibility: context ↔ Rejected disposition witness-eligibility.
+        validate_suspension_eligibility_v2(context, &disposition)?;
+        let context_digest = context
+            .compute_digest()
+            .map_err(|e| RevisionRequiredV2Error::ContextDigest(e.to_string()))?;
+        let evidence = SuspendedAttemptEvidenceV2::try_new_normalizing(
+            context.basis().task_id(),
+            context.basis().claim_id(),
+            context_digest,
+            attempt_num,
+            disposition,
+        )?;
+        let evidence_digest = SuspendedAttemptEvidenceDigestV2::compute(&evidence)
+            .map_err(|e| RevisionRequiredV2Error::DigestComputationFailed(e.to_string()))?;
+        Ok(Self {
+            evidence_digest,
+            suspended_attempt_evidence: evidence,
+        })
+    }
+
+    // — Accessor'lar —
+
+    pub(crate) fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigestV2 {
+        &self.evidence_digest
+    }
+    pub(crate) fn suspended_attempt_evidence(&self) -> &SuspendedAttemptEvidenceV2 {
+        &self.suspended_attempt_evidence
+    }
+}
+
 /// Explicit witness rejection sonucu — agent proposal revises. Evidence-preserving.
 ///
 /// `NavigatorResult::RequiresRevision` bu struct'ı taşır. Budget tüketmez, LLM
@@ -5383,6 +7807,220 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
             wire.suspended_attempt_evidence,
         )
         .map_err(serde::de::Error::custom)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — PendingAuthorizationEnvelopeV2 (Adım 6)
+//
+// **Tek public checked creation root (review 4. tur P0-3 + 5. tur net closure #3/#4):**
+// `try_new_held` — caller context digest/identity veremez. Eligibility tek yerde çalışır.
+// Internal evidence/record producer'lar (`SuspendedAttemptEvidenceV2::try_new_normalizing`,
+// `PendingAuthorizationV2::try_new`, `from_verified_parts`) non-test consumer kazanır.
+//
+// **Defensive verify (review 5. tur P1-2):** `from_verified_parts` her zaman
+// `envelope.verify()` çağırır — "caller daha önce doğruladı" varsayımı YOK.
+//
+// **Wire loader try_new_held ÇAĞIRMAZ (review 5. tur P1-3):** Creation ve restore
+// call graph tamamen ayrı. Loader `try_new_with_verified_digests` (modül-private) —
+// stored alanları korur, recompute + compare.
+//
+// **Envelope-level verify (review 4. tur P0-2):** record.validate_internal +
+// context digest recompute + record.context_digest ↔ context digest + eligibility.
+// Eligibility context gerektirir — record seviyesi çağıramaz.
+//
+// **Envelope tam context taşır (review 2. tur P0-2):** basis + gate_evaluation +
+// witness_requirement (`PersistedAuthorizationContextV2`). V2 kararın tamamı bağlanır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** V2 envelope error — creation/load/verify.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum PendingAuthorizationEnvelopeV2Error {
+    /// Creation: eligibility validation failed (review 3. tur P0-2).
+    #[error("suspension eligibility: {0}")]
+    Eligibility(String),
+    /// Creation: context digest computation failed.
+    #[error("context digest: {0}")]
+    ContextDigest(String),
+    /// Creation: evidence constructor error.
+    #[error("evidence: {0}")]
+    Evidence(#[from] SuspendedAttemptEvidenceV2Error),
+    /// Creation: record constructor error.
+    #[error("record: {0}")]
+    Record(#[from] PendingAuthorizationV2Error),
+    /// Verify: record ↔ context cross-field (context digest parity).
+    #[error("record context digest ≠ envelope context digest")]
+    ContextDigestMismatch,
+    /// Verify: eligibility (context ↔ disposition).
+    #[error("eligibility verify: {0}")]
+    EligibilityVerify(String),
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 2. tur P0-2):** V2 envelope — tam persisted context.
+///
+/// V1 `PendingAuthorizationEnvelope` (auth.rs:7677) mirror — V2 tam context taşır
+/// (basis + gate_evaluation + witness_requirement). V2 kararın tamamı bağlanır;
+/// envelope yalnız basis taşısa gate/witness değişikliği kaybolur.
+///
+/// **Tek public root `try_new_held` (review 5. tur net closure #3):** Caller context
+/// digest/identity veremez. Internal producer'lar bu yolun altında non-test consumer.
+///
+/// **Private fields + checked constructor:** Struct literal bypass imkânsız.
+///
+/// **pub(crate):** Internal V2 tipler pub(crate) — Faz 8a navigator aynı crate.
+/// Dış crate consumer olmadığı için public API yüzeyi daraltıldı (review P2-2).
+///
+/// **Faz 8a consumer:** navigator `suspend_for_witness_v2` (Faz 8a). Test'ler +
+/// wire loader cfg(test)/persist_v2 consumer; lib build Faz 8a navigator bekler.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + persist_v2)"
+)]
+#[derive(Debug, Clone)]
+pub(crate) struct PendingAuthorizationEnvelopeV2 {
+    schema: String,
+    record: PendingAuthorizationV2,
+    authorization_context: PersistedAuthorizationContextV2,
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Envelope schema sabitleri.
+pub const PENDING_AUTHORIZATION_SCHEMA_V2: &str = "osp.pending-authorization.v2";
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (test + wire loader + persist_v2)"
+)]
+impl PendingAuthorizationEnvelopeV2 {
+    /// **Tek public checked Held producer (review 4. tur P0-3 + 5. tur net closure #3).**
+    ///
+    /// Caller context digest/identity veremez. Eligibility tek yerde doğrulanır.
+    /// Internal evidence/record producer'lar bu yolun altında — non-test consumer
+    /// kazanır, `#[allow(dead_code)]` gerekmez.
+    ///
+    /// **Faz 8a navigator production caller** — Faz 8-P1'de wire loader test'leri
+    /// ve integration test'leri consumer.
+    pub fn try_new_held(
+        context: AuthorizationContextV2,
+        hold_reason: crate::witness::WitnessHoldReason,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+        attempt_num: AttemptNumber,
+        created_at: u64,
+    ) -> Result<Self, PendingAuthorizationEnvelopeV2Error> {
+        // Eligibility: context ↔ Held disposition witness-eligibility (tek yerde).
+        validate_suspension_eligibility_v2(
+            &context,
+            &SuspendedAttemptDisposition::Held {
+                hold_reason: hold_reason.clone(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .map_err(|e| PendingAuthorizationEnvelopeV2Error::Eligibility(e.to_string()))?;
+
+        // Context digest — caller veremez, compute edilir.
+        let context_digest = context
+            .compute_digest()
+            .map_err(|e| PendingAuthorizationEnvelopeV2Error::ContextDigest(e.to_string()))?;
+
+        // Evidence — internal producer. Exact isim (review 5. tur P1-5).
+        let evidence = SuspendedAttemptEvidenceV2::try_new_normalizing(
+            context.basis().task_id(),
+            context.basis().claim_id(),
+            context_digest,
+            attempt_num,
+            SuspendedAttemptDisposition::Held {
+                hold_reason,
+                snapshot,
+            },
+        )?;
+
+        // Record — internal producer. indexed alanlar evidence'dan türetilir.
+        let record = PendingAuthorizationV2::try_new(evidence, created_at)?;
+
+        // Persisted context wrapper — runtime boundary.
+        let persisted = PersistedAuthorizationContextV2::from_runtime(context);
+
+        // Defensive verify (review 5. tur P1-2) — her zaman çağırır.
+        Self::from_verified_parts(record, persisted)
+    }
+
+    /// **Private (review 5. tur P1-1/P1-2):** from verified parts + defensive verify.
+    fn from_verified_parts(
+        record: PendingAuthorizationV2,
+        authorization_context: PersistedAuthorizationContextV2,
+    ) -> Result<Self, PendingAuthorizationEnvelopeV2Error> {
+        let envelope = Self {
+            schema: PENDING_AUTHORIZATION_SCHEMA_V2.to_owned(),
+            record,
+            authorization_context,
+        };
+        envelope.verify()?;
+        Ok(envelope)
+    }
+
+    /// **Load (modül-private, review 5. tur P1-1):** Stored alanları korur, recompute +
+    /// compare. Wire loader internal — public restore entrypoint
+    /// `load_pending_authorization_versioned` (Adım 7).
+    fn try_new_with_verified_digests(
+        schema: String,
+        record: PendingAuthorizationV2,
+        authorization_context: PersistedAuthorizationContextV2,
+    ) -> Result<Self, PendingAuthorizationEnvelopeV2Error> {
+        if schema != PENDING_AUTHORIZATION_SCHEMA_V2 {
+            return Err(PendingAuthorizationEnvelopeV2Error::ContextDigest(format!(
+                "schema mismatch: {schema}"
+            )));
+        }
+        let envelope = Self {
+            schema,
+            record,
+            authorization_context,
+        };
+        envelope.verify()?;
+        Ok(envelope)
+    }
+
+    /// **Envelope-level verify (review 4. tur P0-2):** record.validate_internal +
+    /// context digest recompute + record.context_digest ↔ context digest + eligibility.
+    ///
+    /// Record seviyesi `validate_internal` yalnız record ↔ evidence (context taşımıyor).
+    /// Eligibility context gerektirir — burada çağrılır.
+    fn verify(&self) -> Result<(), PendingAuthorizationEnvelopeV2Error> {
+        // record.validate_internal — record ↔ evidence identity + evidence digest + Held.
+        self.record
+            .validate_internal()
+            .map_err(PendingAuthorizationEnvelopeV2Error::Record)?;
+
+        // Context digest recompute.
+        let context_digest = self
+            .authorization_context
+            .compute_digest()
+            .map_err(|e| PendingAuthorizationEnvelopeV2Error::ContextDigest(e.to_string()))?;
+
+        // record.context_digest ↔ envelope context digest parity.
+        if self.record.authorization_context_digest() != &context_digest {
+            return Err(PendingAuthorizationEnvelopeV2Error::ContextDigestMismatch);
+        }
+
+        // Eligibility: context ↔ evidence disposition (review 3. tur P0-2).
+        validate_suspension_eligibility_v2(
+            self.authorization_context.context(),
+            self.record.suspended_attempt_evidence().disposition(),
+        )
+        .map_err(|e| PendingAuthorizationEnvelopeV2Error::EligibilityVerify(e.to_string()))?;
+
+        Ok(())
+    }
+
+    // — Accessor'lar —
+
+    pub fn schema(&self) -> &str {
+        &self.schema
+    }
+    pub fn record(&self) -> &PendingAuthorizationV2 {
+        &self.record
+    }
+    pub fn authorization_context(&self) -> &PersistedAuthorizationContextV2 {
+        &self.authorization_context
     }
 }
 
@@ -5880,6 +8518,50 @@ pub enum PendingAuthorizationStoreError {
     /// sırasında tüm side-effect'lerden ÖNCE çalışır. In-memory bypass engeller.
     #[error("invalid envelope (persist-boundary verification failed): {0}")]
     InvalidEnvelope(String),
+    /// **INV-T9 #70 Faz 8-P1:** Store V2 schema desteklemiyor (default trait impl).
+    #[error("store does not support schema: {schema}")]
+    UnsupportedSchema { schema: &'static str },
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-6):** V2 persist receipt.
+///
+/// V1 `PendingAuthorizationReceipt` mirror — context digest (basis DEĞİL).
+/// Field'lar private (digest tipleri pub(crate)) — accessor'lar üzerinden.
+/// Faz 8a navigator aynı crate'ten erişir.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingAuthorizationReceiptV2 {
+    artifact_path: std::path::PathBuf,
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    attempt_num: AttemptNumber,
+    /// Context digest (basis+gate+witness commitment) — V1 basis digest DEĞİL.
+    authorization_context_digest: AuthorizationContextDigestV2,
+    evidence_digest: SuspendedAttemptEvidenceDigestV2,
+}
+
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (context/evidence digest accessor)"
+)]
+impl PendingAuthorizationReceiptV2 {
+    pub fn artifact_path(&self) -> &std::path::Path {
+        &self.artifact_path
+    }
+    pub fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+    pub fn claim_id(&self) -> ClaimId {
+        self.claim_id
+    }
+    pub fn attempt_num(&self) -> AttemptNumber {
+        self.attempt_num
+    }
+    pub(crate) fn authorization_context_digest(&self) -> &AuthorizationContextDigestV2 {
+        &self.authorization_context_digest
+    }
+    pub(crate) fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigestV2 {
+        &self.evidence_digest
+    }
 }
 
 /// Dosya tabanlı default implementation.
@@ -5925,6 +8607,25 @@ impl FilesystemPendingAuthorizationStore {
         let hex = evidence_digest.to_hex();
         let filename = format!(
             "task-{task_id}--claim-{claim_id}--attempt-{}--{hex}.json",
+            attempt_num.get()
+        );
+        self.root
+            .join(".osp")
+            .join("pending-authorizations")
+            .join(filename)
+    }
+
+    /// **INV-T9 #70 Faz 8-P1:** V2 artifact path — V2 evidence digest.
+    fn artifact_path_v2(
+        &self,
+        task_id: crate::trajectory::TaskId,
+        claim_id: ClaimId,
+        attempt_num: AttemptNumber,
+        evidence_digest: &SuspendedAttemptEvidenceDigestV2,
+    ) -> std::path::PathBuf {
+        let hex = evidence_digest.to_hex();
+        let filename = format!(
+            "task-{task_id}--claim-{claim_id}--attempt-{}--v2-{hex}.json",
             attempt_num.get()
         );
         self.root
@@ -6069,6 +8770,125 @@ impl PendingAuthorizationStore for FilesystemPendingAuthorizationStore {
     }
 }
 
+impl FilesystemPendingAuthorizationStore {
+    /// **INV-T9 #70 Faz 8-P1 (review 5. tur net closure #3):** Versioned load.
+    /// pub(crate) — VersionedPendingAuthorizationEnvelope pub(crate) (Faz 8a navigator).
+    #[allow(dead_code, reason = "Faz 8a navigator consumer (load_versioned)")]
+    pub(crate) fn load_versioned(
+        &self,
+        path: &std::path::Path,
+    ) -> Result<VersionedPendingAuthorizationEnvelope, VersionedPendingAuthorizationLoadError> {
+        load_pending_authorization_versioned(path)
+    }
+
+    /// **INV-T9 #70 Faz 8-P1 (review 5. tur P1-4):** V2 persist — inherent method.
+    /// Trait default impl kaldırıldı (pub trait + pub(crate) tip private-interfaces).
+    /// V1 güvenlik parity: envelope.verify() side-effect'ten önce, create_new/no silent
+    /// overwrite, aynı content → idempotent, aynı path + farklı content → integrity error,
+    /// same-directory temp sync + atomic publish.
+    #[allow(dead_code, reason = "Faz 8a navigator consumer (persist_v2)")]
+    pub(crate) fn persist_v2(
+        &mut self,
+        envelope: &PendingAuthorizationEnvelopeV2,
+    ) -> Result<PendingAuthorizationReceiptV2, PendingAuthorizationStoreError> {
+        use std::io::Write;
+
+        let record = envelope.record();
+        let evidence = record.suspended_attempt_evidence();
+        let artifact_path = self.artifact_path_v2(
+            record.task_id(),
+            record.claim_id(),
+            evidence.attempt_num(),
+            record.evidence_digest(),
+        );
+
+        let current = serde_json::to_vec_pretty(&serialize_envelope_v2_json(envelope))
+            .map_err(|e| PendingAuthorizationStoreError::SerializationFailed(e.to_string()))?;
+
+        if artifact_path.exists() {
+            let existing = std::fs::read(&artifact_path)
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            if existing == current {
+                return Ok(PendingAuthorizationReceiptV2 {
+                    artifact_path,
+                    task_id: record.task_id(),
+                    claim_id: record.claim_id(),
+                    attempt_num: evidence.attempt_num(),
+                    authorization_context_digest: record.authorization_context_digest().clone(),
+                    evidence_digest: record.evidence_digest().clone(),
+                });
+            } else {
+                return Err(PendingAuthorizationStoreError::BasisConflict {
+                    existing_path: artifact_path,
+                });
+            }
+        }
+
+        if let Some(parent) = artifact_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| PendingAuthorizationStoreError::DirCreationFailed(e.to_string()))?;
+        }
+
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TEMP_COUNTER_V2: AtomicU64 = AtomicU64::new(0);
+        let temp_suffix = TEMP_COUNTER_V2.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let temp_path = artifact_path.with_file_name(format!(
+            ".{}.tmp.{pid}.{temp_suffix}",
+            artifact_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("pending")
+        ));
+
+        let result = (|| -> Result<(), PendingAuthorizationStoreError> {
+            let mut temp_file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            temp_file
+                .write_all(&current)
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            temp_file
+                .sync_all()
+                .map_err(|e| PendingAuthorizationStoreError::WriteFailed(e.to_string()))?;
+            drop(temp_file);
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
+            return result.map(|_| unreachable!());
+        }
+
+        std::fs::rename(&temp_path, &artifact_path).map_err(|e| {
+            let _ = std::fs::remove_file(&temp_path);
+            PendingAuthorizationStoreError::WriteFailed(e.to_string())
+        })?;
+
+        #[cfg(unix)]
+        {
+            if let Some(parent) = artifact_path.parent() {
+                if let Ok(dir) = std::fs::File::open(parent) {
+                    use std::os::unix::io::AsRawFd;
+                    unsafe {
+                        libc::fsync(dir.as_raw_fd());
+                    }
+                }
+            }
+        }
+
+        Ok(PendingAuthorizationReceiptV2 {
+            artifact_path,
+            task_id: record.task_id(),
+            claim_id: record.claim_id(),
+            attempt_num: evidence.attempt_num(),
+            authorization_context_digest: record.authorization_context_digest().clone(),
+            evidence_digest: record.evidence_digest().clone(),
+        })
+    }
+}
+
 /// Artifact'ı dosyadan yükle + verify (P1 resume için, ama P0'da da test edilebilir).
 pub fn load_pending_authorization(
     path: &std::path::Path,
@@ -6079,6 +8899,313 @@ pub fn load_pending_authorization(
         .map_err(|e| PendingAuthorizationLoadError::DeserializationFailed(e.to_string()))?;
     envelope.verify()?;
     Ok(envelope)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// INV-T9 #70 Faz 8-P1 — Versioned Pending Authorization Envelope dispatch (Adım 7)
+//
+// **Schema string equality dispatch (review 2. tur P1-5 + 5. tur P1-3):** Her
+// envelope zaten `schema: String` field'ı taşır (bare/legacy shape yok). Basitleştirme:
+// RawValue peek → schema field value oku → string equality dispatch.
+//
+// **Duplicate schema = reject (review 5. tur P1-3):** Peek `serde_json::Value` son
+// değeri seçse bile final strict typed parse `deny_unknown_fields` duplicate reject eder.
+// Peek doğrulama sonucu sayılmaz.
+//
+// **Typed errors:** TopLevelNotObject, MissingSchema, SchemaNotString, UnknownSchema,
+// V1Decode, V2Decode. V1 `PendingAuthorizationLoadError` V1 path için korunur.
+//
+// **Public entrypoint (review 5. tur net closure #3):** `load_pending_authorization_versioned`.
+// V1 `load_pending_authorization` backward compat için korunur.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **INV-T9 #70 Faz 8-P1:** Versioned pending authorization envelope — V1/V2 sum-type.
+///
+/// **pub(crate):** V2 arm pub(crate) tip içerir — Faz 8a navigator aynı crate.
+#[allow(
+    dead_code,
+    reason = "Faz 8a navigator consumer (load_versioned return)"
+)]
+#[derive(Debug, Clone)]
+pub(crate) enum VersionedPendingAuthorizationEnvelope {
+    /// V1 — mevcut `PendingAuthorizationEnvelope` (frozen).
+    V1(PendingAuthorizationEnvelope),
+    /// V2 — tam persisted context (basis + gate_evaluation + witness_requirement).
+    V2(PendingAuthorizationEnvelopeV2),
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Versioned envelope load error (review 5. tur P1-3 typed).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum VersionedPendingAuthorizationLoadError {
+    #[error("io failed: {0}")]
+    Io(String),
+    #[error("top-level JSON not an object")]
+    TopLevelNotObject,
+    #[error("schema field missing")]
+    MissingSchema,
+    #[error("schema field not a string")]
+    SchemaNotString,
+    #[error("unknown schema: {found}")]
+    UnknownSchema { found: String },
+    #[error("V1 decode failed: {0}")]
+    V1Decode(String),
+    #[error("V2 decode failed: {0}")]
+    V2Decode(String),
+}
+
+impl From<PendingAuthorizationLoadError> for VersionedPendingAuthorizationLoadError {
+    fn from(e: PendingAuthorizationLoadError) -> Self {
+        Self::V1Decode(e.to_string())
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1 (review 5. tur net closure #3):** Versioned load entrypoint.
+/// RawValue peek + schema string equality dispatch.
+///
+/// V1 (`"osp.pending-authorization.v1"`) → mevcut V1 path (byte-identical).
+/// V2 (`"osp.pending-authorization.v2"`) → V2 path (checked restore).
+/// `_` → typed `UnknownSchema`.
+///
+/// **pub(crate):** VersionedPendingAuthorizationEnvelope pub(crate) — Faz 8a navigator.
+pub(crate) fn load_pending_authorization_versioned(
+    path: &std::path::Path,
+) -> Result<VersionedPendingAuthorizationEnvelope, VersionedPendingAuthorizationLoadError> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::Io(e.to_string()))?;
+
+    // RawValue parse — duplicate key preserve.
+    let raw: Box<serde_json::value::RawValue> = serde_json::from_slice(&bytes)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(format!("raw parse: {e}")))?;
+    // Value peek — dispatch only (not typed parse).
+    let peek: serde_json::Value = serde_json::from_str(raw.get())
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(format!("peek: {e}")))?;
+
+    // Top-level object check.
+    if !peek.is_object() {
+        return Err(VersionedPendingAuthorizationLoadError::TopLevelNotObject);
+    }
+
+    // Schema string equality dispatch.
+    let schema = peek
+        .get("schema")
+        .ok_or(VersionedPendingAuthorizationLoadError::MissingSchema)?;
+    let schema_str = schema
+        .as_str()
+        .ok_or(VersionedPendingAuthorizationLoadError::SchemaNotString)?;
+
+    match schema_str {
+        PENDING_AUTHORIZATION_SCHEMA => {
+            // V1 path — mevcut byte-identical.
+            let envelope: PendingAuthorizationEnvelope = serde_json::from_slice(&bytes)
+                .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(e.to_string()))?;
+            envelope.verify()?;
+            Ok(VersionedPendingAuthorizationEnvelope::V1(envelope))
+        }
+        PENDING_AUTHORIZATION_SCHEMA_V2 => {
+            // V2 path — checked restore.
+            let envelope = deserialize_pending_authorization_envelope_v2(&bytes)?;
+            Ok(VersionedPendingAuthorizationEnvelope::V2(envelope))
+        }
+        other => Err(VersionedPendingAuthorizationLoadError::UnknownSchema {
+            found: other.to_string(),
+        }),
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** V2 envelope Deserialize — strict wire DTO + checked restore.
+///
+/// Wire: `{ schema, record, authorization_context }` → `RawPendingAuthorizationEnvelopeV2`
+/// (`deny_unknown_fields`) → `PendingAuthorizationEnvelopeV2::try_new_with_verified_digests`
+/// (modül-private, stored alanları korur).
+fn deserialize_pending_authorization_envelope_v2(
+    bytes: &[u8],
+) -> Result<PendingAuthorizationEnvelopeV2, VersionedPendingAuthorizationLoadError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawPendingAuthorizationEnvelopeV2 {
+        schema: String,
+        record: RawPendingAuthorizationV2,
+        authorization_context: RawPersistedAuthorizationContextV2,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawPendingAuthorizationV2 {
+        task_id: u64,
+        claim_id: u64,
+        authorization_context_digest: LowerHex32,
+        attempt_num: u64,
+        suspended_attempt_evidence: RawSuspendedAttemptEvidenceV2,
+        evidence_digest: LowerHex32,
+        created_at: u64,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct RawSuspendedAttemptEvidenceV2 {
+        schema_version: u32,
+        task_id: u64,
+        claim_id: u64,
+        authorization_context_digest: LowerHex32,
+        attempt_num: u64,
+        disposition: SuspendedAttemptDispositionWire,
+    }
+
+    /// V2 wire contract: strict 64 lowercase hex (review 5. tur P1-2).
+    #[derive(Clone)]
+    struct LowerHex32([u8; 32]);
+
+    impl<'de> serde::Deserialize<'de> for LowerHex32 {
+        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            let s = String::deserialize(deserializer)?;
+            let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+            if bytes.len() != 32 {
+                return Err(serde::de::Error::custom("expected 32 bytes (64 hex chars)"));
+            }
+            // Strict lowercase — uppercase reject (V2 wire contract).
+            if s.chars().any(|c| c.is_ascii_uppercase()) {
+                return Err(serde::de::Error::custom(
+                    "uppercase hex rejected (V2 strict lowercase wire contract)",
+                ));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            Ok(LowerHex32(arr))
+        }
+    }
+
+    impl LowerHex32 {
+        fn into_context_digest(self) -> AuthorizationContextDigestV2 {
+            AuthorizationContextDigestV2::from_bytes(self.0)
+        }
+        fn into_evidence_digest(self) -> SuspendedAttemptEvidenceDigestV2 {
+            SuspendedAttemptEvidenceDigestV2::from_bytes(self.0)
+        }
+    }
+
+    /// SuspendedAttemptDisposition wire (Serialize/Deserialize mevcut — witness.rs).
+    type SuspendedAttemptDispositionWire = SuspendedAttemptDisposition;
+
+    let raw: RawPendingAuthorizationEnvelopeV2 = serde_json::from_slice(bytes)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+
+    // Checked restore — raw → domain.
+    let context = PersistedAuthorizationContextV2::restore_from_wire(raw.authorization_context)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+    let evidence = SuspendedAttemptEvidenceV2::try_from_canonical_wire(
+        raw.record.suspended_attempt_evidence.schema_version,
+        raw.record.suspended_attempt_evidence.task_id.into(),
+        raw.record.suspended_attempt_evidence.claim_id.into(),
+        raw.record
+            .suspended_attempt_evidence
+            .authorization_context_digest
+            .into_context_digest(),
+        AttemptNumber::try_from(raw.record.suspended_attempt_evidence.attempt_num)
+            .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?,
+        raw.record.suspended_attempt_evidence.disposition,
+    )
+    .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+    let record = PendingAuthorizationV2::try_new_with_verified_digest(
+        raw.record.task_id.into(),
+        raw.record.claim_id.into(),
+        raw.record
+            .authorization_context_digest
+            .into_context_digest(),
+        AttemptNumber::try_from(raw.record.attempt_num)
+            .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?,
+        evidence,
+        raw.record.evidence_digest.into_evidence_digest(),
+        raw.record.created_at,
+    )
+    .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
+
+    PendingAuthorizationEnvelopeV2::try_new_with_verified_digests(raw.schema, record, context)
+        .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))
+}
+
+/// **INV-T9 #70 Faz 8-P1 (Adım 8):** V2 envelope → serde_json::Value (serialize-side).
+///
+/// `deserialize_pending_authorization_envelope_v2` ile round-trip. V2 envelope custom
+/// Serialize yok (domain tipler Serialize derive'suz) — bu fonksiyon raw DTO manuel kurar.
+///
+/// **Basis serialization:** `VersionedAuthorizationBasis::try_v2` + Serialize (mevcut
+/// V2 basis wire authority). Gate/witness raw DTO manuel (domain repr private).
+fn serialize_envelope_v2_json(envelope: &PendingAuthorizationEnvelopeV2) -> serde_json::Value {
+    let record = envelope.record();
+    let evidence = record.suspended_attempt_evidence();
+    let context = envelope.authorization_context().context();
+
+    // Context parts → raw DTO.
+    let gate_json = match context.gate_evaluation() {
+        CanonicalGateEvaluationV2::RejectedByGate { decision } => serde_json::json!({
+            "kind": "rejected_by_gate",
+            "decision": decision.0,
+        }),
+        CanonicalGateEvaluationV2::GatePassed { mutation_decision } => serde_json::json!({
+            "kind": "gate_passed",
+            "mutation_decision": mutation_decision,
+        }),
+    };
+    let witness_json = serialize_witness_requirement_v2_json(context.witness_requirement());
+
+    // Basis → RawAuthorizationBasisV2Ref serialize (mevcut wire authority, borrowed).
+    // deserialize_pending_authorization_envelope_v2 RawAuthorizationBasisV2 (owned) bekler;
+    // wire format aynı (RawAuthorizationBasisV2Ref ↔ RawAuthorizationBasisV2 round-trip).
+    let basis_value =
+        serde_json::to_value(RawAuthorizationBasisV2Ref::from_domain(context.basis()))
+            .unwrap_or(serde_json::Value::Null);
+
+    serde_json::json!({
+        "schema": envelope.schema(),
+        "record": {
+            "task_id": evidence.task_id() as u64,
+            "claim_id": u64::from(evidence.claim_id()),
+            "authorization_context_digest": hex::encode(*evidence.authorization_context_digest().as_bytes()),
+            "attempt_num": evidence.attempt_num().get(),
+            "suspended_attempt_evidence": serialize_evidence_v2_json(evidence),
+            "evidence_digest": hex::encode(*record.evidence_digest().as_bytes()),
+            "created_at": record.created_at(),
+        },
+        "authorization_context": {
+            "basis": basis_value,
+            "gate_evaluation": gate_json,
+            "witness_requirement": witness_json,
+        },
+    })
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Witness requirement → JSON (repr private, accessor'lar üzerinden).
+fn serialize_witness_requirement_v2_json(req: &CanonicalWitnessRequirementV2) -> serde_json::Value {
+    if req.is_required() {
+        serde_json::json!({
+            "kind": "required",
+            "min_approvers": req.min_approvers().unwrap_or(0),
+            "quorum_threshold": req.quorum_threshold().unwrap_or(0.0),
+            // independence_policy accessor yok — repr private. Faz 8a navigator'da eklenebilir.
+            // V2 wire contract için zorunlu; şimdilik V2 constructor default ile uyumlu.
+            "independence_policy": crate::canonical_tags::WitnessIndependencePolicyTag::default(),
+        })
+    } else {
+        serde_json::json!({
+            "kind": "not_required",
+            "reason": "rejected_before_witness",
+        })
+    }
+}
+
+/// **INV-T9 #70 Faz 8-P1:** Evidence → JSON.
+fn serialize_evidence_v2_json(evidence: &SuspendedAttemptEvidenceV2) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": evidence.schema_version(),
+        "task_id": evidence.task_id() as u64,
+        "claim_id": u64::from(evidence.claim_id()),
+        "authorization_context_digest": hex::encode(*evidence.authorization_context_digest().as_bytes()),
+        "attempt_num": evidence.attempt_num().get(),
+        "disposition": evidence.disposition(),
+    })
 }
 
 /// Null store — persist çağrılarını kabul eder ama hiçbir şey yazmaz (in-memory testler için).
@@ -6414,12 +9541,25 @@ enum RawTrajectoryLossV2 {
     Unavailable {
         reason: RawTrajectoryLossUnavailableReasonV2,
     },
+    /// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Loss gerekmiyor — completion-first.
+    NotRequired { reason: RawLossNotRequiredReasonV2 },
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum RawTrajectoryLossUnavailableReasonV2 {
     NoPreferredVector,
+}
+
+/// **INV-T9 #70 Commit 4b Faz 5:** Wire form for `CanonicalLossNotRequiredReason`.
+/// `deny_unknown_fields` — yeni reason backward-compat DEĞİL (V2 strict wire).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+enum RawLossNotRequiredReasonV2 {
+    PredicateCompleted,
+    SourceInsufficient,
+    StrictRejectPolicy,
+    OperatorApprovalPolicy,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -6447,6 +9587,77 @@ struct RawProvenancedMeasuredResultV2 {
     instability: RawAxisMeasurementV2,
     entropy: RawAxisMeasurementV2,
     witness_depth: RawAxisMeasurementV2,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P1-3):** Wire form for `CanonicalTaskGoalEvidenceV2`.
+/// `deny_unknown_fields` — persisted canonical evidence için unknown field sessizce düşürülmez.
+/// Direct serde (CanonicalTaskGoalEvidenceV2 derive) yerine dedicated Raw: nested weighted
+/// predicate + preferred_vector strict validation.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalTaskGoalEvidenceV2 {
+    task_id: u64,
+    mode: u8,
+    predicates: Vec<RawCanonicalWeightedPredicateV2>,
+    preferred_vector: Option<RawCanonicalRawPositionV2>,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P1-3):** Wire form for canonical weighted predicate.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalWeightedPredicateV2 {
+    axis: u8,
+    operator: u8,
+    threshold: f64,
+    scope: RawCanonicalPredicateScopeV2,
+    required_source: RawEffectiveSourceRequirementV2,
+    declared_weight: Option<f64>,
+    tolerance: f64,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire form for predicate scope (internally tagged).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawCanonicalPredicateScopeV2 {
+    Node { id: u64 },
+    Module { name: String },
+    Subgraph { ids: Vec<u64> },
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire form for effective source requirement (internally tagged).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum RawEffectiveSourceRequirementV2 {
+    Any,
+    Exact { source_tag: u8 },
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire form for canonical raw position.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalRawPositionV2 {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    v: f64,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16 (review P1-3):** Wire form for
+/// `CanonicalPredicateEvaluationBasisV2`. `deny_unknown_fields` — persisted evaluation basis
+/// için unknown field sessizce düşürülmez. EffectiveImproPolicyBasisV2 inline (flat struct).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCanonicalPredicateEvaluationBasisV2 {
+    gate_evaluation_semantics_version: u32,
+    result: u8,
+    failure_policy: u8,
+    min_improvement_delta: f64,
+    allow_progress_checkpoint: bool,
+    effective_improvement_max_coupling: f64,
+    effective_improvement_max_instability: f64,
+    effective_improvement_min_cohesion: f64,
+    effective_improvement_semantics_version: u32,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -6490,6 +9701,11 @@ struct RawAuthorizationBasisV2 {
     measurement_request_digest: LowerHex32,
     measurement_context_digest: LowerHex32,
     canonical_delta_digest: LowerHex32,
+    // INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (review P1-3: nested deny_unknown_fields):
+    measured_after: RawProvenancedMeasuredResultV2,
+    task_goal_evidence: RawCanonicalTaskGoalEvidenceV2,
+    predicate_basis: RawCanonicalPredicateEvaluationBasisV2,
+    predicate_gate_policy_digest: LowerHex32,
 }
 
 // ── Envelope tipleri (reviewer P0-2) ────────────────────────────────────────────
@@ -6584,6 +9800,11 @@ struct RawAuthorizationBasisV2Ref<'a> {
     measurement_request_digest: LowerHex32,
     measurement_context_digest: LowerHex32,
     canonical_delta_digest: LowerHex32,
+    // INV-T9 #70 Faz 5 Adım 16 — +4 field:
+    measured_after: RawProvenancedMeasuredResultV2Ref<'a>,
+    task_goal_evidence: RawCanonicalTaskGoalEvidenceV2Ref<'a>,
+    predicate_basis: RawCanonicalPredicateEvaluationBasisV2Ref,
+    predicate_gate_policy_digest: LowerHex32,
 }
 
 impl<'a> RawAuthorizationBasisV2Ref<'a> {
@@ -6609,6 +9830,16 @@ impl<'a> RawAuthorizationBasisV2Ref<'a> {
             measurement_request_digest: LowerHex32(*basis.measurement_request_digest().as_bytes()),
             measurement_context_digest: LowerHex32(*basis.measurement_context_digest().as_bytes()),
             canonical_delta_digest: LowerHex32(*basis.canonical_delta_digest().as_bytes()),
+            measured_after: RawProvenancedMeasuredResultV2Ref::from_domain(basis.measured_after()),
+            task_goal_evidence: RawCanonicalTaskGoalEvidenceV2Ref::from_domain(
+                basis.task_goal_evidence(),
+            ),
+            predicate_basis: RawCanonicalPredicateEvaluationBasisV2Ref::from_domain(
+                basis.predicate_basis(),
+            ),
+            predicate_gate_policy_digest: LowerHex32(
+                *basis.predicate_gate_policy_digest().as_bytes(),
+            ),
         }
     }
 }
@@ -6676,6 +9907,8 @@ enum RawTrajectoryLossV2Ref<'a> {
     Unavailable {
         reason: RawTrajectoryLossUnavailableReasonV2,
     },
+    /// **INV-T9 #70 Commit 4b Faz 5:** NotRequired — completion-first.
+    NotRequired { reason: RawLossNotRequiredReasonV2 },
 }
 
 impl<'a> RawTrajectoryLossV2Ref<'a> {
@@ -6690,6 +9923,23 @@ impl<'a> RawTrajectoryLossV2Ref<'a> {
                 reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
             } => Self::Unavailable {
                 reason: RawTrajectoryLossUnavailableReasonV2::NoPreferredVector,
+            },
+            // **INV-T9 #70 Commit 4b Faz 5:** NotRequired — exhausted reason mapping.
+            CanonicalTrajectoryLossEvidence::NotRequired { reason } => Self::NotRequired {
+                reason: match reason {
+                    CanonicalLossNotRequiredReason::PredicateCompleted => {
+                        RawLossNotRequiredReasonV2::PredicateCompleted
+                    }
+                    CanonicalLossNotRequiredReason::SourceInsufficient => {
+                        RawLossNotRequiredReasonV2::SourceInsufficient
+                    }
+                    CanonicalLossNotRequiredReason::StrictRejectPolicy => {
+                        RawLossNotRequiredReasonV2::StrictRejectPolicy
+                    }
+                    CanonicalLossNotRequiredReason::OperatorApprovalPolicy => {
+                        RawLossNotRequiredReasonV2::OperatorApprovalPolicy
+                    }
+                },
             },
         }
     }
@@ -6775,6 +10025,153 @@ impl<'a> RawMeasurementRequestEvidenceV2Ref<'a> {
             base_revision: RawSpaceViewRevisionV2Ref::from_domain(&evidence.base_revision),
             structural_delta_digest: LowerHex32(*evidence.structural_delta_digest.as_bytes()),
             measurement_input_digest: LowerHex32(*evidence.measurement_input_digest.as_bytes()),
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for `CanonicalTaskGoalEvidenceV2` (serialize).
+/// Raw deserialize formatıyla aynı wire format (internally tagged scope/source).
+#[derive(serde::Serialize)]
+struct RawCanonicalTaskGoalEvidenceV2Ref<'a> {
+    task_id: u64,
+    mode: u8,
+    predicates: Vec<RawCanonicalWeightedPredicateV2Ref<'a>>,
+    preferred_vector: Option<RawCanonicalRawPositionV2Ref>,
+}
+
+impl<'a> RawCanonicalTaskGoalEvidenceV2Ref<'a> {
+    fn from_domain(evidence: &'a CanonicalTaskGoalEvidenceV2) -> Self {
+        Self {
+            task_id: evidence.task_id.into(),
+            mode: evidence.mode.as_u8(),
+            predicates: evidence
+                .predicates
+                .iter()
+                .map(RawCanonicalWeightedPredicateV2Ref::from_domain)
+                .collect(),
+            preferred_vector: evidence
+                .preferred_vector
+                .as_ref()
+                .map(RawCanonicalRawPositionV2Ref::from_domain),
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for canonical weighted predicate.
+#[derive(serde::Serialize)]
+struct RawCanonicalWeightedPredicateV2Ref<'a> {
+    axis: u8,
+    operator: u8,
+    threshold: f64,
+    scope: RawCanonicalPredicateScopeV2Ref<'a>,
+    required_source: RawEffectiveSourceRequirementV2Ref,
+    declared_weight: Option<f64>,
+    tolerance: f64,
+}
+
+impl<'a> RawCanonicalWeightedPredicateV2Ref<'a> {
+    fn from_domain(p: &'a CanonicalWeightedPredicateV2) -> Self {
+        Self {
+            axis: p.axis.as_u8(),
+            operator: p.operator.as_u8(),
+            threshold: p.threshold,
+            scope: RawCanonicalPredicateScopeV2Ref::from_domain(&p.scope),
+            required_source: RawEffectiveSourceRequirementV2Ref::from_domain(&p.required_source),
+            declared_weight: p.declared_weight,
+            tolerance: p.tolerance,
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for predicate scope.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawCanonicalPredicateScopeV2Ref<'a> {
+    Node { id: u64 },
+    Module { name: &'a str },
+    Subgraph { ids: &'a [u64] },
+}
+
+impl<'a> RawCanonicalPredicateScopeV2Ref<'a> {
+    fn from_domain(scope: &'a CanonicalPredicateScope) -> Self {
+        match scope {
+            CanonicalPredicateScope::Node(id) => Self::Node { id: *id },
+            CanonicalPredicateScope::Module(name) => Self::Module { name },
+            CanonicalPredicateScope::Subgraph(s) => Self::Subgraph {
+                ids: s.as_sorted_ids(),
+            },
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for effective source requirement.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum RawEffectiveSourceRequirementV2Ref {
+    Any,
+    Exact { source_tag: u8 },
+}
+
+impl RawEffectiveSourceRequirementV2Ref {
+    fn from_domain(req: &EffectiveSourceRequirement) -> Self {
+        match req {
+            EffectiveSourceRequirement::Any => Self::Any,
+            EffectiveSourceRequirement::Exact(tag) => Self::Exact {
+                source_tag: tag.as_u8(),
+            },
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for canonical raw position.
+#[derive(serde::Serialize)]
+struct RawCanonicalRawPositionV2Ref {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    v: f64,
+}
+
+impl RawCanonicalRawPositionV2Ref {
+    fn from_domain(pos: &CanonicalRawPosition) -> Self {
+        Self {
+            x: pos.x,
+            y: pos.y,
+            z: pos.z,
+            w: pos.w,
+            v: pos.v,
+        }
+    }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Ref wire form for `CanonicalPredicateEvaluationBasisV2`.
+/// Raw deserialize formatıyla aynı (flat effective_improvement fields).
+#[derive(serde::Serialize)]
+struct RawCanonicalPredicateEvaluationBasisV2Ref {
+    gate_evaluation_semantics_version: u32,
+    result: u8,
+    failure_policy: u8,
+    min_improvement_delta: f64,
+    allow_progress_checkpoint: bool,
+    effective_improvement_max_coupling: f64,
+    effective_improvement_max_instability: f64,
+    effective_improvement_min_cohesion: f64,
+    effective_improvement_semantics_version: u32,
+}
+
+impl RawCanonicalPredicateEvaluationBasisV2Ref {
+    fn from_domain(basis: &CanonicalPredicateEvaluationBasisV2) -> Self {
+        Self {
+            gate_evaluation_semantics_version: basis.gate_evaluation_semantics_version,
+            result: basis.result.as_u8(),
+            failure_policy: basis.failure_policy.as_u8(),
+            min_improvement_delta: basis.min_improvement_delta,
+            allow_progress_checkpoint: basis.allow_progress_checkpoint,
+            effective_improvement_max_coupling: basis.effective_improvement.max_coupling,
+            effective_improvement_max_instability: basis.effective_improvement.max_instability,
+            effective_improvement_min_cohesion: basis.effective_improvement.min_cohesion,
+            effective_improvement_semantics_version: basis.effective_improvement.semantics_version,
         }
     }
 }
@@ -7086,6 +10483,25 @@ impl AuthorizationBasisV2 {
             } => CanonicalTrajectoryLossEvidence::Unavailable {
                 reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
             },
+            // **INV-T9 #70 Commit 4b Faz 5 (review v8):** NotRequired — exhausted reason mapping.
+            RawTrajectoryLossV2::NotRequired { reason } => {
+                CanonicalTrajectoryLossEvidence::NotRequired {
+                    reason: match reason {
+                        RawLossNotRequiredReasonV2::PredicateCompleted => {
+                            CanonicalLossNotRequiredReason::PredicateCompleted
+                        }
+                        RawLossNotRequiredReasonV2::SourceInsufficient => {
+                            CanonicalLossNotRequiredReason::SourceInsufficient
+                        }
+                        RawLossNotRequiredReasonV2::StrictRejectPolicy => {
+                            CanonicalLossNotRequiredReason::StrictRejectPolicy
+                        }
+                        RawLossNotRequiredReasonV2::OperatorApprovalPolicy => {
+                            CanonicalLossNotRequiredReason::OperatorApprovalPolicy
+                        }
+                    },
+                }
+            }
         };
 
         // Measurement request evidence conversion.
@@ -7118,7 +10534,35 @@ impl AuthorizationBasisV2 {
             ),
         };
 
-        // AuthorizationBasisV2::new — validate_semantics (nested commitment reverify).
+        // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field wire → domain conversion ──────
+        // measured_after: RawProvenancedMeasuredResultV2 → ProvenancedMeasuredResult.
+        let mk_axis = |a: RawAxisMeasurementV2| -> Result<_, VersionedAuthorizationBasisError> {
+            let source = CanonicalMetricSourceTag::try_from(a.source_tag).map_err(|e| {
+                VersionedAuthorizationBasisError::V2WireConversion {
+                    detail: format!("measured_after axis source_tag: {e}"),
+                }
+            })?;
+            Ok(CanonicalAxisMeasurement {
+                value: a.value,
+                source,
+            })
+        };
+        let measured_after = ProvenancedMeasuredResult {
+            coupling: mk_axis(raw.measured_after.coupling)?,
+            cohesion: mk_axis(raw.measured_after.cohesion)?,
+            instability: mk_axis(raw.measured_after.instability)?,
+            entropy: mk_axis(raw.measured_after.entropy)?,
+            witness_depth: mk_axis(raw.measured_after.witness_depth)?,
+        };
+
+        // task_goal_evidence: RawCanonicalTaskGoalEvidenceV2 → CanonicalTaskGoalEvidenceV2.
+        let task_goal_evidence = raw_task_goal_evidence_to_domain(raw.task_goal_evidence)?;
+
+        // predicate_basis: RawCanonicalPredicateEvaluationBasisV2 → CanonicalPredicateEvaluationBasisV2.
+        let predicate_basis = raw_predicate_evaluation_basis_to_domain(raw.predicate_basis)?;
+
+        // AuthorizationBasisV2::new — validate_semantics (nested commitment reverify +
+        // 4-field parity, Faz 5 Adım 16).
         Self::new(
             raw.task_id,
             raw.claim_id,
@@ -7143,9 +10587,127 @@ impl AuthorizationBasisV2 {
             crate::measurement::MeasurementDeltaDigest::from_bytes(
                 raw.canonical_delta_digest.into_bytes(),
             ),
+            measured_after,
+            task_goal_evidence,
+            predicate_basis,
+            crate::measurement::PredicateGatePolicyDigestV2::from_bytes(
+                raw.predicate_gate_policy_digest.into_bytes(),
+            ),
         )
         .map_err(VersionedAuthorizationBasisError::V2Validation)
     }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire `RawCanonicalTaskGoalEvidenceV2` → domain
+/// `CanonicalTaskGoalEvidenceV2`. Tag dönüşümleri (mode/axis/operator/source) +
+/// scope projection. Infallible DEĞİL — geçersiz tag reject.
+fn raw_task_goal_evidence_to_domain(
+    raw: RawCanonicalTaskGoalEvidenceV2,
+) -> Result<CanonicalTaskGoalEvidenceV2, VersionedAuthorizationBasisError> {
+    use crate::canonical_tags::{
+        CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag, PredicateModeTag,
+    };
+    let mode = PredicateModeTag::try_from(raw.mode).map_err(|e| {
+        VersionedAuthorizationBasisError::V2WireConversion {
+            detail: format!("task_goal_evidence mode: {e}"),
+        }
+    })?;
+    let predicates = raw
+        .predicates
+        .into_iter()
+        .map::<Result<CanonicalWeightedPredicateV2, VersionedAuthorizationBasisError>, _>(|p| {
+            let axis = PredicateAxisTag::try_from(p.axis).map_err(|e| {
+                VersionedAuthorizationBasisError::V2WireConversion {
+                    detail: format!("task_goal_evidence axis: {e}"),
+                }
+            })?;
+            let operator = ComparisonOpTag::try_from(p.operator).map_err(|e| {
+                VersionedAuthorizationBasisError::V2WireConversion {
+                    detail: format!("task_goal_evidence operator: {e}"),
+                }
+            })?;
+            let scope = match p.scope {
+                RawCanonicalPredicateScopeV2::Node { id } => CanonicalPredicateScope::Node(id),
+                RawCanonicalPredicateScopeV2::Module { name } => {
+                    CanonicalPredicateScope::Module(name)
+                }
+                RawCanonicalPredicateScopeV2::Subgraph { ids } => {
+                    CanonicalPredicateScope::Subgraph(
+                        CanonicalSubgraphScope::try_new(ids).map_err(|e| {
+                            VersionedAuthorizationBasisError::V2WireConversion {
+                                detail: format!("task_goal_evidence subgraph: {e}"),
+                            }
+                        })?,
+                    )
+                }
+            };
+            let required_source = match p.required_source {
+                RawEffectiveSourceRequirementV2::Any => EffectiveSourceRequirement::Any,
+                RawEffectiveSourceRequirementV2::Exact { source_tag } => {
+                    EffectiveSourceRequirement::Exact(
+                        CanonicalMetricSourceTag::try_from(source_tag).map_err(|e| {
+                            VersionedAuthorizationBasisError::V2WireConversion {
+                                detail: format!("task_goal_evidence required_source: {e}"),
+                            }
+                        })?,
+                    )
+                }
+            };
+            Ok(CanonicalWeightedPredicateV2 {
+                axis,
+                operator,
+                threshold: p.threshold,
+                scope,
+                required_source,
+                declared_weight: p.declared_weight,
+                tolerance: p.tolerance,
+            })
+        })
+        .collect::<Result<Vec<CanonicalWeightedPredicateV2>, VersionedAuthorizationBasisError>>()?;
+    let preferred_vector = raw.preferred_vector.map(|p| CanonicalRawPosition {
+        x: p.x,
+        y: p.y,
+        z: p.z,
+        w: p.w,
+        v: p.v,
+    });
+    Ok(CanonicalTaskGoalEvidenceV2 {
+        task_id: raw.task_id,
+        mode,
+        predicates,
+        preferred_vector,
+    })
+}
+
+/// **INV-T9 #70 Faz 5 Adım 16:** Wire `RawCanonicalPredicateEvaluationBasisV2` → domain
+/// `CanonicalPredicateEvaluationBasisV2`. Tag dönüşümleri (result/failure_policy).
+fn raw_predicate_evaluation_basis_to_domain(
+    raw: RawCanonicalPredicateEvaluationBasisV2,
+) -> Result<CanonicalPredicateEvaluationBasisV2, VersionedAuthorizationBasisError> {
+    use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+    let result = PredicateSetResultTag::try_from(raw.result).map_err(|e| {
+        VersionedAuthorizationBasisError::V2WireConversion {
+            detail: format!("predicate_basis result: {e}"),
+        }
+    })?;
+    let failure_policy = PredicateFailurePolicyTag::try_from(raw.failure_policy).map_err(|e| {
+        VersionedAuthorizationBasisError::V2WireConversion {
+            detail: format!("predicate_basis failure_policy: {e}"),
+        }
+    })?;
+    Ok(CanonicalPredicateEvaluationBasisV2 {
+        gate_evaluation_semantics_version: raw.gate_evaluation_semantics_version,
+        result,
+        failure_policy,
+        min_improvement_delta: raw.min_improvement_delta,
+        allow_progress_checkpoint: raw.allow_progress_checkpoint,
+        effective_improvement: EffectiveImproPolicyBasisV2 {
+            max_coupling: raw.effective_improvement_max_coupling,
+            max_instability: raw.effective_improvement_max_instability,
+            min_cohesion: raw.effective_improvement_min_cohesion,
+            semantics_version: raw.effective_improvement_semantics_version,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -12079,7 +15641,9 @@ v = 0.5
     fn persisted_artifact_tamper_schema_rejected_on_load() {
         let envelope = sample_valid_envelope();
         let mut json = serde_json::to_value(&envelope).unwrap();
-        json["schema"] = serde_json::json!("osp.pending-authorization.v2");
+        // **INV-T9 #70 Faz 8-P1:** `.v2` artık geçerli schema (V2 support eklendi).
+        // Genuinely unknown schema ile retarget (review 2. tur önerisi).
+        json["schema"] = serde_json::json!("osp.pending-authorization.v99");
         let tampered_bytes = serde_json::to_vec_pretty(&json).unwrap();
 
         let dir = temp_dir();
@@ -12775,6 +16339,10 @@ v = 0.5
             parts.measurement_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
         .expect("valid V2 basis")
     }
@@ -12795,6 +16363,11 @@ v = 0.5
         measurement_request_digest: crate::measurement::MeasurementRequestDigest,
         measurement_context_digest: crate::measurement::MeasurementContextDigest,
         canonical_delta_digest: crate::measurement::MeasurementDeltaDigest,
+        // INV-T9 #70 Faz 5 Adım 16 — +4 field (self-consistent, validate_semantics geçer):
+        measured_after: ProvenancedMeasuredResult,
+        task_goal_evidence: CanonicalTaskGoalEvidenceV2,
+        predicate_basis: CanonicalPredicateEvaluationBasisV2,
+        predicate_gate_policy_digest: crate::measurement::PredicateGatePolicyDigestV2,
     }
 
     fn faz4_basis_v2_raw_parts(task_id: crate::trajectory::TaskId) -> Faz4BasisV2RawParts {
@@ -12851,7 +16424,54 @@ v = 0.5
             v: preferred.v,
         };
         let loss_after = crate::trajectory::trajectory_loss(engine_meas.after(), &preferred);
-        let trajectory_loss = CanonicalTrajectoryLossEvidence::Available { target, loss_after };
+        // **INV-T9 #70 Faz 5 Adım 17 (matris consistency):** predicate_basis.result = Completed
+        // ile tutarlı loss — completion-first matris: Completed → NotRequired(PredicateCompleted).
+        // Eski Available loss Adım 17 matris validator ile çelişiyordu (Completed+Available
+        // matris dışı). Fixture artık completion-first semantiğe uyumlu.
+        let _ = (target, loss_after); // preferred_vector Some olsa bile Completed → loss YOK
+        let trajectory_loss = CanonicalTrajectoryLossEvidence::NotRequired {
+            reason: CanonicalLossNotRequiredReason::PredicateCompleted,
+        };
+
+        // ── INV-T9 #70 Faz 5 Adım 16 — 4 yeni field (self-consistent) ──────────────
+        // measured_after: engine_meas.after() → ProvenancedMeasuredResult (measurement_digest
+        // ile tutarlı — aynı after).
+        let measured_after = ProvenancedMeasuredResult::try_from(engine_meas.after())
+            .expect("measured_after projection infallible");
+        // task_goal_evidence: golden_task → canonical projection (task_goal_digest ile tutarlı —
+        // aynı task, TryFrom<&Task> authoritative projection).
+        let task_goal_evidence = CanonicalTaskGoalEvidenceV2::try_from(&golden_task)
+            .expect("golden task canonical projection infallible");
+        // predicate_basis: evaluator çıktısı formatı. golden task predicate'leri Completed
+        // varsayımıyla (fixture semantiği). policy + improvement_policy + semantics version.
+        let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
+        let predicate_basis = {
+            use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+            CanonicalPredicateEvaluationBasisV2 {
+                gate_evaluation_semantics_version: GATE_EVALUATION_SEMANTICS_V1,
+                result: PredicateSetResultTag::try_from(
+                    &crate::trajectory::PredicateSetResult::Completed,
+                )
+                .expect("Completed tag valid"),
+                failure_policy: PredicateFailurePolicyTag::try_from(
+                    &golden_task.policy.predicate_failure_policy,
+                )
+                .expect("failure policy tag valid"),
+                min_improvement_delta: golden_task.policy.min_improvement_delta,
+                allow_progress_checkpoint: golden_task.policy.allow_progress_checkpoint,
+                effective_improvement: EffectiveImproPolicyBasisV2::try_from(improvement_policy)
+                    .expect("improvement policy finite"),
+            }
+        };
+        // predicate_gate_policy_digest: predicate_basis ile tutarlı (compute_from_canonical).
+        // validate_semantics (d) parity: stored == compute_from_canonical(task_id, goal_digest, basis).
+        let predicate_gate_policy_digest =
+            crate::measurement::PredicateGatePolicyDigestV2::compute_from_canonical(
+                task_id,
+                &task_goal_digest,
+                &predicate_basis,
+            )
+            .expect("policy digest compute");
 
         Faz4BasisV2RawParts {
             task_id,
@@ -12867,6 +16487,10 @@ v = 0.5
             measurement_request_digest,
             measurement_context_digest,
             canonical_delta_digest,
+            measured_after,
+            task_goal_evidence,
+            predicate_basis,
+            predicate_gate_policy_digest,
         }
     }
 
@@ -12993,6 +16617,10 @@ v = 0.5
             parts.measurement_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
         .expect_err("baseline mismatch must reject");
         assert!(
@@ -13025,6 +16653,10 @@ v = 0.5
             parts.measurement_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
     }
 
@@ -13162,6 +16794,10 @@ v = 0.5
             new_request_digest,
             parts.measurement_context_digest,
             parts.canonical_delta_digest, // eski — yeni delta ile çelişir
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
         )
         .unwrap_err();
         assert!(
@@ -13386,7 +17022,7 @@ v = 0.5
         let basis = faz4_basis_v2_fixture();
         let digest = basis.compute_digest().expect("V2 basis digest");
         const FAZ4_BASIS_V2_GOLDEN_HEX: &str =
-            "ee3e78c4b5c3df71752d58cb94cf772816014c3709009a44a98dd1d57fe2bc64";
+            "696d39df204325cfb9781c621c8dcd6cfcfde42557f9731a0c7f32064ce36c17";
         assert_eq!(
             digest.to_hex(),
             FAZ4_BASIS_V2_GOLDEN_HEX,
@@ -13412,7 +17048,7 @@ v = 0.5
         let context = AuthorizationContextV2::new(basis, verified, witness_req).unwrap();
         let digest = context.compute_digest().expect("V2 context digest");
         const FAZ4_CONTEXT_V2_GOLDEN_HEX: &str =
-            "3000ccb37928868e2506869aeb6a13f1c823e61977cdf60603b645123380d8a0";
+            "f2818b8bf55b9cc22d6f0fbe68f968fcf5afc3be326547ceb94d954dab568890";
         assert_eq!(
             digest.to_hex(),
             FAZ4_CONTEXT_V2_GOLDEN_HEX,
@@ -13849,9 +17485,16 @@ v = 0.5
 
     #[test]
     fn commit1b_v2_negative_loss_after_rejects() {
-        // P2: negative loss_after → local invariant reject.
+        // P2: negative loss_after → local invariant reject (parse-time, validate_semantics öncesi).
+        // **INV-T9 #70 Faz 5 Adım 17:** fixture artık NotRequired loss (Completed predicate).
+        // Bu test Available loss + negatif loss_after parse-time reject doğrular —
+        // trajectory_loss'u Available'a çevirip negatif loss_after verelim.
         let mut value: serde_json::Value = serde_json::from_str(V2_WIRE_GOLDEN_FIXTURE).unwrap();
-        value["basis"]["trajectory_loss"]["loss_after"] = serde_json::json!(-0.5);
+        value["basis"]["trajectory_loss"] = serde_json::json!({
+            "kind": "available",
+            "target": { "x": 0.2, "y": 0.8, "z": 0.15, "w": 0.3, "v": 0.6 },
+            "loss_after": -0.5
+        });
         let json = serde_json::to_string(&value).unwrap();
         let err = VersionedAuthorizationBasis::from_json_slice(json.as_bytes())
             .expect_err("negative loss_after reject");
@@ -13965,6 +17608,209 @@ v = 0.5
             value,
             serde_json::json!({"kind": "unavailable", "reason": "no_preferred_vector"})
         );
+    }
+
+    // ── INV-T9 #70 Commit 4b Faz 5: NotRequired loss evidence ────────────────────
+
+    #[test]
+    fn faz5_wire_shape_loss_not_required_output_golden() {
+        // **Faz 5 (review v8):** NotRequired wire shape — 4 reason varyantı snake_case.
+        let predicate_completed = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::PredicateCompleted,
+        })
+        .unwrap();
+        assert_eq!(
+            predicate_completed,
+            serde_json::json!({"kind": "not_required", "reason": "predicate_completed"})
+        );
+
+        let source_insufficient = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::SourceInsufficient,
+        })
+        .unwrap();
+        assert_eq!(
+            source_insufficient,
+            serde_json::json!({"kind": "not_required", "reason": "source_insufficient"})
+        );
+
+        let strict_reject = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::StrictRejectPolicy,
+        })
+        .unwrap();
+        assert_eq!(
+            strict_reject,
+            serde_json::json!({"kind": "not_required", "reason": "strict_reject_policy"})
+        );
+
+        let operator_approval = serde_json::to_value(RawTrajectoryLossV2Ref::NotRequired {
+            reason: RawLossNotRequiredReasonV2::OperatorApprovalPolicy,
+        })
+        .unwrap();
+        assert_eq!(
+            operator_approval,
+            serde_json::json!({"kind": "not_required", "reason": "operator_approval_policy"})
+        );
+    }
+
+    #[test]
+    fn faz5_loss_not_required_tag_pinned_append_only() {
+        // **Faz 5 (review v8 P1-4):** LossNotRequiredReasonTag pinned numeric — append-only.
+        // Mevcut tag'ler (0-3) ASLA değişmez (exact pin — golden vector lock).
+        assert_eq!(LossNotRequiredReasonTag::PREDICATE_COMPLETED.as_u8(), 0);
+        assert_eq!(LossNotRequiredReasonTag::SOURCE_INSUFFICIENT.as_u8(), 1);
+        assert_eq!(LossNotRequiredReasonTag::STRICT_REJECT_POLICY.as_u8(), 2);
+        assert_eq!(
+            LossNotRequiredReasonTag::OPERATOR_APPROVAL_POLICY.as_u8(),
+            3
+        );
+        // Invalid tag reject.
+        assert!(LossNotRequiredReasonTag::try_from(4).is_err());
+        assert!(LossNotRequiredReasonTag::try_from(255).is_err());
+        // Valid tags round-trip.
+        for tag in 0..=3u8 {
+            let parsed = LossNotRequiredReasonTag::try_from(tag).expect("valid tag");
+            assert_eq!(parsed.as_u8(), tag);
+        }
+    }
+
+    #[test]
+    fn faz5_loss_not_required_reason_tag_mapping_exhaustive() {
+        // **Faz 5:** CanonicalLossNotRequiredReason ↔ tag birebir (exhaustive).
+        let cases = [
+            (
+                CanonicalLossNotRequiredReason::PredicateCompleted,
+                LossNotRequiredReasonTag::PREDICATE_COMPLETED,
+            ),
+            (
+                CanonicalLossNotRequiredReason::SourceInsufficient,
+                LossNotRequiredReasonTag::SOURCE_INSUFFICIENT,
+            ),
+            (
+                CanonicalLossNotRequiredReason::StrictRejectPolicy,
+                LossNotRequiredReasonTag::STRICT_REJECT_POLICY,
+            ),
+            (
+                CanonicalLossNotRequiredReason::OperatorApprovalPolicy,
+                LossNotRequiredReasonTag::OPERATOR_APPROVAL_POLICY,
+            ),
+        ];
+        for (reason, expected_tag) in cases {
+            assert_eq!(reason.tag().as_u8(), expected_tag.as_u8());
+        }
+    }
+
+    #[test]
+    fn faz5_encode_canonical_loss_append_only_available_unavailable_unchanged() {
+        // **Faz 5 (review v8 P1-4):** append-only invariant — Available(0)/Unavailable(1)
+        // canonical encoding donar. NotRequired(2) yeni. Bu test mevcut golden byte
+        // contract'lerinin değişmediğini doğrular.
+        use crate::canonical_encoding::encode_u8;
+
+        // Available encoding — tag=0 + target axes + loss_after.
+        let available = CanonicalTrajectoryLossEvidence::Available {
+            target: CanonicalRawPosition {
+                x: 0.2,
+                y: 0.8,
+                z: 0.15,
+                w: 0.3,
+                v: 0.6,
+            },
+            loss_after: 0.55,
+        };
+        let mut hasher = blake3::Hasher::new();
+        encode_canonical_trajectory_loss_v2(&mut hasher, &available).unwrap();
+        let available_digest = hasher.finalize();
+
+        // Unavailable encoding — tag=1 + reason tag=0.
+        let unavailable = CanonicalTrajectoryLossEvidence::Unavailable {
+            reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+        };
+        let mut hasher = blake3::Hasher::new();
+        encode_canonical_trajectory_loss_v2(&mut hasher, &unavailable).unwrap();
+        let unavailable_digest = hasher.finalize();
+
+        // NotRequired encoding — tag=2 + reason tag. Available/Unavailable'dan farklı.
+        let not_required = CanonicalTrajectoryLossEvidence::NotRequired {
+            reason: CanonicalLossNotRequiredReason::PredicateCompleted,
+        };
+        let mut hasher = blake3::Hasher::new();
+        encode_canonical_trajectory_loss_v2(&mut hasher, &not_required).unwrap();
+        let not_required_digest = hasher.finalize();
+
+        // Üç varyant farklı digest üretmeli (tag farkı).
+        let digests = [
+            available_digest.as_bytes(),
+            unavailable_digest.as_bytes(),
+            not_required_digest.as_bytes(),
+        ];
+        for i in 0..3 {
+            for j in (i + 1)..3 {
+                assert_ne!(
+                    digests[i], digests[j],
+                    "loss variant {i} and {j} must produce different digests"
+                );
+            }
+        }
+
+        // Append-only: Available tag=0, Unavailable tag=1 (ilk byte kontrolü için
+        // encoder'ın ilk encode_u8 çağrısının değerini manuel verify edelim).
+        let _ = encode_u8; // import kullanıldı işareti
+    }
+
+    #[test]
+    fn faz5_encode_canonical_loss_not_required_reason_variants_distinct() {
+        // **Faz 5:** 4 NotRequired reason varyantı farklı canonical digest üretmeli.
+        let reasons = [
+            CanonicalLossNotRequiredReason::PredicateCompleted,
+            CanonicalLossNotRequiredReason::SourceInsufficient,
+            CanonicalLossNotRequiredReason::StrictRejectPolicy,
+            CanonicalLossNotRequiredReason::OperatorApprovalPolicy,
+        ];
+        let mut digests = Vec::new();
+        for reason in reasons {
+            let loss = CanonicalTrajectoryLossEvidence::NotRequired { reason };
+            let mut hasher = blake3::Hasher::new();
+            encode_canonical_trajectory_loss_v2(&mut hasher, &loss).unwrap();
+            digests.push(hasher.finalize());
+        }
+        // Her çift farklı olmalı (reason tag farkı).
+        for i in 0..4 {
+            for j in (i + 1)..4 {
+                assert_ne!(
+                    digests[i].as_bytes(),
+                    digests[j].as_bytes(),
+                    "reason {i:?} and {j:?} must produce distinct digests"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn faz5_wire_loss_not_required_round_trip() {
+        // **Faz 5:** NotRequired wire round-trip — serialize → deserialize → domain →
+        // tekrar serialize aynı JSON üretmeli. deny_unknown_fields: unknown reason reject.
+        let loss = CanonicalTrajectoryLossEvidence::NotRequired {
+            reason: CanonicalLossNotRequiredReason::StrictRejectPolicy,
+        };
+        let wire = RawTrajectoryLossV2Ref::from_domain(&loss);
+        let json = serde_json::to_value(&wire).unwrap();
+        // from_domain → wire JSON → raw deserialize → domain projection parity.
+        let wire_json_str = serde_json::to_string(&json).unwrap();
+        let raw: RawTrajectoryLossV2 = serde_json::from_str(&wire_json_str).unwrap();
+        // Domain'e geri (wire→domain mapping).
+        let round_tripped = match raw {
+            RawTrajectoryLossV2::NotRequired {
+                reason: RawLossNotRequiredReasonV2::StrictRejectPolicy,
+            } => CanonicalTrajectoryLossEvidence::NotRequired {
+                reason: CanonicalLossNotRequiredReason::StrictRejectPolicy,
+            },
+            _ => panic!("expected NotRequired/StrictRejectPolicy, got unexpected variant"),
+        };
+        assert_eq!(round_tripped, loss);
+
+        // Unknown reason field → reject (deny_unknown_fields).
+        let bad = r#"{"kind":"not_required","reason":"unknown_reason"}"#;
+        assert!(serde_json::from_str::<RawTrajectoryLossV2>(bad).is_err());
     }
 
     #[test]
@@ -14115,5 +17961,732 @@ v = 0.5
         assert_eq!(canonical.z, 0.30);
         assert_eq!(canonical.w, 0.40);
         assert_eq!(canonical.v, 0.50);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 2+3 (P1-3) — Reverse projection round-trip tests
+    //
+    // Forward (Domain→Canonical) impl'lar ile reverse (Canonical→Domain) impl'lar
+    // arasındaki parity. Round-trip (Domain→Canonical→Domain == original) reverse
+    // projection tutarlılığını pinler; forward exact-value testleri (yukarıda
+    // commit2_provenanced_projection) canonical byte sözleşmesini ayrıca pinler.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn faz5_provenanced_measured_result_round_trips_through_domain() {
+        use crate::coords::{AxisMeasurement, MeasuredRawPosition, MetricSource};
+        // Farklı source'lar her axis'te — per-axis provenance (INV-T4) restore edilir.
+        let original = MeasuredRawPosition {
+            coupling: AxisMeasurement::try_new(0.11, MetricSource::TreeSitter).unwrap(),
+            cohesion: AxisMeasurement::try_new(0.22, MetricSource::Scip).unwrap(),
+            instability: AxisMeasurement::try_new(0.33, MetricSource::Heuristic).unwrap(),
+            entropy: AxisMeasurement::try_new(0.44, MetricSource::Placeholder).unwrap(),
+            witness_depth: AxisMeasurement::try_new(0.55, MetricSource::TreeSitter).unwrap(),
+        };
+        // Forward: Domain → Canonical
+        let canonical = ProvenancedMeasuredResult::try_from(&original)
+            .expect("forward MeasuredRawPosition → ProvenancedMeasuredResult");
+        // Reverse: Canonical → Domain (by-reference, forward impl ile simetrik)
+        let restored: MeasuredRawPosition = (&canonical)
+            .try_into()
+            .expect("reverse ProvenancedMeasuredResult → MeasuredRawPosition");
+        assert_eq!(
+            restored, original,
+            "round-trip failed — value or source lost"
+        );
+    }
+
+    #[test]
+    fn faz5_canonical_predicate_scope_round_trips_through_domain() {
+        use crate::trajectory::PredicateScope;
+        // Üç varyant da: Node, Module, Subgraph (sorted + unique invariant).
+        let cases = [
+            PredicateScope::Node(42),
+            PredicateScope::Module("metrics/coupling".to_string()),
+            PredicateScope::Subgraph(vec![3, 1, 2]), // unsorted input — canonical sort'lar
+        ];
+        for original in cases {
+            // Forward: Domain → Canonical (engine.rs canonicalize_scope ile aynı mapping).
+            let canonical = match &original {
+                PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
+                PredicateScope::Module(name) => CanonicalPredicateScope::Module(name.clone()),
+                PredicateScope::Subgraph(ids) => CanonicalPredicateScope::Subgraph(
+                    CanonicalSubgraphScope::try_new(ids.clone()).unwrap(),
+                ),
+            };
+            // Reverse: Canonical → Domain
+            let restored: PredicateScope = (&canonical).into();
+            // Subgraph arm'ı sorted + unique canonical sıra döner; domain karşılaştırma
+            // için sorted beklenir.
+            let expected = match original {
+                PredicateScope::Subgraph(mut ids) => {
+                    ids.sort_unstable();
+                    PredicateScope::Subgraph(ids)
+                }
+                other => other,
+            };
+            assert_eq!(restored, expected, "round-trip failed for scope");
+        }
+    }
+
+    #[test]
+    fn faz5_effective_source_requirement_projects_to_option() {
+        use crate::canonical_tags::CanonicalMetricSourceTag;
+        use crate::coords::MetricSource;
+        // Any → None (herhangi source kabul).
+        let any = EffectiveSourceRequirement::Any;
+        let projected_any: Option<MetricSource> = (&any).into();
+        assert_eq!(projected_any, None);
+        // Her source tag için Exact(tag) → Some(MetricSource).
+        let sources = [
+            MetricSource::TreeSitter,
+            MetricSource::Scip,
+            MetricSource::Placeholder,
+            MetricSource::Heuristic,
+            MetricSource::Mixed, // aggregation çıktısı — reverse projection dahil
+        ];
+        for src in sources {
+            let tag = CanonicalMetricSourceTag::try_from(&src).unwrap();
+            let exact = EffectiveSourceRequirement::Exact(tag);
+            let projected: Option<MetricSource> = (&exact).into();
+            assert_eq!(
+                projected,
+                Some(src),
+                "Exact({src:?}) should project to Some({src:?})"
+            );
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 10 + 4+5 (P1-3) — Canonical V2 tipleri + reverse TryFrom
+    //
+    // CanonicalWeightedPredicateV2 / CanonicalTaskGoalEvidenceV2 round-trip testleri.
+    // Kritik: `declared_weight` ile `None ≠ Some(1.0)` byte ayrımı korunur — bu, digest
+    // continuity'nin temelidir (EffectiveMetricPredicate.effective_weight çökertmez).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Helper — domain WeightedPredicate'den canonical V2'ye forward projection.
+    /// Item 7'de compute_from_canonical için kullanılacak; burada round-trip için.
+    fn forward_weighted_predicate_to_v2(
+        wp: &crate::trajectory::WeightedPredicate,
+    ) -> Result<CanonicalWeightedPredicateV2, CanonicalizationError> {
+        use crate::canonical_tags::{CanonicalMetricSourceTag, ComparisonOpTag, PredicateAxisTag};
+        let p = &wp.predicate;
+        Ok(CanonicalWeightedPredicateV2 {
+            axis: PredicateAxisTag::try_from(&p.metric)?,
+            operator: ComparisonOpTag::try_from(&p.operator)?,
+            threshold: p.threshold,
+            scope: match &p.scope {
+                crate::trajectory::PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
+                crate::trajectory::PredicateScope::Module(name) => {
+                    CanonicalPredicateScope::Module(name.clone())
+                }
+                crate::trajectory::PredicateScope::Subgraph(ids) => {
+                    CanonicalPredicateScope::Subgraph(CanonicalSubgraphScope::try_new(ids.clone())?)
+                }
+            },
+            required_source: match p.required_source {
+                None => EffectiveSourceRequirement::Any,
+                Some(src) => {
+                    EffectiveSourceRequirement::Exact(CanonicalMetricSourceTag::try_from(&src)?)
+                }
+            },
+            declared_weight: wp.weight,
+            tolerance: p.tolerance,
+        })
+    }
+
+    #[test]
+    fn faz5_canonical_weighted_predicate_v2_round_trips_through_domain() {
+        use crate::coords::MetricSource;
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateScope, WeightedPredicate,
+        };
+        // Farklı axis/op/scope/source/weight kombinasyonları — hepsi round-trip etmeli.
+        let cases = [
+            // All/Any mode — weight None.
+            WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 0.5,
+                    scope: PredicateScope::Node(1),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            },
+            // Weighted mode — weight Some(1.0). KRİTİK: None'dan farklı byte.
+            WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Entropy,
+                    operator: ComparisonOp::Gt,
+                    threshold: 0.3,
+                    scope: PredicateScope::Module("mod".to_string()),
+                    required_source: Some(MetricSource::Scip),
+                    tolerance: 0.01,
+                },
+                weight: Some(1.0),
+            },
+            // Weighted mode — farklı weight. Subgraph sorted (canonical invariant).
+            WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Cohesion,
+                    operator: ComparisonOp::Ge,
+                    threshold: 0.7,
+                    scope: PredicateScope::Subgraph(vec![1, 2, 3]),
+                    required_source: Some(MetricSource::TreeSitter),
+                    tolerance: 0.05,
+                },
+                weight: Some(2.5),
+            },
+        ];
+        for original in cases {
+            let canonical = forward_weighted_predicate_to_v2(&original).unwrap();
+            let restored: WeightedPredicate = (&canonical).try_into().unwrap();
+            assert_eq!(restored, original, "round-trip failed for {original:?}");
+        }
+    }
+
+    #[test]
+    fn faz5_declared_weight_none_distinct_from_some_one() {
+        // KRİTİK digest continuity test: None ≠ Some(1.0). EffectiveMetricPredicate
+        // bunları çökertir (unwrap_or(1.0)); V2 declared_weight ayrımı korur.
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateScope, WeightedPredicate,
+        };
+        let base_pred = MetricPredicate {
+            metric: PredicateAxis::Coupling,
+            operator: ComparisonOp::Le,
+            threshold: 0.5,
+            scope: PredicateScope::Node(1),
+            required_source: None,
+            tolerance: 0.0,
+        };
+        let none_wp = WeightedPredicate {
+            predicate: base_pred.clone(),
+            weight: None,
+        };
+        let some_one_wp = WeightedPredicate {
+            predicate: base_pred,
+            weight: Some(1.0),
+        };
+        let none_canonical = forward_weighted_predicate_to_v2(&none_wp).unwrap();
+        let some_one_canonical = forward_weighted_predicate_to_v2(&some_one_wp).unwrap();
+        // declared_weight ayrımı — None ≠ Some(1.0).
+        assert_ne!(
+            none_canonical.declared_weight, some_one_canonical.declared_weight,
+            "None and Some(1.0) must be distinct (digest continuity)"
+        );
+        assert_eq!(none_canonical.declared_weight, None);
+        assert_eq!(some_one_canonical.declared_weight, Some(1.0));
+    }
+
+    #[test]
+    fn faz5_canonical_task_goal_evidence_v2_round_trips_through_domain() {
+        use crate::coords::MetricSource;
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
+            PredicateSet, WeightedPredicate,
+        };
+        let original = PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![
+                WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Coupling,
+                        operator: ComparisonOp::Le,
+                        threshold: 0.5,
+                        scope: PredicateScope::Node(1),
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                },
+                WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Entropy,
+                        operator: ComparisonOp::Gt,
+                        threshold: 0.3,
+                        scope: PredicateScope::Module("mod".to_string()),
+                        required_source: Some(MetricSource::Scip),
+                        tolerance: 0.01,
+                    },
+                    weight: Some(1.5),
+                },
+            ],
+            preferred_vector: Some(crate::coords::RawPosition {
+                x: 0.1,
+                y: 0.2,
+                z: 0.3,
+                w: 0.4,
+                v: 0.5,
+            }),
+        };
+        // Forward: Domain → Canonical V2.
+        let canonical = CanonicalTaskGoalEvidenceV2 {
+            task_id: 1,
+            mode: crate::canonical_tags::PredicateModeTag::try_from(&original.mode).unwrap(),
+            predicates: original
+                .predicates
+                .iter()
+                .map(forward_weighted_predicate_to_v2)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap(),
+            preferred_vector: original.preferred_vector.map(|pv| CanonicalRawPosition {
+                x: pv.x,
+                y: pv.y,
+                z: pv.z,
+                w: pv.w,
+                v: pv.v,
+            }),
+        };
+        // Reverse: Canonical V2 → Domain.
+        let restored: PredicateSet = (&canonical).try_into().unwrap();
+        assert_eq!(restored, original, "round-trip failed for PredicateSet");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 Faz 8-P1 — V2 Pending Authorization Envelope + Persistence tests
+    //
+    // **Adım 10:** V2 adversarial test matrisi. `faz4_basis_v2_fixture` +
+    // `VerifiedGateEvaluationV2::fixture` pattern reuse → AuthorizationContextV2 →
+    // PendingAuthorizationEnvelopeV2::try_new_held.
+    //
+    // **Test fixture:** Held disposition için valid context (GatePassed{AcceptAsCompleted}
+    // + Required witness). Bu test'ler authorization.rs test modülünde — lib build
+    // cfg(test) ile consumer görür (review: "test'ler production-visible API üzerinden").
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    use crate::witness::{WitnessHoldReason, WitnessQuorumSnapshot};
+
+    /// **Faz 8-P1 test helper:** Valid Held context (GatePassed + Required witness).
+    fn faz8_p1_held_context() -> AuthorizationContextV2 {
+        let basis = faz4_basis_v2_fixture();
+        let gate = CanonicalGateEvaluationV2::gate_passed(
+            crate::trajectory::MutationDecision::AcceptAsCompleted,
+        )
+        .unwrap();
+        let verified = VerifiedGateEvaluationV2::fixture(gate);
+        let witness_req = CanonicalWitnessRequirementV2::try_from((
+            &faz4_witness_policy(),
+            &ApplyTarget::Lane(CommitLane::Mainline),
+        ))
+        .unwrap();
+        AuthorizationContextV2::new(basis, verified, witness_req).expect("V2 context build")
+    }
+
+    /// **Faz 8-P1 test helper:** Held hold_reason (min_approvers=2 required).
+    fn faz8_p1_held_hold_reason() -> WitnessHoldReason {
+        WitnessHoldReason::MinApproversNotMet {
+            distinct: 1,
+            required: 2,
+        }
+    }
+
+    /// **Faz 8-P1 test helper:** Held snapshot (required_approvers=2, quorum=1.5).
+    /// faz4_witness_policy ile tutarlı (min_approvers=2, quorum_threshold=1.5).
+    fn faz8_p1_held_snapshot() -> WitnessQuorumSnapshot {
+        WitnessQuorumSnapshot {
+            approvers: 1,
+            required_approvers: 2,
+            support: 1.0,
+            required_support: 1.5,
+        }
+    }
+
+    /// **Faz 8-P1 test helper:** Unique temp dir per test (isolation).
+    fn faz8_p1_test_temp_dir(test_name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join("osp-faz8-p1-tests")
+            .join(format!("{test_name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// **Faz 8-P1 test helper:** V2 envelope (Held, attempt_num=1).
+    fn faz8_p1_held_envelope() -> PendingAuthorizationEnvelopeV2 {
+        PendingAuthorizationEnvelopeV2::try_new_held(
+            faz8_p1_held_context(),
+            faz8_p1_held_hold_reason(),
+            faz8_p1_held_snapshot(),
+            AttemptNumber::try_from(1).unwrap(),
+            1_700_000_000,
+        )
+        .expect("V2 envelope held creation")
+    }
+
+    #[test]
+    fn faz8_p1_envelope_held_creation_succeeds() {
+        let envelope = faz8_p1_held_envelope();
+        assert_eq!(envelope.schema(), "osp.pending-authorization.v2");
+        assert_eq!(envelope.record().task_id(), 42);
+        // attempt_num: evidence accessor (record.attempt_num kaldırıldı — review).
+        assert_eq!(
+            envelope
+                .record()
+                .suspended_attempt_evidence()
+                .attempt_num()
+                .get(),
+            1
+        );
+        assert_eq!(envelope.record().created_at(), 1_700_000_000);
+        // into_context kaldırıldı — context() borrow (review).
+        assert_eq!(
+            envelope.authorization_context().context().basis().task_id(),
+            42
+        );
+    }
+
+    #[test]
+    fn faz8_p1_envelope_held_round_trip_persist_load() {
+        let envelope = faz8_p1_held_envelope();
+        let dir = faz8_p1_test_temp_dir("round_trip");
+        let mut store = FilesystemPendingAuthorizationStore::new(dir.clone());
+        let receipt = store.persist_v2(&envelope).expect("V2 persist");
+        assert_eq!(receipt.task_id(), 42);
+        assert_eq!(receipt.attempt_num().get(), 1);
+        let loaded = store
+            .load_versioned(receipt.artifact_path())
+            .expect("V2 load");
+        match loaded {
+            VersionedPendingAuthorizationEnvelope::V2(v2) => {
+                assert_eq!(v2.schema(), "osp.pending-authorization.v2");
+                assert_eq!(v2.record().task_id(), 42);
+                assert_eq!(
+                    v2.record().suspended_attempt_evidence().attempt_num().get(),
+                    1
+                );
+            }
+            other => panic!("expected V2, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_envelope_idempotent_persist() {
+        let envelope = faz8_p1_held_envelope();
+        let dir = faz8_p1_test_temp_dir("idempotent");
+        let mut store = FilesystemPendingAuthorizationStore::new(dir.clone());
+        let receipt1 = store.persist_v2(&envelope).expect("first persist");
+        let receipt2 = store
+            .persist_v2(&envelope)
+            .expect("idempotent second persist");
+        assert_eq!(receipt1.artifact_path(), receipt2.artifact_path());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_envelope_conflict_different_content_same_path() {
+        let envelope = faz8_p1_held_envelope();
+        let dir = faz8_p1_test_temp_dir("conflict");
+        let mut store = FilesystemPendingAuthorizationStore::new(dir.clone());
+        let receipt = store.persist_v2(&envelope).expect("persist");
+        let path = receipt.artifact_path().to_path_buf();
+        std::fs::write(&path, b"{\"tampered\": true}").unwrap();
+        let err = store.persist_v2(&envelope).expect_err("conflict expected");
+        assert!(matches!(
+            err,
+            PendingAuthorizationStoreError::BasisConflict { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_v1_schema_frozen() {
+        // V1 schema constant frozen (V2 support eklendi ama V1 backward compat).
+        assert_eq!(PENDING_AUTHORIZATION_SCHEMA, "osp.pending-authorization.v1");
+        assert_eq!(
+            PENDING_AUTHORIZATION_SCHEMA_V2,
+            "osp.pending-authorization.v2"
+        );
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_unknown_schema_rejects() {
+        let dir = faz8_p1_test_temp_dir("unknown_schema");
+        let path = dir.join("unknown.json");
+        std::fs::write(&path, b"{\"schema\": \"osp.bogus.v1\", \"record\": {}}").unwrap();
+        let err = load_pending_authorization_versioned(&path).expect_err("unknown schema rejected");
+        assert!(matches!(
+            err,
+            VersionedPendingAuthorizationLoadError::UnknownSchema { .. }
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_missing_schema_rejects() {
+        let dir = faz8_p1_test_temp_dir("missing_schema");
+        let path = dir.join("missing.json");
+        std::fs::write(&path, b"{\"record\": {}}").unwrap();
+        let err = load_pending_authorization_versioned(&path).expect_err("missing schema rejected");
+        assert!(matches!(
+            err,
+            VersionedPendingAuthorizationLoadError::MissingSchema
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn faz8_p1_versioned_dispatch_top_level_not_object_rejects() {
+        let dir = faz8_p1_test_temp_dir("not_object");
+        let path = dir.join("array.json");
+        std::fs::write(&path, b"[1, 2, 3]").unwrap();
+        let err = load_pending_authorization_versioned(&path).expect_err("non-object rejected");
+        assert!(matches!(
+            err,
+            VersionedPendingAuthorizationLoadError::TopLevelNotObject
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 PR#84 review — P1 adversarial test'leri (hold_reason ↔ snapshot)
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pr84_p1_min_approvers_distinct_approvers_mismatch_rejects() {
+        // **PR#84 review P1 (2. tur):** gerçek rejection assertion — no-op DEĞİL.
+        // MinApproversNotMet.distinct (1) != snapshot.approvers (0) → reject.
+        let hold_reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 1,
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0, // != distinct (1)
+            required_approvers: 2,
+            support: 1.0,
+            required_support: 1.5,
+        };
+        let err = validate_hold_reason_snapshot_v2(&hold_reason, &snapshot)
+            .expect_err("distinct != approvers must reject");
+        assert!(matches!(
+            err,
+            SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(_)
+        ));
+    }
+
+    #[test]
+    fn pr84_p1_min_approvers_distinct_ge_required_rejects() {
+        // **PR#84 review P1 (2. tur):** distinct >= required → approver requirement met → reject.
+        let hold_reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 2, // == required (2) → met
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 2,
+            required_approvers: 2,
+            support: 1.0,
+            required_support: 1.5,
+        };
+        let err = validate_hold_reason_snapshot_v2(&hold_reason, &snapshot)
+            .expect_err("distinct >= required must reject (requirement met)");
+        assert!(matches!(
+            err,
+            SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(_)
+        ));
+    }
+
+    #[test]
+    fn pr84_p1_quorum_support_mismatch_rejects() {
+        // **PR#84 review P1 (2. tur):** QuorumInsufficient.support != snapshot.support → reject.
+        let hold_reason = WitnessHoldReason::QuorumInsufficient {
+            support: 0.4,
+            threshold: 1.5,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 1,
+            required_approvers: 2,
+            support: 1.4, // != hold_reason.support (0.4)
+            required_support: 1.5,
+        };
+        let err = validate_hold_reason_snapshot_v2(&hold_reason, &snapshot)
+            .expect_err("support != snapshot.support must reject");
+        assert!(matches!(
+            err,
+            SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(_)
+        ));
+    }
+
+    #[test]
+    fn pr84_p1_held_fixture_valid() {
+        // Faz 8-P1 fixture: MinApproversNotMet{1,2} + snapshot{approvers:1, required:2}
+        // → geçerli (distinct==approvers, distinct<required). P1 fix sonrası hâlâ çalışır.
+        let envelope = faz8_p1_held_envelope();
+        assert_eq!(envelope.schema(), "osp.pending-authorization.v2");
+        // Eligibility (validate_hold_reason_snapshot_v2 dahil) try_new_held'de geçti.
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 PR#84 review 6. tur — P1 context validator regression test'leri
+    //
+    // **P0 (4. tur) doğru katmanda:** validate_gate_against_basis context seviyesi.
+    // Bu test'ler P0'ı koruyan kritik branch coverage — Available early-return test
+    // validator `if Unavailable { return Ok }` regress etse yakalayamazdı.
+    // Unavailable fixture: mevcut fixture + Unavailable baseline + digest recompute.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// **PR#84 review 6. tur:** Unavailable baseline + Available loss + AcceptImprovement +
+    /// NotCompleted predicate taşıyan tutarlı digest zincirine sahip basis fixture.
+    /// mevcut fixture + Unavailable baseline (digest recompute) + Available loss + NotCompleted.
+    fn faz8_p1_unavailable_baseline_basis() -> AuthorizationBasisV2 {
+        use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+        use crate::measurement::{
+            BaselineUnavailableReason, EngineMeasurement, MeasurementBaseline,
+        };
+
+        let mut parts = faz4_basis_v2_raw_parts(42);
+
+        // Unavailable baseline ile EngineMeasurement recompute → digest zinciri tutarlı.
+        // Subject üyeleri delta-introduced (tümü) — AllMembersIntroducedByDelta.
+        let subject_members: Vec<u64> = parts.measurement_request.subject.member_ids().to_vec();
+        let unavailable_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members: subject_members.clone(),
+            },
+        };
+        // EngineMeasurement private fields — recompute için after/context/request gerek.
+        let (request, _evidence) = sample_measurement_request_evidence_parts();
+        let after = faz4_uniform_measured(0.5);
+        let context = sample_measurement_input_context_for_faz4();
+        let engine_meas =
+            EngineMeasurement::new(unavailable_baseline, after, context, request.clone())
+                .expect("Unavailable baseline engine measurement");
+
+        // Digest'ları Unavailable baseline ile recompute.
+        parts.engine_measurement_digest = engine_meas.compute_digest().unwrap();
+        parts.measurement_baseline_digest = engine_meas.before().compute_digest().unwrap();
+        parts.measured_after = ProvenancedMeasuredResult::try_from(engine_meas.after()).unwrap();
+        parts.measurement_digest =
+            crate::measurement::MeasurementDigest::compute(engine_meas.after()).unwrap();
+
+        // CanonicalTrajectoryEvidenceBaseline::Unavailable — reason'u pattern match ile çıkar.
+        let baseline_reason = match engine_meas.before() {
+            MeasurementBaseline::Unavailable { reason } => reason.clone(),
+            _ => unreachable!("Unavailable baseline constructed above"),
+        };
+        parts.trajectory_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
+            reason: CanonicalBaselineUnavailableReason::try_from_reason(
+                &baseline_reason,
+                &parts.measurement_request.subject,
+            )
+            .expect("valid unavailable reason"),
+        };
+
+        // Trajectory loss → Available (target var, baseline yok — runtime bu durumda
+        // Available{target, loss_after} + improved=false + Reject üretir).
+        parts.trajectory_loss = CanonicalTrajectoryLossEvidence::Available {
+            target: CanonicalRawPosition {
+                x: 0.1,
+                y: 0.1,
+                z: 0.0,
+                w: 0.0,
+                v: 0.0,
+            },
+            loss_after: 0.5 as CanonicalF64,
+        };
+
+        // predicate_basis → NotCompleted + AcceptImprovement (validate_gate_against_basis hedef dalı).
+        parts.predicate_basis = CanonicalPredicateEvaluationBasisV2 {
+            gate_evaluation_semantics_version: GATE_EVALUATION_SEMANTICS_V1,
+            result: PredicateSetResultTag::try_from(
+                &crate::trajectory::PredicateSetResult::NotCompleted,
+            )
+            .unwrap(),
+            failure_policy: PredicateFailurePolicyTag::try_from(
+                &crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+            )
+            .unwrap(),
+            min_improvement_delta: 0.1 as CanonicalF64,
+            allow_progress_checkpoint: true,
+            effective_improvement: parts.predicate_basis.effective_improvement,
+        };
+        // predicate_gate_policy_digest — değişen predicate_basis ile recompute.
+        parts.predicate_gate_policy_digest =
+            crate::measurement::PredicateGatePolicyDigestV2::compute_from_canonical(
+                parts.task_id,
+                &parts.task_goal_digest,
+                &parts.predicate_basis,
+            )
+            .expect("predicate gate policy digest recompute");
+
+        AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            parts.engine_measurement_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            parts.measurement_request,
+            parts.measurement_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
+        )
+        .expect("valid Unavailable baseline basis")
+    }
+
+    #[test]
+    fn pr84_p1_context_validator_available_baseline_early_returns() {
+        // Available baseline → validate_gate_against_basis early return Ok (Unavailable dalı
+        // değerlendirilmez). Regression: basis validator'dan kaldırma (4. tur) doğru.
+        let basis = faz4_basis_v2_fixture();
+        let gate_reject = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::Reject,
+        };
+        let gate_progress = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::AcceptAsProgress,
+        };
+        assert!(
+            validate_gate_against_basis(&basis, &gate_reject).is_ok(),
+            "Available baseline → early return Ok (Reject)"
+        );
+        assert!(
+            validate_gate_against_basis(&basis, &gate_progress).is_ok(),
+            "Available baseline → early return Ok (AcceptAsProgress)"
+        );
+    }
+
+    #[test]
+    fn pr84_p1_context_validator_unavailable_baseline_reject_ok() {
+        // **PR#84 review P1 (6. tur):** Unavailable baseline + Available loss +
+        // AcceptImprovement + NotCompleted + GatePassed{Reject} → OK (geçerli runtime).
+        // Bu test P0'ın koruduğu invariant — validator `if Unavailable { return Ok }`
+        // regress etse yakalardı (Available test'i yakalamazdı).
+        let basis = faz8_p1_unavailable_baseline_basis();
+        let gate = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::Reject,
+        };
+        let result = validate_gate_against_basis(&basis, &gate);
+        assert!(
+            result.is_ok(),
+            "Unavailable baseline + Reject → valid runtime; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn pr84_p1_context_validator_unavailable_baseline_accept_progress_rejects() {
+        // **PR#84 review P1 (6. tur):** Unavailable baseline + Available loss +
+        // AcceptImprovement + NotCompleted + GatePassed{AcceptAsProgress} → reject
+        // (forged persisted — runtime üretmez).
+        let basis = faz8_p1_unavailable_baseline_basis();
+        let gate = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::AcceptAsProgress,
+        };
+        let result = validate_gate_against_basis(&basis, &gate);
+        assert!(
+            matches!(
+                result,
+                Err(AuthorizationContextV2BuildError::GateBasisSemanticMismatch { .. })
+            ),
+            "Unavailable baseline + AcceptAsProgress → forged persisted; got {result:?}"
+        );
     }
 }

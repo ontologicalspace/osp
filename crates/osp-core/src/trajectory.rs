@@ -368,14 +368,29 @@ impl PredicateSet {
                     PredicateSetResult::NotCompleted
                 }
             }
-            // Weighted: Aşama C'de loss function. Şimdilik All gibi davran (source check).
+            // Weighted: Aşama C'de loss function. Şimdilik All gibi davranır (source check dahil).
+            //
+            // **INV-T9 #70 Commit 4b Faz 5 (review v8 P0-6):** Önceden `all(matches!(Satisfied))`
+            // kullanıyordu — `SourceInsufficient`'ı `NotCompleted`'a collapsed ediyordu. Bu,
+            // placeholder/heuristic ölçümün Weighted task'ta `NotCompleted → AcceptAsProgress`
+            // yoluna girmesine izin vererek INV-T4'ü ihlal ediyordu. All/Any arm'ları source
+            // propagation'ı doğru yapıyor; Weighted artık onları mirror'lar.
             PredicateMode::Weighted => {
-                let all_satisfied = self
-                    .predicates
-                    .iter()
-                    .all(|wp| matches!(wp.predicate.evaluate(pos), PredicateResult::Satisfied));
+                let mut all_satisfied = true;
+                for wp in &self.predicates {
+                    match wp.predicate.evaluate(pos) {
+                        PredicateResult::Satisfied => {}
+                        PredicateResult::SourceInsufficient => {
+                            any_source_insufficient = true;
+                            all_satisfied = false;
+                        }
+                        PredicateResult::Unsatisfied => all_satisfied = false,
+                    }
+                }
                 if all_satisfied {
                     PredicateSetResult::Completed
+                } else if any_source_insufficient {
+                    PredicateSetResult::SourceInsufficient
                 } else {
                     PredicateSetResult::NotCompleted
                 }
@@ -723,106 +738,17 @@ impl Task {
     ///
     /// **NOT (reviewer v3 P0):** `preferred_vector = None` geçerli — bu metod reddetmez.
     /// NoPreferredVector durumunda typed loss evidence gate içinde karar verir.
+    ///
+    /// **INV-T9 #70 Faz 5 (P0-1):** Predicate goal validation `validate_predicate_goal_for_commit`
+    /// free function'a extract edildi — restore path (canonical evidence → PredicateSet)
+    /// aynı validator'ı kullanır. Policy validation bu metodda kalır (TaskPolicy restore
+    /// path ayrı).
     pub(crate) fn validate_for_commit(&self) -> Result<(), TaskValidationError> {
+        // **INV-T9 #70 Faz 5 Adım 6 (P0-1):** Shared predicate-goal validator.
+        validate_predicate_goal_for_commit(self.id, &self.target_predicate_set)?;
+
         let task_id = self.id;
         let policy = &self.policy;
-        let pset = &self.target_predicate_set;
-
-        // PredicateSet non-empty.
-        if pset.predicates.is_empty() {
-            return Err(TaskValidationError::EmptyPredicateSet { task_id });
-        }
-
-        // Her WeightedPredicate için MetricPredicate + weight/mode shape validation.
-        for (predicate_index, wp) in pset.predicates.iter().enumerate() {
-            let pred = &wp.predicate;
-            // threshold finite.
-            if !pred.threshold.is_finite() {
-                return Err(TaskValidationError::NonFiniteThreshold {
-                    task_id,
-                    predicate_index,
-                    threshold: pred.threshold,
-                });
-            }
-            // tolerance finite + >= 0.
-            if !pred.tolerance.is_finite() || pred.tolerance < 0.0 {
-                return Err(TaskValidationError::InvalidTolerance {
-                    task_id,
-                    predicate_index,
-                    tolerance: pred.tolerance,
-                });
-            }
-            // required_source != Mixed (epistemik talep değil).
-            if pred.required_source == Some(MetricSource::Mixed) {
-                return Err(TaskValidationError::InvalidRequiredMetricSource {
-                    task_id,
-                    predicate_index,
-                    required_source: MetricSource::Mixed,
-                });
-            }
-            // **Reviewer scoped P1-1:** mode/weight shape validation.
-            // Sözleşme: Weighted → weight=Some(w); All/Any → weight=None.
-            match (pset.mode, wp.weight) {
-                (PredicateMode::Weighted, None) => {
-                    return Err(TaskValidationError::MissingWeightForWeightedMode {
-                        task_id,
-                        predicate_index,
-                    });
-                }
-                (PredicateMode::All | PredicateMode::Any, Some(weight)) => {
-                    return Err(TaskValidationError::UnexpectedWeightForUnweightedMode {
-                        task_id,
-                        predicate_index,
-                        weight,
-                        mode: pset.mode,
-                    });
-                }
-                (_, Some(weight)) if !weight.is_finite() || weight <= 0.0 => {
-                    return Err(TaskValidationError::InvalidWeight {
-                        task_id,
-                        predicate_index,
-                        weight,
-                    });
-                }
-                _ => {}
-            }
-            // **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** Subgraph scope duplicate
-            // node id kontrolü. `[1,1,2]` iki farklı digest üretürken aynı ontolojik
-            // subgraph'ı ifade edebilir. Canonical representation invariant — sessiz
-            // dedup YOK, typed reject.
-            if let PredicateScope::Subgraph(ids) = &pred.scope {
-                let mut sorted = ids.clone();
-                sorted.sort_unstable();
-                for pair in sorted.windows(2) {
-                    if pair[0] == pair[1] {
-                        return Err(TaskValidationError::DuplicateSubgraphScopeNode {
-                            task_id,
-                            predicate_index,
-                            node_id: pair[0],
-                        });
-                    }
-                }
-            }
-        }
-
-        // preferred_vector varsa beş alan finite.
-        if let Some(pv) = pset.preferred_vector {
-            if !pv.x.is_finite()
-                || !pv.y.is_finite()
-                || !pv.z.is_finite()
-                || !pv.w.is_finite()
-                || !pv.v.is_finite()
-            {
-                return Err(TaskValidationError::NonFinitePreferredVector {
-                    task_id,
-                    x: pv.x,
-                    y: pv.y,
-                    z: pv.z,
-                    w: pv.w,
-                    v: pv.v,
-                });
-            }
-        }
 
         // TaskPolicy: min_improvement_delta finite + >= 0.
         if !policy.min_improvement_delta.is_finite() || policy.min_improvement_delta < 0.0 {
@@ -848,6 +774,123 @@ impl Task {
 
         Ok(())
     }
+}
+
+/// **INV-T9 #70 Faz 5 Adım 6 (P0-1):** Shared task-goal validator — predicate set
+/// commit-time validation. `Task::validate_for_commit`'ten extract edildi; restore
+/// path (canonical evidence → `PredicateSet::try_from` → validate_predicate_goal_for_commit
+/// → evaluate_completion) tek evaluator altyapısı için aynı validator'ı kullanır.
+///
+/// **Exact matris (reviewer v4 P2):**
+/// - MetricPredicate: threshold finite, tolerance finite + >= 0, required_source != Mixed
+/// - WeightedPredicate: weight varsa finite + > 0 (mode/weight shape: Weighted→Some, All/Any→None)
+/// - PredicateSet: predicate list non-empty, preferred_vector varsa beş alan finite,
+///   subgraph scope duplicate node id yok
+///
+/// **NOT (reviewer v3 P0):** `preferred_vector = None` geçerli — bu metod reddetmez.
+pub(crate) fn validate_predicate_goal_for_commit(
+    task_id: TaskId,
+    predicate_set: &PredicateSet,
+) -> Result<(), TaskValidationError> {
+    let pset = predicate_set;
+
+    // PredicateSet non-empty.
+    if pset.predicates.is_empty() {
+        return Err(TaskValidationError::EmptyPredicateSet { task_id });
+    }
+
+    // Her WeightedPredicate için MetricPredicate + weight/mode shape validation.
+    for (predicate_index, wp) in pset.predicates.iter().enumerate() {
+        let pred = &wp.predicate;
+        // threshold finite.
+        if !pred.threshold.is_finite() {
+            return Err(TaskValidationError::NonFiniteThreshold {
+                task_id,
+                predicate_index,
+                threshold: pred.threshold,
+            });
+        }
+        // tolerance finite + >= 0.
+        if !pred.tolerance.is_finite() || pred.tolerance < 0.0 {
+            return Err(TaskValidationError::InvalidTolerance {
+                task_id,
+                predicate_index,
+                tolerance: pred.tolerance,
+            });
+        }
+        // required_source != Mixed (epistemik talep değil).
+        if pred.required_source == Some(MetricSource::Mixed) {
+            return Err(TaskValidationError::InvalidRequiredMetricSource {
+                task_id,
+                predicate_index,
+                required_source: MetricSource::Mixed,
+            });
+        }
+        // **Reviewer scoped P1-1:** mode/weight shape validation.
+        // Sözleşme: Weighted → weight=Some(w); All/Any → weight=None.
+        match (pset.mode, wp.weight) {
+            (PredicateMode::Weighted, None) => {
+                return Err(TaskValidationError::MissingWeightForWeightedMode {
+                    task_id,
+                    predicate_index,
+                });
+            }
+            (PredicateMode::All | PredicateMode::Any, Some(weight)) => {
+                return Err(TaskValidationError::UnexpectedWeightForUnweightedMode {
+                    task_id,
+                    predicate_index,
+                    weight,
+                    mode: pset.mode,
+                });
+            }
+            (_, Some(weight)) if !weight.is_finite() || weight <= 0.0 => {
+                return Err(TaskValidationError::InvalidWeight {
+                    task_id,
+                    predicate_index,
+                    weight,
+                });
+            }
+            _ => {}
+        }
+        // **INV-T9 #70 Commit 4b Faz 4 (reviewer P1-4):** Subgraph scope duplicate
+        // node id kontrolü. `[1,1,2]` iki farklı digest üretürken aynı ontolojik
+        // subgraph'ı ifade edebilir. Canonical representation invariant — sessiz
+        // dedup YOK, typed reject.
+        if let PredicateScope::Subgraph(ids) = &pred.scope {
+            let mut sorted = ids.clone();
+            sorted.sort_unstable();
+            for pair in sorted.windows(2) {
+                if pair[0] == pair[1] {
+                    return Err(TaskValidationError::DuplicateSubgraphScopeNode {
+                        task_id,
+                        predicate_index,
+                        node_id: pair[0],
+                    });
+                }
+            }
+        }
+    }
+
+    // preferred_vector varsa beş alan finite.
+    if let Some(pv) = pset.preferred_vector {
+        if !pv.x.is_finite()
+            || !pv.y.is_finite()
+            || !pv.z.is_finite()
+            || !pv.w.is_finite()
+            || !pv.v.is_finite()
+        {
+            return Err(TaskValidationError::NonFinitePreferredVector {
+                task_id,
+                x: pv.x,
+                y: pv.y,
+                z: pv.z,
+                w: pv.w,
+                v: pv.v,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -986,6 +1029,37 @@ pub enum MutationDecision {
     AcceptAsCompleted,
     /// İnsan review gerekli (critical domain).
     RequireOperatorApproval,
+}
+
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** Improvement assessment — gate decision core'ın
+/// zenginleştirilmiş sonucu. `MutationDecision` *ne* yapılacağını söyler;
+/// `ImprovementAssessment` *neden* — restore validator semantic matrix için kanıt.
+///
+/// Completion-first short-circuit'ler (`PredicateCompleted`, `SourceInsufficient`) +
+/// policy-driven decision'lar (`StrictRejectPolicy`, `OperatorApprovalPolicy`) +
+/// improvement result (`Improved`, `NotImproved`). `evaluate_decision_core` üretir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImprovementAssessment {
+    /// PredicateSet completed → AcceptAsCompleted. Loss hesabı YOK (completion-first).
+    PredicateCompleted,
+    /// Source insufficient (INV-T4) → Reject. Placeholder/heuristic ile task kapatılamaz.
+    SourceInsufficient,
+    /// StrictReject policy → Reject (predicate fail her zaman reject).
+    StrictRejectPolicy,
+    /// OperatorApproval policy → RequireOperatorApproval (critical domain).
+    OperatorApprovalPolicy,
+    /// AcceptImprovement policy + improved + progress checkpoint → AcceptAsProgress.
+    Improved,
+    /// AcceptImprovement policy ama improved DEĞİL (loss regression veya hard-cap fail)
+    /// veya progress checkpoint kapalı → Reject.
+    NotImproved {
+        /// min_improvement_delta sağlanmadı mı (loss_after >= loss_before - delta)?
+        insufficient_delta: bool,
+        /// Hard-cap aşıldı mı (coupling/instability/cohesion threshold)?
+        hard_cap_violated: bool,
+        /// Progress checkpoint policy kapalı mı?
+        progress_checkpoint_disabled: bool,
+    },
 }
 
 /// Commit lane — INV-T8 (progress checkpoint isolation).
@@ -1211,6 +1285,37 @@ pub enum TrajectoryLossUnavailableReason {
     NoPreferredVector,
 }
 
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Trajectory loss "gerekmiyor" sebebi —
+/// completion-first PredicateGate modeli. Loss hesaplanAMADI anlamında DEĞİL; loss
+/// hesaplanMASI GEREKMEZ (semantik olarak irrelevant).
+///
+/// **Epistemik disiplin (review v8 P0-3):** `NotRequired` hiçbir zaman error/fallback
+/// yolu değildir. Loss üretim hatası → typed operational error → fail-closed (RejectedByGate
+/// değil). `NotRequired` yalnızca predicate sonucu/policy loss hesabını gereksiz kıldığında
+/// üretilir.
+///
+/// **Kapalı enum — `Other(String)` YOK.** Reason, gate'in neden loss istemediğini
+/// denetlenebilir biçimde açıklar. Append-only pinned numeric tag (`LossNotRequiredReasonTag`
+/// authorization.rs'te — Faz 5 encoder ile).
+///
+/// **Karar matrisi (Faz 5 plan v8 pinli):**
+/// - `PredicateCompleted` — predicate satisfied → loss irrelevant → AcceptAsCompleted
+/// - `SourceInsufficient` — INV-T4 placeholder → Reject kesin, loss anlamsız
+/// - `StrictRejectPolicy` — StrictReject policy → loss computation anlamsız → Reject
+/// - `OperatorApprovalPolicy` — OperatorApproval → loss mutation kararını etkilemiyor
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LossNotRequiredReason {
+    /// Predicate Completed — task kapandı, loss irrelevant.
+    PredicateCompleted,
+    /// SourceInsufficient (INV-T4) — placeholder/heuristic ile task kapatılamaz, Reject kesin.
+    SourceInsufficient,
+    /// StrictReject policy — predicate fail'de her zaman Reject, loss computation anlamsız.
+    StrictRejectPolicy,
+    /// OperatorApproval policy — loss mutation kararını etkilemiyor, insan review.
+    OperatorApprovalPolicy,
+}
+
 /// **Borrowed gate input** — `PredicateGate::evaluate` loss evidence. Available ise
 /// target + loss_after taşır; Unavailable ise reason. Baseline ayrı parametre
 /// (`TrajectoryEvidenceBaseline<'a>`).
@@ -1220,29 +1325,21 @@ pub enum TrajectoryLossUnavailableReason {
 /// (canonicalization, non-finite) `Unavailable`'a dönüştürülmez** — terminal derivation
 /// error (`MeasurementBindingDerivationError` veya `EngineCommitError::Internal`).
 ///
-/// **INV-T9 #70 Commit 4b Faz 3 contract (Faz 5 için not — reviewer v6):** Bu enum
-/// Faz 3'te DEĞİŞTİRİLMEZ. `NotRequired` varyantı Faz 5'te completion-first PredicateGate
-/// refactor ile ATOMİK olarak eklenir (producer + consumer + owned eşlenik + gate
-/// refactor + authorization wiring aynı commit). Şu anki 2-varyantlı yapı (`Available`
-/// + `Unavailable`) mevcut PredicateGate scalar `trajectory_loss` hesabıyla uyumlu —
-/// `NotRequired`'ın consumer'ı olmadan eklenmesi dead-code yaratır.
+/// **INV-T9 #70 Commit 4b Faz 5 (review v8):** Bu enum artık 3-varyantlı —
+/// `NotRequired` eklendi (completion-first PredicateGate modeli). Faz 3 contract'ı
+/// (atomik ekleme) kapandı: producer + consumer + owned eşlenik + canonical/wire senkron
+/// + encoder tag=2 Faz 5 Checkpoint A'da birlikte.
 ///
-/// **Faz 5 completion-first karar matrisi (plan pinli):**
+/// **Faz 5 completion-first karar matrisi (plan v8 pinli):**
 ///
 /// | Predicate | Policy | preferred_vector | Loss evidence | Decision |
 /// |---|---|---|---|---|
 /// | Completed | any | Some/None | NotRequired(PredicateCompleted) | AcceptAsCompleted |
+/// | SourceInsufficient | any | Some/None | NotRequired(SourceInsufficient) | Reject |
 /// | NotCompleted | StrictReject | Some/None | NotRequired(StrictRejectPolicy) | Reject |
+/// | NotCompleted | OperatorApproval | Some/None | NotRequired(OperatorApprovalPolicy) | RequireOperatorApproval |
 /// | NotCompleted | AcceptImprovement + target | Available | Available | loss/regression |
-/// | NotCompleted | AcceptImprovement + None | Unavailable(PreferredVectorMissing) | Progress reject |
-///
-/// Faz 5'te eklenecekler (atomik):
-/// - `TrajectoryLossEvidence::NotRequired { reason: LossNotRequiredReason }`
-/// - `LossNotRequiredReason { PredicateCompleted, StrictRejectPolicy }`
-/// - `OwnedTrajectoryLossEvidence` eşleniği senkron
-/// - canonical loss derivation (tek truth source)
-/// - PredicateGate scalar `trajectory_loss` iç hesabı → canonical evidence consume
-/// - AuthorizationContextV2 aynı evidence consume (drift risk kapalı)
+/// | NotCompleted | AcceptImprovement + None | Unavailable(NoPreferredVector) | Reject |
 #[derive(Debug, Clone, PartialEq)]
 pub enum TrajectoryLossEvidence<'a> {
     /// Loss hesaplanabilir — preferred_vector mevcut, after ölçüldü.
@@ -1252,17 +1349,21 @@ pub enum TrajectoryLossEvidence<'a> {
     },
     /// Loss unavailable — yalnız `NoPreferredVector` (preferred_vector None).
     /// Computation failure ayrı terminal error — bu varyanta gömülmez.
-    ///
-    /// **Faz 5:** `NotRequired` varyantı eklenecek (completion-first). Bu varyant
-    /// yalnız "loss gerekliydi ama üretilemedi" anlamında kalır — "loss gerekmedi"
-    /// (`PredicateCompleted`/`StrictRejectPolicy`) ayrı varyant.
     Unavailable {
         reason: TrajectoryLossUnavailableReason,
     },
+    /// **Faz 5:** Loss gerekmiyor — completion-first. Semantik olarak loss irrelevant
+    /// (predicate completed/source insufficient/policy reject/operator approval).
+    /// `LossNotRequiredReason` kapalı enum — `Other(String)` yok. Epistemik kaçış kapısı
+    /// DEĞİL: loss üretim hatası `NotRequired` yerine typed operational error olur.
+    NotRequired { reason: LossNotRequiredReason },
 }
 
 /// **Owned variant** — `TaskCommitResult.evaluation` ve navigator state (Faz 7) için.
 /// `TrajectoryLossEvidence<'a>` owned counterpart'i — target `RawPosition` (borrow değil).
+///
+/// **INV-T9 #70 Commit 4b Faz 5:** `NotRequired` varyantı senkron (borrowed ile aynı
+/// semantik cebirin lossless projection'ı).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum OwnedTrajectoryLossEvidence {
     Available {
@@ -1272,6 +1373,8 @@ pub enum OwnedTrajectoryLossEvidence {
     Unavailable {
         reason: TrajectoryLossUnavailableReason,
     },
+    /// **Faz 5:** Loss gerekmiyor — borrowed ile aynı reason set.
+    NotRequired { reason: LossNotRequiredReason },
 }
 
 /// **Borrowed gate input** — baseline (before-state) evidence. Subject scope üyelerinin
@@ -1475,50 +1578,45 @@ impl PredicateGate {
     /// **reviewer P0-1:** `improvement_policy` burada BİR KEZ üretilir — `is_improved_loss`
     /// kararını verir ve `PredicateGateOutput` ile döndürülür. Engine output'tan alıp
     /// authorization basis'e taşır; basis builder yeniden üretmez (tek source of truth).
+    ///
+    /// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** V1 adapter — legacy scalar loss formülünü
+    /// hesaplayıp `evaluate_decision_core`'a geçirir. Core loss formülü içermez (plan
+    /// negatif koşulu). 7 test parity: mevcut behavior korunur, decision logic core'da.
     pub fn evaluate(&self, input: PredicateGateInput<'_>) -> PredicateGateOutput {
         let policy = &input.bound.task.policy;
         let loss_after = trajectory_loss(input.measured, input.target);
         let improvement_policy = EffectiveImprovementPolicy::current_semantics();
 
         // 1. PredicateSet completion (INV-T4 source check dahil).
-        let (predicate_completion, mutation_decision) = match input
+        let completion = input
             .bound
             .task
             .target_predicate_set
-            .evaluate_completion(input.measured)
-        {
-            PredicateSetResult::Completed => (
-                PredicateCompletion::Completed,
-                MutationDecision::AcceptAsCompleted,
-            ),
-            PredicateSetResult::SourceInsufficient => {
-                // INV-T4 — placeholder/heuristic ile task kapatılamaz. Her zaman Reject.
-                (PredicateCompletion::NotCompleted, MutationDecision::Reject)
-            }
-            PredicateSetResult::NotCompleted => {
-                // 2. INV-T6 — policy'ye göre: improved mı, regressed mi?
-                let improved = is_improved_loss(
-                    input.loss_before,
-                    loss_after,
-                    input.measured,
-                    policy,
-                    &improvement_policy,
-                );
-                let completion = PredicateCompletion::NotCompleted;
-                let decision = match policy.predicate_failure_policy {
-                    PredicateFailurePolicy::StrictReject => MutationDecision::Reject,
-                    PredicateFailurePolicy::AcceptImprovement => {
-                        if policy.allow_progress_checkpoint && improved {
-                            MutationDecision::AcceptAsProgress
-                        } else {
-                            MutationDecision::Reject
-                        }
-                    }
-                    PredicateFailurePolicy::OperatorApproval => {
-                        MutationDecision::RequireOperatorApproval
-                    }
-                };
-                (completion, decision)
+            .evaluate_completion(input.measured);
+
+        // 2. INV-T9 #70 Faz 5 (review P0-2 düzeltme): improvement assessment V1 producer
+        //    — loss + hard-cap hesabı burada. Core loss/measured ERİŞMEZ.
+        let improved = assess_improvement_v1(
+            input.loss_before,
+            loss_after,
+            input.measured,
+            policy,
+            &improvement_policy,
+        );
+
+        // 3. Decision core — SADECE assessment + policy'den karar üretir (loss YOK).
+        let (_assessment, mutation_decision) = evaluate_decision_core(
+            completion,
+            improved,
+            policy.predicate_failure_policy,
+            policy.allow_progress_checkpoint,
+        );
+
+        // PredicateCompletion: Completed yalnızca PredicateSetResult::Completed ise.
+        let predicate_completion = match completion {
+            PredicateSetResult::Completed => PredicateCompletion::Completed,
+            PredicateSetResult::SourceInsufficient | PredicateSetResult::NotCompleted => {
+                PredicateCompletion::NotCompleted
             }
         };
 
@@ -1542,7 +1640,20 @@ impl PredicateGate {
 /// `min_cohesion`) artık hardcoded literal DEĞİL — `EffectiveImprovementPolicy`'den
 /// okunur. Bu policy `PredicateGate::evaluate`'de bir kez üretilir ve buraya geçirilir;
 /// aynı nesne authorization basis'e de taşınır. Tek truth source.
-fn is_improved_loss(
+///
+/// **INV-T9 #70 Faz 5 Adım 12 (review P0-2 düzeltme):** Eski `is_improved_loss` ayrı
+/// wrapper olarak kaldırıldı — logic `assess_improvement_v1`'e taşındı (aynı semantik,
+/// improvement assessment producer). Core loss/measured erişmez.
+
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1, review P0-2 düzeltme):** Improvement assessment
+/// producer — loss + hard-cap hesabını YAPAR. `evaluate_decision_core` loss/measured
+/// ERİŞMEZ (frozen negatif koşul); bu fonksiyon assessment'ı üretir, core sadece
+/// assessment + policy'den karar çıkarır.
+///
+/// **V1 semantics:** `loss_after < loss_before - min_delta` AND hard caps aşılmadı.
+/// Hard-cap threshold'ları `EffectiveImprovementPolicy`'den. `is_improved_loss`'un
+/// zenginleştirilmiş versiyonu — improved bool döner, neden ayrıntısı core'da değil.
+pub(crate) fn assess_improvement_v1(
     loss_before: f64,
     loss_after: f64,
     measured: &ProvenancedRawPosition,
@@ -1552,11 +1663,66 @@ fn is_improved_loss(
     if loss_after >= loss_before - policy.min_improvement_delta {
         return false;
     }
-    // Hard caps — measured her axis 0..1. Regresyon = değerin threshold'u aşması
-    // (basit Aşama B; Aşama C'de before/after karşılaştırması + WeightedPredicate loss).
     measured.coupling.value < improvement.max_coupling
         && measured.instability.value < improvement.max_instability
         && measured.cohesion.value > improvement.min_cohesion
+}
+
+/// **INV-T9 #70 Faz 5 Adım 12 (P0-1, review P0-2 düzeltme):** Gate decision core —
+/// pure free function. **Loss formülü YOK, measured erişimi YOK, hard-cap kontrolü YOK**
+/// (frozen negatif koşul: "decision core'da loss formülü yok"). SADECE assessment +
+/// policy'den karar üretir.
+///
+/// Completion-first short-circuit'ler (Completed/SourceInsufficient) + policy-driven
+/// (StrictReject/OperatorApproval) + AcceptImprovement policy `improved` bool'a bakar.
+///
+/// **7 test parity:** mevcut PredicateGate::evaluate test'leri (1-7) bu core üzerinden
+/// aynı MutationDecision üretmeli. V1 adapter `improved`'ı `assess_improvement_v1`'den
+/// alır ve core'a geçirir.
+pub(crate) fn evaluate_decision_core(
+    completion: PredicateSetResult,
+    improved: bool,
+    failure_policy: PredicateFailurePolicy,
+    allow_progress_checkpoint: bool,
+) -> (ImprovementAssessment, MutationDecision) {
+    match completion {
+        PredicateSetResult::Completed => (
+            ImprovementAssessment::PredicateCompleted,
+            MutationDecision::AcceptAsCompleted,
+        ),
+        PredicateSetResult::SourceInsufficient => (
+            // INV-T4 — placeholder/heuristic ile task kapatılamaz. Her zaman Reject.
+            ImprovementAssessment::SourceInsufficient,
+            MutationDecision::Reject,
+        ),
+        PredicateSetResult::NotCompleted => match failure_policy {
+            PredicateFailurePolicy::StrictReject => (
+                ImprovementAssessment::StrictRejectPolicy,
+                MutationDecision::Reject,
+            ),
+            PredicateFailurePolicy::AcceptImprovement => {
+                if allow_progress_checkpoint && improved {
+                    (
+                        ImprovementAssessment::Improved,
+                        MutationDecision::AcceptAsProgress,
+                    )
+                } else {
+                    (
+                        ImprovementAssessment::NotImproved {
+                            insufficient_delta: !improved,
+                            hard_cap_violated: false,
+                            progress_checkpoint_disabled: !allow_progress_checkpoint,
+                        },
+                        MutationDecision::Reject,
+                    )
+                }
+            }
+            PredicateFailurePolicy::OperatorApproval => (
+                ImprovementAssessment::OperatorApprovalPolicy,
+                MutationDecision::RequireOperatorApproval,
+            ),
+        },
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -2095,9 +2261,9 @@ mod tests {
 
     #[test]
     fn weighted_mode_with_mixed_requirement_is_source_insufficient() {
-        // Bypass 2: Weighted mode'da Mixed predicate SourceInsufficient → all()==false
-        // → NotCompleted (info loss). PredicateGate NotCompleted'i policy'ye göre
-        // AcceptAsProgress'e çevirebilirdi. Set-level guard SourceInsufficient korur.
+        // Weighted mode + Mixed requirement. Set-level preflight (has_invalid_mixed_source_requirement)
+        // bunu erken yakalar — bu test preflight'i doğrular. Faz 5 Weighted arm mirror düzeltmesi
+        // (P0-6) non-Mixed source mismatch'ları için ayrıca test edilir (aşağıdaki test).
         let set = PredicateSet {
             mode: PredicateMode::Weighted,
             predicates: vec![WeightedPredicate {
@@ -2110,6 +2276,69 @@ mod tests {
             set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
             PredicateSetResult::SourceInsufficient,
             "Weighted mode: invalid Mixed requirement NotCompleted değil SourceInsufficient olmalı"
+        );
+    }
+
+    #[test]
+    fn weighted_mode_non_mixed_source_mismatch_is_source_insufficient() {
+        // **INV-T9 #70 Commit 4b Faz 5 (review v8 P0-6):** Weighted arm eskiden
+        // `all(matches!(Satisfied))` kullanıyordu — `SourceInsufficient`'ı `NotCompleted`'a
+        // collapsed ediyordu. Bu, placeholder ölçümün Weighted task'ta
+        // `NotCompleted → AcceptAsProgress` yoluna girmesine izin vererek INV-T4'ü ihlal ediyordu.
+        //
+        // Bu test preflight YOKKEN (non-Mixed source mismatch) Weighted arm'ın kendi
+        // source propagation'ını doğrular: required_source=Scip ama measured Placeholder.
+        let set = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, Some(MetricSource::Scip)),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        // placeholder_pos coupling için Placeholder source üretir — required Scip ile uyuşmaz.
+        assert_eq!(
+            set.evaluate_completion(&placeholder_pos(0.40)),
+            PredicateSetResult::SourceInsufficient,
+            "Weighted mode: non-Mixed source mismatch artık SourceInsufficient (eski davranış NotCompleted idi — INV-T4 ihlali)"
+        );
+    }
+
+    #[test]
+    fn weighted_mode_unsatisfied_predicate_is_not_completed() {
+        // **INV-T9 #70 Commit 4b Faz 5 (P0-6):** Weighted arm source propagation ekledikten
+        // sonra normal Unsatisfied durumunun hâlâ NotCompleted döndürdüğünü doğrular
+        // (source yeterli ama değer threshold altında).
+        let set = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                // Scip required, measured_pos Placeholder — ama coupling_predicate source
+                // helper'ı Placeholder üretiyor. Doğru source için elle ProvenancedRawPosition
+                // kurmak yerine, Unsatisfied yolunu required_source=None ile test ediyoruz.
+                predicate: coupling_predicate(0.55, ComparisonOp::Le, None),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        // coupling=0.40 ≤ 0.55 → Satisfied (Le op). Bu Completed olmalı.
+        assert_eq!(
+            set.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::Completed,
+            "Weighted mode: tüm Satisfied → Completed"
+        );
+        // Şimdi threshold'ı aşalım: coupling=0.40 ≤ 0.30? Hayır → Unsatisfied.
+        let set_unsat = PredicateSet {
+            mode: PredicateMode::Weighted,
+            predicates: vec![WeightedPredicate {
+                predicate: coupling_predicate(0.30, ComparisonOp::Le, None),
+                weight: Some(1.0),
+            }],
+            preferred_vector: None,
+        };
+        assert_eq!(
+            set_unsat.evaluate_completion(&measured_pos(0.40, 0.50, 0.3)),
+            PredicateSetResult::NotCompleted,
+            "Weighted mode: Unsatisfied (source yeterli) → NotCompleted (SourceInsufficient değil)"
         );
     }
 
@@ -3185,6 +3414,39 @@ mod tests {
                 task_id: 1,
                 value: 0,
             }
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // INV-T9 #70 Faz 5 Adım 6 (P0-1) — validate_predicate_goal_for_commit parity
+    //
+    // Free function extract'inin Task::validate_for_commit ile aynı validation
+    // sonucunu verdiği pinlenir. P0-1 amacı: restore path (canonical evidence →
+    // PredicateSet) aynı validator'ı kullanır — iki truth source YOK.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn faz5_validate_predicate_goal_for_commit_accepts_valid_set() {
+        // Free function valid predicate set'i kabul eder — Task metodu ile parity.
+        let task = valid_task_for_validation();
+        validate_predicate_goal_for_commit(task.id, &task.target_predicate_set)
+            .expect("valid predicate set must pass free function validation");
+    }
+
+    #[test]
+    fn faz5_validate_predicate_goal_for_commit_rejects_predicate_issues() {
+        // Predicate-goal validator predicate sorunlarını yakalar (policy DEĞİL).
+        // Bu test free function'ın policy validation YAPMADIĞINI da doğrular —
+        // maneuver_limit=0 free function'da hata vermez (Task::validate_for_commit verir).
+        let mut task = valid_task_for_validation();
+        task.policy.maneuver_limit = 0; // policy issue — free function bunu görmez
+        task.target_predicate_set.predicates.clear(); // predicate issue
+        let err =
+            validate_predicate_goal_for_commit(task.id, &task.target_predicate_set).unwrap_err();
+        // EmptyPredicateSet (predicate issue) — InvalidManeuverLimit (policy) DEĞİL.
+        assert!(matches!(
+            err,
+            TaskValidationError::EmptyPredicateSet { task_id: 1 }
         ));
     }
 
