@@ -52,6 +52,14 @@ pub enum GateEvaluationV2Error {
     /// Task-goal digest mismatch.
     #[error("task-goal digest mismatch: proof={proof}, recomputed={recomputed}")]
     TaskGoalDigestMismatch { proof: String, recomputed: String },
+    /// **INV-T9 #70 PR#84 review P0-1:** Task identity mismatch — binding captured task_id
+    /// ile güncel task.id farklı. TOCTOU: iki farklı task gerçekliği birleştirilemez.
+    #[error("task identity mismatch: binding captured task_id={proof}, current task.id={current}")]
+    TaskIdentityMismatch { proof: u64, current: u64 },
+    /// **INV-T9 #70 PR#84 review P0-1:** Current task projection, captured task-goal
+    /// evidence ile parity sağlamıyor. Task değişmiş (predicate/policy/preferred_vector).
+    #[error("current task-goal evidence mismatch: captured digest != current task projection")]
+    CurrentTaskGoalEvidenceMismatch,
     /// Predicate gate policy digest hesap hatası.
     #[error("predicate gate policy digest computation failed: {0}")]
     PredicateGatePolicyDigest(EngineMeasurementDigestError),
@@ -61,6 +69,10 @@ pub enum GateEvaluationV2Error {
     /// Loss production hatası — `ProducedTrajectoryLossEvidence` üretimi sırasında.
     #[error("trajectory loss production failed: {0}")]
     LossProduction(TrajectoryLossProductionError),
+    /// **INV-T9 #70 PR#84 review P0-2:** Loss-before derivation failed — baseline
+    /// unavailable veya preferred_vector None ile AcceptImprovement progress imkânsız.
+    #[error("loss-before derivation failed: {0}")]
+    LossBeforeDerivation(String),
 }
 
 /// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Trajectory loss production error —
@@ -330,10 +342,13 @@ pub(crate) struct VerifiedGateEvaluationBundlePartsV2 {
 /// 3 digest recheck (TOCTOU) + predicate exactly once + completion-first loss +
 /// decision core → `VerifiedGateEvaluationBundleV2`. Builder bundle'ı bütün consume eder.
 ///
-/// **Inputs:** `binding` (verify epoch proof), `measurement` (engine-measured after),
-/// `task` (trusted task snapshot), `loss_before` (baseline loss — Available preferred
-/// vector için). `loss_before` caller tarafından sağlanır (engine measurement'dan değil —
-/// loss_before baseline context ister).
+/// **Inputs:** `binding` (verify epoch proof), `measurement` (engine-measured before+after),
+/// `task` (trusted task snapshot).
+///
+/// **PR#84 review P0-2:** `loss_before` parametresi kaldırıldı — caller-controlled scalar
+/// yerine `measurement.before()` + binding `preferred_vector_snapshot`'tan derive.
+/// `MeasurementBaseline::Available` + `Some(target)` → `trajectory_loss(before, target)`.
+/// `Unavailable` veya `None` → progress imkânsız (typed unavailable/reject).
 #[allow(
     dead_code,
     reason = "Faz 5 build_authorization_context_v2 consumer (Faz 8 wiring)"
@@ -342,7 +357,6 @@ pub(crate) fn evaluate_task_gate_v2(
     binding: crate::engine::VerifiedTaskMeasurementBinding,
     measurement: &crate::measurement::EngineMeasurement,
     task: &crate::trajectory::Task,
-    loss_before: f64,
 ) -> Result<VerifiedGateEvaluationBundleV2, GateEvaluationV2Error> {
     use crate::authorization::{
         CanonicalPredicateEvaluationBasisV2, EffectiveImproPolicyBasisV2,
@@ -371,6 +385,32 @@ pub(crate) fn evaluate_task_gate_v2(
     // Evaluator epoch'ta güncel measurement/task'tan recomputed digest, verify epoch'ta
     // capture edilen proof digest ile parity kanıtı. Mismatch = fail-closed.
 
+    // **PR#84 review P0-1 (task-goal TOCTOU closure):** Önce task identity + current task
+    // projection parity. Captured evidence (Task A) ile güncel task (Task B) birleştirilemez.
+    // `task.id == captured task_id` + current task'tan projection recompute + captured digest
+    // ile parity. Bu olmadan predicate güncel task'tan, kimlik/evidence başka task'tan gelebilir.
+    if task.id != task_id {
+        return Err(GateEvaluationV2Error::TaskIdentityMismatch {
+            proof: task_id,
+            current: task.id,
+        });
+    }
+    let current_task_goal_evidence =
+        crate::authorization::CanonicalTaskGoalEvidenceV2::try_from(task).map_err(|e| {
+            GateEvaluationV2Error::TaskGoalDigest(EngineMeasurementDigestError::from(
+                crate::measurement::MeasurementDigestError::StructuralCanonicalization {
+                    detail: format!("current task-goal projection: {e}"),
+                },
+            ))
+        })?;
+    let current_task_goal_digest =
+        crate::measurement::TaskGoalDigest::compute_from_canonical(&current_task_goal_evidence)
+            .map_err(GateEvaluationV2Error::TaskGoalDigest)?;
+    // Current projection captured digest ile parity — task değişmişse reject.
+    if current_task_goal_digest.as_bytes() != task_goal_digest.as_bytes() {
+        return Err(GateEvaluationV2Error::CurrentTaskGoalEvidenceMismatch);
+    }
+
     // (1) Measurement digest — measured_after'dan recompute.
     let measured_after = ProvenancedMeasuredResult::try_from(measurement.after()).map_err(|e| {
         GateEvaluationV2Error::MeasurementDigest(EngineMeasurementDigestError::from(
@@ -390,7 +430,9 @@ pub(crate) fn evaluate_task_gate_v2(
         });
     }
 
-    // (2) Task-goal digest — captured evidence'dan recompute.
+    // (2) Task-goal digest — captured evidence'dan recompute (current projection yukarıda
+    // parity ile kanıtlandı, bu ek defense-in-depth: captured evidence kendi digest'iyle
+    // tutarlı — binding içi tutarlılık).
     let recomputed_task_goal =
         crate::measurement::TaskGoalDigest::compute_from_canonical(&task_goal_evidence)
             .map_err(GateEvaluationV2Error::TaskGoalDigest)?;
@@ -465,14 +507,14 @@ pub(crate) fn evaluate_task_gate_v2(
 
     // ── Completion-first loss matrisi (review P0-2) ─────────────────────────────
     // Loss preferred_vector'den DEĞİL, predicate sonucundan önce belirlenir.
+    // **PR#84 review P0-2:** loss_before measurement.before()'tan derive (caller scalar DEĞİL).
     let (loss_evidence, _improved, mutation_decision) = compute_completion_first_loss_and_decision(
         completion,
         &task.policy,
         &improvement_policy,
         measurement,
-        loss_before,
         preferred_vector_snapshot,
-    );
+    )?;
 
     // ── Decision core → MutationDecision (review P0-1: pure, loss-free) ──────────
     // Yukarıdaki helper improved + completion'dan decision üretti; burada sadece
@@ -512,22 +554,29 @@ pub(crate) fn evaluate_task_gate_v2(
     dead_code,
     reason = "Faz 5 evaluate_task_gate_v2 consumer (Faz 8 wiring)"
 )]
+/// **PR#84 review P0-2:** `loss_before` parametresi kaldırıldı — caller-controlled
+/// scalar yerine `measurement.before()` + `preferred_vector_snapshot`'tan derive.
+/// `MeasurementBaseline::Available` + `Some(target)` → trajectory_loss(before, target).
+/// `Unavailable` veya `None` → progress imkânsız (typed unavailable/reject).
 fn compute_completion_first_loss_and_decision(
     completion: crate::trajectory::PredicateSetResult,
     policy: &crate::trajectory::TaskPolicy,
     improvement_policy: &crate::trajectory::EffectiveImprovementPolicy,
     measurement: &crate::measurement::EngineMeasurement,
-    loss_before: f64,
     preferred_vector_snapshot: Option<crate::coords::RawPosition>,
-) -> (
-    crate::authorization::CanonicalTrajectoryLossEvidence,
-    bool,
-    crate::trajectory::MutationDecision,
-) {
+) -> Result<
+    (
+        crate::authorization::CanonicalTrajectoryLossEvidence,
+        bool,
+        crate::trajectory::MutationDecision,
+    ),
+    GateEvaluationV2Error,
+> {
     use crate::authorization::{
         CanonicalLossNotRequiredReason, CanonicalRawPosition, CanonicalTrajectoryLossEvidence,
         CanonicalTrajectoryLossUnavailableReason,
     };
+    use crate::measurement::MeasurementBaseline;
     use crate::trajectory::{assess_improvement_v1, evaluate_decision_core, PredicateSetResult};
 
     match completion {
@@ -546,11 +595,11 @@ fn compute_completion_first_loss_and_decision(
                 policy.predicate_failure_policy,
                 policy.allow_progress_checkpoint,
             );
-            (
+            Ok((
                 CanonicalTrajectoryLossEvidence::NotRequired { reason },
                 false,
                 decision,
-            )
+            ))
         }
         PredicateSetResult::NotCompleted => match policy.predicate_failure_policy {
             crate::trajectory::PredicateFailurePolicy::StrictReject => {
@@ -560,13 +609,13 @@ fn compute_completion_first_loss_and_decision(
                     policy.predicate_failure_policy,
                     policy.allow_progress_checkpoint,
                 );
-                (
+                Ok((
                     CanonicalTrajectoryLossEvidence::NotRequired {
                         reason: CanonicalLossNotRequiredReason::StrictRejectPolicy,
                     },
                     false,
                     decision,
-                )
+                ))
             }
             crate::trajectory::PredicateFailurePolicy::OperatorApproval => {
                 let (_assessment, decision) = evaluate_decision_core(
@@ -575,16 +624,16 @@ fn compute_completion_first_loss_and_decision(
                     policy.predicate_failure_policy,
                     policy.allow_progress_checkpoint,
                 );
-                (
+                Ok((
                     CanonicalTrajectoryLossEvidence::NotRequired {
                         reason: CanonicalLossNotRequiredReason::OperatorApprovalPolicy,
                     },
                     false,
                     decision,
-                )
+                ))
             }
             crate::trajectory::PredicateFailurePolicy::AcceptImprovement => {
-                // Loss calculation needed — preferred_vector required.
+                // Loss calculation needed — preferred_vector + baseline required.
                 match preferred_vector_snapshot {
                     None => {
                         // No preferred vector → loss meaningless → Reject.
@@ -594,17 +643,44 @@ fn compute_completion_first_loss_and_decision(
                             policy.predicate_failure_policy,
                             policy.allow_progress_checkpoint,
                         );
-                        (
+                        Ok((
                             CanonicalTrajectoryLossEvidence::Unavailable {
                                 reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
                             },
                             false,
                             decision,
-                        )
+                        ))
                     }
                     Some(target) => {
+                        // **PR#84 review P0-2:** loss_before measurement.before()'tan derive.
+                        // Baseline unavailable → progress imkânsız (typed reject).
+                        let before = match measurement.before() {
+                            MeasurementBaseline::Available(b) => b,
+                            MeasurementBaseline::Unavailable { .. } => {
+                                let (_assessment, decision) = evaluate_decision_core(
+                                    completion,
+                                    false,
+                                    policy.predicate_failure_policy,
+                                    policy.allow_progress_checkpoint,
+                                );
+                                return Ok((
+                                    CanonicalTrajectoryLossEvidence::Unavailable {
+                                        reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
+                                    },
+                                    false,
+                                    decision,
+                                ));
+                            }
+                        };
+                        let loss_before = crate::trajectory::trajectory_loss(before, &target);
                         let loss_after =
                             crate::trajectory::trajectory_loss(measurement.after(), &target);
+                        // Finite check — produced evidence invariant.
+                        if !loss_before.is_finite() || !loss_after.is_finite() {
+                            return Err(GateEvaluationV2Error::LossBeforeDerivation(format!(
+                                "non-finite loss: before={loss_before}, after={loss_after}"
+                            )));
+                        }
                         let improved = assess_improvement_v1(
                             loss_before,
                             loss_after,
@@ -622,7 +698,7 @@ fn compute_completion_first_loss_and_decision(
                             target: CanonicalRawPosition::from(target),
                             loss_after,
                         };
-                        (loss_evidence, improved, decision)
+                        Ok((loss_evidence, improved, decision))
                     }
                 }
             }

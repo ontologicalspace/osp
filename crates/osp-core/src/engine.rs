@@ -5804,7 +5804,7 @@ v = 0.5
         let binding = engine
             .verify_measurement_binding(claim, task, measurement)
             .expect("verify_measurement_binding");
-        crate::authorization::evaluate_task_gate_v2(binding, measurement, task, 0.0)
+        crate::authorization::evaluate_task_gate_v2(binding, measurement, task)
             .expect("evaluate_task_gate_v2")
     }
 
@@ -6051,5 +6051,88 @@ v = 0.5
             err,
             crate::authorization::AuthorizationContextV2BuildError::WitnessRequirement(_)
         ));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 PR#84 review — P0-1 + P0-2 adversarial test'leri
+    //
+    // **P0-1 (task-goal TOCTOU):** binding Task A, evaluator Task B → reject.
+    // **P0-2 (loss_before):** caller scalar artık API'den kaldırıldı; measurement.before()
+    //   + preferred_vector_snapshot'tan derive. NaN/infinite → typed error.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pr84_p0_1_task_identity_mismatch_rejects() {
+        // Binding Task A (task_id=42), evaluator Task B (task_id=99) → TaskIdentityMismatch.
+        let engine = make_measurement_engine();
+        let task_a = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task_a, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task_a, &measurement)
+            .expect("binding Task A");
+        // Task B — farklı task_id.
+        let task_b = task_with_node_scope(1, 99);
+        let err = crate::authorization::evaluate_task_gate_v2(binding, &measurement, &task_b)
+            .expect_err("task identity mismatch");
+        assert!(matches!(
+            err,
+            crate::authorization::GateEvaluationV2Error::TaskIdentityMismatch {
+                proof: 42,
+                current: 99
+            }
+        ));
+    }
+
+    #[test]
+    fn pr84_p0_1_same_task_id_different_predicate_rejects() {
+        // Aynı task_id, farklı predicate set → CurrentTaskGoalEvidenceMismatch.
+        // task_with_node_scope coupling<=0.5; ikinci task coupling<=0.3 (farklı threshold).
+        let engine = make_measurement_engine();
+        let task_a = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task_a, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task_a, &measurement)
+            .expect("binding");
+        // Task B — aynı id (42) ama farklı predicate (threshold 0.3 vs 0.5).
+        let mut task_b = task_with_node_scope(1, 42);
+        task_b.target_predicate_set.predicates[0]
+            .predicate
+            .threshold = 0.3;
+        let err = crate::authorization::evaluate_task_gate_v2(binding, &measurement, &task_b)
+            .expect_err("predicate mismatch");
+        assert!(matches!(
+            err,
+            crate::authorization::GateEvaluationV2Error::CurrentTaskGoalEvidenceMismatch
+        ));
+    }
+
+    #[test]
+    fn pr84_p0_2_loss_before_derived_from_measurement() {
+        // P0-2: loss_before artık measurement.before()'tan derive — caller scalar YOK.
+        // Valid context üretimi çalışır (loss_before internal derive).
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let bundle = faz5_builder_bundle(&engine, &task, &claim, &measurement);
+        // Bundle üretildi — loss_before measurement.before()'tan derive edildi.
+        let _ = bundle;
+    }
+
+    #[test]
+    fn pr84_p0_2_evaluator_signature_no_loss_before_param() {
+        // Compile-time guard: evaluate_task_gate_v2 imzasında loss_before parametresi YOK.
+        // Bu test API şeklini pinler — loss_before eklenirse compile fail.
+        let engine = make_measurement_engine();
+        let task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let measurement = produce_valid_measurement(&engine, &task, &claim);
+        let binding = engine
+            .verify_measurement_binding(&claim, &task, &measurement)
+            .expect("binding");
+        // 3 argüman (binding, measurement, task) — loss_before YOK.
+        let _ = crate::authorization::evaluate_task_gate_v2(binding, &measurement, &task);
     }
 }
