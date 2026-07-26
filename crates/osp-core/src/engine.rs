@@ -6263,11 +6263,114 @@ v = 0.5
             other => panic!("expected GatePassed, got {other:?}"),
         }
     }
-    // pr84_p0_2_loss_before_decision_depends_on_before kaldırıldı (review 5. tur P1):
+    // pr84_p0_2_loss_before_decision_depends_on_before kaldırıldı (review 5 tur P1):
     // before'u değiştirmiyor, yanıltıcı "decision before'a bağlı" iddiası. Cross-artifact
     // test (pr84_p0_2_cross_artifact_before_state_mismatch_rejects) farklı before → digest
     // mismatch kanıtlıyor; exact AcceptAsProgress fixture Faz 8-P2 derive_expected_mutation_
     // decision shared helper ile (improvement durumunda deterministik loss_before/after).
+
+    #[test]
+    fn pr84_p0_2_improvement_accept_as_progress() {
+        // **PR#84 review P1 (7. tur):** exact AcceptAsProgress — improvement branch.
+        // compute_completion_first_loss_and_decision direkt test (review'ın önerdiği yol):
+        // full binding/evaluator zinciri gerekmez, eksik semantic branch pinlenir.
+        //
+        // before target'tan uzak (coupling 0.9), after target'a yakın (coupling 0.1) →
+        // loss_before > loss_after + min_delta → improved → AcceptAsProgress.
+        use crate::authorization::compute_completion_first_loss_and_decision;
+        use crate::authorization::CanonicalRawPosition;
+        use crate::authorization::CanonicalTrajectoryLossEvidence;
+        use crate::coords::{AxisMeasurement, MeasuredRawPosition, MetricSource, RawPosition};
+        use crate::measurement::{EngineMeasurement, MeasurementBaseline};
+        use crate::trajectory::{
+            EffectiveImprovementPolicy, PredicateFailurePolicy, PredicateSetResult, TaskPolicy,
+        };
+
+        let engine = make_measurement_engine();
+        let base_task = task_with_node_scope(1, 42);
+        let claim = claim_with_node1_delta(42);
+        let base_measurement = produce_valid_measurement(&engine, &base_task, &claim);
+
+        // target — preferred_vector.
+        let target = RawPosition {
+            x: 0.1,
+            y: 0.1,
+            z: 0.0,
+            w: 0.0,
+            v: 0.0,
+        };
+
+        // before: target'tan uzak (coupling 0.9). after: target'a yakın (coupling 0.1).
+        let mk_measured = |coupling: f64| MeasuredRawPosition {
+            coupling: AxisMeasurement {
+                value: coupling,
+                source: MetricSource::Scip,
+            },
+            cohesion: AxisMeasurement {
+                value: 0.5,
+                source: MetricSource::Scip,
+            },
+            instability: AxisMeasurement {
+                value: 0.1,
+                source: MetricSource::Scip,
+            },
+            entropy: AxisMeasurement {
+                value: 0.1,
+                source: MetricSource::Scip,
+            },
+            witness_depth: AxisMeasurement {
+                value: 0.1,
+                source: MetricSource::Scip,
+            },
+        };
+        let before_far = MeasurementBaseline::Available(mk_measured(0.25));
+        let after_near = mk_measured(0.1);
+        // corrupt_request_context_digest_for_test defensive verify'ı atlar — farklı before/after.
+        let measurement = EngineMeasurement::corrupt_request_context_digest_for_test(
+            before_far,
+            after_near,
+            base_measurement.context().clone(),
+            base_measurement.request().clone(),
+        );
+
+        let policy = TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
+        let improvement_policy = EffectiveImprovementPolicy::current_semantics();
+
+        let (loss, improved, decision) = compute_completion_first_loss_and_decision(
+            PredicateSetResult::NotCompleted,
+            &policy,
+            &improvement_policy,
+            &measurement,
+            Some(target),
+        )
+        .expect("valid improvement evaluation");
+
+        // Exact assertions — improvement branch.
+        assert!(improved, "before far (0.9) → after near (0.1) → improved");
+        assert_eq!(
+            decision,
+            crate::trajectory::MutationDecision::AcceptAsProgress,
+            "improved + AcceptImprovement policy → AcceptAsProgress"
+        );
+        match loss {
+            CanonicalTrajectoryLossEvidence::Available {
+                target: actual_target,
+                loss_after,
+            } => {
+                assert_eq!(actual_target, CanonicalRawPosition::from(target));
+                // loss_after finite + small (after near target).
+                assert!(
+                    loss_after < 0.5,
+                    "loss_after small (after coupling 0.1 near target 0.1): {loss_after}"
+                );
+            }
+            other => panic!("expected Available loss, got {other:?}"),
+        }
+    }
 
     #[test]
     fn pr84_p0_2_non_finite_loss_typed_rejection() {

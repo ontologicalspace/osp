@@ -4992,6 +4992,10 @@ pub(crate) use gate_v2::{
     build_authorization_context_v2, evaluate_task_gate_v2, GateEvaluationV2Error,
     ProducedTrajectoryLossEvidence, TrajectoryLossProductionError, VerifiedGateEvaluationBundleV2,
 };
+// **PR#84 review 7. tur:** compute_completion_first_loss_and_decision — improvement branch
+// test için re-export. Production'da evaluate_task_gate_v2 çağırır (gate_v2 private).
+#[allow(unused_imports, reason = "Faz 8-P1 improvement branch test")]
+pub(crate) use gate_v2::compute_completion_first_loss_and_decision;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // hex encoding (inline — dependency eklemeden)

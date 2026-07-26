@@ -579,9 +579,12 @@ pub(crate) fn evaluate_task_gate_v2(
 )]
 /// **PR#84 review P0-2:** `loss_before` parametresi kaldırıldı — caller-controlled
 /// scalar yerine `measurement.before()` + `preferred_vector_snapshot`'tan derive.
-/// `MeasurementBaseline::Available` + `Some(target)` → trajectory_loss(before, target).
+/// `MeasurementBaseline::Available` + `Some(target)` → `trajectory_loss(before, target)`.
 /// `Unavailable` veya `None` → progress imkânsız (typed unavailable/reject).
-fn compute_completion_first_loss_and_decision(
+///
+/// **PR#84 review 7. tur:** `pub(crate)` — improvement branch test için (gate_v2 modülü
+/// private, re-export üzerinden test erişimi). Production'da evaluate_task_gate_v2 çağırır.
+pub(crate) fn compute_completion_first_loss_and_decision(
     completion: crate::trajectory::PredicateSetResult,
     policy: &crate::trajectory::TaskPolicy,
     improvement_policy: &crate::trajectory::EffectiveImprovementPolicy,
