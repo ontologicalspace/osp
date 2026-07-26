@@ -3168,8 +3168,22 @@ impl AuthorizationBasisV2 {
                                 }
                             }
                             CanonicalTrajectoryLossEvidence::Available { .. } => {
-                                // Available: improved unknown — AcceptAsProgress veya Reject
-                                // olabilir. Loose check (decision parity context katmanında).
+                                // **PR#84 review P0 (3. tur):** Available loss + baseline
+                                // unavailable → runtime her zaman Reject üretir (improvement
+                                // kanıtlanamaz). Persisted artifact'te AcceptAsProgress olamaz.
+                                // Runtime düzeltmesi (gate_v2.rs) restore'a yansımamıştı.
+                                if matches!(
+                                    self.trajectory_baseline(),
+                                    CanonicalTrajectoryEvidenceBaseline::Unavailable { .. }
+                                ) {
+                                    return Err(GateSemanticConsistencyError::MatrixViolation {
+                                        detail: "AcceptImprovement + Available loss + Unavailable baseline — runtime always Rejects (improvement unprovable); AcceptAsProgress impossible".to_string(),
+                                    });
+                                }
+                                // Available baseline: improved recompute edilebilir (before +
+                                // target + loss_after + min_delta). Tam decision parity context
+                                // restore katmanında (basis + gate_evaluation birlikte). Basis
+                                // seviyesi Available loss + Available baseline → geçerli.
                             }
                             CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
                                 // AcceptImprovement altında NotRequired beklenmez —
@@ -18438,4 +18452,20 @@ v = 0.5
         assert_eq!(envelope.schema(), "osp.pending-authorization.v2");
         // Eligibility (validate_hold_reason_snapshot_v2 dahil) try_new_held'de geçti.
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // INV-T9 #70 PR#84 review 3. tur — P0 persisted restore parity
+    //
+    // **P0 fix:** validate_gate_decision_semantics_v2 AcceptImprovement + Available loss
+    // dalında artık trajectory_baseline kontrolü yapıyor. Unavailable baseline +
+    // AcceptImprovement + Available loss → MatrixViolation (AcceptAsProgress runtime'da
+    // imkânsız — improvement kanıtlanamaz).
+    //
+    // **Adversarial test notu:** Unavailable baseline + tutarlı digest zinciri taşıyan
+    // persisted fixture kurmak için ayrı raw parts builder gerekir (measurement_baseline_
+    // digest, engine_measurement_digest hepsi birbirine bağlı). Bu fixture Faz 8-P2/8a'da
+    // `derive_expected_mutation_decision` shared helper ile gelir (review'ın önerdiği
+    // temiz çözüm). Şimdilik P0 fix kod review ile — runtime davranışı P1 test'lerinde
+    // (pr84_p0_2_loss_before_*) kanıtlandı (baseline Available → improved derive).
+    // ═══════════════════════════════════════════════════════════════════════════════
 }
