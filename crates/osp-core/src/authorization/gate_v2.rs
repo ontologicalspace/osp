@@ -73,6 +73,11 @@ pub enum GateEvaluationV2Error {
     /// unavailable veya preferred_vector None ile AcceptImprovement progress imkânsız.
     #[error("loss-before derivation failed: {0}")]
     LossBeforeDerivation(String),
+    /// **INV-T9 #70 PR#84 review P0-2 (2. tur):** Full EngineMeasurementDigest mismatch —
+    /// evaluator'a verilen measurement, binding'in capture ettiği artifact'tan farklı
+    /// (before-state değişmiş). Cross-artifact TOCTOU: M1 binding, M2 evaluator.
+    #[error("engine measurement digest mismatch: proof={proof}, recomputed={recomputed}")]
+    EngineMeasurementDigestMismatch { proof: String, recomputed: String },
 }
 
 /// **INV-T9 #70 Faz 5 Adım 13 (P1-1):** Trajectory loss production error —
@@ -411,7 +416,25 @@ pub(crate) fn evaluate_task_gate_v2(
         return Err(GateEvaluationV2Error::CurrentTaskGoalEvidenceMismatch);
     }
 
-    // (1) Measurement digest — measured_after'dan recompute.
+    // (0) **PR#84 review P0-2 (2. tur):** Full EngineMeasurementDigest parity — before+after+
+    // context+request bütününü bağlar. Bu olmadan evaluator'a M2 (farklı before, aynı after)
+    // verilebilir; loss-before M2'den, builder M1'den gelir (cross-artifact TOCTOU).
+    // loss-before derivation'dan ÖNCE — before-state doğrulaması.
+    let recomputed_engine_measurement = measurement.compute_digest().map_err(|e| {
+        GateEvaluationV2Error::MeasurementDigest(EngineMeasurementDigestError::from(
+            crate::measurement::MeasurementDigestError::StructuralCanonicalization {
+                detail: format!("engine measurement full digest: {e}"),
+            },
+        ))
+    })?;
+    if recomputed_engine_measurement.as_bytes() != engine_measurement_digest.as_bytes() {
+        return Err(GateEvaluationV2Error::EngineMeasurementDigestMismatch {
+            proof: engine_measurement_digest.to_hex(),
+            recomputed: recomputed_engine_measurement.to_hex(),
+        });
+    }
+
+    // (1) Measurement digest — measured_after'dan recompute (defense-in-depth: after-only).
     let measured_after = ProvenancedMeasuredResult::try_from(measurement.after()).map_err(|e| {
         GateEvaluationV2Error::MeasurementDigest(EngineMeasurementDigestError::from(
             crate::measurement::MeasurementDigestError::StructuralCanonicalization {
@@ -653,52 +676,62 @@ fn compute_completion_first_loss_and_decision(
                     }
                     Some(target) => {
                         // **PR#84 review P0-2:** loss_before measurement.before()'tan derive.
-                        // Baseline unavailable → progress imkânsız (typed reject).
-                        let before = match measurement.before() {
-                            MeasurementBaseline::Available(b) => b,
+                        // **PR#84 review P1 (2. tur):** baseline unavailable → target var, baseline
+                        // yok. Ontolojik olarak: Available{target, loss_after} (target gerçek) +
+                        // improved=false + Reject (baseline olmadan progress kanıtlanamaz).
+                        // NoPreferredVector YANLIŞ — preferred vector var, eksik olan baseline.
+                        let loss_after =
+                            crate::trajectory::trajectory_loss(measurement.after(), &target);
+                        if !loss_after.is_finite() {
+                            return Err(GateEvaluationV2Error::LossBeforeDerivation(format!(
+                                "non-finite loss_after: {loss_after}"
+                            )));
+                        }
+                        match measurement.before() {
+                            MeasurementBaseline::Available(before) => {
+                                let loss_before =
+                                    crate::trajectory::trajectory_loss(before, &target);
+                                if !loss_before.is_finite() {
+                                    return Err(GateEvaluationV2Error::LossBeforeDerivation(
+                                        format!("non-finite loss_before: {loss_before}"),
+                                    ));
+                                }
+                                let improved = assess_improvement_v1(
+                                    loss_before,
+                                    loss_after,
+                                    measurement.after(),
+                                    policy,
+                                    improvement_policy,
+                                );
+                                let (_assessment, decision) = evaluate_decision_core(
+                                    completion,
+                                    improved,
+                                    policy.predicate_failure_policy,
+                                    policy.allow_progress_checkpoint,
+                                );
+                                let loss_evidence = CanonicalTrajectoryLossEvidence::Available {
+                                    target: CanonicalRawPosition::from(target),
+                                    loss_after,
+                                };
+                                Ok((loss_evidence, improved, decision))
+                            }
                             MeasurementBaseline::Unavailable { .. } => {
+                                // Baseline yok → improvement kanıtlanamaz → improved=false, Reject.
+                                // Loss evidence Available (target gerçek, loss_after hesaplanabilir);
+                                // baseline ayrı CanonicalTrajectoryEvidenceBaseline::Unavailable.
                                 let (_assessment, decision) = evaluate_decision_core(
                                     completion,
                                     false,
                                     policy.predicate_failure_policy,
                                     policy.allow_progress_checkpoint,
                                 );
-                                return Ok((
-                                    CanonicalTrajectoryLossEvidence::Unavailable {
-                                        reason: CanonicalTrajectoryLossUnavailableReason::NoPreferredVector,
-                                    },
-                                    false,
-                                    decision,
-                                ));
+                                let loss_evidence = CanonicalTrajectoryLossEvidence::Available {
+                                    target: CanonicalRawPosition::from(target),
+                                    loss_after,
+                                };
+                                Ok((loss_evidence, false, decision))
                             }
-                        };
-                        let loss_before = crate::trajectory::trajectory_loss(before, &target);
-                        let loss_after =
-                            crate::trajectory::trajectory_loss(measurement.after(), &target);
-                        // Finite check — produced evidence invariant.
-                        if !loss_before.is_finite() || !loss_after.is_finite() {
-                            return Err(GateEvaluationV2Error::LossBeforeDerivation(format!(
-                                "non-finite loss: before={loss_before}, after={loss_after}"
-                            )));
                         }
-                        let improved = assess_improvement_v1(
-                            loss_before,
-                            loss_after,
-                            measurement.after(),
-                            policy,
-                            improvement_policy,
-                        );
-                        let (_assessment, decision) = evaluate_decision_core(
-                            completion,
-                            improved,
-                            policy.predicate_failure_policy,
-                            policy.allow_progress_checkpoint,
-                        );
-                        let loss_evidence = CanonicalTrajectoryLossEvidence::Available {
-                            target: CanonicalRawPosition::from(target),
-                            loss_after,
-                        };
-                        Ok((loss_evidence, improved, decision))
                     }
                 }
             }

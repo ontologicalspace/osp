@@ -7324,7 +7324,8 @@ fn validate_suspension_eligibility_v2(
                     },
                 );
             }
-            if (snapshot.required_support - quorum_threshold).abs() > f64::EPSILON {
+            // **PR#84 review P1 (2. tur):** exact equality — aynı committed değerin duplicate alanları.
+            if snapshot.required_support != quorum_threshold {
                 return Err(
                     SuspensionEligibilityV2Error::SnapshotRequiredSupportMismatch {
                         snapshot: snapshot.required_support,
@@ -7346,7 +7347,8 @@ fn validate_suspension_eligibility_v2(
                     },
                 );
             }
-            if (snapshot.required_support - quorum_threshold).abs() > f64::EPSILON {
+            // **PR#84 review P1 (2. tur):** exact equality — aynı committed değerin duplicate alanları.
+            if snapshot.required_support != quorum_threshold {
                 return Err(
                     SuspensionEligibilityV2Error::SnapshotRequiredSupportMismatch {
                         snapshot: snapshot.required_support,
@@ -7404,8 +7406,9 @@ fn validate_hold_reason_snapshot_v2(
             }
         }
         WitnessHoldReason::QuorumInsufficient { support, threshold } => {
-            // threshold == snapshot.required_support.
-            if (threshold - snapshot.required_support).abs() > f64::EPSILON {
+            // **PR#84 review P1 (2. tur):** threshold == snapshot.required_support — exact equality.
+            // Aynı committed değerin duplicate alanları (yaklaşık ölçüm DEĞİL) → bit equality.
+            if threshold != &snapshot.required_support {
                 return Err(
                     SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
                         "QuorumInsufficient.threshold ({threshold}) != snapshot.required_support ({})",
@@ -7413,8 +7416,9 @@ fn validate_hold_reason_snapshot_v2(
                     )),
                 );
             }
-            // **PR#84 review P1:** support == snapshot.support (eksikti).
-            if (support - snapshot.support).abs() > f64::EPSILON {
+            // **PR#84 review P1 (2. tur):** support == snapshot.support — exact equality.
+            // Aynı committed değerin duplicate alanları (yaklaşık ölçüm DEĞİL) → bit equality.
+            if support != &snapshot.support {
                 return Err(
                     SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(format!(
                         "QuorumInsufficient.support ({support}) != snapshot.support ({})",
@@ -18364,6 +18368,7 @@ v = 0.5
 
     #[test]
     fn pr84_p1_min_approvers_distinct_approvers_mismatch_rejects() {
+        // **PR#84 review P1 (2. tur):** gerçek rejection assertion — no-op DEĞİL.
         // MinApproversNotMet.distinct (1) != snapshot.approvers (0) → reject.
         let hold_reason = WitnessHoldReason::MinApproversNotMet {
             distinct: 1,
@@ -18375,18 +18380,17 @@ v = 0.5
             support: 1.0,
             required_support: 1.5,
         };
-        // validate_hold_reason_snapshot_v2 private — test via validate_suspension_eligibility_v2
-        // indirectly impossible (Held construction rejects). Direct helper test: internal
-        // consistency checked at envelope verify. Şimdilik structural: accessor pattern.
-        // (validate_hold_reason_snapshot_v2 modül-private — test via public envelope API.)
-        // Bu test hold_reason ↔ snapshot tutarlılığının önemini pinler.
-        let _ = (hold_reason, snapshot);
+        let err = validate_hold_reason_snapshot_v2(&hold_reason, &snapshot)
+            .expect_err("distinct != approvers must reject");
+        assert!(matches!(
+            err,
+            SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(_)
+        ));
     }
 
     #[test]
     fn pr84_p1_min_approvers_distinct_ge_required_rejects() {
-        // distinct >= required → approver requirement met → Held invalid.
-        // (Faz 8-P1 fixture: distinct=1, required=2 → geçerli. distinct=2, required=2 → reject.)
+        // **PR#84 review P1 (2. tur):** distinct >= required → approver requirement met → reject.
         let hold_reason = WitnessHoldReason::MinApproversNotMet {
             distinct: 2, // == required (2) → met
             required: 2,
@@ -18397,13 +18401,17 @@ v = 0.5
             support: 1.0,
             required_support: 1.5,
         };
-        // Bu durum Held için nonsensical — eligibility reject etmeli.
-        let _ = (hold_reason, snapshot);
+        let err = validate_hold_reason_snapshot_v2(&hold_reason, &snapshot)
+            .expect_err("distinct >= required must reject (requirement met)");
+        assert!(matches!(
+            err,
+            SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(_)
+        ));
     }
 
     #[test]
     fn pr84_p1_quorum_support_mismatch_rejects() {
-        // QuorumInsufficient.support (0.4) != snapshot.support (1.4) → reject.
+        // **PR#84 review P1 (2. tur):** QuorumInsufficient.support != snapshot.support → reject.
         let hold_reason = WitnessHoldReason::QuorumInsufficient {
             support: 0.4,
             threshold: 1.5,
@@ -18414,7 +18422,12 @@ v = 0.5
             support: 1.4, // != hold_reason.support (0.4)
             required_support: 1.5,
         };
-        let _ = (hold_reason, snapshot);
+        let err = validate_hold_reason_snapshot_v2(&hold_reason, &snapshot)
+            .expect_err("support != snapshot.support must reject");
+        assert!(matches!(
+            err,
+            SuspensionEligibilityV2Error::HoldReasonSnapshotInconsistency(_)
+        ));
     }
 
     #[test]
