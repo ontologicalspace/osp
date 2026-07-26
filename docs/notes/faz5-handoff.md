@@ -1,18 +1,26 @@
-# INV-T9 #70 Commit 4b Faz 5 — Handoff (Checkpoint A complete: Adım 1-20)
+# INV-T9 #70 Commit 4b Faz 5 + Faz 8-P1 — Handoff (PR #84 APPROVED, merge hazır)
 
 ## Repository state
 
 ```
 Branch: wip/inv-t9-70-commit4b
-HEAD: 488be1b (Adım 17 P0-B + P0-C restore validators)
-Remote HEAD: 488be1b (sync — local = remote)
-Push status: Adım 16-20 + Adım 17 PUSHED (8fe5fa5, 488be1b)
+HEAD: 48ca733 (PR #84 review r7 P2 cleanup)
+Remote HEAD: 48ca733 (sync — local = remote)
+PR #84: APPROVED (7 review turu, production 9.8/10, test 9.9/10)
+Push status: Faz 5 + Faz 8-P1 + 7 review fix turu PUSHED
 Worktree: clean (source) — sadece untracked docs var
-Untracked files:
-- docs/design/plan-bound-task-lifecycle.md
-- docs/notes/planlama-tasarım-eskiz.txt
-- docs/notes/proje-adaylari.md
-- docs/notes/sohbet-konu.txt
+```
+
+## PR #84 Review Zinciri (7 tur, tamamı CLOSED)
+1. P0-1 task-goal TOCTOU + P0-2 loss_before + P1 snapshot
+2. P0-2 cross-artifact + P1 ontological + no-op + epsilon
+3. P0 persisted restore parity + P1 gerçek branch
+4. P0 yanlış katman (en kritik) + P1 exact + P2 typed
+5. Test closure (exact assertions + cleanup)
+6. Context validator P0 coverage (counter-example)
+7. Exact AcceptAsProgress (son açık) + P2 temizlik
+
+**Tüm blocking bulgular kapandı.** Production mimari 9.8/10, merge readiness 9.8/10.
 - docs/osp-3ay-hedef-karti.md
 - docs/osp-papers-comparison.md
 
@@ -230,8 +238,18 @@ Faz 8c:   persistence + downstream migration (PendingAuthorizationEnvelopeV2 res
 ```
 
 ### Sonraki adım (Faz 8-P2)
-Faz 8-P1 tamamlandı, CI green. Sıradaki:
-1. **Commit:** Faz 8-P1 atomik (Adım 1-11, tüm review kararları frozen)
+PR #84 APPROVED, merge hazır. Sıradaki:
+1. **Merge PR #84** → main (wip/inv-t9-70-commit4b → main)
 2. **Faz 8-P2:** Measurement caller migration (navigator/MCP compute_raw →
    measure_task_delta). `TaskCommitInput::new` + `EngineMeasurement` typed result.
+   navigator.rs:873 + osp-mcp/server.rs:876 TaskCommitInput literal construction →
+   smart ctor. compute_raw_from_delta/provenanced_from_flat/trajectory_loss kaldır.
 3. **Faz 8a:** Engine cutover (commit_task_claim → V2, V1 producer silme, atomik)
+
+### Faz 8-P2 scope (yeni oturum)
+- navigator.rs:618 loss_before üretimi kaldır (Faz 8-P1 evaluator measurement'dan derive)
+- navigator.rs:873 TaskCommitInput literal → `TaskCommitInput::new(claim, omega, resolver, measurement)`
+- osp-mcp/server.rs:868-884 aynı pattern
+- `measure_task_delta` (engine.rs:2366) production caller kazan (şu an test-only)
+- `compute_raw_from_delta`/`provenanced_from_raw`/`trajectory_loss` caller'ları azalır
+- V1 TaskCommitInput field'ları (target/loss_before/measured) → measurement: EngineMeasurement
