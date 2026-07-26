@@ -6266,8 +6266,8 @@ v = 0.5
     // pr84_p0_2_loss_before_decision_depends_on_before kaldırıldı (review 5 tur P1):
     // before'u değiştirmiyor, yanıltıcı "decision before'a bağlı" iddiası. Cross-artifact
     // test (pr84_p0_2_cross_artifact_before_state_mismatch_rejects) farklı before → digest
-    // mismatch kanıtlıyor; exact AcceptAsProgress fixture Faz 8-P2 derive_expected_mutation_
-    // decision shared helper ile (improvement durumunda deterministik loss_before/after).
+    // mismatch kanıtlıyor. Exact AcceptAsProgress fixture (improvement branch) artık
+    // pr84_p0_2_improvement_accept_as_progress ile kapandı (review 7 tur APPROVED).
 
     #[test]
     fn pr84_p0_2_improvement_accept_as_progress() {
@@ -6275,7 +6275,7 @@ v = 0.5
         // compute_completion_first_loss_and_decision direkt test (review'ın önerdiği yol):
         // full binding/evaluator zinciri gerekmez, eksik semantic branch pinlenir.
         //
-        // before target'tan uzak (coupling 0.9), after target'a yakın (coupling 0.1) →
+        // before target'tan uzak (coupling 0.25), after target'a yakın (coupling 0.1) →
         // loss_before > loss_after + min_delta → improved → AcceptAsProgress.
         use crate::authorization::compute_completion_first_loss_and_decision;
         use crate::authorization::CanonicalRawPosition;
@@ -6300,7 +6300,7 @@ v = 0.5
             v: 0.0,
         };
 
-        // before: target'tan uzak (coupling 0.9). after: target'a yakın (coupling 0.1).
+        // before: target'tan uzak (coupling 0.25). after: target'a yakın (coupling 0.1).
         let mk_measured = |coupling: f64| MeasuredRawPosition {
             coupling: AxisMeasurement {
                 value: coupling,
