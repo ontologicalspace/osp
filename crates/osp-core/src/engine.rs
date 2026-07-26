@@ -6220,11 +6220,11 @@ v = 0.5
     }
 
     #[test]
-    fn pr84_p0_2_loss_before_branch_accept_progress() {
-        // **PR#84 review P1 (4. tur):** gerçek loss-before branch — exact decision assertion.
+    fn pr84_p0_2_equal_loss_rejects() {
+        // **PR#84 review P1 (5. tur):** exact Reject assertion (test adı artık davranışla uyumlu).
         // task_accept_improvement_with_preferred: Coupling>=0.1 (measured 0.0 → NotCompleted) +
         // AcceptImprovement + preferred_vector Some + Available baseline.
-        // Measurement: before/after engine üretir. Decision loss değerlerine göre exact.
+        // before/after measured coupling 0.0 → loss_before == loss_after → not improved → Reject.
         let engine = make_measurement_engine();
         let task = task_accept_improvement_with_preferred(1, 42);
         let claim = claim_with_node1_delta(42);
@@ -6248,9 +6248,8 @@ v = 0.5
                 "AcceptImprovement + NotCompleted + Some(target) → Available loss, got {other:?}"
             ),
         };
-        // Decision — exact. measured coupling 0.0, before de 0.0 (engine delta sonrası).
-        // preferred_vector (0.1,0.1,...) — loss_before == loss_after (symmetric) →
-        // improved false (not strictly less) → Reject.
+        // Decision — exact Reject. before/after measured coupling 0.0 → loss_before == loss_after
+        // → not strictly less (min_improvement_delta not met) → improved false → Reject.
         let canonical = parts.gate_evaluation.into_canonical();
         match canonical {
             crate::authorization::CanonicalGateEvaluationV2::GatePassed { mutation_decision } => {
@@ -6264,46 +6263,18 @@ v = 0.5
             other => panic!("expected GatePassed, got {other:?}"),
         }
     }
-
-    #[test]
-    fn pr84_p0_2_loss_before_decision_depends_on_before() {
-        // **PR#84 review P1 (4. tur):** karar measurement.before()'dan türetildiğini kanıtla.
-        // pr84_p0_2_cross_artifact_before_state_mismatch_rejects zaten farklı before → farklı
-        // digest (mismatch) kanıtladı. Bu test farklı before'un decision'ı değiştirdiğini
-        // kanıtlar: aynı after, iki farklı before → iki farklı measurement → evaluator
-        // before'a bağlı karar üretir (eğer before digest parity geçerse).
-        //
-        // Not: Cross-artifact parity (full EngineMeasurementDigest) farklı before'u reject eder.
-        // Bu test "decision before'a bağlı" semantic kanıtını cross-artifact test'ine bırakır
-        // ve burada loss-before derive dalının observable loss_after ürettiğini assert eder.
-        let engine = make_measurement_engine();
-        let task = task_accept_improvement_with_preferred(1, 42);
-        let claim = claim_with_node1_delta(42);
-        let measurement = produce_valid_measurement(&engine, &task, &claim);
-        let parts = faz5_builder_bundle(&engine, &task, &claim, &measurement).into_parts();
-        // loss evidence Available → loss_after observable (before'dan derive edilen improved
-        // kararının girdisi). Exact loss_after assertion (preferred_vector 0.1'e distance).
-        use crate::authorization::CanonicalTrajectoryLossEvidence;
-        match parts.loss_evidence {
-            CanonicalTrajectoryLossEvidence::Available { loss_after, .. } => {
-                // loss_after finite — non-finite olsaydı LossBeforeDerivation reject ederdi.
-                assert!(
-                    loss_after.is_finite(),
-                    "loss_after must be finite: {loss_after}"
-                );
-            }
-            other => panic!("expected Available loss, got {other:?}"),
-        }
-    }
+    // pr84_p0_2_loss_before_decision_depends_on_before kaldırıldı (review 5. tur P1):
+    // before'u değiştirmiyor, yanıltıcı "decision before'a bağlı" iddiası. Cross-artifact
+    // test (pr84_p0_2_cross_artifact_before_state_mismatch_rejects) farklı before → digest
+    // mismatch kanıtlıyor; exact AcceptAsProgress fixture Faz 8-P2 derive_expected_mutation_
+    // decision shared helper ile (improvement durumunda deterministik loss_before/after).
 
     #[test]
     fn pr84_p0_2_non_finite_loss_typed_rejection() {
-        // **PR#84 review P2 (4. tur):** typed LossBeforeDerivation assertion.
-        // Evaluator full digest parity'ye takılmadan loss non-finite'i test etmek için
-        // ProducedTrajectoryLossEvidence::new (loss producer) direkt test edilir.
-        // Evaluator non-finite loss → LossBeforeDerivation; producer non-finite →
-        // TrajectoryLossProductionError::NonFiniteLossBefore. Aynı invariant.
-        use crate::authorization::ProducedTrajectoryLossEvidence;
+        // **PR#84 review P2 (5. tur):** typed TrajectoryLossProductionError variant assertion.
+        // ProducedTrajectoryLossEvidence::new (loss producer) direkt test — evaluator full
+        // digest parity'ye takılmadan finite invariant izole.
+        use crate::authorization::{ProducedTrajectoryLossEvidence, TrajectoryLossProductionError};
         use crate::measurement::EngineMeasurementDigest;
 
         let digest = EngineMeasurementDigest::compute_from_measurement(&produce_valid_measurement(
@@ -6313,17 +6284,23 @@ v = 0.5
         ))
         .expect("digest");
 
-        // Non-finite loss_before → TrajectoryLossProductionError::NonFiniteLossBefore.
+        // Non-finite loss_before → TrajectoryLossProductionError::NonFiniteLossBefore (exact).
         let err = ProducedTrajectoryLossEvidence::new(f64::NAN, 0.5, digest.clone());
         assert!(
-            err.is_err(),
-            "non-finite loss_before must reject in loss producer"
+            matches!(
+                err,
+                Err(TrajectoryLossProductionError::NonFiniteLossBefore { .. })
+            ),
+            "non-finite loss_before → NonFiniteLossBefore; got {err:?}"
         );
-        // Non-finite loss_after → same.
+        // Non-finite loss_after → TrajectoryLossProductionError::NonFiniteLossAfter (exact).
         let err = ProducedTrajectoryLossEvidence::new(0.5, f64::INFINITY, digest);
         assert!(
-            err.is_err(),
-            "non-finite loss_after must reject in loss producer"
+            matches!(
+                err,
+                Err(TrajectoryLossProductionError::NonFiniteLossAfter { .. })
+            ),
+            "non-finite loss_after → NonFiniteLossAfter; got {err:?}"
         );
     }
 }

@@ -18513,18 +18513,39 @@ v = 0.5
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // INV-T9 #70 PR#84 review 3. tur — P0 persisted restore parity
+    // INV-T9 #70 PR#84 review 5. tur — P1 context validator test'leri
     //
-    // **P0 fix:** validate_gate_decision_semantics_v2 AcceptImprovement + Available loss
-    // dalında artık trajectory_baseline kontrolü yapıyor. Unavailable baseline +
-    // AcceptImprovement + Available loss → MatrixViolation (AcceptAsProgress runtime'da
-    // imkânsız — improvement kanıtlanamaz).
+    // **P0 (4. tur) doğru katmanda:** validate_gate_against_basis context seviyesi.
+    // Available baseline → early return Ok (validate_gate_against_basis sadece Unavailable
+    // dalını değerlendirir). Unavailable fixture için tutarlı digest zinciri (Unavailable
+    // baseline ile EngineMeasurement + measurement_baseline_digest + engine_measurement_digest
+    // hepsi recompute) gerekir — Faz 8-P2 `derive_expected_mutation_decision` shared helper.
     //
-    // **Adversarial test notu:** Unavailable baseline + tutarlı digest zinciri taşıyan
-    // persisted fixture kurmak için ayrı raw parts builder gerekir (measurement_baseline_
-    // digest, engine_measurement_digest hepsi birbirine bağlı). Bu fixture Faz 8-P2/8a'da
-    // `derive_expected_mutation_decision` shared helper ile gelir (review'ın önerdiği
-    // temiz çözüm). Şimdilik P0 fix kod review ile — runtime davranışı P1 test'lerinde
-    // (pr84_p0_2_loss_before_*) kanıtlandı (baseline Available → improved derive).
+    // Şimdilik: mevcut Available baseline fixture ile validate_gate_against_basis çağrısı
+    // Ok döner (early return). Bu fonksiyonun güvenli çağrıldığını kanıtlar. Unavailable
+    // dalının pozitif/negatif test'i Faz 8-P2'de shared helper + Unavailable fixture ile.
     // ═══════════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn pr84_p1_context_validator_available_baseline_early_returns() {
+        // Available baseline → validate_gate_against_basis early return Ok (Unavailable dalı
+        // değerlendirilmez). Bu test fonksiyonun güvenli çağrıldığını + Available baseline ile
+        // reject etmediğini kanıtlar (regression: basis validator'dan kaldırma doğru).
+        let basis = faz4_basis_v2_fixture();
+        let gate_reject = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::Reject,
+        };
+        let gate_progress = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::AcceptAsProgress,
+        };
+        // Available baseline → her iki gate ile Ok (Unavailable dalı değerlendirilmez).
+        assert!(
+            validate_gate_against_basis(&basis, &gate_reject).is_ok(),
+            "Available baseline → early return Ok (Reject)"
+        );
+        assert!(
+            validate_gate_against_basis(&basis, &gate_progress).is_ok(),
+            "Available baseline → early return Ok (AcceptAsProgress)"
+        );
+    }
 }
