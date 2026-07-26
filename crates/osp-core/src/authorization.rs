@@ -18513,24 +18513,124 @@ v = 0.5
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // INV-T9 #70 PR#84 review 5. tur — P1 context validator test'leri
+    // INV-T9 #70 PR#84 review 6. tur — P1 context validator regression test'leri
     //
     // **P0 (4. tur) doğru katmanda:** validate_gate_against_basis context seviyesi.
-    // Available baseline → early return Ok (validate_gate_against_basis sadece Unavailable
-    // dalını değerlendirir). Unavailable fixture için tutarlı digest zinciri (Unavailable
-    // baseline ile EngineMeasurement + measurement_baseline_digest + engine_measurement_digest
-    // hepsi recompute) gerekir — Faz 8-P2 `derive_expected_mutation_decision` shared helper.
-    //
-    // Şimdilik: mevcut Available baseline fixture ile validate_gate_against_basis çağrısı
-    // Ok döner (early return). Bu fonksiyonun güvenli çağrıldığını kanıtlar. Unavailable
-    // dalının pozitif/negatif test'i Faz 8-P2'de shared helper + Unavailable fixture ile.
+    // Bu test'ler P0'ı koruyan kritik branch coverage — Available early-return test
+    // validator `if Unavailable { return Ok }` regress etse yakalayamazdı.
+    // Unavailable fixture: mevcut fixture + Unavailable baseline + digest recompute.
     // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// **PR#84 review 6. tur:** Unavailable baseline + Available loss + AcceptImprovement +
+    /// NotCompleted predicate taşıyan tutarlı digest zincirine sahip basis fixture.
+    /// mevcut fixture + Unavailable baseline (digest recompute) + Available loss + NotCompleted.
+    fn faz8_p1_unavailable_baseline_basis() -> AuthorizationBasisV2 {
+        use crate::canonical_tags::{PredicateFailurePolicyTag, PredicateSetResultTag};
+        use crate::measurement::{
+            BaselineUnavailableReason, EngineMeasurement, MeasurementBaseline,
+        };
+
+        let mut parts = faz4_basis_v2_raw_parts(42);
+
+        // Unavailable baseline ile EngineMeasurement recompute → digest zinciri tutarlı.
+        // Subject üyeleri delta-introduced (tümü) — AllMembersIntroducedByDelta.
+        let subject_members: Vec<u64> = parts.measurement_request.subject.member_ids().to_vec();
+        let unavailable_baseline = MeasurementBaseline::Unavailable {
+            reason: BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                members: subject_members.clone(),
+            },
+        };
+        // EngineMeasurement private fields — recompute için after/context/request gerek.
+        let (request, _evidence) = sample_measurement_request_evidence_parts();
+        let after = faz4_uniform_measured(0.5);
+        let context = sample_measurement_input_context_for_faz4();
+        let engine_meas =
+            EngineMeasurement::new(unavailable_baseline, after, context, request.clone())
+                .expect("Unavailable baseline engine measurement");
+
+        // Digest'ları Unavailable baseline ile recompute.
+        parts.engine_measurement_digest = engine_meas.compute_digest().unwrap();
+        parts.measurement_baseline_digest = engine_meas.before().compute_digest().unwrap();
+        parts.measured_after = ProvenancedMeasuredResult::try_from(engine_meas.after()).unwrap();
+        parts.measurement_digest =
+            crate::measurement::MeasurementDigest::compute(engine_meas.after()).unwrap();
+
+        // CanonicalTrajectoryEvidenceBaseline::Unavailable — reason'u pattern match ile çıkar.
+        let baseline_reason = match engine_meas.before() {
+            MeasurementBaseline::Unavailable { reason } => reason.clone(),
+            _ => unreachable!("Unavailable baseline constructed above"),
+        };
+        parts.trajectory_baseline = CanonicalTrajectoryEvidenceBaseline::Unavailable {
+            reason: CanonicalBaselineUnavailableReason::try_from_reason(
+                &baseline_reason,
+                &parts.measurement_request.subject,
+            )
+            .expect("valid unavailable reason"),
+        };
+
+        // Trajectory loss → Available (target var, baseline yok — runtime bu durumda
+        // Available{target, loss_after} + improved=false + Reject üretir).
+        parts.trajectory_loss = CanonicalTrajectoryLossEvidence::Available {
+            target: CanonicalRawPosition {
+                x: 0.1,
+                y: 0.1,
+                z: 0.0,
+                w: 0.0,
+                v: 0.0,
+            },
+            loss_after: 0.5 as CanonicalF64,
+        };
+
+        // predicate_basis → NotCompleted + AcceptImprovement (validate_gate_against_basis hedef dalı).
+        parts.predicate_basis = CanonicalPredicateEvaluationBasisV2 {
+            gate_evaluation_semantics_version: GATE_EVALUATION_SEMANTICS_V1,
+            result: PredicateSetResultTag::try_from(
+                &crate::trajectory::PredicateSetResult::NotCompleted,
+            )
+            .unwrap(),
+            failure_policy: PredicateFailurePolicyTag::try_from(
+                &crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+            )
+            .unwrap(),
+            min_improvement_delta: 0.1 as CanonicalF64,
+            allow_progress_checkpoint: true,
+            effective_improvement: parts.predicate_basis.effective_improvement,
+        };
+        // predicate_gate_policy_digest — değişen predicate_basis ile recompute.
+        parts.predicate_gate_policy_digest =
+            crate::measurement::PredicateGatePolicyDigestV2::compute_from_canonical(
+                parts.task_id,
+                &parts.task_goal_digest,
+                &parts.predicate_basis,
+            )
+            .expect("predicate gate policy digest recompute");
+
+        AuthorizationBasisV2::new(
+            parts.task_id,
+            parts.claim_id,
+            parts.task_claim_digest,
+            parts.task_goal_digest,
+            parts.measurement_digest,
+            parts.engine_measurement_digest,
+            parts.trajectory_baseline,
+            parts.measurement_baseline_digest,
+            parts.trajectory_loss,
+            parts.measurement_request,
+            parts.measurement_request_digest,
+            parts.measurement_context_digest,
+            parts.canonical_delta_digest,
+            parts.measured_after,
+            parts.task_goal_evidence,
+            parts.predicate_basis,
+            parts.predicate_gate_policy_digest,
+        )
+        .expect("valid Unavailable baseline basis")
+    }
 
     #[test]
     fn pr84_p1_context_validator_available_baseline_early_returns() {
         // Available baseline → validate_gate_against_basis early return Ok (Unavailable dalı
-        // değerlendirilmez). Bu test fonksiyonun güvenli çağrıldığını + Available baseline ile
-        // reject etmediğini kanıtlar (regression: basis validator'dan kaldırma doğru).
+        // değerlendirilmez). Regression: basis validator'dan kaldırma (4. tur) doğru.
         let basis = faz4_basis_v2_fixture();
         let gate_reject = CanonicalGateEvaluationV2::GatePassed {
             mutation_decision: crate::trajectory::MutationDecision::Reject,
@@ -18538,7 +18638,6 @@ v = 0.5
         let gate_progress = CanonicalGateEvaluationV2::GatePassed {
             mutation_decision: crate::trajectory::MutationDecision::AcceptAsProgress,
         };
-        // Available baseline → her iki gate ile Ok (Unavailable dalı değerlendirilmez).
         assert!(
             validate_gate_against_basis(&basis, &gate_reject).is_ok(),
             "Available baseline → early return Ok (Reject)"
@@ -18546,6 +18645,42 @@ v = 0.5
         assert!(
             validate_gate_against_basis(&basis, &gate_progress).is_ok(),
             "Available baseline → early return Ok (AcceptAsProgress)"
+        );
+    }
+
+    #[test]
+    fn pr84_p1_context_validator_unavailable_baseline_reject_ok() {
+        // **PR#84 review P1 (6. tur):** Unavailable baseline + Available loss +
+        // AcceptImprovement + NotCompleted + GatePassed{Reject} → OK (geçerli runtime).
+        // Bu test P0'ın koruduğu invariant — validator `if Unavailable { return Ok }`
+        // regress etse yakalardı (Available test'i yakalamazdı).
+        let basis = faz8_p1_unavailable_baseline_basis();
+        let gate = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::Reject,
+        };
+        let result = validate_gate_against_basis(&basis, &gate);
+        assert!(
+            result.is_ok(),
+            "Unavailable baseline + Reject → valid runtime; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn pr84_p1_context_validator_unavailable_baseline_accept_progress_rejects() {
+        // **PR#84 review P1 (6. tur):** Unavailable baseline + Available loss +
+        // AcceptImprovement + NotCompleted + GatePassed{AcceptAsProgress} → reject
+        // (forged persisted — runtime üretmez).
+        let basis = faz8_p1_unavailable_baseline_basis();
+        let gate = CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: crate::trajectory::MutationDecision::AcceptAsProgress,
+        };
+        let result = validate_gate_against_basis(&basis, &gate);
+        assert!(
+            matches!(
+                result,
+                Err(AuthorizationContextV2BuildError::GateBasisSemanticMismatch { .. })
+            ),
+            "Unavailable baseline + AcceptAsProgress → forged persisted; got {result:?}"
         );
     }
 }
