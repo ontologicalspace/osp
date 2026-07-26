@@ -3168,22 +3168,14 @@ impl AuthorizationBasisV2 {
                                 }
                             }
                             CanonicalTrajectoryLossEvidence::Available { .. } => {
-                                // **PR#84 review P0 (3. tur):** Available loss + baseline
-                                // unavailable → runtime her zaman Reject üretir (improvement
-                                // kanıtlanamaz). Persisted artifact'te AcceptAsProgress olamaz.
-                                // Runtime düzeltmesi (gate_v2.rs) restore'a yansımamıştı.
-                                if matches!(
-                                    self.trajectory_baseline(),
-                                    CanonicalTrajectoryEvidenceBaseline::Unavailable { .. }
-                                ) {
-                                    return Err(GateSemanticConsistencyError::MatrixViolation {
-                                        detail: "AcceptImprovement + Available loss + Unavailable baseline — runtime always Rejects (improvement unprovable); AcceptAsProgress impossible".to_string(),
-                                    });
-                                }
-                                // Available baseline: improved recompute edilebilir (before +
-                                // target + loss_after + min_delta). Tam decision parity context
-                                // restore katmanında (basis + gate_evaluation birlikte). Basis
-                                // seviyesi Available loss + Available baseline → geçerli.
+                                // **PR#84 review P0 (4. tur):** Available loss + Unavailable
+                                // baseline runtime'da GEÇERLİ (target var, baseline yok →
+                                // Available{target, loss_after} + improved=false + Reject).
+                                // Bu kontrol basis seviyesinde DEĞİL — basis'in elinde gate
+                                // evaluation yok, Reject ↔ AcceptAsProgress ayırt edemez.
+                                // Karar parity'si context seviyesinde: validate_gate_against_basis
+                                // (AuthorizationContextV2::new + restore) — basis + gate birlikte.
+                                // Eski kontrol (3. tur) geçerli runtime Reject'i kırıyordu.
                             }
                             CanonicalTrajectoryLossEvidence::NotRequired { reason } => {
                                 // AcceptImprovement altında NotRequired beklenmez —
@@ -6069,6 +6061,10 @@ pub enum AuthorizationContextV2BuildError {
     Basis(#[from] AuthorizationBasisV2Error),
     #[error("witness requirement validation failed: {0}")]
     WitnessRequirement(#[from] CanonicalWitnessRequirementV2Error),
+    /// **PR#84 review P0 (4. tur):** Gate decision ↔ basis semantic mismatch — context seviyesi.
+    /// Basis + gate_evaluation birlikte değerlendirilir (basis seviyesi değil).
+    #[error("gate decision ↔ basis semantic mismatch: {detail}")]
+    GateBasisSemanticMismatch { detail: String },
 }
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:164):** AuthorizationContextV2 invariant error.
@@ -6120,6 +6116,8 @@ impl AuthorizationContextV2 {
         // mutation_decision.apply_target(). Illegal state yapısal olarak imkânsız.
         let apply_target = canonical_gate.apply_target();
         witness_requirement.validate_for(&apply_target)?;
+        // **PR#84 review P0 (4. tur):** gate ↔ basis semantic parity (context seviyesi).
+        validate_gate_against_basis(&basis, &canonical_gate)?;
         Ok(Self {
             basis,
             gate_evaluation: canonical_gate,
@@ -6169,6 +6167,8 @@ impl AuthorizationContextV2 {
     /// (başka site yok).
     ///
     /// **Validation:** `validate_for(apply_target)` — runtime `new` ile aynı invariant.
+    /// **PR#84 review P0 (4. tur):** `validate_gate_against_basis` — gate ↔ basis semantic
+    /// parity (Unavailable baseline + AcceptAsProgress impossible, Reject valid).
     fn restore(
         basis: AuthorizationBasisV2,
         gate_evaluation: CanonicalGateEvaluationV2,
@@ -6176,11 +6176,70 @@ impl AuthorizationContextV2 {
     ) -> Result<Self, AuthorizationContextV2BuildError> {
         let apply_target = gate_evaluation.apply_target();
         witness_requirement.validate_for(&apply_target)?;
+        validate_gate_against_basis(&basis, &gate_evaluation)?;
         Ok(Self {
             basis,
             gate_evaluation,
             witness_requirement,
         })
+    }
+}
+
+/// **PR#84 review P0 (4. tur):** Shared gate ↔ basis semantic validator (context seviyesi).
+///
+/// Runtime (`AuthorizationContextV2::new`) ve restore (`restore`) tarafından ortak çağrılır.
+/// Basis seviyesi değil — basis'in elinde gate evaluation yok, karar ayırt edemez. Bu validator
+/// basis + gate_evaluation'ı birlikte değerlendirir:
+///
+/// **Unavailable baseline + Available loss + AcceptImprovement + NotCompleted:**
+/// - `GatePassed { Reject }` → geçerli (runtime bu durumu üretir — improvement kanıtlanamaz)
+/// - `GatePassed { AcceptAsProgress }` → reject (forged persisted — runtime üretmez)
+/// - diğer → reject
+///
+/// Available baseline: improved recompute edilebilir (before + target + min_delta) → loose check.
+fn validate_gate_against_basis(
+    basis: &AuthorizationBasisV2,
+    gate: &CanonicalGateEvaluationV2,
+) -> Result<(), AuthorizationContextV2BuildError> {
+    use crate::trajectory::MutationDecision;
+
+    // Sadece Unavailable baseline + AcceptImprovement + NotCompleted + Available loss dalı.
+    if !matches!(
+        basis.trajectory_baseline(),
+        CanonicalTrajectoryEvidenceBaseline::Unavailable { .. }
+    ) {
+        return Ok(()); // Available baseline → improved recompute edilebilir, loose check.
+    }
+    // predicate_basis result + failure_policy kontrolü.
+    // Tag değerleri: PredicateSetResult (Completed=0, SourceInsufficient=1, NotCompleted=2);
+    // PredicateFailurePolicy (StrictReject=0, AcceptImprovement=1, OperatorApproval=2).
+    let predicate_basis = basis.predicate_basis();
+    if predicate_basis.result.as_u8() != 2 {
+        return Ok(()); // Completed/SourceInsufficient → loss NotRequired, bu dal değil.
+    }
+    if predicate_basis.failure_policy.as_u8() != 1 {
+        return Ok(()); // Sadece AcceptImprovement policy.
+    }
+    if !matches!(
+        basis.trajectory_loss(),
+        CanonicalTrajectoryLossEvidence::Available { .. }
+    ) {
+        return Ok(()); // Sadece Available loss (target var, baseline yok).
+    }
+    // Bu dalda: Unavailable baseline + Available loss + AcceptImprovement + NotCompleted.
+    // Runtime her zaman Reject üretir. AcceptAsProgress imkânsız (forged persisted).
+    match gate {
+        CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: MutationDecision::Reject,
+        } => Ok(()), // Geçerli runtime Reject.
+        CanonicalGateEvaluationV2::GatePassed {
+            mutation_decision: MutationDecision::AcceptAsProgress,
+        } => Err(AuthorizationContextV2BuildError::GateBasisSemanticMismatch {
+            detail: "Unavailable baseline + Available loss + AcceptImprovement → runtime always Rejects; AcceptAsProgress impossible (forged persisted)".to_string(),
+        }),
+        _ => Err(AuthorizationContextV2BuildError::GateBasisSemanticMismatch {
+            detail: "Unavailable baseline + Available loss + AcceptImprovement → only Reject valid".to_string(),
+        }),
     }
 }
 
