@@ -247,8 +247,9 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
 pub fn build_all_cases() -> Vec<CharacterizationCase> {
     vec![
         matching_single_node_001(),
-        // P2-0B.9'da eklenecek: wide_affected_scope_001, removed_edge_external_001,
-        // delta_introduced_subject_001, mixed_per_axis_sources_001.
+        wide_affected_scope_001(),
+        removed_edge_external_source_001(),
+        delta_introduced_subject_001(),
     ]
 }
 
@@ -269,18 +270,42 @@ pub fn compute_case_digests() -> Vec<(String, String)> {
 
 /// Bir case'in deterministik serialize-bytes'ı (digest için).
 ///
-/// Sıralama: space, task, proposal (her biri serde_json ile canonical sorted-keys
-/// serialize). Bu, builder drift'inin digest'e yansımasını sağlar.
+/// **Kritik:** `Space.nodes: HashMap<NodeId, Node>` iteration order'ı Rust random
+/// seed'ine bağlıdır (her process'de farklı). Bu yüzden düz `serde_json::to_vec`
+/// nondeterministik digest üretir. Çözüm: önce `serde_json::Value`'ya parse edip
+/// `to_string_pretty` + sort_keys yerine, `Serializer` ile canonical sorted output
+/// almak. En temiz yol: her üçü için de `serde_json::to_value` → recursiv olarak
+/// objeleri BTreeMap karşılığına çevir → serialize.
+///
+/// Pratik implementation: `serde_json::to_string_pretty` zaten default feature'suz
+/// serde_json'de map'leri sort eder (BTreeMap-backed `Map` type). HashMap direkt
+/// serialize entry order kullanır — bu yüzden önce `Value`'ya, sonra tekrar serialize.
 pub fn serialize_case_bytes(case: &CharacterizationCase) -> Vec<u8> {
-    // serde_json canonical (sorted keys) — builder drift deterministic yakalanır.
-    let space = serde_json::to_vec(&case.space).expect("space serialize");
-    let task = serde_json::to_vec(&case.task).expect("task serialize");
-    let proposal = serde_json::to_vec(&case.proposal).expect("proposal serialize");
+    // serde_json::Value (BTreeMap-backed default) → deterministic key order.
+    // HashMap entry order Rust process-random seed'e bağlı; Value'ya round-trip
+    // canonical sorted order verir.
+    let space_val = serde_json::to_value(&case.space).expect("space → Value");
+    let task_val = serde_json::to_value(&case.task).expect("task → Value");
+    let proposal_val = serde_json::to_value(&case.proposal).expect("proposal → Value");
+    let space = canonical_json_bytes(&space_val);
+    let task = canonical_json_bytes(&task_val);
+    let proposal = canonical_json_bytes(&proposal_val);
     let mut combined = Vec::new();
     combined.extend_from_slice(&space);
     combined.extend_from_slice(&task);
     combined.extend_from_slice(&proposal);
     combined
+}
+
+/// JSON Value'yu canonical (sorted-key, deterministic) bytes'a çevir.
+///
+/// serde_json default `preserve_order` feature KAPALI olduğu için `Map` type
+/// BTreeMap-backed'dir → key'ler sort edilir. Bu, HashMap iteration order
+/// nondeterminism'ini kapatır.
+fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
+    // Value zaten Map (BTreeMap-backed) → serialize sorted.
+    // pretty=false (compact), deterministic.
+    serde_json::to_vec(value).expect("Value → canonical bytes")
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -357,6 +382,260 @@ fn matching_single_node_001() -> CharacterizationCase {
         class: CaseClass::MatchingScope,
         source: CaseSource::SyntheticAdversarial,
         description: "Task targets Node(1); proposal affected_nodes=[1]. Baseline parity."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Case 002: wide-affected-scope (KNOWN DIVERGENCE — production-reachable)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **Bilinen production-reachable divergence.** Task targets Node(1) via `Node(1)`
+/// predicate scope; proposal declares `affected_nodes=[1, 2, 3]` (LLM geniş scope
+/// bildirir — komşu coupling kaymasıyla).
+///
+/// - V1 subject = `{1, 2, 3}` (affected_nodes) → affected centroid 3 node üzerinden.
+/// - V2 subject = `{1}` (task.predicate.scope) → subject centroid tek node üzerinden.
+///
+/// Bu fark **ontolojiktir** (subject authority: LLM-affected vs task-derived) ve
+/// **production-reachable**. P2-1'in açılması için ontolojik karar gerekir.
+fn wide_affected_scope_001() -> CharacterizationCase {
+    use osp_core::agent::NewEdgeSpec;
+    use osp_core::space::{EdgeKind, Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 1, 2, 3 mevcut (hepsi Module).
+    let mut space = Space::new();
+    for id in 1..=3u64 {
+        space.insert_node(Node {
+            id,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+    }
+
+    // Task: Node(1) predicate scope (dar — sadece node 1).
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 42,
+        milestone_id: 0,
+        label: "wide-affected-scope-001".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Proposal: affected_nodes=[1,2,3] (geniş — LLM affected bildirir), structural
+    // delta olarak 1→2 edge (empty-proposal check için).
+    let proposal = DeltaProposal {
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1, 2, 3],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "wide-affected-scope-001".to_string(),
+        class: CaseClass::WideAffectedScope,
+        source: CaseSource::SyntheticAdversarial,
+        description: "Task Node(1) scope; affected_nodes=[1,2,3]. KNOWN divergence: \
+            V1 measures centroid over {1,2,3}, V2 over {1}."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Case 003: removed-edge-external-source (divergence)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// `removed_edges[*].from` task scope DIŞINDA bir node. V1 affected set'e bu node'u
+/// dahil eder (navigator.rs affected_nodes + removed_edges.from); V2 subject scope
+/// (task-derived) dahil ETMEZ. Divergence: V1 centroid etkilenir, V2 etkilenmez.
+fn removed_edge_external_source_001() -> CharacterizationCase {
+    use osp_core::agent::{EdgeRef, NewEdgeSpec};
+    use osp_core::space::{EdgeKind, Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 1 (subject), node 9 (external — removed-edge source).
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+    space.insert_node(Node {
+        id: 9,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 42,
+        milestone_id: 0,
+        label: "removed-edge-external-001".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Proposal: affected_nodes=[1] (matching), ama removed_edges[0].from=9 (external).
+    // V1 affected = {1, 9} (9 removed_edges.from'dan eklenir); V2 subject = {1}.
+    let proposal = DeltaProposal {
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 9,
+            kind: EdgeKind::Imports,
+        }],
+        removed_edges: vec![EdgeRef {
+            from: 9,
+            to: 1,
+            kind: EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "removed-edge-external-source-001".to_string(),
+        class: CaseClass::RemovedEdgeExternalSource,
+        source: CaseSource::SyntheticAdversarial,
+        description: "Task Node(1); affected=[1] + removed_edge from=9 (external). \
+            V1 folds 9 into affected set; V2 subject scope {1} excludes it."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Case 004: delta-introduced-subject (V2 baseline Unavailable)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Task predicate scope node'ları tamamen delta ile introduced (space'te YOK).
+/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` →
+///   project_v1_loss_before_compatibility fail-closed (loss_before=loss_after →
+///   improved=false → Reject).
+/// - V1: current_measured her zaman var → loss_before hesaplanır → improvement
+///   değerlendirilebilir.
+///
+/// Bu case V2'nin "baseline yoksa progress kanıtlanamaz" semantiğini V1'in
+/// "her zaman current_measured var" semantiğinden ayırır.
+fn delta_introduced_subject_001() -> CharacterizationCase {
+    use osp_core::agent::NewNodeSpec;
+    use osp_core::space::{Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 10 mevcut (delta-introduced değil, ama subject node 10 değil).
+    // Subject node = 1, delta ile introduced.
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 10,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1), // node 1 space'te YOK — delta ile introduced
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 42,
+        milestone_id: 0,
+        label: "delta-introduced-subject-001".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Proposal: delta node 1'i introduced; affected_nodes=[1].
+    let proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "delta-introduced-subject-001".to_string(),
+        class: CaseClass::DeltaIntroducedSubject,
+        source: CaseSource::SyntheticAdversarial,
+        description: "Subject node 1 delta-introduced. V2 baseline Unavailable → \
+            fail-closed (improved=false→Reject); V1 always has current_measured."
             .to_string(),
         space,
         task,
