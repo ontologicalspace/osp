@@ -86,9 +86,26 @@ impl LanguageAdapter for GoAdapter {
             Some(t) => t,
             None => return Vec::new(),
         };
-        // Go: interface = abstract, struct = concrete
-        // type_declaration nodes contain struct_type or interface_type
-        shared::walk_class_defs(tree.root_node(), source, "", &["interface"])
+        // Go: interface = abstract, struct = concrete.
+        // type_declaration nodes contain struct_type or interface_type.
+        // BIT-IDENTICAL NOTE: preserves the old ["interface"] substring test verbatim,
+        // including:
+        // KNOWN-DIVERGENCE(GO-ABST-002): the pattern is tested against the node's FULL
+        // text, so a struct with an `interface{}` field (e.g. `Handler interface{}`) is
+        // marked abstract (false-positive). Preserved in PR A; fix tracked separately.
+        // KNOWN-DIVERGENCE(GO-TYPE-001): a grouped `type ( A struct{}; B struct{} )` is a
+        // single type_declaration wrapper → counted as ONE ClassDef (under-count), and
+        // FirstIdentifierFallback returns the first inner name only. type_spec is not a
+        // recognized kind here. Preserved in PR A; fix (per-type_spec counting) tracked
+        // separately. NameStrategy stays FirstIdentifierFallback (NOT DescendantField)
+        // to preserve exact current behavior.
+        use shared::{AbstractnessRule, DeclarationKindSpec, NameStrategy};
+        const GO_SPECS: &[DeclarationKindSpec] = &[DeclarationKindSpec::new(
+            "type_declaration",
+            AbstractnessRule::LegacyTextContains(&["interface"]),
+            NameStrategy::FirstIdentifierFallback,
+        )];
+        shared::walk_class_defs(tree.root_node(), source, GO_SPECS)
     }
 }
 
