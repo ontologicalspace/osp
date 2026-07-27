@@ -37,9 +37,9 @@
       "id": "delta-introduced-subject-001",
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
-      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline Unavailable (AllMembersIntroducedByDelta) → fail-closed; V1 always has current_measured.",
-      "builder_digest_blake3": "5513da86f5f4b19b8ad74e808c23917ac344d1c974fb6a98f9c6ee7b0d4592cb",
-      "notes": "Baseline-availability divergence (3rd migration dimension): V1 current_measured always vs V2 UnavailableAllIntroduced. Subject/value parity (no subject-authority divergence). Pipeline mutation-decision drift NotReached (Held). Decision-level impact pending P2-0B.8."
+      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (representation divergence); V1 always has current_measured. Policy/decision impact pending P2-0B.8.",
+      "builder_digest_blake3": "6c7ef8b3999104617fe8c235ccd9b119a281e6f5068a8bcb7a52e3abdf261254",
+      "notes": "Baseline representation divergence: V1 current_measured (typed değil) vs V2 UnavailableAllIntroduced. Subject/value parity (no subject-authority divergence). Pipeline mutation-decision ReachedButUnsurfaced (Held — outcome surfaced değil). Policy/decision impact hipotez — NotCompleted+AcceptImprovement fixture P2-0B.8'de."
     }
   ]
 }

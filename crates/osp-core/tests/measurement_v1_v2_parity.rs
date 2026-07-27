@@ -163,6 +163,24 @@ fn matching_scope_baseline_case_shows_parity() {
     assert_apply_target_parity(&case.id, &obs_v1, &obs_v2);
     assert_witness_reachability_parity(&case.id, &obs_v1, &obs_v2);
 
+    // === Corpus observation golden (review tur 5 P0-2/P1-2) ===
+    // Mutation decision: matching V1/V2 Q5 Vision'da durur (placeholder computed_raw →
+    // theta ihlali) → PredicateGate'e ulaşmadı → NotReached.
+    let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
+    let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
+    assert_eq!(
+        md_v1,
+        common::MutationDecisionObservation::NotReached,
+        "matching V1: Q5 Vision → PredicateGate NotReached; case {}",
+        case.id
+    );
+    assert_eq!(
+        md_v2,
+        common::MutationDecisionObservation::NotReached,
+        "matching V2: Q5 Vision NotReached; case {}",
+        case.id
+    );
+
     // === Baseline ===
     // V2-candidate: matching scope → Available baseline (node space'te).
     match &obs_v2.measurement {
@@ -466,9 +484,33 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         "V2 engine axis defaults; case {}",
         case.id
     );
-}
 
-/// `removed-edge-external-source-001`: removed_edges.from external node divergence.
+    // === Corpus observation golden (review tur 5 P0-2/P1-2) ===
+    // wide-affected: Q5 Vision'da durur → PredicateGate'e ulaşmadı → NotReached.
+    let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
+    let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
+    assert_eq!(
+        md_v1,
+        common::MutationDecisionObservation::NotReached,
+        "wide-affected V1: Q5 Vision'da durdu → PredicateGate NotReached; case {}",
+        case.id
+    );
+    assert_eq!(
+        md_v2,
+        common::MutationDecisionObservation::NotReached,
+        "wide-affected V2: Q5 Vision NotReached; case {}",
+        case.id
+    );
+    // V2 baseline Available (subject node 1 space'te).
+    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v2.measurement {
+        assert_eq!(
+            *baseline_kind,
+            Some(common::BaselineKind::Available),
+            "wide-affected V2 baseline Available; case {}",
+            case.id
+        );
+    }
+}
 ///
 /// V1 affected = {1, 9} (9 removed_edges.from'dan); V2 subject = {1}.
 ///
@@ -555,24 +597,52 @@ fn removed_edge_external_source_shows_affected_contamination() {
         "V2 engine axis defaults; case {}",
         case.id
     );
+
+    // === Corpus observation golden (review tur 5 P0-2/P1-2) ===
+    // removed-edge: Q5 Vision'da durur → NotReached.
+    let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
+    let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
+    assert_eq!(
+        md_v1,
+        common::MutationDecisionObservation::NotReached,
+        "removed-edge V1: Q5 Vision NotReached; case {}",
+        case.id
+    );
+    assert_eq!(
+        md_v2,
+        common::MutationDecisionObservation::NotReached,
+        "removed-edge V2: Q5 Vision NotReached; case {}",
+        case.id
+    );
+    // V2 baseline Available (subject node 1 space'te).
+    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v2.measurement {
+        assert_eq!(
+            *baseline_kind,
+            Some(common::BaselineKind::Available),
+            "removed-edge V2 baseline Available; case {}",
+            case.id
+        );
+    }
 }
 
-/// `delta-introduced-subject-001`: baseline-availability divergence (3rd migration).
+/// `delta-introduced-subject-001`: baseline-availability representation divergence
+/// (review tur 5: policy/decision divergence hipotez, P2-0B.8 fixture gerek).
 ///
 /// Subject node 10000 delta-introduced (base space'te yok, delta ile geliyor —
 /// `node_from_spec` id 10_000+0). **Review tur 4 P0-1:** subject authority divergence
 /// YOK (V1 affected={10000} == V2 task scope={10000}). Ayrışan tek ontolojik boyut:
-/// **baseline availability**.
-/// - V1: `current_measured` her zaman var → loss_before hesaplanır → improvement evaluable.
-/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` →
-///   project_v1_loss_before_compatibility fail-closed (loss_before=loss_after).
+/// **baseline availability representation**.
+/// - V1: `current_measured` her zaman var → loss_before hesaplanır.
+/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` (typed).
 ///
-/// Bu, subject authority + provenance authority'den **bağımsız üçüncü** bir migration
-/// boyutudur: delta-introduced subject için geçmiş baseline yoksa ne yapılsın?
-/// (Reject / Held-Suspended / RequireOperatorApproval — test-only projection şu an
-/// sessizce Reject policy'sini uyguluyor).
+/// **Review tur 5 P0-1:** Bu case **representation divergence** kanıtlar (V1 baseline
+/// typed değil, V2 UnavailableAllIntroduced). **Policy/decision divergence KANITLAMAZ** —
+/// Case 4 predicate `Coupling ≤ 0.5` + measured coupling 0.0 → `Completed` →
+/// `AcceptAsCompleted` (completion-first decision core improved'a bakmaz). Unavailable
+/// projection'ın decision etkisi SADECE `NotCompleted` + improvement-sensitive policy
+/// dalında observable (P2-0B.8 fixture).
 #[test]
-fn delta_introduced_subject_shows_baseline_semantics_divergence() {
+fn delta_introduced_subject_shows_baseline_representation_divergence() {
     let case = build_all_cases()
         .into_iter()
         .find(|c| c.class == CaseClass::DeltaIntroducedSubject)
@@ -679,13 +749,41 @@ fn delta_introduced_subject_shows_baseline_semantics_divergence() {
         other => panic!("V1 measurement Produced olmalı; got {other:?}"),
     }
 
-    // === Pipeline observation (log — NotReached N/A mutation decision) ===
+    // === Pipeline observation golden (review tur 5 P0-2/P1-2) ===
     // Case 4 Q5 PASSED (coupling 0.0 ≤ vision bound) → PredicateGate'e ulaştı → Held
-    // (witness quorum). predicate_completion/mutation_decision surfaced DEĞİL (Held
-    // EngineCommitResult'da outcome taşımaz). Mutation decision drift = NotReached.
+    // (witness quorum). mutation_decision surfaced DEĞİL → ReachedButUnsurfaced.
     eprintln!("  delta-introduced V1 pipeline: {:?}", obs_v1.pipeline);
     eprintln!("  delta-introduced V2 pipeline: {:?}", obs_v2.pipeline);
-    // Pipeline decision-drift: mutation_decision None (Held surfaced değil) → NotReached.
+    let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
+    let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
+    assert_eq!(
+        md_v1,
+        common::MutationDecisionObservation::ReachedButUnsurfaced,
+        "delta-introduced V1: Q5 passed → PredicateGate'e ulaştı, Held → outcome surfaced değil; case {}",
+        case.id
+    );
+    assert_eq!(
+        md_v2,
+        common::MutationDecisionObservation::ReachedButUnsurfaced,
+        "delta-introduced V2: Held → ReachedButUnsurfaced; case {}",
+        case.id
+    );
+    assert_eq!(
+        witness_reachability(&obs_v1),
+        WitnessReachability::Held,
+        "delta-introduced V1 witness Held; case {}",
+        case.id
+    );
+    assert_eq!(
+        witness_reachability(&obs_v2),
+        WitnessReachability::Held,
+        "delta-introduced V2 witness Held; case {}",
+        case.id
+    );
+    // **Review tur 5 P0-1:** mutation decision parity (ikisi de ReachedButUnsurfaced)
+    // policy/decision divergence KANITLAMAZ — representation divergence sadece baseline
+    // boyutunda (V1 None vs V2 UnavailableAllIntroduced). Policy/decision divergence
+    // NotCompleted + AcceptImprovement fixture ile P2-0B.8'de kanıtlanacak.
 }
 
 fn assert_none_or_not_unavailable(baseline_kind: &Option<common::BaselineKind>, msg: &str) {

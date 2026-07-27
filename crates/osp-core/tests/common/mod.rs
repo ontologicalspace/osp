@@ -582,11 +582,16 @@ fn removed_edge_external_source_001() -> CharacterizationCase {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Task predicate scope node'ları tamamen delta ile introduced (space'te YOK).
-/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` →
-///   project_v1_loss_before_compatibility fail-closed (loss_before=loss_after →
-///   improved=false → Reject).
-/// - V1: current_measured her zaman var → loss_before hesaplanır → improvement
-///   değerlendirilebilir.
+/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` (typed
+///   representation — geçmiş baseline yok).
+/// - V1: current_measured her zaman var → loss_before hesaplanır.
+///
+/// **Review tur 5 P0-1:** Bu case **baseline representation divergence** kanıtlar
+/// (V1 baseline typed değil, V2 UnavailableAllIntroduced). **Policy/decision
+/// divergence KANITLAMAZ** — Case 4 predicate `Coupling ≤ 0.5` + measured coupling 0.0
+/// → `PredicateSetResult::Completed` → `AcceptAsCompleted` (completion-first decision
+/// core improved'a bakmaz). Unavailable projection'ın decision etkisi SADECE
+/// `NotCompleted` + improvement-sensitive policy dalında observable (P2-0B.8 fixture).
 ///
 /// Bu case V2'nin "baseline yoksa progress kanıtlanamaz" semantiğini V1'in
 /// "her zaman current_measured var" semantiğinden ayırır.
@@ -659,8 +664,8 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         class: CaseClass::DeltaIntroducedSubject,
         source: CaseSource::SyntheticAdversarial,
         description: "Subject node 10000 delta-introduced (node_from_spec id). \
-            V2 baseline Unavailable (AllMembersIntroducedByDelta) → fail-closed; \
-            V1 always has current_measured."
+            V2 baseline UnavailableAllIntroduced (representation divergence); \
+            V1 always has current_measured. Policy/decision impact pending P2-0B.8."
             .to_string(),
         space,
         task,
@@ -934,6 +939,38 @@ impl WitnessReachability {
             EngineCommitResult::Evaluated { .. } => Self::Evaluated,
             EngineCommitResult::Held { .. } => Self::Held,
             EngineCommitResult::Rejected { .. } => Self::Rejected,
+        }
+    }
+}
+
+/// Mutation decision observation tri-state (review tur 5 P0-2).
+///
+/// `NotReached` (gate çalışmadı) ile `ReachedButUnsurfaced` (gate çalıştı ama sonuç
+/// EngineCommitResult'ta taşınmıyor — Held/Rejected) farklı mimari problemlerdir;
+/// aynı kategoride birleştirilmemeli.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MutationDecisionObservation {
+    /// PredicateGate'e ulaşıldı, Evaluated → gerçek MutationDecision observable.
+    Observed(osp_core::trajectory::MutationDecision),
+    /// PredicateGate'e ulaşıldı ama Held/Rejected → outcome surfaced değil
+    /// (EngineCommitResult::Held/Rejected mutation_decision taşımaz).
+    ReachedButUnsurfaced,
+    /// PredicateGate'e ulaşılmadı (Q5 Vision veya erken stage'de durdu).
+    NotReached,
+}
+
+impl MutationDecisionObservation {
+    pub fn from_observations(pipeline: &PipelineObservation) -> Self {
+        match pipeline {
+            PipelineObservation::CommitReached {
+                mutation_decision: Some(md),
+                ..
+            } => Self::Observed(md.clone()),
+            PipelineObservation::CommitReached {
+                mutation_decision: None,
+                ..
+            } => Self::ReachedButUnsurfaced,
+            PipelineObservation::StoppedBeforeCommit { .. } => Self::NotReached,
         }
     }
 }
@@ -1312,11 +1349,24 @@ fn finalize_pipeline_observation_commit_reached(
 /// V1 compatibility projection: loss_before measurement'dan türe.
 ///
 /// Available baseline → gerçek trajectory_loss(before, target).
-/// Unavailable baseline → fail-closed: loss_before = loss_after → improved=false → Reject.
+/// Unavailable baseline → loss_before = loss_after (fail-closed projection).
 ///
-/// **Önemli:** Unavailable durumundaki scalar tarihsel loss_before DEĞİL; V1 scalar
-/// contract'ına geçici adaptasyon (improved=false zorla). Faz 8a V2 typed loss evidence
-/// cutover'ında kaldırılacak.
+/// **Önemli (review tur 5 P0-1):** `improved=false → Reject` zinciri **koşulsuz
+/// DEĞİLDİR**. Production decision core completion-first çalışır:
+/// - `PredicateSetResult::Completed` → `MutationDecision::AcceptAsCompleted`
+///   (improved'a bakılmaz; loss_before=loss_after etkisiz).
+/// - `PredicateSetResult::NotCompleted` + `AcceptImprovement` policy → improved
+///   değerlendirilir; loss_before=loss_after → improved=false → progress yok →
+///   Reject (BU dalda policy etkisi observable).
+///
+/// Yani Unavailable projection sadece **NotCompleted + improvement-sensitive policy**
+/// durumunda decision'ı etkiler. Case 4 `Coupling ≤ 0.5` + measured coupling 0.0 →
+/// `Completed` → projection'ın decision etkisi YOK. Bu yüzden:
+/// - **Representation divergence kanıtlandı** (V1 baseline typed değil, V2 UnavailableAllIntroduced).
+/// - **Policy/decision divergence kanıtlanmadı** — NotCompleted fixture gerek (P2-0B.8).
+///
+/// Unavailable scalar tarihsel loss_before DEĞİL; V1 scalar contract'ına geçici
+/// adaptasyon. Faz 8a V2 typed loss evidence cutover'ında kaldırılacak.
 pub fn project_v1_loss_before_compatibility_v2(
     measurement: &osp_core::measurement::EngineMeasurement,
     target: &osp_core::coords::RawPosition,
@@ -1326,7 +1376,9 @@ pub fn project_v1_loss_before_compatibility_v2(
     match measurement.before() {
         MeasurementBaseline::Available(before) => trajectory_loss(before, target),
         MeasurementBaseline::Unavailable { .. } => {
-            // Fail-closed: loss_before = loss_after → improved=false → Reject.
+            // loss_before = loss_after. Decision etkisi SADECE NotCompleted +
+            // improvement-sensitive policy dalında (Completed dalında etkisiz —
+            // completion-first decision core improved'a bakmaz).
             trajectory_loss(measurement.after(), target)
         }
     }
