@@ -92,7 +92,7 @@ impl LegacyCommitProjection {
 
 **Önemli kapsam notu:** Bu test **mevcut** `measure_task_delta` producer'ını pinler. Gelecekteki `measure_task_delta_checked` boundary'si (P2-1) için **"binding must precede `Task::validate_for_commit`"** contract test'i P2-1 implementation'ında eklenecektir — bu scope'ta `measure_task_delta_checked` henüz YOK.
 
-**Sentinel stratejisi:** Test `claim.task_id != task.id` ile birlikte geçersiz task declaration verebilirdi; eğer producer binding kontrolünü measurement work'tan sonra yapsaydı başka bir hata dönebilirdi. `TaskBindingMismatch`'ın önceliği pinlendi.
+**Sentinel stratejisi (review P0-3 fix sonrası):** Test `task_with_module_scope(20)` kullanır — Module scope Commit 3 fail-closed olduğu için, eğer producer binding check'i measurement work'tan SONRA yapsaydı, measurement work `SubjectScopeResolutionFailed` üretiridi. `TaskBindingMismatch` dönmesi, binding check'in measurement work'tan ÖNCE çalıştığının gerçek ordering kanıtıdır. (Önceki kod geçerli `task_with_node_scope` kullanıyordu — bu sentinel değildi; review P0-3 ile düzeltildi.)
 
 ---
 

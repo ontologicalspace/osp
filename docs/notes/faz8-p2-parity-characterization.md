@@ -17,6 +17,13 @@ semantic divergence'ı** somut olarak ölçtü. Sonuç:
 > subject-scope divergence mevcuttur. P2-1 (caller migration), ontolojik subject
 > authority kararı verilmeden açılamaz.
 
+**Önemli kapsam sınırlaması (review P1):** Gözlemlenen value/source divergence
+production-reachable; ancak Cases 2/3 Q5 Vision gate'inde durduğu için
+**decision-drift (commit outcome değişimi) henüz ölçülemedi** — P2-0B.8 non-default
+`computed_raw` ile tamamlanana kadar decision-level etki kanıtlanmamış sayılır.
+Mevcut bulgu: measured VALUES ve sources diverge ediyor; commit DECISION'larının
+diverge olduğuna dair kanıt henüz yok.
+
 Bu rapor, üç ontolojik yol için pro/con analizi sağlar ve kararı bekler.
 
 ---
@@ -154,6 +161,13 @@ derivation'ı önce yapıyor — bu da bir karakterizasyon bulgusu).
 olabilirdi ama Q5'in placeholder `RawPosition::default()` ile fail olması buna
 engel oldu (bu da ayrı bir bulgu — Q5 characterization için non-default
 `computed_raw` gerekir, P2-0B.8 Q5 exact theta unit'te ele alınacak).
+
+**⚠️ Selection bias caveat (review P1):** Bu oran fixture selection'a bağlıdır — 4
+case'ten 3'ü bilinçli olarak divergence sınıfları (wide-affected/removed-edge/delta-
+introduced) olarak tasarlandı. "75%" production divergence sıklığı tahmini DEĞİLDİR;
+sadece "seçilen adversarial case'lerde divergence gözlemlendi" anlamına gelir.
+Production divergence sıklığı bu rapordan çıkarılamaz — gerçek corpus
+characterization'ı (navigator/MCP fixture'ları) P2-0B kalan iş kapsamında.
 
 ---
 

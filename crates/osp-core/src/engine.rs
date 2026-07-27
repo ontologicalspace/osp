@@ -6615,8 +6615,16 @@ v = 0.5
     #[test]
     fn measure_task_delta_rejects_binding_mismatch_before_measurement_work() {
         let engine = make_measurement_engine();
-        // Task A: geçerli node-scope, id=42. Ama binding için task B (id=20) geçeceğiz.
-        let task_b = task_with_node_scope(1, 20);
+        // **Sentinel (review P0-3 fix):** task_b Module scope kullanır — eğer producer
+        // binding check'i measurement work'tan SONRA yapsaydı, measurement work
+        // (subject scope derivation) `SubjectScopeResolutionFailed` üretiridi (Module
+        // scope Commit 3 fail-closed, engine.rs:2553+). Binding check ÖNCE olduğu için
+        // `TaskBindingMismatch` döner — bu ordering kanıtı.
+        //
+        // Önceki kod `task_with_node_scope(1, 20)` (geçerli task) kullanıyordu; bu
+        // sentinel değildi çünkü valid task ile measurement work hata üretmezdi ve
+        // binding check'in sırasını pinlemezdi.
+        let task_b = task_with_module_scope(20);
         // Claim task_id=10 ile (≠ task_b.id=20) — structural forgery.
         let claim = claim_with_task_id(10, vec![mod_node(1)], vec![], vec![]);
         let bound = crate::trajectory::TaskBoundClaim {
@@ -6625,7 +6633,8 @@ v = 0.5
         };
         let revision = engine.current_space_view_revision().unwrap();
         let result = engine.measure_task_delta(&bound, &revision, None);
-        // Binding mismatch measurement work'tan önce yakalanır.
+        // Binding mismatch measurement work'tan önce yakalanır. Eğer sonra olsaydı,
+        // Module scope → SubjectScopeResolutionFailed dönerdi.
         assert!(
             matches!(
                 result,
@@ -6635,7 +6644,8 @@ v = 0.5
                 })
             ),
             "binding mismatch (claim_task_id=10 vs bound_task_id=20) must be rejected BEFORE \
-             measurement work; got {result:?}"
+             measurement work; if binding were checked after measurement, Module scope would \
+             have produced SubjectScopeResolutionFailed; got {result:?}"
         );
     }
 

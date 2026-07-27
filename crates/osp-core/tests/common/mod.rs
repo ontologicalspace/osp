@@ -34,7 +34,6 @@
 use osp_core::agent::DeltaProposal;
 use osp_core::space::Space;
 use osp_core::trajectory::Task;
-use osp_core::witness::Claim;
 use std::path::{Path, PathBuf};
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -73,6 +72,10 @@ pub enum CaseClass {
     /// task.predicate.scope members all delta-introduced — V2 baseline Unavailable.
     DeltaIntroducedSubject,
     /// subject members report different MetricSource per axis — provenance divergence.
+    ///
+    /// **TODO (P2-0B kalan iş):** Henüz case builder üretemez (build_all_cases'te yok).
+    /// Case 2 (wide-affected) zaten per-axis source divergence gösterdi ama dedicated
+    /// required_source matrisi (Any/Exact(Scip)/Exact(Heuristic)/mixed/mismatch) eksik.
     MixedPerAxisSources,
 }
 
@@ -644,69 +647,6 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Claim builder (structural delta proposal'dan)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// Proposal'dan structural delta Claim üretir (her iki harness için ortak).
-///
-/// Bu, navigator'ın `build_claim_from_proposal` pattern'ini mirror eder ama
-/// `computed_raw` parametresini caller verir (V1: `compute_raw_from_delta` sonucu,
-/// V2-candidate probe: `RawPosition::default()`).
-pub fn build_claim_from_proposal(
-    proposal: &DeltaProposal,
-    computed_raw: osp_core::coords::RawPosition,
-    task_id: osp_core::trajectory::TaskId,
-    agent: osp_core::witness::AgentId,
-    claim_id: osp_core::witness::ClaimId,
-) -> Claim {
-    use osp_core::space::{Edge, Node};
-    // NewNodeSpec → Node (connected_to ile edge'ler dahil).
-    let mut delta_nodes: Vec<Node> = proposal
-        .new_nodes
-        .iter()
-        .enumerate()
-        .map(|(i, spec)| Node {
-            id: 10_000 + i as u64,
-            kind: spec.kind,
-            mass: spec.initial_mass,
-            ..Default::default()
-        })
-        .collect();
-    let _ = &mut delta_nodes; // (matcher için; delta_nodes below'da kullanılıyor)
-    let mut delta_edges: Vec<Edge> = proposal
-        .new_edges
-        .iter()
-        .map(|spec| Edge {
-            from: spec.from,
-            to: spec.to,
-            kind: spec.kind,
-            is_type_only: false,
-        })
-        .collect();
-    for (i, spec) in proposal.new_nodes.iter().enumerate() {
-        let node_id = 10_000 + i as u64;
-        for (target, kind) in &spec.connected_to {
-            delta_edges.push(Edge {
-                from: node_id,
-                to: *target,
-                kind: *kind,
-                is_type_only: false,
-            });
-        }
-    }
-    Claim {
-        id: claim_id,
-        intent: osp_core::witness::Intent::new(agent, computed_raw),
-        author: agent,
-        computed_raw,
-        delta_nodes,
-        delta_edges,
-        task_id: Some(task_id),
-        removed_edges: proposal.removed_edges.clone(),
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // Stage-aware observation model (P2-0B.4, plan Tur 5 P1-2)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -742,6 +682,11 @@ pub enum MeasurementObservation {
     /// V2-candidate measurement producer hatası (V1 infallible → bu varyant V1'de yok).
     Failed { error: MeasurementFailureClass },
     /// V1 path measurement'ı tracking yapmaz (compute_raw_from_delta infallible).
+    ///
+    /// **Not:** V1 harness şu an `Produced { subject: None, baseline_kind: None }`
+    /// üretir — bu varyant hiçbir builder tarafından üretilmez. Future-use: V1'in
+    /// "measurement tracking yok" durumunu explicit temsil etmek için ayrılabilir.
+    /// Şu an sadece matcher'larda referans edilir.
     NotAttempted,
 }
 
@@ -751,6 +696,9 @@ pub enum MeasurementObservation {
 pub enum BaselineKind {
     Available,
     UnavailableAllIntroduced,
+    /// **Not:** Hiçbir V2-candidate case builder tarafından üretilmedi (PartialNewSubject
+    /// baseline gerektiren case henüz yok). Matcher'da referans edilir — future-use
+    /// (P2-0B kalan: mixed_per_axis_sources veya subgraph-introduced case eklendiğinde).
     UnavailablePartialNew,
 }
 
@@ -789,17 +737,57 @@ impl MeasurementFailureClass {
             | MeasurementError::Digest(_) => Self::Digest,
         }
     }
+
+    /// Measurement failure → (PipelineStage, PipelineFailureClass) mapping.
+    ///
+    /// **Review P1-3 fix:** V2-candidate early-return'de `stage: Other` yerine gerçek
+    /// stage. Measurement producer hatası commit pipeline'ının measurement-binding
+    /// aşamasında durur — ama spesifik MeasurementError variant'a göre alt-stage
+    /// (Binding/TaskValidation/Internal) verir.
+    pub fn pipeline_stage_and_class(&self) -> (PipelineStage, PipelineFailureClass) {
+        match self {
+            Self::Binding => (PipelineStage::TaskBinding, PipelineFailureClass::Binding),
+            Self::Revision => (
+                PipelineStage::MeasurementBinding,
+                PipelineFailureClass::Internal,
+            ),
+            Self::SubjectScope => (
+                PipelineStage::TaskValidation,
+                PipelineFailureClass::TaskValidation,
+            ),
+            Self::Coordinate => (
+                PipelineStage::MeasurementBinding,
+                PipelineFailureClass::Internal,
+            ),
+            Self::Digest => (
+                PipelineStage::MeasurementBinding,
+                PipelineFailureClass::Internal,
+            ),
+            Self::Other => (
+                PipelineStage::MeasurementBinding,
+                PipelineFailureClass::Other,
+            ),
+        }
+    }
 }
 
 /// Pipeline (commit_task_claim) sonucu — stage-aware erken duruşlar dahil.
 #[derive(Debug, Clone)]
 pub enum PipelineObservation {
     /// commit_task_claim tam çalıştı (Evaluated/Held/Rejected dahil).
+    ///
+    /// **Önemli (review P0-1 fix):** `predicate_completion`/`mutation_decision`/`apply_target`
+    /// `Option<>`'dır — Held/Rejected'da EngineCommitResult gerçek outcome'u taşımaz
+    /// (sadece Evaluated `TaskCommitResult.outcome` içerir). Fabrication YAPILMAZ;
+    /// Held/Rejected'da bu alanlar `None` olur (gate computed ama surfaced değil).
     CommitReached {
         q5: Q5Observation,
-        predicate_completion: osp_core::trajectory::PredicateCompletion,
-        mutation_decision: osp_core::trajectory::MutationDecision,
-        apply_target: osp_core::trajectory::ApplyTarget,
+        /// Evaluated'da gerçek değer; Held/Rejected'da None (outcome surfaced değil).
+        predicate_completion: Option<osp_core::trajectory::PredicateCompletion>,
+        /// Evaluated'da gerçek değer; Held/Rejected'da None.
+        mutation_decision: Option<osp_core::trajectory::MutationDecision>,
+        /// Evaluated'da gerçek değer; Held/Rejected'da None.
+        apply_target: Option<osp_core::trajectory::ApplyTarget>,
         witness_reachability: WitnessReachability,
     },
     /// commit_task_claim Q5/commit'e ulaşmadan error verdi (early stop).
@@ -829,8 +817,11 @@ pub enum PipelineStage {
     TaskValidation,
     Vision,
     PredicateGate,
+    MeasurementBinding,
+    Authorization,
     Witness,
-    Other,
+    Persistence,
+    Internal,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -891,6 +882,11 @@ impl WitnessReachability {
 }
 
 /// Pipeline stage'ı EngineCommitError'dan çıkar (hangi aşamada durduğunu söyler).
+///
+/// **Review P1-2 fix:** `PipelineFailureClass::from_engine_commit_error` ile tutarlı
+/// stage↔class correspondence. Önceki kod measurement binding → Measurement class
+/// ama Other stage yapıyordu (self-contradictory StoppedBeforeCommit). Artık her
+/// EngineCommitError variant tek bir (stage, class) çiftine map eder.
 impl PipelineStage {
     pub fn from_engine_commit_error(err: &osp_core::engine::EngineCommitError) -> Self {
         use osp_core::engine::EngineCommitError;
@@ -903,10 +899,12 @@ impl PipelineStage {
             EngineCommitError::RuleViolation { .. } => Self::PredicateGate,
             EngineCommitError::MeasurementBindingMismatch(_)
             | EngineCommitError::MeasurementBindingFailed(_)
-            | EngineCommitError::MeasurementBindingVerification(_) => Self::Other,
-            EngineCommitError::AuthorizationContextFailed(_) => Self::Other,
-            EngineCommitError::NoPersistence | EngineCommitError::Persistence(_) => Self::Other,
-            EngineCommitError::Internal(_) => Self::Other,
+            | EngineCommitError::MeasurementBindingVerification(_) => Self::MeasurementBinding,
+            EngineCommitError::AuthorizationContextFailed(_) => Self::Authorization,
+            EngineCommitError::NoPersistence | EngineCommitError::Persistence(_) => {
+                Self::Persistence
+            }
+            EngineCommitError::Internal(_) => Self::Internal,
             EngineCommitError::InvalidWitnessEvidence(_) => Self::Witness,
         }
     }
@@ -914,6 +912,12 @@ impl PipelineStage {
 
 /// Q5 exact theta bits (engine-unit'ten — integration public API'den alamaz).
 #[derive(Debug, Clone)]
+/// Q5 exact theta bits (engine-unit'ten — integration public API'den alamaz).
+///
+/// **TODO (P2-0B.8 kalan iş):** Henüz hiçbir engine-unit test bu struct'ı üretmiyor.
+/// P2-0B.8 (Q5 exact theta engine-unit characterization) tamamlanana kadar dead.
+/// Case 2/3 Q5 Vision'da durduğu için PredicateGate decision-drift ölçülemedi;
+/// non-default `computed_raw` ile Q5'i geçen case'ler gerekiyor.
 pub struct Q5ThetaCharacterization {
     pub case_id: String,
     pub v1_theta_bits: u64,
@@ -964,6 +968,12 @@ pub fn engine_with_case_space(case: &CharacterizationCase) -> osp_core::engine::
 /// (V1 measurement tracking yapmaz; measured = provenanced_from_raw(computed_raw)).
 ///
 /// **İsimlendirme:** "V1 production path" — bu mevcut navigator/MCP yolu.
+///
+/// **Review P0-2 fix:** `loss_before` navigator.rs:618/879'daki gibi `current_measured`
+/// (pre-delta engine space centroid) üzerinden hesaplanır — `measured` (post-delta after)
+/// üzerinden DEĞİL. Önceki kod `trajectory_loss(&measured, &target)` ile loss_before =
+/// loss_after yapıyordu; bu sistematik improved=false üretirdi ve V1/V2 baseline
+/// karşılaştırmasını bozardı.
 pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
@@ -980,47 +990,46 @@ pub fn evaluate_v1_case(
         }
     }
 
-    // V1: compute_raw_from_delta (infallible).
-    let delta_nodes: Vec<_> = case
-        .proposal
-        .new_nodes
-        .iter()
-        .enumerate()
-        .map(|(i, spec)| osp_core::space::Node {
-            id: 10_000 + i as u64,
-            kind: spec.kind,
-            mass: spec.initial_mass,
-            ..Default::default()
-        })
-        .collect();
-    let delta_edges: Vec<_> = case
-        .proposal
-        .new_edges
-        .iter()
-        .map(|spec| osp_core::space::Edge {
-            from: spec.from,
-            to: spec.to,
-            kind: spec.kind,
-            is_type_only: false,
-        })
-        .collect();
+    // **Review P1-6 fix:** Önce probe claim üret (placeholder computed_raw), sonra
+    // claim'in structural delta'sını compute_raw_from_delta için kullan. Önceki kod
+    // node/edge mapping'i 3. kez inline duplicate ediyordu (navigator + local helper
+    // + V1 harness). Artık tek mapping kaynağı: build_claim_from_proposal.
+    let probe_claim = build_claim_from_proposal(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .expect("V1 probe claim build should succeed for characterization case");
+
+    // V1: compute_raw_from_delta (infallible) — post-delta hypothetical centroid.
+    // claim'in structural delta'sını kullan (mapping duplicate YOK).
     let computed_raw = engine.compute_raw_from_delta(
-        &delta_nodes,
-        &delta_edges,
-        &case.proposal.removed_edges,
+        &probe_claim.delta_nodes,
+        &probe_claim.delta_edges,
+        &probe_claim.removed_edges,
         &affected,
     );
 
-    // Claim + measured (V1 path).
+    // **P0-2 fix:** loss_before için current_measured (pre-delta) — navigator.rs:618
+    // `trajectory_loss(&self.current_measured, &self.target_vector)` mirror. Pre-delta
+    // engine space üzerinden affected centroid hesapla (delta uygulamadan).
+    let current_measured_raw = engine.compute_raw_from_delta(&[], &[], &[], &affected);
+    let current_measured =
+        provenanced_from_raw(current_measured_raw, osp_core::coords::MetricSource::Scip);
+
+    // Final claim: computed_raw = compute_raw_from_delta sonucu (V1 production path).
     let claim = build_claim_from_proposal(&case.proposal, computed_raw, case.task.id, 100, 1)
-        .expect("V1 claim build should succeed for characterization case");
+        .expect("V1 final claim build should succeed for characterization case");
     let measured = provenanced_from_raw(claim.computed_raw, osp_core::coords::MetricSource::Scip);
     let target = case
         .task
         .target_predicate_set
         .preferred_vector
         .unwrap_or_default();
-    let loss_before = osp_core::trajectory::trajectory_loss(&measured, &target);
+    // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
+    let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
     // Registry + commit.
     let mut registry = InMemoryTaskRegistry::new();
@@ -1096,22 +1105,13 @@ pub fn evaluate_v2_candidate_case(
         Ok(t) => t,
         Err(ref e) => {
             let error = MeasurementFailureClass::from_measurement_error(e);
+            // **Review P1-3 fix:** gerçek (stage, class) — önceden stage: Other hardcode.
+            let (stage, class) = error.pipeline_stage_and_class();
             return CharacterizationObservation {
-                measurement: MeasurementObservation::Failed {
-                    error: error.clone(),
-                },
+                measurement: MeasurementObservation::Failed { error },
                 pipeline: PipelineObservation::StoppedBeforeCommit {
-                    stage: PipelineStage::Other, // measurement producer hatası
-                    error: match error {
-                        MeasurementFailureClass::Binding => PipelineFailureClass::Binding,
-                        MeasurementFailureClass::Revision => PipelineFailureClass::Internal,
-                        MeasurementFailureClass::SubjectScope => {
-                            PipelineFailureClass::TaskValidation
-                        }
-                        MeasurementFailureClass::Coordinate => PipelineFailureClass::Internal,
-                        MeasurementFailureClass::Digest => PipelineFailureClass::Internal,
-                        MeasurementFailureClass::Other => PipelineFailureClass::Other,
-                    },
+                    stage,
+                    error: class,
                 },
             };
         }
@@ -1135,6 +1135,14 @@ pub fn evaluate_v2_candidate_case(
         }
     };
     let measurement = MeasurementObservation::Produced {
+        // **Review P1-7 note:** Bu `subject` harness-side bir approximation'dır —
+        // engine'in `CanonicalSubjectScope` derivation'ı (measure_task_delta step 3)
+        // ile aynı DEĞİL. Sınırlamalar: (1) heterogeneous scope'lar (Node+Subgraph
+        // karışık) engine'de HeterogeneousPredicateScopes hatası verirken burada
+        // sessizce flatten edilir; (2) Module scope burada vec![] döner ama engine
+        // SubjectScopeResolutionFailed üretir. Telemetry/raporlama amaçlı; V2-candidate
+        // subject authority kararının ontolojik kanıtı için motor davranışını (Failed
+        // varyant) kullan.
         subject: Some(
             case.task
                 .target_predicate_set
@@ -1197,33 +1205,43 @@ pub fn evaluate_v2_candidate_case(
 }
 
 /// commit_task_claim başarılı sonucundan PipelineObservation::CommitReached üret.
+///
+/// **Review P0-1 fix:** Held/Rejected'da `EngineCommitResult` gerçek PredicateGate
+/// outcome'unu taşımaz (sadece `Evaluated` `TaskCommitResult.outcome` içerir). Önceki
+/// kod `AcceptAsCompleted`+`NotApplied` fabrication ediyordu — bu imkânsız bir
+/// kombinasyon (MutationDecision::apply_target() mapping'i). Artık Held/Rejected'da
+/// gate-outcome alanları `None` (computed ama surfaced değil).
 fn finalize_pipeline_observation_commit_reached(
     result: &osp_core::engine::EngineCommitResult,
 ) -> PipelineObservation {
     use osp_core::engine::EngineCommitResult;
     match result {
         EngineCommitResult::Evaluated { result, .. } => {
-            // Evaluated → witness reached (Satisfied).
+            // Evaluated → witness Satisfied; gerçek outcome surfaced.
             PipelineObservation::CommitReached {
                 q5: Q5Observation::Passed, // Q5 passed (commit reached past vision gate)
-                predicate_completion: result.outcome.predicate_completion.clone(),
-                mutation_decision: result.outcome.mutation_decision.clone(),
-                apply_target: result.apply_target.clone(),
+                predicate_completion: Some(result.outcome.predicate_completion.clone()),
+                mutation_decision: Some(result.outcome.mutation_decision.clone()),
+                apply_target: Some(result.apply_target.clone()),
                 witness_reachability: WitnessReachability::Evaluated,
             }
         }
         EngineCommitResult::Held { .. } => PipelineObservation::CommitReached {
             q5: Q5Observation::Passed,
-            predicate_completion: osp_core::trajectory::PredicateCompletion::NotCompleted,
-            mutation_decision: osp_core::trajectory::MutationDecision::AcceptAsCompleted,
-            apply_target: osp_core::trajectory::ApplyTarget::NotApplied,
+            // Outcome computed by PredicateGate ama Held variant'ta surfaced DEĞİL.
+            // Fabrication YAPILMAZ — None, characterization consumer gerçek değeri
+            // göremez (engine.rs:1131-1144 EngineCommitResult::Held field'larına bak).
+            predicate_completion: None,
+            mutation_decision: None,
+            apply_target: None,
             witness_reachability: WitnessReachability::Held,
         },
         EngineCommitResult::Rejected { .. } => PipelineObservation::CommitReached {
             q5: Q5Observation::Passed,
-            predicate_completion: osp_core::trajectory::PredicateCompletion::NotCompleted,
-            mutation_decision: osp_core::trajectory::MutationDecision::AcceptAsCompleted,
-            apply_target: osp_core::trajectory::ApplyTarget::NotApplied,
+            // Rejected için aynı: outcome surfaced değil.
+            predicate_completion: None,
+            mutation_decision: None,
+            apply_target: None,
             witness_reachability: WitnessReachability::Rejected,
         },
     }
