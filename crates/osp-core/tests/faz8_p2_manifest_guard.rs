@@ -74,6 +74,13 @@ fn every_case_builder_digest_matches_manifest() {
             "case {} source mismatch (builder vs manifest)",
             manifest_case.id
         );
+        // **Review tur 3 P1-2 fix:** description equality — builder/manifest senkron.
+        assert_eq!(
+            built.description, manifest_case.description,
+            "case {} description mismatch (builder vs manifest) — manifest stale; \
+             builder güncellendikten sonra manifest description'ı da güncelle",
+            manifest_case.id
+        );
     }
 
     // Ters yönde: builder'da olup manifest'te olmayan case (unpinned) uyar.

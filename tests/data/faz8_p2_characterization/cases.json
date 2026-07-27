@@ -2,7 +2,7 @@
   "schema_version": 1,
   "description": "Faz 8-P2 P2-0B characterization corpus — V1 (compute_raw_from_delta + provenanced_from_raw) vs V2-candidate (measure_task_delta) semantic divergence measurement. Case content is produced by Rust builders (crates/osp-core/tests/common/faz8_p2_cases.rs); this manifest pins each case's serialized-bytes BLAKE3 digest so builder drift is DETECTED (explicit fixture+digest update required). Corpus change is detected by digest verification, not prevented.",
   "divergence_classes": {
-    "matching_scope": "task.predicate.scope and proposal.affected_nodes describe the same node set — parity expected",
+    "matching_scope": "task.predicate.scope and proposal.affected_nodes describe the same node set — subject/value parity but INV-T4 source divergence (V1 Scip override vs V2 TreeSitter axis)",
     "wide_affected_scope": "proposal.affected_nodes is a strict superset of task.predicate.scope — known production-reachable divergence (V1 measures wider centroid)",
     "removed_edge_external_source": "removed_edges[*].from references a node outside task.predicate.scope — divergence (V1 folds into affected set)",
     "delta_introduced_subject": "task.predicate.scope members are all introduced by the delta — V2 baseline Unavailable, V1 always has current_measured",
@@ -13,15 +13,15 @@
       "id": "matching-single-node-001",
       "class": "matching_scope",
       "source": "synthetic_adversarial",
-      "description": "Task targets Node(1) via Node(1) predicate scope; proposal declares affected_nodes=[1]. Node 1 pre-exists in space. Subject set identical V1/V2 — parity expected for all metrics.",
-      "builder_digest_blake3": "6670d7b4a453ba5724d524e173036c0f50ba60322d8d0e1556144f73516b9288",
-      "notes": "Baseline parity case. If this diverges, the harness itself is broken."
+      "description": "Task targets Node(1); proposal affected_nodes=[1]. Subject/value parity but source divergence (INV-T4: V1 Scip override vs V2 TreeSitter axis).",
+      "builder_digest_blake3": "00ef0bc3d3dd61ebb0645b9520263bdd9425af7833caaf1502ee48ed077398b5",
+      "notes": "Subject/value parity case. Source divergence (INV-T4) present even in matching scope — required_source matrix quantifies decision impact."
     },
     {
       "id": "wide-affected-scope-001",
       "class": "wide_affected_scope",
       "source": "synthetic_adversarial",
-      "description": "KNOWN production-reachable divergence. Task Node(1) predicate scope; proposal affected_nodes=[1,2,3]. V1 subject={1,2,3} (affected centroid), V2 subject={1} (task scope centroid). Divergence expected across subject/values/loss/decision.",
+      "description": "Task Node(1) scope; affected_nodes=[1,2,3]. KNOWN divergence: V1 measures centroid over {1,2,3}, V2 over {1}.",
       "builder_digest_blake3": "be3365b6411eb0aeec41f41b487969027a0109ffde3ca2100b61f37470df9758",
       "notes": "Core ontological divergence case — subject authority: LLM-affected vs task-derived. P2-1 cannot open without resolving this."
     },
@@ -29,7 +29,7 @@
       "id": "removed-edge-external-source-001",
       "class": "removed_edge_external_source",
       "source": "synthetic_adversarial",
-      "description": "Task Node(1) scope; affected_nodes=[1] but removed_edges[0].from=9 (external node). V1 folds 9 into affected set (navigator pattern), V2 subject scope {1} excludes it. Divergence in V1 centroid only.",
+      "description": "Task Node(1); affected=[1] + removed_edge from=9 (external). V1 folds 9 into affected set; V2 subject scope {1} excludes it.",
       "builder_digest_blake3": "1690fd36d4727631ae5bce06dcabd993c26c0fbbbb0b971dc3dbdf15c916c878",
       "notes": "removed_edges.from external to task scope — V1 affected-set contamination."
     },
@@ -37,7 +37,7 @@
       "id": "delta-introduced-subject-001",
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
-      "description": "Subject node 1 delta-introduced (not in base space). V2 baseline Unavailable (AllMembersIntroducedByDelta) → project_v1_loss_before_compatibility fail-closed (loss_before=loss_after → improved=false → Reject). V1 always has current_measured → improvement evaluable.",
+      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline Unavailable (AllMembersIntroducedByDelta) → fail-closed; V1 always has current_measured.",
       "builder_digest_blake3": "5513da86f5f4b19b8ad74e808c23917ac344d1c974fb6a98f9c6ee7b0d4592cb",
       "notes": "V2 'progress unprovable without baseline' semantics vs V1 'always has current_measured'. Decision divergence expected."
     }

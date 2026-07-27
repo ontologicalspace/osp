@@ -110,12 +110,28 @@ fn matching_scope_baseline_case_shows_parity() {
         "matching-scope source check: V1={:?} V2={:?} diverges={}",
         src_v1, src_v2, source_divergence
     );
-    // PIN: matching scope'ta coupling source divergence KESİN beklenir.
-    // V1 coupling source = Scip (provenanced_from_raw override), V2 = TreeSitter (engine axis default).
-    assert_ne!(
-        src_v1[0], src_v2[0],
-        "INV-T4 provenance-authority divergence: V1 coupling source {:?} != V2 {:?}; case {}",
-        src_v1[0], src_v2[0], case.id
+    // **Review tur 3 P1-1 fix:** Exact 5-axis source snapshot pin (sadece coupling
+    // assert_ne DEĞİL). V1 uniform Scip (provenanced_from_raw override); V2 gerçek
+    // engine axis defaults. Bu snapshot measurement implementation değişirse stale
+    // kalır → test fail (golden pin).
+    use osp_core::coords::MetricSource;
+    assert_eq!(
+        src_v1,
+        [MetricSource::Scip; 5],
+        "V1 uniform Scip (provenanced_from_raw override); case {}",
+        case.id
+    );
+    assert_eq!(
+        src_v2,
+        [
+            MetricSource::TreeSitter,  // coupling
+            MetricSource::Placeholder, // cohesion (default axis)
+            MetricSource::TreeSitter,  // instability
+            MetricSource::Heuristic,   // entropy
+            MetricSource::Heuristic,   // witness_depth
+        ],
+        "V2 gerçek engine axis defaults (INV-T4 native provenance); case {}",
+        case.id
     );
 
     // === Pipeline parity (Q5/Q5.b/apply/witness) ===
@@ -372,26 +388,60 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         "ONTOLOJİK SUBJECT AUTHORITY DIVERGENCE: V1 affected ≠ V2 task scope"
     );
 
-    // === Value bits divergence (exact) ===
-    // V1 3-node centroid, V2 1-node → coupling value farklı. PIN specific axis.
+    // === Value bits divergence (exact 5-axis snapshot — review tur 3 P1-1) ===
+    // V1 3-node centroid ({1,2,3}), V2 1-node ({1}). PIN exact bits.
     let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
     eprintln!(
         "  wide-affected value bits: V1={:?} V2={:?}",
         vals_v1, vals_v2
     );
-    // Coupling (axis 0) farklı OLMALI — 3-node centroid vs 1-node.
-    assert_ne!(
-        vals_v1[0], vals_v2[0],
-        "coupling value divergence: V1 3-node centroid vs V2 1-node; case {}",
+    assert_eq!(
+        vals_v1,
+        [
+            4595172819793696085u64,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V1 wide-affected 3-node centroid exact bits; case {}",
         case.id
     );
+    assert_eq!(
+        vals_v2,
+        [
+            4602678819172646912u64,
+            4602678819172646912,
+            4607182418800017408,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V2 wide-affected 1-node (task scope) exact bits; case {}",
+        case.id
+    );
+    // Coupling (axis 0) ve instability (axis 2) farklı — 3-node vs 1-node centroid.
+    assert_ne!(vals_v1[0], vals_v2[0], "coupling divergence");
+    assert_ne!(vals_v1[2], vals_v2[2], "instability divergence");
 
-    // === Source divergence (INV-T4 provenance-authority) ===
-    // V1 uniform Scip, V2 gerçek axis source'ları. Matching scope'taki gibi.
+    // === Source divergence (INV-T4 — exact 5-axis snapshot) ===
+    use osp_core::coords::MetricSource;
     let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
-    assert_ne!(
-        src_v1[0], src_v2[0],
-        "provenance-authority divergence (subject-authority'den bağımsız); case {}",
+    assert_eq!(
+        src_v1,
+        [MetricSource::Scip; 5],
+        "V1 uniform Scip (provenanced_from_raw override); case {}",
+        case.id
+    );
+    assert_eq!(
+        src_v2,
+        [
+            MetricSource::TreeSitter,
+            MetricSource::Placeholder,
+            MetricSource::TreeSitter,
+            MetricSource::Heuristic,
+            MetricSource::Heuristic,
+        ],
+        "V2 engine axis defaults; case {}",
         case.id
     );
 }
@@ -427,15 +477,60 @@ fn removed_edge_external_source_shows_affected_contamination() {
         "AFFECTED CONTAMINATION: V1 removed_edges.from external node ile genişler"
     );
 
-    // Value divergence: V1 2-node centroid ({1,9}), V2 1-node ({1}).
+    // === Value bits divergence (exact 5-axis snapshot — review tur 3 P1-1) ===
+    // V1 2-node centroid ({1,9}), V2 1-node ({1}). PIN exact bits.
     let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
     eprintln!(
         "  removed-edge value bits: V1={:?} V2={:?}",
         vals_v1, vals_v2
     );
-    assert_ne!(
-        vals_v1[0], vals_v2[0],
-        "coupling value divergence: V1 {{1,9}} centroid vs V2 {{1}}; case {}",
+    assert_eq!(
+        vals_v1,
+        [
+            4598175219545276416u64,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V1 removed-edge 2-node {{1,9}} centroid exact bits; case {}",
+        case.id
+    );
+    assert_eq!(
+        vals_v2,
+        [
+            4602678819172646912u64,
+            4602678819172646912,
+            4607182418800017408,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V2 removed-edge 1-node {{1}} exact bits; case {}",
+        case.id
+    );
+    // Coupling (axis 0) ve instability (axis 2) farklı.
+    assert_ne!(vals_v1[0], vals_v2[0], "coupling divergence");
+    assert_ne!(vals_v1[2], vals_v2[2], "instability divergence");
+
+    // === Source divergence (INV-T4 — exact 5-axis snapshot) ===
+    use osp_core::coords::MetricSource;
+    let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        src_v1,
+        [MetricSource::Scip; 5],
+        "V1 uniform Scip; case {}",
+        case.id
+    );
+    assert_eq!(
+        src_v2,
+        [
+            MetricSource::TreeSitter,
+            MetricSource::Placeholder,
+            MetricSource::TreeSitter,
+            MetricSource::Heuristic,
+            MetricSource::Heuristic,
+        ],
+        "V2 engine axis defaults; case {}",
         case.id
     );
 }
@@ -492,6 +587,18 @@ fn delta_introduced_subject_shows_baseline_semantics_divergence() {
         }
         other => panic!("V1 measurement Produced olmalı; got {other:?}"),
     }
+
+    // **Review tur 3 P0-2 fix:** Pipeline (decision) karşılaştırması.
+    // Case 4'te V1/V2 pipeline observation'ları log'la — decision-drift var mı yok mu
+    // gerçek observation ile göster. Rapor "decision-drift = 1" iddia ediyordu ama
+    // test kanıtlamıyordu. Bu case Q5 Vision'da duruyor (placeholder computed_raw),
+    // yani PredicateGate'e ulaşmıyor — gerçek mutation decision drift BURADA ölçülemez.
+    eprintln!("  delta-introduced V1 pipeline: {:?}", obs_v1.pipeline);
+    eprintln!("  delta-introduced V2 pipeline: {:?}", obs_v2.pipeline);
+    // Pipeline observation'larını dondur (rapor için) — ama decision-drift iddiası
+    // KALDIRILDI (Cases Q5 Vision'da durur, PredicateGate'e ulaşmaz). Bu case sadece
+    // baseline-semantics divergence kanıtlar (V2 fail-closed loss_before projection).
+    // P2-0B.8 (non-default computed_raw ile Q5 geçişi) decision-drift ölçümü için gerekli.
 }
 
 fn assert_none_or_not_unavailable(baseline_kind: &Option<common::BaselineKind>, msg: &str) {
@@ -572,24 +679,23 @@ fn sorted(v: &[u64]) -> Vec<u64> {
 // required_source decision matrix (review P0-2 — INV-T4 provenance-authority)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// **Review P0-2 (devam): required_source decision matrix.**
+/// **Review tur 2 P0-2 + tur 3 P0-1 fix: required_source decision matrix.**
 ///
 /// Matching scope'ta BİLE V1 coupling source = Scip (provenanced_from_raw override),
 /// V2 coupling source = TreeSitter (engine axis default). Bu, subject-authority'den
-/// **bağımsız** bir provenance-authority geçişi — INV-T4 `required_source` predicate'leri
-/// V1/V2 arasında farklı karar üretir.
+/// **bağımsız** bir provenance-authority divergence'ı.
 ///
-/// Bu test, `required_source` değerlerinin (None/Scip/TreeSitter/Placeholder/Heuristic)
-/// V1 vs V2 PredicateGate üzerindeki etkisini ölçer. Ontolojik karar raporu için
-/// kritik girdi — P2-1 açılması için source-sensitive predicate matrisinin exhaustively
-/// aynı sonuç vermesi gerekir (plan Tur 4 gate kriteri 3).
+/// **Tur 3 P0-1 fix:** Önceki test sadece lokal `bool` karşılaştırması yapıyordu
+/// (`Scip != TreeSitter` kanıtı). Artık gerçek `PredicateSet::evaluate_completion`
+/// çağrılıp `PredicateSetResult` (Completed/SourceInsufficient/NotCompleted) exact
+/// pinleniyor. Bu, PredicateGate decision divergence'ını gerçek evaluation ile kanıtlar.
 #[test]
 fn required_source_matrix_shows_provenance_authority_divergence() {
     use osp_core::coords::MetricSource;
     use osp_core::space::{Node, NodeKind};
     use osp_core::trajectory::{
         ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
-        TaskPolicy, TaskStatus, WeightedPredicate,
+        PredicateSetResult, TaskPolicy, TaskStatus, WeightedPredicate,
     };
 
     // Inline matching case: node 1 space'te, task Node(1) scope, affected=[1].
@@ -601,28 +707,53 @@ fn required_source_matrix_shows_provenance_authority_divergence() {
         ..Default::default()
     });
 
-    // V1 coupling source = Scip (provenanced_from_raw override), V2 = TreeSitter.
-    // Bu sabit — required_source değerini değiştirip PredicateGate decision'ını ölçeriz.
+    // V1 coupling source = Scip, V2 = TreeSitter (sabit — engine axis defaults).
     let v1_coupling_source = MetricSource::Scip;
     let v2_coupling_source = MetricSource::TreeSitter;
 
-    // required_source değerleri üzerinde iterate — her biri için V1/V2 pass/reject bekle.
-    // Predicate: Coupling ≤ 0.5 (threshold coupling axis'i için, source predicate'i ana odak).
-    let required_sources = [
-        None,                            // source gereksinimi yok → her ikisi pass
-        Some(MetricSource::Scip),        // V1 Scip=pass, V2 TreeSitter=SourceInsufficient
-        Some(MetricSource::TreeSitter),  // V1 Scip=SourceInsufficient, V2 TreeSitter=pass
-        Some(MetricSource::Placeholder), // her ikisi de SourceInsufficient (ikisi de Placeholder değil)
-        Some(MetricSource::Heuristic),   // her ikisi de SourceInsufficient
+    // Her required_source için beklenen PredicateSetResult exact matrix (tur 3 P0-1).
+    // Predicate: Coupling ≤ 0.5 (coupling axis threshold; gerçek measured coupling 0.5
+    // veya altında olduğu sürece completion source-driven olur).
+    use osp_core::agent::{DeltaProposal, NewEdgeSpec};
+    use osp_core::space::EdgeKind;
+    let space_for_case = space.clone();
+
+    let cases: [(Option<MetricSource>, PredicateSetResult, PredicateSetResult); 5] = [
+        // (required_source, V1_expected, V2_expected)
+        (
+            None,
+            PredicateSetResult::Completed,
+            PredicateSetResult::Completed,
+        ),
+        (
+            Some(MetricSource::Scip),
+            PredicateSetResult::Completed,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        (
+            Some(MetricSource::TreeSitter),
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::Completed,
+        ),
+        (
+            Some(MetricSource::Placeholder),
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        (
+            Some(MetricSource::Heuristic),
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
     ];
 
-    for req_source in &required_sources {
+    for (req_source, expected_v1, expected_v2) in cases {
         let predicate = MetricPredicate {
             metric: PredicateAxis::Coupling,
             operator: ComparisonOp::Le,
             threshold: 0.5,
             scope: PredicateScope::Node(1),
-            required_source: *req_source,
+            required_source: req_source,
             tolerance: 0.0,
         };
         let ps = PredicateSet {
@@ -636,16 +767,13 @@ fn required_source_matrix_shows_provenance_authority_divergence() {
         let task = osp_core::trajectory::Task {
             id: 42,
             milestone_id: 0,
-            label: "required-source-matrix".to_string(),
-            target_predicate_set: ps,
+            label: format!("required-source-{:?}-inline", req_source),
+            target_predicate_set: ps.clone(),
             policy: TaskPolicy::default(),
             allowed_operations: vec![],
             constraints: vec![],
             status: TaskStatus::Pending,
         };
-        // Structural delta (empty-proposal check için minimal edge).
-        use osp_core::agent::{DeltaProposal, NewEdgeSpec};
-        use osp_core::space::EdgeKind;
         let proposal = DeltaProposal {
             new_edges: vec![NewEdgeSpec {
                 from: 1,
@@ -660,7 +788,7 @@ fn required_source_matrix_shows_provenance_authority_divergence() {
             class: common::CaseClass::MatchingScope,
             source: common::CaseSource::SyntheticAdversarial,
             description: "inline required_source matrix case".to_string(),
-            space: space.clone(),
+            space: space_for_case.clone(),
             task: task.clone(),
             proposal,
         };
@@ -670,41 +798,50 @@ fn required_source_matrix_shows_provenance_authority_divergence() {
         let obs_v1 = common::evaluate_v1_case(&mut engine_v1, &case);
         let obs_v2 = common::evaluate_v2_candidate_case(&mut engine_v2, &case);
 
-        // V1 coupling source = Scip, V2 = TreeSitter (sabit).
-        let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
-        assert_eq!(
-            src_v1[0], v1_coupling_source,
-            "V1 coupling source sabit Scip"
-        );
-        assert_eq!(
-            src_v2[0], v2_coupling_source,
-            "V2 coupling source sabit TreeSitter"
-        );
+        // V1/V2 measured_after'ı çek.
+        let measured_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
+            other => panic!("V1 Produced olmalı; req_source={req_source:?} got {other:?}"),
+        };
+        let measured_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
+            other => panic!("V2 Produced olmalı; req_source={req_source:?} got {other:?}"),
+        };
 
-        // required_source'a göre beklenen V1/V2 source match:
-        let v1_source_matches = req_source.map_or(true, |r| r == v1_coupling_source);
-        let v2_source_matches = req_source.map_or(true, |r| r == v2_coupling_source);
+        // **Tur 3 P0-1 fix:** GERÇEK PredicateSet::evaluate_completion çağrısı.
+        let v1_result = ps.evaluate_completion(&measured_v1);
+        let v2_result = ps.evaluate_completion(&measured_v2);
 
         eprintln!(
-            "  required_source={:?}: V1 source={} match={}, V2 source={} match={}",
+            "  required_source={:?}: V1 coupling src={:?} result={:?} (expected {:?}), \
+             V2 coupling src={:?} result={:?} (expected {:?})",
             req_source,
             v1_coupling_source,
-            v1_source_matches,
+            v1_result,
+            expected_v1,
             v2_coupling_source,
-            v2_source_matches
+            v2_result,
+            expected_v2
         );
 
-        // Eğer req_source Scip veya TreeSitter ise V1/V2 source match FARKLI →
-        // PredicateGate SourceInsufficient decision'ı farklı olabilir.
-        if let Some(req) = req_source {
-            if *req == MetricSource::Scip || *req == MetricSource::TreeSitter {
-                assert_ne!(
-                    v1_source_matches, v2_source_matches,
-                    "INV-T4 PROVENANCE-AUTHORITY DIVERGENCE: required_source={:?} \
-                     için V1 match {} ≠ V2 match {} — PredicateGate SourceInsufficient kararı farklı",
-                    req, v1_source_matches, v2_source_matches
-                );
-            }
+        // Exact PredicateSetResult pin.
+        assert_eq!(
+            v1_result, expected_v1,
+            "V1 PredicateSetResult mismatch; required_source={req_source:?}"
+        );
+        assert_eq!(
+            v2_result, expected_v2,
+            "V2 PredicateSetResult mismatch; required_source={req_source:?}"
+        );
+
+        // Decision divergence kanıtı: Scip/TreeSitter için V1/V2 farklı karar.
+        if req_source == Some(MetricSource::Scip) || req_source == Some(MetricSource::TreeSitter) {
+            assert_ne!(
+                v1_result, v2_result,
+                "INV-T4 PROVENANCE-AUTHORITY DECISION DIVERGENCE: required_source={:?} \
+                 için V1 {:?} ≠ V2 {:?} — PredicateSet::evaluate_completion farklı sonuç",
+                req_source, v1_result, v2_result
+            );
         }
     }
 }

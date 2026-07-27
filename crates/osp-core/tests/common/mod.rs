@@ -396,7 +396,8 @@ fn matching_single_node_001() -> CharacterizationCase {
         id: "matching-single-node-001".to_string(),
         class: CaseClass::MatchingScope,
         source: CaseSource::SyntheticAdversarial,
-        description: "Task targets Node(1); proposal affected_nodes=[1]. Baseline parity."
+        description: "Task targets Node(1); proposal affected_nodes=[1]. Subject/value \
+            parity but source divergence (INV-T4: V1 Scip override vs V2 TreeSitter axis)."
             .to_string(),
         space,
         task,

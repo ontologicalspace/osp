@@ -183,62 +183,136 @@ Fix: task scope `Node(10000)` → gerçek AllMembersIntroducedByDelta yolu çal�
 
 ---
 
-## Divergence Özeti (frozen fixture incidence + required_source matrix)
+## Divergence Özeti (frozen fixture incidence — review tur 3 ayrım)
 
-| Class | Tested | Divergent | Decision-drift |
-|---|---:|---:|---:|
-| matching_scope | 1 | **1** (source divergence) | **1** (required_source Scip/TreeSitter — see matrix) |
-| wide_affected_scope | 1 | 1 | 0 (Q5 Vision'da durdu, PredicateGate'e ulaşmadı) |
-| removed_edge_external_source | 1 | 1 | 0 (Q5 Vision'da durdu) |
-| delta_introduced_subject | 1 | 1 | 1 (V2 fail-closed Reject vs V1 evaluable) |
-| **Toplam (fixture)** | **4** | **4** | **2** |
-| required_source matrix (inline) | 5 | 2 (Scip/TreeSitter) | **2** (SourceInsufficient decision) |
+**Frozen fixture corpus (4 case):**
 
-**Frozen fixture incidence:** 4 case'te **4 divergence (100%)** — review tur 2 P0-2
-sonrası matching scope da source divergence gösteriyor. Decision-drift 2/4 fixture
-+ 2/5 required_source matrix.
+| Class | Tested | Subject/value divergence | Source divergence | Decision-drift (pipeline) |
+|---|---:|---:|---:|---:|
+| matching_scope | 1 | 0 (parity) | **1** (INV-T4) | 0 (Q5 Vision'da durdu, required_source=None → parity) |
+| wide_affected_scope | 1 | 1 | 1 | 0 (Q5 Vision'da durdu) |
+| removed_edge_external_source | 1 | 1 | 1 | 0 (Q5 Vision'da durdu) |
+| delta_introduced_subject | 1 | 1 (baseline semantics) | 1 | **0** (kanıtlamadı — Q5 Vision'da durdu) |
+| **Toplam (frozen fixture)** | **4** | **3** | **4** | **0** |
 
-**required_source decision matrix (review tur 2 P0-2, INV-T4):**
+**Inline required_source matrix (frozen corpus DIŞI ayrı yüzey, 5 case):**
+
+| `required_source` | Decision-drift |
+|---|---:|
+| `None` | 0 |
+| `Some(Scip)` | **1** (V1 Completed, V2 SourceInsufficient) |
+| `Some(TreeSitter)` | **1** (V1 SourceInsufficient, V2 Completed) |
+| `Some(Placeholder)` | 0 |
+| `Some(Heuristic)` | 0 |
+| **Toplam (inline matrix)** | **2/5** |
+
+**Önemli (review tur 3 P0-2):** Önceki rapor "fixture decision-drift = 2/4" diyordu.
+Bu yanlıştı — Case 4 decision-drift kanıtlanmadı (Q5 Vision confound), matching frozen
+fixture `required_source=None` → decision parity. Doğru ayrım:
+- Frozen fixture subject/value/source divergence: 3/4 + 4/4 source
+- Frozen fixture pipeline decision-drift: **0/4** (Cases Q5 Vision'da durur)
+- Inline required_source matrix decision-drift: **2/5** (PredicateSet level, gerçek
+  `evaluate_completion` ile)
+
+Pipeline-level (commit outcome) decision-drift ölçümü P2-0B.8 (non-default
+`computed_raw` ile Q5 geçişi) bekliyor.
+
+**required_source decision matrix (review tur 3 P0-1 — gerçek `PredicateSet::evaluate_completion`):**
 
 | `required_source` | V1 coupling=Scip | V2 coupling=TreeSitter | Decision divergence |
 |---|---|---|---|
-| `None` | match ✓ | match ✓ | yok |
-| `Some(Scip)` | **match ✓ (pass)** | **✗ (SourceInsufficient)** | **VAR** |
-| `Some(TreeSitter)` | **✗ (SourceInsufficient)** | **match ✓ (pass)** | **VAR** |
-| `Some(Placeholder)` | ✗ | ✗ | yok (ikisi fail) |
-| `Some(Heuristic)` | ✗ | ✗ | yok (ikisi fail) |
+| `None` | `Completed` | `Completed` | yok |
+| `Some(Scip)` | **`Completed`** | **`SourceInsufficient`** | **VAR** |
+| `Some(TreeSitter)` | **`SourceInsufficient`** | **`Completed`** | **VAR** |
+| `Some(Placeholder)` | `SourceInsufficient` | `SourceInsufficient` | yok |
+| `Some(Heuristic)` | `SourceInsufficient` | `SourceInsufficient` | yok |
 
 **Kritik:** Bu matrix, subject authority'den **BAĞIMSIZ** bir INV-T4 provenance-
-authority decision divergence'ı kanıtlar. Matching scope'ta bile `required_source =
-Some(Scip)` predicate V1'de pass, V2'de SourceInsufficient → PredicateGate decision
-farklı. Bu, ontolojik karar için **üçüncü boyut** — subject authority + provenance
-authority.
+authority decision divergence'ı gerçek `PredicateSet::evaluate_completion` ile
+kanıtlar. Matching scope'ta bile `required_source = Some(Scip)` predicate V1'de
+`Completed`, V2'de `SourceInsufficient` → PredicateSet decision farklı.
 
-**⚠️ Selection bias caveat (review P1):** Bu oran fixture selection'a bağlıdır — 4
-case'ten 3'ü bilinçli olarak divergence sınıfları olarak tasarlandı. "100%" production
-divergence sıklığı tahmini DEĞİLDİR; sadece "seçilen adversarial case'lerde divergence
-gözlemlendi" anlamına gelir. Production divergence sıklığı bu rapordan çıkarılamaz —
-gerçek corpus characterization'ı (navigator/MCP fixture'ları) P2-0B kalan iş kapsamında.
+**Önemli ayrım (review tur 3):** Bu matrix frozen corpus DIŞI ayrı bir characterization
+yüzeyidir (inline case'ler, frozen fixture'lara dahil DEĞİL). Frozen matching fixture
+`required_source = None` kullanır → frozen corpus'ta matching decision parity korunur.
+Inline matrix ayrı bir kanıt yüzeyi olarak değerlendirilmeli.
+
+**⚠️ Selection bias caveat:** Bu oran fixture selection'a bağlıdır — 4 case'ten 3'ü
+bilinçli olarak divergence sınıfları olarak tasarlandı. "100%" production divergence
+sıklığı tahmini DEĞİLDİR; sadece "seçilen adversarial case'lerde divergence gözlemlendi"
+anlamına gelir. Production divergence sıklığı bu rapordan çıkarılamaz — gerçek corpus
+characterization'ı (navigator/MCP fixture'ları) P2-0B kalan iş kapsamında.
 
 ---
 
-## Q5 vs Measurement Error Precedence (P2-0A finding, somutlaştı)
+## Q5 vs Measurement Error Precedence (P2-0A finding)
 
-P2-0A'da belgelenen characterization finding'ı P2-0B'de somutlaştı:
+P2-0A'da belgelenen characterization finding'ı:
 
 > `measure_task_delta` fallible; Q5 final `claim.computed_raw` gerektirir → exact
 > V1 precedence sağlanamaz.
 
-Case 4'te gözlemlendi: V1 Vision gate'de durdu (`StoppedBeforeCommit{Vision}`),
-V2 measurement producer hatasında durdu (`StoppedBeforeCommit{Other}`).
-Aynı girdide farklı pipeline stage — exact V1 error precedence P2-1'de
-sağlanamaz.
+**Review tur 3 P0-2 düzeltmesi:** Önceki rapor Case 4'te "V1 Vision'da durdu, V2
+StoppedBeforeCommit{Other}" diyordu. Bu, **Case 4 fixture kimlik hatasına** (tur 2
+P0-1) dayanıyordu — düzeltme sonrası V2 measurement `Produced` (UnavailableAllIntroduced),
+error değil. Bu yüzden Case 4'te pipeline stage farkı KANITLANMADI.
+
+Cases 2/3/4 Q5 Vision gate'inde durur (placeholder `RawPosition::default()` → theta
+ihlali). Bu yüzden PredicateGate-level decision-drift bu case'lerde ölçülemedi.
+Sadece `required_source` matrix (yukarıda) INV-T4 decision divergence'ı PredicateSet
+levelinde kanıtladı. Pipeline-level (commit outcome) decision-drift ölçümü P2-0B.8
+(non-default `computed_raw` ile Q5 geçişi) bekliyor.
 
 ---
 
-## Ontolojik Subject Authority Kararı — Üç Yol
+## İki Ayrı Semantic Migration (review tur 3 ontolojik değerlendirme)
 
-P2-1'in açılması için subject authority'nin nasıl belirleneceğine karar verilmeli.
+P2-1, **iki ayrı** semantic migration kararını içerir. Bunlar birleştirilmemeli —
+
+### Migration 1: Subject Authority
+
+V1 subject = `proposal.affected_nodes` (LLM-declared); V2 subject =
+`task.predicate.scope` (task-derived). Üç yol (detay aşağıda):
+
+1. V1 compatibility subject producer
+2. Task-authoritative migration (Faz 8a atomik cutover)
+3. Proposal invariant'ı (`affected_nodes == task.predicate.scope`)
+
+### Migration 2: Provenance Authority (INV-T4) — **normative, "seçenek" değil**
+
+V1 `provenanced_from_raw(..., Scip)` tüm axis'lere uniform Scip verir; V2 engine gerçek
+per-axis source'ları (TreeSitter/Placeholder/Heuristic). Bu **normatif hedef değil
+seçenek**: Paper 1/Paper 2 epistemik ilkesi "ölçüm kaynağı gerçekte neyse o
+taşınmalıdır; bilinmeyen V1 SCIP olarak yeniden etiketlenmemelidir." Verilmesi gereken
+karar:
+
+> Gerçek provenance'a hangi migration sınırı ve hangi backward-compatibility
+> politikasıyla geçeceğiz?
+
+V1 uniform Scip davranışı compatibility gerçeğidir; V2 engine-native per-axis
+provenance normatif hedeftir. `required_source` matrix (yukarıda) bu migration'ın
+PredicateSet-level decision impact'ini kanıtladı.
+
+### Reviewer uzun vadeli yön önerisi
+
+Subject authority için Yol 2 (task-authoritative):
+
+```
+task.predicate.scope  → measurement subject authority
+structural delta      → impact authority
+affected_nodes        → agent-declared impact hint / telemetry
+```
+
+Bu, subject ve impact kümelerini ayrı tutar (Paper 3 predicate scope binding, Paper 2
+INV-T2 operator-defines-target). Yol 3 (`affected == scope`) reddedilir — subject/impact
+ayrımını çökertir (bir delta `Node(1)` hedeflerken Node 9'u yapısal olarak etkileyebilir;
+bu meşru).
+
+---
+
+## Ontolojik Subject Authority Kararı — Üç Yol (Migration 1 detayı)
+
+Subject authority migration için üç yol. Provenance migration (yukarıda) ayrı.
 
 ### Yol 1: V1 compatibility subject producer
 
