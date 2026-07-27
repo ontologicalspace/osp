@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "description": "Faz 8-P2 P2-0B characterization corpus — V1 (compute_raw_from_delta + provenanced_from_raw) vs V2-candidate (measure_task_delta) semantic divergence measurement. Case content is produced by Rust builders (crates/osp-core/tests/common/faz8_p2_cases.rs); this manifest pins each case's serialized-bytes BLAKE3 digest so builder drift is DETECTED (explicit fixture+digest update required). Corpus change is detected by digest verification, not prevented.",
+  "divergence_classes": {
+    "matching_scope": "task.predicate.scope and proposal.affected_nodes describe the same node set — parity expected",
+    "wide_affected_scope": "proposal.affected_nodes is a strict superset of task.predicate.scope — known production-reachable divergence (V1 measures wider centroid)",
+    "removed_edge_external_source": "removed_edges[*].from references a node outside task.predicate.scope — divergence (V1 folds into affected set)",
+    "delta_introduced_subject": "task.predicate.scope members are all introduced by the delta — V2 baseline Unavailable, V1 always has current_measured",
+    "mixed_per_axis_sources": "subject members report different MetricSource per axis — V2 per-axis provenance (Mixed possible) vs V1 uniform Scip"
+  },
+  "cases": [
+    {
+      "id": "matching-single-node-001",
+      "class": "matching_scope",
+      "source": "synthetic_adversarial",
+      "description": "Task targets Node(1) via Node(1) predicate scope; proposal declares affected_nodes=[1]. Node 1 pre-exists in space. Subject set identical V1/V2 — parity expected for all metrics.",
+      "builder_digest_blake3": "efc2325b497ebd6bb00c596c6b91e410bf104c1c493d0043302fe80d02bb3eea",
+      "notes": "Baseline parity case. If this diverges, the harness itself is broken."
+    }
+  ]
+}

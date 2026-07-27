@@ -1,0 +1,9 @@
+# Faz 8-P2 characterization fixture tree — LF pin (cross-platform raw-byte determinism).
+#
+# Git core.autocrlf Windows'ta CRLF üretir; bu durum BLAKE3 digest doğrulamasını
+# (sidecar cases.blake3 + per-fixture digest) platformlar arası kırar. `text eol=lf`
+# working-tree byte'larını sabitler — hash fonksiyonu anlamı korunur.
+#
+# Ayrıca: bu ağaçtaki tüm dosyalar metin olarak işaretlenir (Git binary diff/merge
+# uygulanmaz), böylece review'da okunabilir ve diff-friendly kalır.
+/tests/data/faz8_p2_characterization/** text eol=lf
