@@ -200,28 +200,34 @@ fn matching_scope_baseline_case_shows_parity() {
         "matching V2 exact pipeline: StoppedBeforeCommit{{Vision, Vision}}; case {}",
         case.id
     );
-    // V1 baseline exact None (review tur 6 P1-1).
-    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+    // V1 baseline exact (review tur 7): AffectedCentroid (node 1 space'te) — value/source/loss.
+    if let MeasurementObservation::Produced {
+        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        ..
+    } = &obs_v1.measurement
+    {
         assert_eq!(
-            *baseline_kind, None,
-            "matching V1 baseline None (no tracking); case {}",
+            *derivation,
+            common::LegacyBaselineDerivation::AffectedCentroid,
+            "matching V1 baseline AffectedCentroid (node 1 space'te); case {}",
+            case.id
+        );
+    } else {
+        panic!(
+            "matching V1 baseline LegacyComputed olmalı; case {}",
             case.id
         );
     }
 
     // === Baseline ===
-    // V2-candidate: matching scope → Available baseline (node space'te).
+    // V2-candidate: matching scope → Available baseline (node 1 space'te).
     match &obs_v2.measurement {
-        MeasurementObservation::Produced { baseline_kind, .. } => {
-            assert_eq!(
-                *baseline_kind,
-                Some(common::BaselineKind::Available),
-                "matching scope (node space'te) → V2 Available baseline; case {}",
-                case.id
-            );
-        }
+        MeasurementObservation::Produced {
+            baseline: common::BaselineObservation::Available { .. },
+            ..
+        } => {}
         other => panic!(
-            "V2-candidate measurement Produced olmalı; case {} got {:?}",
+            "V2-candidate Available baseline olmalı; case {} got {:?}",
             case.id, other
         ),
     }
@@ -548,19 +554,27 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         "wide-affected V2 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
         case.id
     );
-    // V1 baseline exact None; V2 baseline Available (subject node 1 space'te).
-    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+    // V1 baseline AffectedCentroid (nodes 1/2/3 space'te); V2 Available (node 1 space'te).
+    if let MeasurementObservation::Produced {
+        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        ..
+    } = &obs_v1.measurement
+    {
         assert_eq!(
-            *baseline_kind, None,
-            "wide-affected V1 baseline None; case {}",
+            *derivation,
+            common::LegacyBaselineDerivation::AffectedCentroid,
+            "wide-affected V1 AffectedCentroid (nodes 1/2/3 space'te); case {}",
             case.id
         );
     }
-    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v2.measurement {
-        assert_eq!(
-            *baseline_kind,
-            Some(common::BaselineKind::Available),
-            "wide-affected V2 baseline Available; case {}",
+    if let MeasurementObservation::Produced {
+        baseline: common::BaselineObservation::Available { .. },
+        ..
+    } = &obs_v2.measurement
+    {
+    } else {
+        panic!(
+            "wide-affected V2 Available baseline olmalı; case {}",
             case.id
         );
     }
@@ -687,19 +701,27 @@ fn removed_edge_external_source_shows_affected_contamination() {
         "removed-edge V2 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
         case.id
     );
-    // V1 baseline exact None; V2 baseline Available (subject node 1 space'te).
-    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+    // V1 baseline AffectedCentroid (nodes 1/9 space'te); V2 Available (node 1 space'te).
+    if let MeasurementObservation::Produced {
+        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        ..
+    } = &obs_v1.measurement
+    {
         assert_eq!(
-            *baseline_kind, None,
-            "removed-edge V1 baseline None; case {}",
+            *derivation,
+            common::LegacyBaselineDerivation::AffectedCentroid,
+            "removed-edge V1 AffectedCentroid (nodes 1/9 space'te); case {}",
             case.id
         );
     }
-    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v2.measurement {
-        assert_eq!(
-            *baseline_kind,
-            Some(common::BaselineKind::Available),
-            "removed-edge V2 baseline Available; case {}",
+    if let MeasurementObservation::Produced {
+        baseline: common::BaselineObservation::Available { .. },
+        ..
+    } = &obs_v2.measurement
+    {
+    } else {
+        panic!(
+            "removed-edge V2 Available baseline olmalı; case {}",
             case.id
         );
     }
@@ -806,25 +828,42 @@ fn delta_introduced_subject_shows_baseline_representation_divergence() {
         case.id
     );
 
-    // === Baseline availability representation divergence (Migration 3) ===
-    // V2 baseline UnavailableAllIntroduced (typed — geçmiş baseline yok).
-    // V1 baseline None (current_measured her zaman var, typed tracking yok).
+    // === Baseline epistemic availability divergence (Migration 3, review tur 7) ===
+    // **Review tur 7 P0:** V1 yokluğu sıfır koordinata çevirir (DefaultFallback);
+    // V2 typed UnavailableAllIntroduced olarak korur. Bu "typed/untyped representation"
+    // değil, **epistemik availability yorumu** farkı. Case 4 subject node 10000 base
+    // space'te yok → V1 compute_raw_from_delta empty positions → RawPosition::default()
+    // (engine.rs:2329-2330); V2 typed Unavailable.
     match &obs_v2.measurement {
-        MeasurementObservation::Produced { baseline_kind, .. } => {
+        MeasurementObservation::Produced {
+            baseline: common::BaselineObservation::Unavailable(kind),
+            ..
+        } => {
             assert_eq!(
-                *baseline_kind,
-                Some(common::BaselineKind::UnavailableAllIntroduced),
+                *kind,
+                common::BaselineKind::UnavailableAllIntroduced,
                 "V2 baseline UnavailableAllIntroduced; case {}",
                 case.id
             );
         }
-        other => panic!("V2 Produced+UnavailableAllIntroduced olmalı; got {other:?}"),
+        other => panic!("V2 UnavailableAllIntroduced baseline olmalı; got {other:?}"),
     }
-    // V1 baseline exact None (review tur 6 P1-1).
-    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+    // V1 baseline DefaultFallback (node 10000 base'de yok → RawPosition::default()).
+    if let MeasurementObservation::Produced {
+        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        ..
+    } = &obs_v1.measurement
+    {
         assert_eq!(
-            *baseline_kind, None,
-            "delta-introduced V1 baseline None; case {}",
+            *derivation,
+            common::LegacyBaselineDerivation::DefaultFallback,
+            "delta-introduced V1 DefaultFallback (subject node 10000 base'de yok → \
+             RawPosition::default()); case {}",
+            case.id
+        );
+    } else {
+        panic!(
+            "delta-introduced V1 LegacyComputed baseline olmalı; case {}",
             case.id
         );
     }

@@ -710,9 +710,12 @@ pub enum MeasurementObservation {
         values_bits: [u64; 5],
         /// 5-axis sources — exact source parity için (review P0-2, INV-T4).
         sources: [osp_core::coords::MetricSource; 5],
-        /// V2-candidate baseline kind (Available | Unavailable).
-        /// V1 için `None` (V1 always has current_measured).
-        baseline_kind: Option<BaselineKind>,
+        /// **Review tur 7 P0:** Anlamlı baseline observation — V1 LegacyComputed
+        /// (affected centroid veya DefaultFallback) / V2 Available/Unavailable.
+        /// Önceki `baseline_kind: Option<BaselineKind>` V1 için her zaman None
+        /// üretiyordu ve "baseline yok" anlamına gelmiyordu; gerçekte V1 yokluğu
+        /// sıfır koordinata çeviriyordu (LegacyDefaultFallback).
+        baseline: BaselineObservation,
     },
     /// V2-candidate measurement producer hatası (V1 infallible → bu varyant V1'de yok).
     Failed { error: MeasurementFailureClass },
@@ -735,6 +738,47 @@ pub enum BaselineKind {
     /// baseline gerektiren case henüz yok). Matcher'da referans edilir — future-use
     /// (P2-0B kalan: mixed_per_axis_sources veya subgraph-introduced case eklendiğinde).
     UnavailablePartialNew,
+}
+
+/// **Review tur 7 P0:** Anlamlı baseline observation — representation/availability/
+/// value-source ayrımı. V1 `compute_raw_from_delta(&[], ...)` empty positions durumunda
+/// `RawPosition::default()` döndürür (engine.rs:2329-2330) — delta-introduced subject
+/// için V1 "current_measured her zaman var" DEĞİL, **legacy default fallback** üretir.
+/// Bu, "typed/untyped representation" değil, **epistemik availability yorumu** farkı:
+/// V1 yokluğu sıfır koordinaya çeviriyor, V2 typed `UnavailableAllIntroduced` koruyor.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BaselineObservation {
+    /// V1 legacy baseline — `compute_raw_from_delta` pre-delta affected centroid.
+    /// `LegacyDefaultFallback`: subject node'ları base space'te yok → empty positions
+    /// → `RawPosition::default()` (sıfır). OSP "bilinmeyeni ölçülmüş gibi sunmama"
+    /// çizgisine aykırı — explicit pinlenmeli.
+    LegacyComputed {
+        values_bits: [u64; 5],
+        sources: [osp_core::coords::MetricSource; 5],
+        /// `trajectory_loss(baseline, target)` bit'leri.
+        loss_bits: u64,
+        /// Empty positions → RawPosition::default() mı, yoksa gerçek centroid mi?
+        derivation: LegacyBaselineDerivation,
+    },
+    /// V2 Available baseline — `MeasurementBaseline::Available(before)`; before centroid
+    /// value/source/loss ile birlikte.
+    Available {
+        values_bits: [u64; 5],
+        sources: [osp_core::coords::MetricSource; 5],
+        loss_bits: u64,
+    },
+    /// V2 Unavailable baseline — typed; geçmiş baseline yok.
+    Unavailable(BaselineKind),
+}
+
+/// V1 legacy baseline türetme yolu (review tur 7).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LegacyBaselineDerivation {
+    /// Subject node'ları base space'te mevcut → gerçek pre-delta centroid.
+    AffectedCentroid,
+    /// Subject node'ları base space'te YOK → empty positions → `RawPosition::default()`.
+    /// Case 4 (delta-introduced subject) bu yola girer.
+    DefaultFallback,
 }
 
 /// 5-axis value bits (coupling/cohesion/instability/entropy/witness_depth sırasıyla).
@@ -835,23 +879,24 @@ impl MeasurementFailureClass {
 
 /// Pipeline (commit_task_claim) sonucu — stage-aware erken duruşlar dahil.
 ///
-/// **Review tur 6:** `PartialEq` derive eklendi — exact pipeline golden assertion'ları
-/// için (StoppedBeforeCommit{stage, error} ve CommitReached tam struct karşılaştırması).
+/// **Review tur 6/7:** `PartialEq` derive + Held/Rejected outcome authoritative okuma.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineObservation {
     /// commit_task_claim tam çalıştı (Evaluated/Held/Rejected dahil).
     ///
-    /// **Önemli (review P0-1 fix):** `predicate_completion`/`mutation_decision`/`apply_target`
-    /// `Option<>`'dır — Held/Rejected'da EngineCommitResult gerçek outcome'u taşımaz
-    /// (sadece Evaluated `TaskCommitResult.outcome` içerir). Fabrication YAPILMAZ;
-    /// Held/Rejected'da bu alanlar `None` olur (gate computed ama surfaced değil).
+    /// **Review tur 6 P0-1:** Held/Rejected `AuthorizationContext` taşır (engine.rs:1133);
+    /// `authorization.outcome` gerçek `AttemptOutcome` (predicate_completion +
+    /// mutation_decision) + `authorization.apply_target` verir. Önceki "Held fabrication"
+    /// yanlıştı — Held/Rejected'da outcome `None` DEĞİL, authoritative engine çıktısı.
+    /// `Option<>` sadece alignment/coverage eksikliği için (bazı pipeline stage'larda
+    /// outcome henüz computed değil); Held/Rejected için her zaman `Some(...)`.
     CommitReached {
         q5: Q5Observation,
-        /// Evaluated'da gerçek değer; Held/Rejected'da None (outcome surfaced değil).
+        /// Evaluated: TaskCommitResult.outcome; Held/Rejected: authorization.outcome.
         predicate_completion: Option<osp_core::trajectory::PredicateCompletion>,
-        /// Evaluated'da gerçek değer; Held/Rejected'da None.
+        /// Evaluated: TaskCommitResult.outcome; Held/Rejected: authorization.outcome.
         mutation_decision: Option<osp_core::trajectory::MutationDecision>,
-        /// Evaluated'da gerçek değer; Held/Rejected'da None.
+        /// Evaluated: TaskCommitResult.apply_target; Held/Rejected: authorization.apply_target.
         apply_target: Option<osp_core::trajectory::ApplyTarget>,
         witness_reachability: WitnessReachability,
     },
@@ -946,17 +991,25 @@ impl WitnessReachability {
     }
 }
 
-/// Mutation decision observation tri-state (review tur 5 P0-2).
+/// Mutation decision observation tri-state (review tur 5/6/7).
 ///
 /// `NotReached` (gate çalışmadı) ile `ReachedButUnsurfaced` (gate çalıştı ama sonuç
-/// EngineCommitResult'ta taşınmıyor — Held/Rejected) farklı mimari problemlerdir;
-/// aynı kategoride birleştirilmemeli.
+/// observation'a taşınmıyor) farklı mimari problemlerdir.
+///
+/// **Review tur 6 P0-1:** Mevcut production'da `EngineCommitResult`'ın tüm varyantları
+/// (Evaluated/Held/Rejected) `AuthorizationContext` üzerinden gerçek outcome taşır.
+/// Yani `ReachedButUnsurfaced` şu an **production-reachable değil** — Held/Rejected
+/// `authorization.outcome` observable olduğu için `Observed(...)` üretilir. Varyant
+/// gelecekte farklı bir API şekli (outcome taşımayan sonuç) için tutulur; Held/Rejected'a
+/// bağlanmadan generic "şu an production-reachable değil" olarak açıklanır.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MutationDecisionObservation {
-    /// PredicateGate'e ulaşıldı, Evaluated → gerçek MutationDecision observable.
+    /// PredicateGate'e ulaşıldı → gerçek MutationDecision observable (Evaluated'ın
+    /// TaskCommitResult.outcome veya Held/Rejected'ın authorization.outcome).
     Observed(osp_core::trajectory::MutationDecision),
-    /// PredicateGate'e ulaşıldı ama Held/Rejected → outcome surfaced değil
-    /// (EngineCommitResult::Held/Rejected mutation_decision taşımaz).
+    /// PredicateGate'e ulaşıldı ama outcome observation'a taşınmıyor. **Şu an
+    /// production-reachable değil** — tüm EngineCommitResult varyantları outcome taşır.
+    /// Future API shapes için tutulur.
     ReachedButUnsurfaced,
     /// PredicateGate'e ulaşılmadı (Q5 Vision veya erken stage'de durdu).
     NotReached,
@@ -1116,15 +1169,38 @@ pub fn evaluate_v1_case(
     let current_measured =
         provenanced_from_raw(current_measured_raw, osp_core::coords::MetricSource::Scip);
 
-    // Final claim: computed_raw = compute_raw_from_delta sonucu (V1 production path).
-    let claim = build_claim_from_proposal(&case.proposal, computed_raw, case.task.id, 100, 1)
-        .expect("V1 final claim build should succeed for characterization case");
-    let measured = provenanced_from_raw(claim.computed_raw, osp_core::coords::MetricSource::Scip);
+    // **Review tur 7 P0:** V1 baseline derivation — affected node'ları base space'te
+    // var mı? Yoksa compute_raw_from_delta empty positions → RawPosition::default()
+    // (engine.rs:2329-2330). DefaultFallback OSP "bilinmeyeni ölçülmüş gibi sunmama"
+    // çizgisine aykırı — explicit pinlenmeli.
+    let baseline_derivation = {
+        let any_present = affected
+            .iter()
+            .any(|id| engine.space().nodes.contains_key(id));
+        if any_present {
+            LegacyBaselineDerivation::AffectedCentroid
+        } else {
+            LegacyBaselineDerivation::DefaultFallback
+        }
+    };
     let target = case
         .task
         .target_predicate_set
         .preferred_vector
         .unwrap_or_default();
+    let baseline_loss_bits =
+        osp_core::trajectory::trajectory_loss(&current_measured, &target).to_bits();
+    let baseline_observation = BaselineObservation::LegacyComputed {
+        values_bits: axis_value_bits(&current_measured),
+        sources: axis_sources(&current_measured),
+        loss_bits: baseline_loss_bits,
+        derivation: baseline_derivation,
+    };
+
+    // Final claim: computed_raw = compute_raw_from_delta sonucu (V1 production path).
+    let claim = build_claim_from_proposal(&case.proposal, computed_raw, case.task.id, 100, 1)
+        .expect("V1 final claim build should succeed for characterization case");
+    let measured = provenanced_from_raw(claim.computed_raw, osp_core::coords::MetricSource::Scip);
     // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
@@ -1150,7 +1226,10 @@ pub fn evaluate_v1_case(
         // V1 provenanced_from_raw(..., Scip) tüm axis'lere uniform Scip verir.
         values_bits: axis_value_bits(&measured),
         sources: axis_sources(&measured),
-        baseline_kind: None, // V1 always has current_measured
+        // **Review tur 7 P0:** V1 baseline observation — LegacyComputed (AffectedCentroid
+        // veya DefaultFallback). Önceki `baseline_kind: None` V1 "current_measured her
+        // zaman var" diyordu ama delta-introduced subject için yanlıştı.
+        baseline: baseline_observation,
     };
 
     let pipeline = match result {
@@ -1222,18 +1301,35 @@ pub fn evaluate_v2_candidate_case(
     // Measurement başarılı — observation üret + commit için değerleri çıkar.
     let measured_for_commit = token.after().clone();
     let computed_raw_for_final_claim = token.after().to_raw();
-    let baseline_kind = match token.before() {
-        osp_core::measurement::MeasurementBaseline::Available(_) => Some(BaselineKind::Available),
+    let target = case
+        .task
+        .target_predicate_set
+        .preferred_vector
+        .unwrap_or_default();
+    // **Review tur 7 P0:** V2 baseline observation — Available (before centroid
+    // value/source/loss) veya Unavailable (typed reason).
+    let baseline_observation = match token.before() {
+        osp_core::measurement::MeasurementBaseline::Available(before) => {
+            let before_measured = before.clone();
+            let loss_bits =
+                osp_core::trajectory::trajectory_loss(&before_measured, &target).to_bits();
+            BaselineObservation::Available {
+                values_bits: axis_value_bits(&before_measured),
+                sources: axis_sources(&before_measured),
+                loss_bits,
+            }
+        }
         osp_core::measurement::MeasurementBaseline::Unavailable { reason } => {
             use osp_core::measurement::BaselineUnavailableReason;
-            match reason {
+            let kind = match reason {
                 BaselineUnavailableReason::AllMembersIntroducedByDelta { .. } => {
-                    Some(BaselineKind::UnavailableAllIntroduced)
+                    BaselineKind::UnavailableAllIntroduced
                 }
                 BaselineUnavailableReason::PartialNewSubject { .. } => {
-                    Some(BaselineKind::UnavailablePartialNew)
+                    BaselineKind::UnavailablePartialNew
                 }
-            }
+            };
+            BaselineObservation::Unavailable(kind)
         }
     };
     let measurement = MeasurementObservation::Produced {
@@ -1258,7 +1354,7 @@ pub fn evaluate_v2_candidate_case(
         // **Review P0-2:** 5-axis value bits + sources — exact parity için.
         values_bits: axis_value_bits(&measured_for_commit),
         sources: axis_sources(&measured_for_commit),
-        baseline_kind,
+        baseline: baseline_observation,
     };
 
     // Final Claim: computed_raw = measurement.after().to_raw().
@@ -1308,11 +1404,11 @@ pub fn evaluate_v2_candidate_case(
 
 /// commit_task_claim başarılı sonucundan PipelineObservation::CommitReached üret.
 ///
-/// **Review P0-1 fix:** Held/Rejected'da `EngineCommitResult` gerçek PredicateGate
-/// outcome'unu taşımaz (sadece `Evaluated` `TaskCommitResult.outcome` içerir). Önceki
-/// kod `AcceptAsCompleted`+`NotApplied` fabrication ediyordu — bu imkânsız bir
-/// kombinasyon (MutationDecision::apply_target() mapping'i). Artık Held/Rejected'da
-/// gate-outcome alanları `None` (computed ama surfaced değil).
+/// **Review tur 6 P0-1 (Held fabrication çürütüldü):** Held/Rejected `AuthorizationContext`
+/// taşır (engine.rs:1133) — `authorization.outcome` gerçek `AttemptOutcome` (predicate_completion
+/// + mutation_decision) + `authorization.apply_target` verir. Tur 1 "Held fabrication"
+/// düzeltmesi yanlıştı; Held/Rejected'da outcome observation'a taşınır (authoritative
+/// engine çıktısı, fabrication DEĞİL).
 fn finalize_pipeline_observation_commit_reached(
     result: &osp_core::engine::EngineCommitResult,
 ) -> PipelineObservation {
