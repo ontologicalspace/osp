@@ -200,36 +200,96 @@ fn matching_scope_baseline_case_shows_parity() {
         "matching V2 exact pipeline: StoppedBeforeCommit{{Vision, Vision}}; case {}",
         case.id
     );
-    // V1 baseline exact (review tur 7): AffectedCentroid (node 1 space'te) — value/source/loss.
+    // V1 baseline exact golden (review tur 8 P0-2): AffectedCentroid + tüm alanlar.
     if let MeasurementObservation::Produced {
-        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        baseline:
+            common::BaselineObservation::LegacyComputed {
+                values_bits,
+                sources,
+                loss_bits,
+                derivation,
+            },
         ..
     } = &obs_v1.measurement
     {
         assert_eq!(
             *derivation,
-            common::LegacyBaselineDerivation::AffectedCentroid,
-            "matching V1 baseline AffectedCentroid (node 1 space'te); case {}",
+            common::LegacyBaselineDerivation::AffectedCentroid
+        );
+        assert_eq!(
+            *values_bits,
+            [
+                0u64,
+                4602678819172646912,
+                4602678819172646912,
+                4602678819172646912,
+                4601046424471046557
+            ],
+            "matching V1 baseline values_bits; case {}",
+            case.id
+        );
+        assert_eq!(
+            *sources,
+            [MetricSource::Scip; 5],
+            "matching V1 baseline sources; case {}",
+            case.id
+        );
+        assert_eq!(
+            *loss_bits, 4604544271217802189,
+            "matching V1 baseline loss_bits; case {}",
             case.id
         );
     } else {
         panic!(
-            "matching V1 baseline LegacyComputed olmalı; case {}",
+            "matching V1 LegacyComputed baseline olmalı; case {}",
             case.id
         );
     }
 
-    // === Baseline ===
-    // V2-candidate: matching scope → Available baseline (node 1 space'te).
-    match &obs_v2.measurement {
-        MeasurementObservation::Produced {
-            baseline: common::BaselineObservation::Available { .. },
-            ..
-        } => {}
-        other => panic!(
-            "V2-candidate Available baseline olmalı; case {} got {:?}",
-            case.id, other
-        ),
+    // V2-candidate Available baseline exact golden (review tur 8 P0-2).
+    if let MeasurementObservation::Produced {
+        baseline:
+            common::BaselineObservation::Available {
+                values_bits,
+                sources,
+                loss_bits,
+            },
+        ..
+    } = &obs_v2.measurement
+    {
+        assert_eq!(
+            *values_bits,
+            [
+                0u64,
+                4602678819172646912,
+                4602678819172646912,
+                4602678819172646912,
+                4601046424471046557
+            ],
+            "matching V2 baseline values_bits; case {}",
+            case.id
+        );
+        // V2 baseline sources engine-native (Scip DEĞİL) → INV-T4 provenance divergence
+        // baseline boyutunda da var (review tur 8 P0-2).
+        assert_eq!(
+            *sources,
+            [
+                MetricSource::TreeSitter,
+                MetricSource::Placeholder,
+                MetricSource::TreeSitter,
+                MetricSource::Heuristic,
+                MetricSource::Heuristic
+            ],
+            "matching V2 baseline sources engine-native; case {}",
+            case.id
+        );
+        assert_eq!(
+            *loss_bits, 4604544271217802189,
+            "matching V2 baseline loss_bits; case {}",
+            case.id
+        );
+    } else {
+        panic!("matching V2 Available baseline olmalı; case {}", case.id);
     }
 }
 
@@ -554,24 +614,66 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         "wide-affected V2 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
         case.id
     );
-    // V1 baseline AffectedCentroid (nodes 1/2/3 space'te); V2 Available (node 1 space'te).
+    // V1 baseline exact golden (review tur 8 P0-2): AffectedCentroid + tüm alanlar.
     if let MeasurementObservation::Produced {
-        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        baseline:
+            common::BaselineObservation::LegacyComputed {
+                values_bits,
+                sources,
+                loss_bits,
+                derivation,
+            },
         ..
     } = &obs_v1.measurement
     {
         assert_eq!(
             *derivation,
-            common::LegacyBaselineDerivation::AffectedCentroid,
-            "wide-affected V1 AffectedCentroid (nodes 1/2/3 space'te); case {}",
-            case.id
+            common::LegacyBaselineDerivation::AffectedCentroid
         );
+        assert_eq!(
+            *values_bits,
+            [
+                0u64,
+                4602678819172646912,
+                4602678819172646912,
+                4602678819172646912,
+                4601046424471046557
+            ]
+        );
+        assert_eq!(*sources, [osp_core::coords::MetricSource::Scip; 5]);
+        assert_eq!(*loss_bits, 4604544271217802189);
     }
     if let MeasurementObservation::Produced {
-        baseline: common::BaselineObservation::Available { .. },
+        baseline:
+            common::BaselineObservation::Available {
+                values_bits,
+                sources,
+                loss_bits,
+            },
         ..
     } = &obs_v2.measurement
     {
+        assert_eq!(
+            *values_bits,
+            [
+                0u64,
+                4602678819172646912,
+                4602678819172646912,
+                4602678819172646912,
+                4601046424471046557
+            ]
+        );
+        assert_eq!(
+            *sources,
+            [
+                osp_core::coords::MetricSource::TreeSitter,
+                osp_core::coords::MetricSource::Placeholder,
+                osp_core::coords::MetricSource::TreeSitter,
+                osp_core::coords::MetricSource::Heuristic,
+                osp_core::coords::MetricSource::Heuristic
+            ]
+        );
+        assert_eq!(*loss_bits, 4604544271217802189);
     } else {
         panic!(
             "wide-affected V2 Available baseline olmalı; case {}",
@@ -701,24 +803,66 @@ fn removed_edge_external_source_shows_affected_contamination() {
         "removed-edge V2 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
         case.id
     );
-    // V1 baseline AffectedCentroid (nodes 1/9 space'te); V2 Available (node 1 space'te).
+    // V1 baseline exact golden (review tur 8 P0-2): AffectedCentroid + tüm alanlar.
     if let MeasurementObservation::Produced {
-        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        baseline:
+            common::BaselineObservation::LegacyComputed {
+                values_bits,
+                sources,
+                loss_bits,
+                derivation,
+            },
         ..
     } = &obs_v1.measurement
     {
         assert_eq!(
             *derivation,
-            common::LegacyBaselineDerivation::AffectedCentroid,
-            "removed-edge V1 AffectedCentroid (nodes 1/9 space'te); case {}",
-            case.id
+            common::LegacyBaselineDerivation::AffectedCentroid
         );
+        assert_eq!(
+            *values_bits,
+            [
+                0u64,
+                4602678819172646912,
+                4602678819172646912,
+                4602678819172646912,
+                4601046424471046557
+            ]
+        );
+        assert_eq!(*sources, [osp_core::coords::MetricSource::Scip; 5]);
+        assert_eq!(*loss_bits, 4604544271217802189);
     }
     if let MeasurementObservation::Produced {
-        baseline: common::BaselineObservation::Available { .. },
+        baseline:
+            common::BaselineObservation::Available {
+                values_bits,
+                sources,
+                loss_bits,
+            },
         ..
     } = &obs_v2.measurement
     {
+        assert_eq!(
+            *values_bits,
+            [
+                0u64,
+                4602678819172646912,
+                4602678819172646912,
+                4602678819172646912,
+                4601046424471046557
+            ]
+        );
+        assert_eq!(
+            *sources,
+            [
+                osp_core::coords::MetricSource::TreeSitter,
+                osp_core::coords::MetricSource::Placeholder,
+                osp_core::coords::MetricSource::TreeSitter,
+                osp_core::coords::MetricSource::Heuristic,
+                osp_core::coords::MetricSource::Heuristic
+            ]
+        );
+        assert_eq!(*loss_bits, 4604544271217802189);
     } else {
         panic!(
             "removed-edge V2 Available baseline olmalı; case {}",
@@ -744,7 +888,7 @@ fn removed_edge_external_source_shows_affected_contamination() {
 /// projection'ın decision etkisi SADECE `NotCompleted` + improvement-sensitive policy
 /// dalında observable (P2-0B.8 fixture).
 #[test]
-fn delta_introduced_subject_shows_baseline_representation_divergence() {
+fn delta_introduced_subject_shows_baseline_epistemic_availability_divergence() {
     let case = build_all_cases()
         .into_iter()
         .find(|c| c.class == CaseClass::DeltaIntroducedSubject)
@@ -848,17 +992,36 @@ fn delta_introduced_subject_shows_baseline_representation_divergence() {
         }
         other => panic!("V2 UnavailableAllIntroduced baseline olmalı; got {other:?}"),
     }
-    // V1 baseline DefaultFallback (node 10000 base'de yok → RawPosition::default()).
+    // V1 baseline DefaultFallback exact golden (review tur 8 P0-2): node 10000 base'de
+    // yok → compute_raw_from_delta empty positions → RawPosition::default() (tümü sıfır).
+    // OSP "bilinmeyeni ölçülmüş değer gibi sunmama" çizgisine aykırı — explicit pin.
     if let MeasurementObservation::Produced {
-        baseline: common::BaselineObservation::LegacyComputed { derivation, .. },
+        baseline:
+            common::BaselineObservation::LegacyComputed {
+                values_bits,
+                sources,
+                loss_bits,
+                derivation,
+            },
         ..
     } = &obs_v1.measurement
     {
         assert_eq!(
             *derivation,
-            common::LegacyBaselineDerivation::DefaultFallback,
-            "delta-introduced V1 DefaultFallback (subject node 10000 base'de yok → \
-             RawPosition::default()); case {}",
+            common::LegacyBaselineDerivation::DefaultFallback
+        );
+        // RawPosition::default() → tüm axis değerleri 0.0 → to_bits() = 0.
+        assert_eq!(
+            *values_bits, [0u64; 5],
+            "delta-introduced V1 baseline default (all zero); case {}",
+            case.id
+        );
+        assert_eq!(*sources, [osp_core::coords::MetricSource::Scip; 5]);
+        // loss_before = trajectory_loss(zero, target); Case 4 target = preferred_vector
+        // (None → RawPosition::default() = zero) → loss = 0.
+        assert_eq!(
+            *loss_bits, 0u64,
+            "delta-introduced V1 baseline loss 0 (zero baseline, zero target); case {}",
             case.id
         );
     } else {
@@ -867,6 +1030,8 @@ fn delta_introduced_subject_shows_baseline_representation_divergence() {
             case.id
         );
     }
+    // V2 Unavailable — value/source/loss N/A (review tur 8 P0-2: Unavailable tarafında
+    // bu alanlar yoktur; divergence availability düzeyindedir, value düzeyinde DEĞİL).
 
     // === Pipeline observation golden (review tur 6 P0-1) ===
     // Case 4 Q5 PASSED → PredicateGate'e ulaştı. Held AuthorizationContext taşır

@@ -29,11 +29,12 @@ semantic divergence'ı** somut olarak ölçtü. Sonuç:
    scope'ta BİLE** bu divergence var — `required_source` predicate'leri V1/V2 arasında
    farklı PredicateSet kararı üretir (matrix kanıtı yukarıda).
 
-3. **Baseline-availability representation divergence — KANITLANDI; policy/decision
-   divergence — HİPOTEZ (review tur 5 P0-1).** Case 4 subject/value parity KORUR ama
-   baseline representation diverge eder (V1 typed değil, V2 UnavailableAllIntroduced).
-   Policy/decision divergence kanıtlanmadı — Case 4 `Completed` → projection etkisiz;
-   NotCompleted + improvement-sensitive fixture P2-0B.8 gerek.
+3. **Baseline epistemic availability divergence — KANITLANDI; policy/decision divergence
+   — HİPOTEZ (review tur 5/7/8).** Case 4 subject/value parity KORUR ama baseline
+   availability diverge eder: V1 `DefaultFallback` (yokluk → `RawPosition::default()`
+   sıfır koordinat), V2 typed `UnavailableAllIntroduced`. Policy/decision divergence
+   kanıtlanmadı — Case 4 `Completed` → `AcceptAsCompleted` parity; NotCompleted +
+   improvement-sensitive fixture P2-0B.8 gerek.
 
 **Önemli kapsam sınırlaması (review tur 6/7):** Gözlemlenen value/source/baseline divergence
 production-reachable. Pipeline mutation-decision: Case 4 **Observed(AcceptAsCompleted)
@@ -174,7 +175,7 @@ kodu ile somutlaştı.
 |---|---|---|---|
 | Subject set | {10000} | {10000} | **parity** (subject authority divergence yok) |
 | Axis value bits | 1-node centroid | aynı centroid | **parity** |
-| Baseline representation | None (typed değil) | **UnavailableAllIntroduced** | **representation divergence KANITLANDI** |
+| Baseline availability | DefaultFallback (`RawPosition::default()`) | **UnavailableAllIntroduced** | **availability divergence KANITLANDI** |
 | Source | uniform Scip | per-axis engine defaults | INV-T4 divergence |
 | Pipeline mutation-decision | **Observed(AcceptAsCompleted)** | **Observed(AcceptAsCompleted)** | **parity (ölçüldü, eşit)** |
 | Apply target | Lane(Mainline) | Lane(Mainline) | parity |
@@ -211,32 +212,39 @@ baseline gözleminde representation/availability/value-source/decision ayrımı 
 — V1 `None` "baseline yok" değil "typed değil" demektir; delta-introduced subject için
 V1 `RawPosition::default()` (DefaultFallback) üretir.
 
-**Frozen fixture corpus (4 case) — review tur 7 dört boyutlu baseline ayrımı:**
+**Frozen fixture corpus (4 case) — review tur 8 ayrı baseline boyutları:**
 
-| Class | Subject-set div | Axis-value div | Baseline schema div | Baseline availability div | Baseline value/source div | Source div | Pipeline mutation-decision |
+| Class | Subject-set div | Axis-value div (after) | Baseline schema (structural) | Baseline availability | Baseline value bits | Baseline source | Pipeline mutation-decision |
 |---|---:|---:|---:|---:|---:|---:|---|
-| matching_scope | 0 | 0 | 0 (V1 LegacyComputed / V2 Available) | 0 (Available parity) | 0 (AffectedCentroid) | **1** (INV-T4) | NotReached (Q5 Vision) |
-| wide_affected_scope | **1** | **1** | 0 | 0 (Available parity) | 0 (AffectedCentroid) | **1** | NotReached (Q5 Vision) |
-| removed_edge_external_source | **1** | **1** | 0 | 0 (Available parity) | 0 (AffectedCentroid) | **1** | NotReached (Q5 Vision) |
-| delta_introduced_subject | **0** | 0 | **1** (V1 LegacyComputed / V2 Unavailable) | **1** (DefaultFallback / UnavailableAllIntroduced) | **1** (V1 RawPosition::default() vs V2 typed none) | **1** | **Observed(AcceptAsCompleted), V1/V2 parity** |
-| **Toplam (frozen fixture)** | **2/4** | **2/4** | **1/4** | **1/4** | **1/4** | **4/4** | NotReached 3/4 + Observed+Equal 1/4 |
+| matching_scope | 0 | 0 | **1** (LegacyComputed↔Available) | 0 (Available parity) | 0 (parity) | **1** (Scip↔engine-native) | NotReached (Q5 Vision) |
+| wide_affected_scope | **1** | **1** | **1** (LegacyComputed↔Available) | 0 (Available parity) | 0 (parity) | **1** | NotReached (Q5 Vision) |
+| removed_edge_external_source | **1** | **1** | **1** (LegacyComputed↔Available) | 0 (Available parity) | 0 (parity) | **1** | NotReached (Q5 Vision) |
+| delta_introduced_subject | **0** | 0 | **1** (LegacyComputed↔Unavailable) | **1** (DefaultFallback↔Unavailable) | **N/A** (V2 Unavailable — value yok) | **N/A** (V2 Unavailable — source yok) | **Observed(AcceptAsCompleted), parity** |
+| **Toplam** | **2/4** | **2/4** | **4/4** (structural) | **1/4** | 0/3 + N/A 1 | **3/3** (Available case'lerde) + N/A 1 | NotReached 3/4 + Observed+Equal 1/4 |
 
-**Kritik (review tur 7 P0):** Case 4 baseline **availability divergence** kanıtlar —
-V1 `DefaultFallback` (subject node 10000 base'de yok → `compute_raw_from_delta` empty
-positions → `RawPosition::default()`, engine.rs:2329-2330), V2 typed
-`UnavailableAllIntroduced`. Bu "typed/untyped representation" değil, **epistemik
-availability yorumu** farkı: V1 yokluğu sıfır koordinaya çeviriyor, V2 typed koruyor.
-`RawPosition::default()` bir baseline kanıtı DEĞİL — `LegacyDefaultFallback` olarak
-isimlendirildi (OSP "bilinmeyeni ölçülmüş değer gibi sunmama" çizgisi).
+**Kritik (review tur 7/8):**
+- **Baseline schema:** 4/4 structural — V1 `LegacyComputed` (scalar/untyped) ↔ V2 typed
+  (`Available` | `Unavailable`). Her case'te structural fark.
+- **Baseline availability:** 1/4 — Cases 1/2/3 Available parity, Case 4
+  `DefaultFallback` (V1 yokluk → sıfır koordinat) ↔ `UnavailableAllIntroduced` (V2 typed).
+- **Baseline value bits:** Cases 1/2/3'te parity (AffectedCentroid/Available aynı
+  subject üzerinden aynı centroid). Case 4 **N/A** — V2 `Unavailable` olduğu için
+  value yoktur; `RawPosition::default()` ile "typed none"ı value divergence saymak
+  OSP "bilinmeyeni değer gibi sunmama" ilkesini ihlal eder.
+- **Baseline source:** Cases 1/2/3'te **divergence** (V1 uniform Scip ↔ V2 engine-native
+  — INV-T4 provenance authority baseline boyutunda da var). Case 4 **N/A** (V2 Unavailable).
+- **Case 4 availability divergence:** V1 `DefaultFallback` (subject node 10000 base'de
+  yok → `compute_raw_from_delta` empty positions → `RawPosition::default()`,
+  engine.rs:2329-2330), V2 typed `UnavailableAllIntroduced`. Bu "typed/untyped
+  representation" değil, **epistemik availability yorumu** farkı. `RawPosition::default()`
+  bir baseline kanıtı DEĞİL — `LegacyDefaultFallback`.
 
-**Pipeline mutation-decision (tur 6/7 canonical):**
+**Pipeline mutation-decision (tur 6/7/8 canonical):**
 - Cases 1/2/3: Q5 Vision'da durdu → **NotReached** (PredicateGate çalışmadı).
 - Case 4: Q5 passed, PredicateGate'e ulaştı, Held → **Observed(AcceptAsCompleted)**,
   V1/V2 parity (Held `authorization.outcome` real).
 - ReachedButUnsurfaced: **0/4** (production-reachable değil — tüm EngineCommitResult
   varyantları outcome taşır).
-- Pipeline-level decision-drift: **ölçüldü, eşit** (Case 4). Cases 1/2/3 NotReached.
-- ReachedButUnsurfaced: **0/4** (Held gerçek outcome taşır).
 
 **Inline required_source matrix (frozen corpus DIŞI ayrı yüzey, 5 case):**
 
@@ -539,7 +547,7 @@ rejection politikalarından hangisi uygulanacağı ayrıca belirlenir.
 | `matching_scope_baseline_case_shows_parity` | measurement_v1_v2_parity.rs | ✅ |
 | `wide_affected_scope_shows_subject_authority_divergence` | measurement_v1_v2_parity.rs | ✅ |
 | `removed_edge_external_source_shows_affected_contamination` | measurement_v1_v2_parity.rs | ✅ |
-| `delta_introduced_subject_shows_baseline_representation_divergence` | measurement_v1_v2_parity.rs | ✅ (review tur 4/5/6: subject/value parity + baseline representation + Observed(AcceptAsCompleted)) |
+| `delta_introduced_subject_shows_baseline_epistemic_availability_divergence` | measurement_v1_v2_parity.rs | ✅ (review tur 4/5/6: subject/value parity + baseline representation + Observed(AcceptAsCompleted)) |
 | `required_source_matrix_shows_provenance_authority_divergence` | measurement_v1_v2_parity.rs | ✅ (review tur 3: gerçek `PredicateSet::evaluate_completion`) |
 
 ---
