@@ -67,12 +67,16 @@ impl LanguageAdapter for PythonAdapter {
             Some(t) => t,
             None => return Vec::new(),
         };
-        shared::walk_class_defs(
-            tree.root_node(),
-            source,
+        // KNOWN-DIVERGENCE(PY-ABST-004): LegacyTextContains substring test may mark
+        // a concrete class abstract if "ABC"/"Protocol"/"ABCMeta" appears anywhere in
+        // its text (e.g. a comment). Preserved verbatim in PR A; fix tracked separately.
+        use shared::{AbstractnessRule, DeclarationKindSpec, NameStrategy};
+        const PY_SPECS: &[DeclarationKindSpec] = &[DeclarationKindSpec::new(
             "class_definition",
-            &["ABC", "Protocol", "ABCMeta"], // Python abstract patterns
-        )
+            AbstractnessRule::LegacyTextContains(&["ABC", "Protocol", "ABCMeta"]),
+            NameStrategy::FirstIdentifierFallback,
+        )];
+        shared::walk_class_defs(tree.root_node(), source, PY_SPECS)
     }
 }
 
