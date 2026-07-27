@@ -163,7 +163,7 @@ fn matching_scope_baseline_case_shows_parity() {
     assert_apply_target_parity(&case.id, &obs_v1, &obs_v2);
     assert_witness_reachability_parity(&case.id, &obs_v1, &obs_v2);
 
-    // === Corpus observation golden (review tur 5 P0-2/P1-2) ===
+    // === Corpus observation golden (review tur 5/6 P0-2/P1-2) ===
     // Mutation decision: matching V1/V2 Q5 Vision'da durur (placeholder computed_raw →
     // theta ihlali) → PredicateGate'e ulaşmadı → NotReached.
     let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
@@ -180,6 +180,34 @@ fn matching_scope_baseline_case_shows_parity() {
         "matching V2: Q5 Vision NotReached; case {}",
         case.id
     );
+    // **Review tur 6 P1-1:** exact pipeline stage pin (NotReached yalnız tri-state;
+    // Vision stage değil TaskBinding/TaskValidation'da da durursa yeşil kalabilirdi).
+    assert_eq!(
+        obs_v1.pipeline,
+        common::PipelineObservation::StoppedBeforeCommit {
+            stage: common::PipelineStage::Vision,
+            error: common::PipelineFailureClass::Vision,
+        },
+        "matching V1 exact pipeline: StoppedBeforeCommit{{Vision, Vision}}; case {}",
+        case.id
+    );
+    assert_eq!(
+        obs_v2.pipeline,
+        common::PipelineObservation::StoppedBeforeCommit {
+            stage: common::PipelineStage::Vision,
+            error: common::PipelineFailureClass::Vision,
+        },
+        "matching V2 exact pipeline: StoppedBeforeCommit{{Vision, Vision}}; case {}",
+        case.id
+    );
+    // V1 baseline exact None (review tur 6 P1-1).
+    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+        assert_eq!(
+            *baseline_kind, None,
+            "matching V1 baseline None (no tracking); case {}",
+            case.id
+        );
+    }
 
     // === Baseline ===
     // V2-candidate: matching scope → Available baseline (node space'te).
@@ -485,7 +513,7 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         case.id
     );
 
-    // === Corpus observation golden (review tur 5 P0-2/P1-2) ===
+    // === Corpus observation golden (review tur 5/6 P0-2/P1-2) ===
     // wide-affected: Q5 Vision'da durur → PredicateGate'e ulaşmadı → NotReached.
     let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
     let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
@@ -501,7 +529,33 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         "wide-affected V2: Q5 Vision NotReached; case {}",
         case.id
     );
-    // V2 baseline Available (subject node 1 space'te).
+    // **Review tur 6 P1-1:** exact pipeline stage pin (Vision/Vision).
+    assert_eq!(
+        obs_v1.pipeline,
+        common::PipelineObservation::StoppedBeforeCommit {
+            stage: common::PipelineStage::Vision,
+            error: common::PipelineFailureClass::Vision,
+        },
+        "wide-affected V1 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
+        case.id
+    );
+    assert_eq!(
+        obs_v2.pipeline,
+        common::PipelineObservation::StoppedBeforeCommit {
+            stage: common::PipelineStage::Vision,
+            error: common::PipelineFailureClass::Vision,
+        },
+        "wide-affected V2 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
+        case.id
+    );
+    // V1 baseline exact None; V2 baseline Available (subject node 1 space'te).
+    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+        assert_eq!(
+            *baseline_kind, None,
+            "wide-affected V1 baseline None; case {}",
+            case.id
+        );
+    }
     if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v2.measurement {
         assert_eq!(
             *baseline_kind,
@@ -614,7 +668,33 @@ fn removed_edge_external_source_shows_affected_contamination() {
         "removed-edge V2: Q5 Vision NotReached; case {}",
         case.id
     );
-    // V2 baseline Available (subject node 1 space'te).
+    // **Review tur 6 P1-1:** exact pipeline stage pin (Vision/Vision).
+    assert_eq!(
+        obs_v1.pipeline,
+        common::PipelineObservation::StoppedBeforeCommit {
+            stage: common::PipelineStage::Vision,
+            error: common::PipelineFailureClass::Vision,
+        },
+        "removed-edge V1 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
+        case.id
+    );
+    assert_eq!(
+        obs_v2.pipeline,
+        common::PipelineObservation::StoppedBeforeCommit {
+            stage: common::PipelineStage::Vision,
+            error: common::PipelineFailureClass::Vision,
+        },
+        "removed-edge V2 exact: StoppedBeforeCommit{{Vision, Vision}}; case {}",
+        case.id
+    );
+    // V1 baseline exact None; V2 baseline Available (subject node 1 space'te).
+    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+        assert_eq!(
+            *baseline_kind, None,
+            "removed-edge V1 baseline None; case {}",
+            case.id
+        );
+    }
     if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v2.measurement {
         assert_eq!(
             *baseline_kind,
@@ -726,72 +806,72 @@ fn delta_introduced_subject_shows_baseline_representation_divergence() {
         case.id
     );
 
-    // === Baseline availability divergence (3RD migration dimension — P0-1) ===
-    // Bu, subject/value/source'dan BAĞIMSIZ bir ontolojik boyut.
+    // === Baseline availability representation divergence (Migration 3) ===
+    // V2 baseline UnavailableAllIntroduced (typed — geçmiş baseline yok).
+    // V1 baseline None (current_measured her zaman var, typed tracking yok).
     match &obs_v2.measurement {
         MeasurementObservation::Produced { baseline_kind, .. } => {
             assert_eq!(
                 *baseline_kind,
                 Some(common::BaselineKind::UnavailableAllIntroduced),
-                "V2 baseline UnavailableAllIntroduced (delta-introduced subject, no prior baseline); case {}",
+                "V2 baseline UnavailableAllIntroduced; case {}",
                 case.id
             );
         }
         other => panic!("V2 Produced+UnavailableAllIntroduced olmalı; got {other:?}"),
     }
-    match &obs_v1.measurement {
-        MeasurementObservation::Produced { baseline_kind, .. } => {
-            assert_none_or_not_unavailable(
-                baseline_kind,
-                "V1 baseline tracking yapmaz (None); current_measured her zaman var",
-            );
-        }
-        other => panic!("V1 measurement Produced olmalı; got {other:?}"),
+    // V1 baseline exact None (review tur 6 P1-1).
+    if let MeasurementObservation::Produced { baseline_kind, .. } = &obs_v1.measurement {
+        assert_eq!(
+            *baseline_kind, None,
+            "delta-introduced V1 baseline None; case {}",
+            case.id
+        );
     }
 
-    // === Pipeline observation golden (review tur 5 P0-2/P1-2) ===
-    // Case 4 Q5 PASSED (coupling 0.0 ≤ vision bound) → PredicateGate'e ulaştı → Held
-    // (witness quorum). mutation_decision surfaced DEĞİL → ReachedButUnsurfaced.
+    // === Pipeline observation golden (review tur 6 P0-1) ===
+    // Case 4 Q5 PASSED → PredicateGate'e ulaştı. Held AuthorizationContext taşır
+    // (engine.rs:1133) → authorization.outcome gerçek AttemptOutcome verir. Case 4
+    // Completed → AcceptAsCompleted (completion-first core improved'a bakmaz).
+    // **Review tur 6 P0-1:** Held fabrication yanlıştı — outcome observable.
     eprintln!("  delta-introduced V1 pipeline: {:?}", obs_v1.pipeline);
     eprintln!("  delta-introduced V2 pipeline: {:?}", obs_v2.pipeline);
+    use osp_core::trajectory::{ApplyTarget, CommitLane, MutationDecision, PredicateCompletion};
+    let expected_case4_pipeline = common::PipelineObservation::CommitReached {
+        q5: common::Q5Observation::Passed,
+        predicate_completion: Some(PredicateCompletion::Completed),
+        mutation_decision: Some(MutationDecision::AcceptAsCompleted),
+        apply_target: Some(ApplyTarget::Lane(CommitLane::Mainline)),
+        witness_reachability: common::WitnessReachability::Held,
+    };
+    assert_eq!(
+        obs_v1.pipeline, expected_case4_pipeline,
+        "delta-introduced V1 exact pipeline (Held+AcceptAsCompleted+Mainline); case {}",
+        case.id
+    );
+    assert_eq!(
+        obs_v2.pipeline, expected_case4_pipeline,
+        "delta-introduced V2 exact pipeline (Held+AcceptAsCompleted+Mainline); case {}",
+        case.id
+    );
     let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
     let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
     assert_eq!(
         md_v1,
-        common::MutationDecisionObservation::ReachedButUnsurfaced,
-        "delta-introduced V1: Q5 passed → PredicateGate'e ulaştı, Held → outcome surfaced değil; case {}",
+        common::MutationDecisionObservation::Observed(MutationDecision::AcceptAsCompleted),
+        "delta-introduced V1 Observed(AcceptAsCompleted); case {}",
         case.id
     );
     assert_eq!(
         md_v2,
-        common::MutationDecisionObservation::ReachedButUnsurfaced,
-        "delta-introduced V2: Held → ReachedButUnsurfaced; case {}",
+        common::MutationDecisionObservation::Observed(MutationDecision::AcceptAsCompleted),
+        "delta-introduced V2 Observed(AcceptAsCompleted); case {}",
         case.id
     );
-    assert_eq!(
-        witness_reachability(&obs_v1),
-        WitnessReachability::Held,
-        "delta-introduced V1 witness Held; case {}",
-        case.id
-    );
-    assert_eq!(
-        witness_reachability(&obs_v2),
-        WitnessReachability::Held,
-        "delta-introduced V2 witness Held; case {}",
-        case.id
-    );
-    // **Review tur 5 P0-1:** mutation decision parity (ikisi de ReachedButUnsurfaced)
-    // policy/decision divergence KANITLAMAZ — representation divergence sadece baseline
-    // boyutunda (V1 None vs V2 UnavailableAllIntroduced). Policy/decision divergence
-    // NotCompleted + AcceptImprovement fixture ile P2-0B.8'de kanıtlanacak.
-}
-
-fn assert_none_or_not_unavailable(baseline_kind: &Option<common::BaselineKind>, msg: &str) {
-    match baseline_kind {
-        None => {}                                  // V1 → None (tracking yok)
-        Some(common::BaselineKind::Available) => {} // hypothetical V1 Available
-        Some(other) => panic!("{msg}; got {other:?}"),
-    }
+    // **Review tur 6 sonuçu:** Case 4 pipeline mutation-decision ÖLÇÜLDÜ ve eşit
+    // (Observed(AcceptAsCompleted) V1/V2 parity). Baseline policy/decision divergence
+    // hâlâ hipotez — Case 4 Completed → projection etkisiz. P2-0B.8 NotCompleted +
+    // AcceptImprovement fixture gerek.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -873,7 +953,8 @@ fn sorted(v: &[u64]) -> Vec<u64> {
 /// **Tur 3 P0-1 fix:** Önceki test sadece lokal `bool` karşılaştırması yapıyordu
 /// (`Scip != TreeSitter` kanıtı). Artık gerçek `PredicateSet::evaluate_completion`
 /// çağrılıp `PredicateSetResult` (Completed/SourceInsufficient/NotCompleted) exact
-/// pinleniyor. Bu, PredicateGate decision divergence'ını gerçek evaluation ile kanıtlar.
+/// pinleniyor. Bu, **PredicateSet-level** decision divergence'ı gerçek evaluation ile
+/// kanıtlar (PredicateGate/pipeline-level DEĞİL — review tur 6 terminoloji).
 #[test]
 fn required_source_matrix_shows_provenance_authority_divergence() {
     use osp_core::coords::MetricSource;

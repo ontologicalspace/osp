@@ -80,7 +80,9 @@ Bu rapor, üç ontolojik boyut için pro/con analizi sağlar ve kararı bekler.
 
 - Subject set: V1={1}, V2={1} — **parity** ✅
 - 5-axis value bits: **parity** ✅ (aynı node üzerinden centroid)
-- Q5 disposition / predicate completion / mutation decision / apply target / witness: **parity** ✅
+- Q5 disposition: **parity** (ikisi de Q5 Vision'da durdu — NotReached)
+- predicate completion / mutation decision / apply target / witness: **NotReached**
+  (Q5 Vision'da durdu, PredicateGate çalışmadı — ölçülemedi, "parity" DEĞİL)
 - **5-axis sources: DIVERGENCE** ⚠️ — V1 coupling=Scip (provenanced_from_raw override),
   V2 coupling=TreeSitter (engine axis default)
 
@@ -102,9 +104,10 @@ uniform Scip verir; V2 engine gerçek axis implementation source'ları. Bu, INV-
 `required_source` predicate'lerini etkiler — `required_source = Some(Scip)` predicate
 V1'de `Completed`, V2'de `SourceInsufficient` (required_source matrix yukarıda).
 
-**Pipeline mutation-decision drift (review tur 4 P0-2):** matching case PredicateGate'e
-ulaştı ama Held oldu (witness quorum) → mutation_decision surfaced değil → drift
-**NotReached** (ölçülemedi), "parity" DEĞİL.
+**Pipeline mutation-decision (review tur 6 canonical):** matching case Q5 Vision'da
+durdu (placeholder `computed_raw` → theta ihlali) → PredicateGate **NotReached**
+(çalışmadı). Pipeline mutation-decision parity "ölçüldü eşit" DEĞİL — **ölçülemedi**
+(NotReached).
 
 ---
 
@@ -158,44 +161,51 @@ kodu ile somutlaştı.
 
 ---
 
-### Case 4: `delta-introduced-subject-001` (baseline semantics divergence) ✅
+### Case 4: `delta-introduced-subject-001` (baseline representation divergence) ✅
 
 **Girdi:** Task `Node(10000)` scope, node 10000 delta-introduced via `NewNodeSpec`
 (`node_from_spec` id = 10_000 + 0).
 
-**Sonuç:** ✅ **Baseline semantics divergence — kesin pin (review tur 2 P0-1 fix).**
+**Sonuç (review tur 6 P0-1/P0-2 canonical):**
 
-| Metrik | V1 | V2 | Divergence |
+| Boyut | V1 | V2 | Sonuç |
 |---|---|---|---|
-| Measurement | Produced (infallible compute_raw) | **Produced, UnavailableAllIntroduced** | **baseline semantics** |
-| Baseline | None (current_measured always) | **UnavailableAllIntroduced** | ontolojik |
-| loss_before | real (current_measured) | fail-closed (= loss_after → improved=false) | decision-affecting |
+| Subject set | {10000} | {10000} | **parity** (subject authority divergence yok) |
+| Axis value bits | 1-node centroid | aynı centroid | **parity** |
+| Baseline representation | None (typed değil) | **UnavailableAllIntroduced** | **representation divergence KANITLANDI** |
+| Source | uniform Scip | per-axis engine defaults | INV-T4 divergence |
+| Pipeline mutation-decision | **Observed(AcceptAsCompleted)** | **Observed(AcceptAsCompleted)** | **parity (ölçüldü, eşit)** |
+| Apply target | Lane(Mainline) | Lane(Mainline) | parity |
+| Witness | Held | Held | parity |
 
-**Kritik yorum:**
-- V1 `compute_raw_from_delta` **infallible** — delta-introduced node'lar için bile
-  measurement üretir; `current_measured` her zaman var → loss_before hesaplanır →
-  improvement değerlendirilebilir.
-- V2 `measure_task_delta` `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }`
-  üretir → `project_v1_loss_before_compatibility` fail-closed (loss_before = loss_after →
-  improved = false → Reject). V2 "baseline yoksa progress kanıtlanamaz" semantiği.
-- Bu, V1 "her zaman current_measured var" ile V2 "baseline yoksa progress kanıtlanamaz"
-  arasındaki ontolojik ayrımın **somut, kesin pin'lenmiş** kanıtı.
+**Kritik (review tur 6 P0-1):** Case 4 predicate `Coupling ≤ 0.5` + measured coupling 0.0
+→ `PredicateSetResult::Completed` → `MutationDecision::AcceptAsCompleted` (completion-first
+decision core `improved`'a bakmaz). Held `AuthorizationContext` gerçek outcome taşır
+(engine.rs:1133) → `Observed(AcceptAsCompleted)` V1/V2 parity. **Pipeline mutation-decision
+ölçüldü ve eşit** — NotReached/ReachedButUnsurfaced DEĞİL (tur 5 yanlıştı).
 
-**Review tur 2 P0-1 fix notu:** Önceki fixture task scope `Node(1)` kullanıyordu ama
-delta node `10000` oluyordu (`node_from_spec` `10_000 + index`). Node 1 ne base'de ne
-delta'da → SubjectScope hatası "baseline unavailable" DEĞİL, kimlik uyuşmazlığı sonucuydu.
-Fix: task scope `Node(10000)` → gerçek AllMembersIntroducedByDelta yolu çalışır.
-Önceki "Unavailable VEYA SubjectScope" test toleransı kaldırıldı; artık exact
-`UnavailableAllIntroduced` beklenir ve pinlenir.
+**Baseline policy/decision divergence — HİPOTEZ (kanıtlanmadı):** Case 4 `Completed`
+olduğu için `project_v1_loss_before_compatibility` (loss_before=loss_after) projection'ın
+decision etkisi **observable DEĞİL**. Decision etkisi SADECE `NotCompleted` +
+improvement-sensitive policy dalında olabilir — o fixture P2-0B.8 gerek.
+
+**Özet (review tur 6 canonical):**
+- Representation divergence: **kanıtlandı** (V1 typed değil vs V2 UnavailableAllIntroduced).
+- Policy/decision divergence: **kanıtlanmadı** (hipotez).
+- Case 4 exact mutation decision: **V1/V2 AcceptAsCompleted parity**.
+- P2-0B.8: `NotCompleted` + `AcceptImprovement` policy fixture gerekli.
+
+**Fixture notu:** task scope `Node(10000)` = delta node id (`node_from_spec` 10_000+0).
+Önceki fixture `Node(1)` kullanıyordu → kimlik uyuşmazlığı → SubjectScope hatası.
 
 ---
 
-## Divergence Özeti (frozen fixture incidence — review tur 4 ayrım)
+## Divergence Özeti (frozen fixture incidence — review tur 6 canonical)
 
-**Önemli (review tur 5 P0-2):** Pipeline mutation-decision iki farklı durum içerir —
-**NotReached** (Q5 Vision'da durdu, PredicateGate çalışmadı) vs **ReachedButUnsurfaced**
-(PredicateGate çalıştı ama Held/Rejected → outcome EngineCommitResult'ta surfaced değil).
-Bunlar farklı mimari problemlerdir; aynı kategoride birleştirilmemeli.
+**Önemli (review tur 6 P0-1):** Pipeline mutation-decision Held için **Observed** —
+`EngineCommitResult::Held` `AuthorizationContext` taşır (engine.rs:1133), gerçek
+`AttemptOutcome` (predicate_completion + mutation_decision) verir. Tur 5 "Held fabrication"
+yanlıştı; Held outcome observation'a taşınır (authoritative engine çıktısı).
 
 **Frozen fixture corpus (4 case) — üç boyutta ayrı incidence + pipeline tri-state:**
 
@@ -204,19 +214,21 @@ Bunlar farklı mimari problemlerdir; aynı kategoride birleştirilmemeli.
 | matching_scope | 0 (parity) | 0 (parity) | 0 (V1 None / V2 Available) | **1** (INV-T4) | NotReached (Q5 Vision) |
 | wide_affected_scope | **1** | **1** | 0 (V1 None / V2 Available) | **1** | NotReached (Q5 Vision) |
 | removed_edge_external_source | **1** | **1** | 0 (V1 None / V2 Available) | **1** | NotReached (Q5 Vision) |
-| delta_introduced_subject | **0** (parity) | 0 (parity) | **1** (V1 None / V2 UnavailableAllIntroduced) | **1** | **ReachedButUnsurfaced** (Held) |
-| **Toplam (frozen fixture)** | **2/4** | **2/4** | **1/4** | **4/4** | NotReached 3/4 + ReachedButUnsurfaced 1/4 |
+| delta_introduced_subject | **0** (parity) | 0 (parity) | **1** (V1 None / V2 UnavailableAllIntroduced) | **1** | **Observed(AcceptAsCompleted), V1/V2 parity** |
+| **Toplam (frozen fixture)** | **2/4** | **2/4** | **1/4** | **4/4** | NotReached 3/4 + Observed+Equal 1/4 |
 
-**Kritik (review tur 4 P0-1):** Case 4 subject/value divergence GÖSTERMEZ — subject
-authority divergence yok (V1 affected {10000} ile V2 task scope {10000} aynı), axis
-value da aynı (aynı 1-node centroid). Ayrışan tek boyut **baseline availability**
-(V1 current_measured her zaman, V2 UnavailableAllIntroduced). Bu, subject authority +
-provenance authority'den BAĞIMSIZ **üçüncü** bir migration/policy boyutudur (aşağıda).
+**Kritik (review tur 4 P0-1 + tur 6):** Case 4 subject/value divergence GÖSTERMEZ —
+subject authority divergence yok ({10000}=={10000}), axis value da aynı. Ayrışan tek
+boyut **baseline representation**. **Case 4 pipeline mutation-decision ölçüldü ve eşit**
+(Observed(AcceptAsCompleted) V1/V2 parity) — Held fabrication yanlıştı, Held gerçek
+outcome taşır.
 
-**Pipeline mutation-decision drift:** Tüm 4 case NotReached — Cases 2/3 Q5 Vision'da
-durur (placeholder `computed_raw` → theta ihlali), Case 1/4 PredicateGate'e ulaştı ama
-Held oldu (mutation_decision EngineCommitResult::Held'da surfaced değil). Pipeline-level
-decision-drift ölçümü P2-0B.8 (non-default `computed_raw` + Evaluated outcome) bekliyor.
+**Pipeline mutation-decision (tur 6 canonical):**
+- Cases 1/2/3: Q5 Vision'da durdu → **NotReached** (PredicateGate çalışmadı).
+- Case 4: Q5 passed, PredicateGate'e ulaştı, Held → **Observed(AcceptAsCompleted)**,
+  V1/V2 parity ( Held `authorization.outcome` real).
+- Pipeline-level decision-drift: **ölçüldü, eşit** (Case 4). Cases 1/2/3 NotReached.
+- ReachedButUnsurfaced: **0/4** (Held gerçek outcome taşır).
 
 **Inline required_source matrix (frozen corpus DIŞI ayrı yüzey, 5 case):**
 
@@ -229,16 +241,17 @@ decision-drift ölçümü P2-0B.8 (non-default `computed_raw` + Evaluated outcom
 | `Some(Heuristic)` | 0 |
 | **Toplam (inline matrix)** | **2/5** |
 
-**Önemli (review tur 5 P0-2):** Pipeline mutation-decision **ölçülemedi** (0 DEĞİL) —
-farklı sebeplerle:
+**Önemli (review tur 6 canonical):** Pipeline mutation-decision:
 - Frozen fixture Cases 1/2/3 Q5 Vision'da durdu → **NotReached 3/4** (PredicateGate çalışmadı).
-- Frozen fixture Case 4 PredicateGate'e ulaştı ama **Held** → **ReachedButUnsurfaced 1/4**
-  (outcome EngineCommitResult::Held'de surfaced değil).
-- Inline required_source matrix: **2/5** decision divergence (PredicateSet level, gerçek
-  `evaluate_completion` ile — pipeline level değil).
+- Frozen fixture Case 4 PredicateGate'e ulaştı, **Held** → **Observed(AcceptAsCompleted)
+  1/4, V1/V2 parity** (Held `AuthorizationContext` gerçek outcome taşır — tur 5
+  "ReachedButUnsurfaced" yanlıştı, Held fabrication çürütüldü).
+- Inline required_source matrix: **2/5** PredicateSet decision divergence (pipeline
+  level değil).
 
-Pipeline-level (commit outcome) mutation-decision drift ölçümü P2-0B.8 (non-default
-`computed_raw` + Evaluated outcome + NotCompleted fixture) bekliyor.
+Pipeline-level (commit outcome) mutation-decision drift için non-default `computed_raw`
++ Evaluated outcome P2-0B.8 (Cases 1/2/3'ü PredicateGate'e ulaştırmak + Case 4'te
+Evaluated witness) bekliyor.
 
 **required_source decision matrix (review tur 3 P0-1 — gerçek `PredicateSet::evaluate_completion`):**
 
@@ -280,15 +293,15 @@ StoppedBeforeCommit{Other}" diyordu. Bu, **Case 4 fixture kimlik hatasına** (tu
 P0-1) dayanıyordu — düzeltme sonrası V2 measurement `Produced` (UnavailableAllIntroduced),
 error değil. Bu yüzden Case 4'te pipeline stage farkı KANITLANMADI.
 
-**Review tur 5 P0-2 güncellemesi:** Cases 1/2/3 Q5 Vision gate'inde durur (placeholder
-`RawPosition::default()` → theta ihlali) → PredicateGate **NotReached**. Case 4 ise Q5'i
-geçti (coupling 0.0 ≤ vision bound), PredicateGate'e ulaştı ama **Held** oldu (witness
-quorum) → **ReachedButUnsurfaced** (outcome surfaced değil). PredicateGate-level
-mutation-decision drift bu case'lerde ölçülemedi (Cases 1/2/3 çalışmadı, Case 4 çalıştı
-ama sonuç gözlenmedi). Sadece `required_source` matrix (yukarıda) INV-T4 decision
-divergence'ı PredicateSet levelinde kanıtladı. Pipeline-level (commit outcome)
-mutation-decision drift ölçümü P2-0B.8 (non-default `computed_raw` + Evaluated outcome)
-bekliyor.
+**Review tur 6 canonical:** Cases 1/2/3 Q5 Vision gate'inde durur (placeholder
+`RawPosition::default()` → theta ihlali) → PredicateGate **NotReached**. Case 4 Q5'i
+geçti (coupling 0.0 ≤ vision bound), PredicateGate'e ulaştı, **Held** oldu — Held
+`AuthorizationContext` gerçek outcome taşır → **Observed(AcceptAsCompleted)** V1/V2
+parity (tur 6 P0-1: Held fabrication yanlıştı). Pipeline mutation-decision: **ölçüldü,
+eşit** (Case 4); Cases 1/2/3 NotReached. Sadece `required_source` matrix (yukarıda)
+INV-T4 PredicateSet decision divergence kanıtladı. Pipeline-level decision-drift için
+non-default `computed_raw` + Evaluated outcome P2-0B.8'de (Cases 1/2/3'ü PredicateGate'e
+ulaştırmak + Case 4'te Evaluated witness).
 
 ---
 
@@ -468,13 +481,15 @@ gösterdi:
   (V1 typed değil, V2 UnavailableAllIntroduced) — **kanıtlandı**. **Policy/decision**
   divergence — **hipotez** (Case 4 Completed → projection etkisiz; NotCompleted fixture
   P2-0B.8 gerek).
-- **Pipeline mutation-decision drift:** ⏸ NotReached 3/4 (Q5 Vision) + ReachedButUnsurfaced
-  1/4 (Case 4 Held) — ölçülemedi, P2-0B.8 bekliyor
+- **Pipeline mutation-decision (tur 6):** Case 4 **Observed(AcceptAsCompleted)** V1/V2
+  parity (ölçüldü, eşit — Held fabrication çürütüldü). Cases 1/2/3 NotReached (Q5 Vision).
+  Pipeline-level Evaluated-witness drift için P2-0B.8 bekliyor.
 - **Ontolojik:** ⚠️ **İki kanıtlanmış + bir hipotez** migration kararı:
   1. Subject authority (Yol 1/2/3) — **kanıtlandı**
   2. Provenance authority (INV-T4 normatif hedef) — **kanıtlandı** (migration sınırı + backward-compat)
   3. Baseline-availability policy — **hipotez** (representation divergence kanıtlandı,
-     policy/decision divergence P2-0B.8 fixture bekliyor)
+     policy/decision divergence P2-0B.8 fixture bekliyor — Case 4 Completed'da projection
+     etkisiz, AcceptAsCompleted parity gözlendi)
 
 **P2-1 durumu:** `BLOCKED — iki kanıtlanmış migration kararı + bir hipotez (P2-0B.8)`
 
@@ -502,7 +517,7 @@ rejection politikalarından hangisi uygulanacağı ayrıca belirlenir.
 | `matching_scope_baseline_case_shows_parity` | measurement_v1_v2_parity.rs | ✅ |
 | `wide_affected_scope_shows_subject_authority_divergence` | measurement_v1_v2_parity.rs | ✅ |
 | `removed_edge_external_source_shows_affected_contamination` | measurement_v1_v2_parity.rs | ✅ |
-| `delta_introduced_subject_shows_baseline_semantics_divergence` | measurement_v1_v2_parity.rs | ✅ |
+| `delta_introduced_subject_shows_baseline_representation_divergence` | measurement_v1_v2_parity.rs | ✅ (review tur 4/5/6: subject/value parity + baseline representation + Observed(AcceptAsCompleted)) |
 | `required_source_matrix_shows_provenance_authority_divergence` | measurement_v1_v2_parity.rs | ✅ (review tur 3: gerçek `PredicateSet::evaluate_completion`) |
 
 ---

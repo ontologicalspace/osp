@@ -834,7 +834,10 @@ impl MeasurementFailureClass {
 }
 
 /// Pipeline (commit_task_claim) sonucu — stage-aware erken duruşlar dahil.
-#[derive(Debug, Clone)]
+///
+/// **Review tur 6:** `PartialEq` derive eklendi — exact pipeline golden assertion'ları
+/// için (StoppedBeforeCommit{stage, error} ve CommitReached tam struct karşılaştırması).
+#[derive(Debug, Clone, PartialEq)]
 pub enum PipelineObservation {
     /// commit_task_claim tam çalıştı (Evaluated/Held/Rejected dahil).
     ///
@@ -862,7 +865,7 @@ pub enum PipelineObservation {
 /// Q5 vision gözlemi — successful theta public API'den AÇILMAZ (TaskCommitResult'ta yok),
 /// yalnız failure'da `VisionViolation.theta` observable. Successful theta engine-unit
 /// (`Q5ThetaCharacterization`) karakterize eder.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Q5Observation {
     /// Q5 çalışmadı (commit stopped before Q5).
     NotReached,
@@ -1316,7 +1319,7 @@ fn finalize_pipeline_observation_commit_reached(
     use osp_core::engine::EngineCommitResult;
     match result {
         EngineCommitResult::Evaluated { result, .. } => {
-            // Evaluated → witness Satisfied; gerçek outcome surfaced.
+            // Evaluated → witness Satisfied; gerçek outcome TaskCommitResult'ta surfaced.
             PipelineObservation::CommitReached {
                 q5: Q5Observation::Passed, // Q5 passed (commit reached past vision gate)
                 predicate_completion: Some(result.outcome.predicate_completion.clone()),
@@ -1325,22 +1328,24 @@ fn finalize_pipeline_observation_commit_reached(
                 witness_reachability: WitnessReachability::Evaluated,
             }
         }
-        EngineCommitResult::Held { .. } => PipelineObservation::CommitReached {
+        EngineCommitResult::Held { authorization, .. } => PipelineObservation::CommitReached {
             q5: Q5Observation::Passed,
-            // Outcome computed by PredicateGate ama Held variant'ta surfaced DEĞİL.
-            // Fabrication YAPILMAZ — None, characterization consumer gerçek değeri
-            // göremez (engine.rs:1131-1144 EngineCommitResult::Held field'larına bak).
-            predicate_completion: None,
-            mutation_decision: None,
-            apply_target: None,
+            // **Review tur 6 P0-1 fix:** Held `AuthorizationContext` taşır (engine.rs:1133);
+            // authorization.outcome AttemptOutcome (predicate_completion + mutation_decision)
+            // + authorization.apply_target içerir. Bu authoritative engine çıktısıdır —
+            // fabrication DEĞİL. Önceki tur "Held fabrication" düzeltmesi yanlıştı; gerçek
+            // outcome observation'a taşınmalı (tur 1 fabrication iddiası çürütüldü).
+            predicate_completion: Some(authorization.outcome.predicate_completion.clone()),
+            mutation_decision: Some(authorization.outcome.mutation_decision.clone()),
+            apply_target: Some(authorization.apply_target.clone()),
             witness_reachability: WitnessReachability::Held,
         },
-        EngineCommitResult::Rejected { .. } => PipelineObservation::CommitReached {
+        EngineCommitResult::Rejected { authorization, .. } => PipelineObservation::CommitReached {
             q5: Q5Observation::Passed,
-            // Rejected için aynı: outcome surfaced değil.
-            predicate_completion: None,
-            mutation_decision: None,
-            apply_target: None,
+            // Rejected aynı şekilde authorization taşır (engine.rs:1140).
+            predicate_completion: Some(authorization.outcome.predicate_completion.clone()),
+            mutation_decision: Some(authorization.outcome.mutation_decision.clone()),
+            apply_target: Some(authorization.apply_target.clone()),
             witness_reachability: WitnessReachability::Rejected,
         },
     }
