@@ -244,41 +244,94 @@ fn extract_import_path(node: &Node, source: &[u8], imports: &mut Vec<String>) {
     }
 }
 
-/// Walk AST, collect class definitions.
-/// Matches any node kind containing "class" (class_definition, class_declaration, etc.).
-pub fn walk_class_defs(
-    root: Node,
-    source: &str,
-    _class_node_kind: &str, // ignored — uses contains("class") for robustness
-    abstract_patterns: &[&str],
-) -> Vec<ClassDef> {
+/// How a declaration's `is_abstract` flag is decided for a given node kind.
+///
+/// PR A (declaration-policy extraction) moved the previously-global abstractness
+/// logic into per-adapter specs. `LegacyTextContains` is a **behavior-preservation
+/// carrier only** — it reproduces the pre-refactor `full_text.contains(pattern)`
+/// substring test verbatim so the refactor stays bit-identical. It is NOT the
+/// recommended design; subsequent bug-fix PRs migrate each adapter off it onto
+/// `Always` / `Never` / `DirectModifier`.
+#[derive(Debug, Clone, Copy)]
+pub enum AbstractnessRule {
+    /// Always abstract (kind-level). Replaces the old `force_abstract` branch
+    /// for `interface_declaration` / `type_alias_declaration`.
+    Always,
+    /// Never abstract (concrete). E.g. Rust `struct_item`, JS classes.
+    Never,
+    /// Abstract iff a direct `modifier` child equals the given keyword
+    /// (e.g. C# `abstract`). Reads modifier child nodes, not substring —
+    /// immune to modifier ordering and nested-type text bleed. Used by PR C.
+    DirectModifier(&'static str),
+    /// Behavior-preservation ONLY: abstract iff the node's full text contains
+    /// any of these substrings. Mirrors pre-PR-A behavior exactly, including its
+    /// known false-positives (see KNOWN-DIVERGENCE markers in adapters).
+    LegacyTextContains(&'static [&'static str]),
+}
+
+/// How a declaration's name is extracted for a given node kind.
+///
+/// PR A only ships `FirstIdentifierFallback` (the pre-refactor behavior).
+/// `DirectField` / `DescendantField` exist for PR C (C#) and future adapter
+/// migrations but are unused by the five existing adapters.
+#[derive(Debug, Clone, Copy)]
+pub enum NameStrategy {
+    /// `node.child_by_field_name(field)`. Correct for C# where an `[Attribute]`
+    /// precedes the name and a naive first-identifier search would return the
+    /// attribute name.
+    DirectField(&'static str),
+    /// Find a descendant of kind `container_kind`, then read its `field`.
+    /// For Go, where `type_declaration` has no direct `name` field; the name
+    /// lives in the `type_spec` / `type_alias` child's own `name` field.
+    DescendantField {
+        container_kind: &'static str,
+        field: &'static str,
+    },
+    /// Pre-PR-A behavior: DFS for the first identifier-like node.
+    FirstIdentifierFallback,
+}
+
+/// One declaration kind an adapter recognizes, with its abstractness and name rules.
+#[derive(Debug, Clone, Copy)]
+pub struct DeclarationKindSpec {
+    pub kind: &'static str,
+    pub abstractness: AbstractnessRule,
+    pub name_strategy: NameStrategy,
+}
+
+impl DeclarationKindSpec {
+    pub const fn new(
+        kind: &'static str,
+        abstractness: AbstractnessRule,
+        name_strategy: NameStrategy,
+    ) -> Self {
+        Self {
+            kind,
+            abstractness,
+            name_strategy,
+        }
+    }
+}
+
+/// Walk AST, collect class/type declarations matching one of `specs` by node kind.
+///
+/// **Traversal is preserved verbatim from the pre-PR-A implementation**
+/// (stack-pop DFS, children pushed right-to-left) so that `defs` ordering — and
+/// therefore every downstream count and snapshot — stays bit-identical. The only
+/// change is that the recognized kind set and the abstractness/name rules now come
+/// from `specs` (adapter-owned) instead of a hard-coded global list.
+pub fn walk_class_defs(root: Node, source: &str, specs: &[DeclarationKindSpec]) -> Vec<ClassDef> {
     let source_bytes = source.as_bytes();
     let mut defs = Vec::new();
     let mut stack = vec![root];
     while let Some(n) = stack.pop() {
-        // Match actual class definition nodes (not class_body, class_heritage etc.)
         let k = n.kind();
-        let is_class_def = k == "class_definition"        // Python
-            || k == "class_declaration"                     // JS/TS
-            || k == "abstract_class_declaration"            // TS abstract
-            || k == "interface_declaration"                 // TS/JS interface (abstract — Martin)
-            || k == "type_alias_declaration"                // TS type alias (abstract surface)
-            || k == "struct_item"                           // Rust concrete
-            || k == "trait_item"                            // Rust abstract (trait)
-            || k == "enum_item"                             // Rust concrete (enum)
-            || k == "type_declaration"; // Go
-                                        // TS interface/type_alias abstract sayılır (Martin: interface = abstract contract).
-                                        // extract_class_def abstract_patterns'e bakar ama biz bu node kind'lerini
-                                        // doğrudan abstract işaretliyoruz — TS adapter'da pattern gerekmez.
-        let force_abstract = k == "interface_declaration" || k == "type_alias_declaration";
-        if is_class_def {
-            if let Some(mut def) = extract_class_def(&n, source_bytes, abstract_patterns) {
-                if force_abstract {
-                    def.is_abstract = true;
-                }
+        if let Some(spec) = specs.iter().find(|s| s.kind == k) {
+            if let Some(def) = extract_class_def(&n, source_bytes, spec) {
                 defs.push(def);
             }
         }
+        // Push children right-to-left → processed left-to-right (DFS order preserved)
         for i in (0..n.child_count()).rev() {
             if let Some(c) = n.child(i) {
                 stack.push(c);
@@ -288,12 +341,17 @@ pub fn walk_class_defs(
     defs
 }
 
-fn extract_class_def(node: &Node, source: &[u8], abstract_patterns: &[&str]) -> Option<ClassDef> {
-    let full_text = node.utf8_text(source).ok()?.to_string();
-    let is_abstract = abstract_patterns.iter().any(|&p| full_text.contains(p));
+fn extract_class_def(node: &Node, source: &[u8], spec: &DeclarationKindSpec) -> Option<ClassDef> {
+    // BIT-IDENTICAL: the pre-PR-A code did `node.utf8_text(source).ok()?` up front,
+    // so a node whose text is not valid UTF-8 was skipped entirely (no ClassDef),
+    // regardless of abstractness. Preserve that early-return exactly — otherwise
+    // Always/Never kinds (which no longer read the text for abstractness) would
+    // start emitting defs the old code dropped.
+    let _full_text = node.utf8_text(source).ok()?;
 
-    // Robust name search: walk children for first identifier/type_identifier
-    let name = find_first_identifier(node, source)?;
+    let is_abstract = compute_abstractness(node, source, &spec.abstractness);
+
+    let name = extract_declaration_name(node, source, &spec.name_strategy)?;
 
     // Robust method search: recursive walk for function_definition/method_definition
     let methods = find_methods(node, source);
@@ -304,6 +362,70 @@ fn extract_class_def(node: &Node, source: &[u8], abstract_patterns: &[&str]) -> 
         methods,
         source_location: node.start_byte(),
     })
+}
+
+fn compute_abstractness(node: &Node, source: &[u8], rule: &AbstractnessRule) -> bool {
+    match rule {
+        AbstractnessRule::Always => true,
+        AbstractnessRule::Never => false,
+        AbstractnessRule::DirectModifier(keyword) => {
+            // Scan direct children for a `modifier` node equal to `keyword`.
+            // C#: `public abstract partial class` → modifiers are direct children,
+            // order-independent; nested types are NOT direct children so their
+            // modifiers don't bleed into this node.
+            let mut found = false;
+            for i in 0..node.child_count() {
+                if let Some(c) = node.child(i) {
+                    if c.kind() == "modifier" {
+                        if let Ok(text) = c.utf8_text(source) {
+                            if text.trim() == *keyword {
+                                found = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            found
+        }
+        AbstractnessRule::LegacyTextContains(patterns) => {
+            // Pre-PR-A behavior verbatim: substring test over the node's full text.
+            match node.utf8_text(source) {
+                Ok(full_text) => patterns.iter().any(|&p| full_text.contains(p)),
+                Err(_) => false,
+            }
+        }
+    }
+}
+
+fn extract_declaration_name(node: &Node, source: &[u8], strategy: &NameStrategy) -> Option<String> {
+    match strategy {
+        NameStrategy::DirectField(field) => node
+            .child_by_field_name(field)
+            .and_then(|n| n.utf8_text(source).ok())
+            .map(|s| s.trim().to_string()),
+        NameStrategy::DescendantField {
+            container_kind,
+            field,
+        } => {
+            // DFS for the first descendant of `container_kind`, then read `field`.
+            let mut stack = vec![*node];
+            while let Some(n) = stack.pop() {
+                if n.kind() == *container_kind {
+                    if let Some(name_node) = n.child_by_field_name(field) {
+                        return name_node.utf8_text(source).ok().map(|s| s.trim().to_string());
+                    }
+                }
+                for i in (0..n.child_count()).rev() {
+                    if let Some(c) = n.child(i) {
+                        stack.push(c);
+                    }
+                }
+            }
+            None
+        }
+        NameStrategy::FirstIdentifierFallback => find_first_identifier(node, source),
+    }
 }
 
 fn find_first_identifier(node: &Node, source: &[u8]) -> Option<String> {
