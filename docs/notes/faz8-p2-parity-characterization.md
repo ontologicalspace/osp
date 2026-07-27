@@ -33,8 +33,9 @@ semantic divergence'ı** somut olarak ölçtü. Sonuç:
 production-reachable; ancak Cases 2/3 Q5 Vision gate'inde durduğu için
 **decision-drift (commit outcome değişimi) henüz ölçülemedi** — P2-0B.8 non-default
 `computed_raw` ile tamamlanana kadar decision-level etki kanıtlanmamış sayılır.
-**Ancak** `required_source` matrix (yeni) INV-T4 decision divergence'ı PredicateGate
-levelinde kanıtladı (SourceInsufficient).
+**Ancak** `required_source` matrix INV-T4 decision divergence'ı PredicateSet
+(`evaluate_completion`) levelinde kanıtladı — PredicateGate/pipeline level değil.
+Pipeline mutation-decision drift NotReached (Q5 Vision + Held confound).
 
 Bu rapor, üç ontolojik yol (subject authority için) + provenance authority boyutu
 için pro/con analizi sağlar ve kararı bekler.
@@ -63,7 +64,7 @@ için pro/con analizi sağlar ve kararı bekler.
 | `matching_scope` | affected_nodes = task scope | task predicate scope | parity |
 | `wide_affected_scope` | affected_nodes ⊃ task scope | task scope (dar) | **divergence** |
 | `removed_edge_external_source` | affected + removed_edges.from | task scope (harici node hariç) | divergence |
-| `delta_introduced_subject` | current_measured (always) | Unavailable OR SubjectScope fail | divergence |
+| `delta_introduced_subject` | current_measured (always) | UnavailableAllIntroduced (no prior baseline) | baseline-availability divergence |
 
 ---
 
@@ -84,20 +85,24 @@ için pro/con analizi sağlar ve kararı bekler.
 | Axis | V1 source | V2 source | Divergence |
 |---|---|---|---|
 | coupling | **Scip** | **TreeSitter** | **VAR** (INV-T4) |
-| cohesion | Scip | Scip | yok (axis override Scip) |
-| instability | Scip | TreeSitter | VAR |
-| entropy | Scip | Heuristic | VAR |
-| witness_depth | Scip | Heuristic | VAR |
+| cohesion | Scip | **Placeholder** | **VAR** |
+| instability | Scip | **TreeSitter** | **VAR** |
+| entropy | Scip | **Heuristic** | **VAR** |
+| witness_depth | Scip | **Heuristic** | **VAR** |
+
+V1=[Scip; 5], V2=[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic] (engine
+axis defaults). Exact snapshot test'lerde pinlenmiştir (review tur 4 P1-1).
 
 **Kritik yorum (review tur 2 P0-2):** Matching scope'ta subject/value parity KORUNSA
-bile, **source divergence subject authority'den BAĞIMSIZ** bir ontolojik boyut.
-V1 `provenanced_from_raw(..., Scip)` tüm axis'lere uniform Scip verir; V2 engine gerçek
-axis implementation source'ları. Bu, INV-T4 `required_source` predicate'lerini etkiler —
-`required_source = Some(Scip)` predicate V1'de pass, V2'de `SourceInsufficient`
-(required_source matrix aşağıda).
+bile, **source divergence subject authority'den BAĞIMSIZ** bir ontolojik boyut
+(Migration 2 — provenance authority). V1 `provenanced_from_raw(..., Scip)` tüm axis'lere
+uniform Scip verir; V2 engine gerçek axis implementation source'ları. Bu, INV-T4
+`required_source` predicate'lerini etkiler — `required_source = Some(Scip)` predicate
+V1'de `Completed`, V2'de `SourceInsufficient` (required_source matrix yukarıda).
 
-**Yorum:** "Matching scope'da divergence beklenmiyor" ifadesi review tur 2 ile çürütüldü.
-Subject authority divergence olmasa bile provenance authority divergence P2-1'i bloklar.
+**Pipeline mutation-decision drift (review tur 4 P0-2):** matching case PredicateGate'e
+ulaştı ama Held oldu (witness quorum) → mutation_decision surfaced değil → drift
+**NotReached** (ölçülemedi), "parity" DEĞİL.
 
 ---
 
@@ -183,21 +188,38 @@ Fix: task scope `Node(10000)` → gerçek AllMembersIntroducedByDelta yolu çal�
 
 ---
 
-## Divergence Özeti (frozen fixture incidence — review tur 3 ayrım)
+## Divergence Özeti (frozen fixture incidence — review tur 4 ayrım)
 
-**Frozen fixture corpus (4 case):**
+**Önemli (review tur 4 P0-1):** Divergence üç BAĞIMSIZ ontolojik boyutta ölçülür —
+subject set, axis value, baseline availability. Bunlar aynı sütunda birleştirilmemeli.
+Ayrıca pipeline mutation-decision drift için Q5 Vision confound: Cases 2/3/4'de Q5
+Vision veya Held'da durur → PredicateGate mutation decision **NotReached** (ölçülemedi),
+**0 (ölçüldü, eşit) DEĞİL**.
 
-| Class | Tested | Subject/value divergence | Source divergence | Decision-drift (pipeline) |
-|---|---:|---:|---:|---:|
-| matching_scope | 1 | 0 (parity) | **1** (INV-T4) | 0 (Q5 Vision'da durdu, required_source=None → parity) |
-| wide_affected_scope | 1 | 1 | 1 | 0 (Q5 Vision'da durdu) |
-| removed_edge_external_source | 1 | 1 | 1 | 0 (Q5 Vision'da durdu) |
-| delta_introduced_subject | 1 | 1 (baseline semantics) | 1 | **0** (kanıtlamadı — Q5 Vision'da durdu) |
-| **Toplam (frozen fixture)** | **4** | **3** | **4** | **0** |
+**Frozen fixture corpus (4 case) — üç boyutta ayrı incidence:**
+
+| Class | Subject-set div | Axis-value div | Baseline-avail div | Source div | Pipeline mutation-decision drift |
+|---|---:|---:|---:|---:|---|
+| matching_scope | 0 (parity) | 0 (parity) | 0 (V1 None / V2 Available) | **1** (INV-T4) | NotReached (Held) |
+| wide_affected_scope | **1** | **1** | 0 (V1 None / V2 Available) | **1** | NotReached (Q5 Vision) |
+| removed_edge_external_source | **1** | **1** | 0 (V1 None / V2 Available) | **1** | NotReached (Q5 Vision) |
+| delta_introduced_subject | **0** (parity) | 0 (parity) | **1** (V1 None / V2 UnavailableAllIntroduced) | **1** | NotReached (Held) |
+| **Toplam (frozen fixture)** | **2/4** | **2/4** | **1/4** | **4/4** | **NotReached 4/4** |
+
+**Kritik (review tur 4 P0-1):** Case 4 subject/value divergence GÖSTERMEZ — subject
+authority divergence yok (V1 affected {10000} ile V2 task scope {10000} aynı), axis
+value da aynı (aynı 1-node centroid). Ayrışan tek boyut **baseline availability**
+(V1 current_measured her zaman, V2 UnavailableAllIntroduced). Bu, subject authority +
+provenance authority'den BAĞIMSIZ **üçüncü** bir migration/policy boyutudur (aşağıda).
+
+**Pipeline mutation-decision drift:** Tüm 4 case NotReached — Cases 2/3 Q5 Vision'da
+durur (placeholder `computed_raw` → theta ihlali), Case 1/4 PredicateGate'e ulaştı ama
+Held oldu (mutation_decision EngineCommitResult::Held'da surfaced değil). Pipeline-level
+decision-drift ölçümü P2-0B.8 (non-default `computed_raw` + Evaluated outcome) bekliyor.
 
 **Inline required_source matrix (frozen corpus DIŞI ayrı yüzey, 5 case):**
 
-| `required_source` | Decision-drift |
+| `required_source` | PredicateSet decision divergence |
 |---|---:|
 | `None` | 0 |
 | `Some(Scip)` | **1** (V1 Completed, V2 SourceInsufficient) |
@@ -265,9 +287,12 @@ levelinde kanıtladı. Pipeline-level (commit outcome) decision-drift ölçümü
 
 ---
 
-## İki Ayrı Semantic Migration (review tur 3 ontolojik değerlendirme)
+## Üç Ayrı Semantic Migration (review tur 4 ontolojik değerlendirme)
 
-P2-1, **iki ayrı** semantic migration kararını içerir. Bunlar birleştirilmemeli —
+P2-1, **üç ayrı** semantic migration/policy kararını içerir. Bunlar birleştirilmemeli —
+subject authority, provenance authority ve baseline availability aynı ontolojik karar
+değildir (review tur 4 P0-1 bulgusu: Case 4 subject/value parity KORUR ama baseline
+availability diverge eder).
 
 ### Migration 1: Subject Authority
 
@@ -278,11 +303,11 @@ V1 subject = `proposal.affected_nodes` (LLM-declared); V2 subject =
 2. Task-authoritative migration (Faz 8a atomik cutover)
 3. Proposal invariant'ı (`affected_nodes == task.predicate.scope`)
 
-### Migration 2: Provenance Authority (INV-T4) — **normative, "seçenek" değil**
+### Migration 2: Provenance Authority (INV-T4) — normatif hedef
 
 V1 `provenanced_from_raw(..., Scip)` tüm axis'lere uniform Scip verir; V2 engine gerçek
-per-axis source'ları (TreeSitter/Placeholder/Heuristic). Bu **normatif hedef değil
-seçenek**: Paper 1/Paper 2 epistemik ilkesi "ölçüm kaynağı gerçekte neyse o
+per-axis source'ları (TreeSitter/Placeholder/Heuristic). Bu bir seçenek DEĞİL; normatif
+hedeftir — Paper 1/Paper 2 epistemik ilkesi "ölçüm kaynağı gerçekte neyse o
 taşınmalıdır; bilinmeyen V1 SCIP olarak yeniden etiketlenmemelidir." Verilmesi gereken
 karar:
 
@@ -292,6 +317,27 @@ karar:
 V1 uniform Scip davranışı compatibility gerçeğidir; V2 engine-native per-axis
 provenance normatif hedeftir. `required_source` matrix (yukarıda) bu migration'ın
 PredicateSet-level decision impact'ini kanıtladı.
+
+### Migration 3: Baseline-Availability Policy (review tur 4 — yeni boyut)
+
+Case 4'ün ortaya çıkardığı üçüncü boyut: **delta ile tamamen yeni oluşturulan subject
+için geçmiş baseline yoksa sistem ne yapmalı?**
+
+- V1: `current_measured` her zaman var (engine space centroid) → loss_before hesaplanır.
+- V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` → geçmiş baseline yok.
+
+Test-only `project_v1_loss_before_compatibility` bu yokluğu `loss_before = loss_after`
+(fail-closed → improved=false → Reject) olarak uydurma scalar'a çevirir. Bu yalnızca
+compatibility tekniği DEĞİL; **davranışsal bir politikadır** — sessizce Reject seçilmiş
+olur. Verilmesi gereken karar:
+
+> Delta-introduced subject için geçmiş baseline yoksa: `Reject`, `Held/Suspended`,
+> `RequireOperatorApproval` veya başka typed bir sonuç mu üretilmeli?
+
+**INV-T9 normatif durumu:** Eğer INV-T9 bu sorunu zaten normatif olarak kapatıyorsa
+(test-only Reject adaptasyonu yerine), yeni migration kararı açmak yerine ilgili
+INV-T9 sonucuna açık referans + exact davranış testi eklenmelidir. Bu rapor o referansı
+içermez — P2-0B kalan iş veya P2-1 planında netleştirilmeli.
 
 ### Reviewer uzun vadeli yön önerisi
 
@@ -308,6 +354,12 @@ INV-T2 operator-defines-target). Yol 3 (`affected == scope`) reddedilir — subj
 ayrımını çökertir (bir delta `Node(1)` hedeflerken Node 9'u yapısal olarak etkileyebilir;
 bu meşru).
 
+Provenance tarafında V2 engine-native per-axis source normatif hedeftir; Paper 2 INV-T4
+bunu doğrudan destekler. Baseline-availability tarafında OSP'nin epistemik çizgisi
+uydurma scalar baseline yerine typed Unavailable korumayı tercih eder; sonrasında
+Held/Suspended, operator escalation veya fail-closed rejection politikalarından hangisi
+uygulanacağı ayrıca belirlenir.
+
 ---
 
 ## Ontolojik Subject Authority Kararı — Üç Yol (Migration 1 detayı)
@@ -321,8 +373,10 @@ Subject authority migration için üç yol. Provenance migration (yukarıda) ayr
 compatibility producer.
 
 **Pro:**
-- V1 semantic parity tam korunur (Case 2/3/4 divergence'ı kapanır)
-- P2-1 caller migration güvenli açılır
+- V1 subject-set/value semantic parity korunur (Case 2/3 subject-authority divergence kapanır)
+- **Not (review tur 4 P0-1):** Case 4'te subject authority divergence zaten yoktu — Yol 1
+  Case 4 baseline-availability divergence'ı KAPATMAZ (V2 hâlâ UnavailableAllIntroduced).
+- P2-1 caller migration güvenli açılır (subject authority için)
 - navigator/MCP mevcut `affected_nodes` declaration model'ini korur
 
 **Con:**
@@ -338,7 +392,9 @@ birleşik atomik cutover. V1 davranış değişir (affected_nodes geniş scope �
 
 **Pro:**
 - En temiz ontolojik sonuç (tek subject authority: task scope)
-- Case 2/3/4 divergence'ı "expected semantic change" olur (regolden değil, kabul)
+- Case 2/3 subject-authority divergence'ı "expected semantic change" olur (regolden değil, kabul)
+- **Not (review tur 4 P0-1):** Case 4 subject authority divergence yoktur — Yol 2 Case 4
+  baseline-availability divergence'ı kapatmaz (Migration 3 ayrı).
 - V2 invariant'ı tam uygulanır
 - Geçici compatibility producer YOK
 
@@ -390,21 +446,29 @@ before-measurement). **P2-0B, yapısal önkoşulların yeterli OLMADIĞINI** som
 gösterdi:
 
 - **Yapısal:** ✅ Probe→final akış, type alias, harness çalışıyor
-- **Semantic (subject authority):** ❌ Exact V1/V2 parity sağlanamaz (Case 2/3/4 divergence)
+- **Semantic (subject authority):** ❌ Exact parity sağlanamaz (Case 2/3 subject-set divergence)
 - **Semantic (provenance authority, INV-T4):** ❌ Matching scope'ta BİLE source divergence
-  + `required_source` matrix decision divergence (Scip/TreeSitter)
-- **Ontolojik:** ⚠️ **İki** authority kararı gerekli:
-  1. Subject authority (Yol 1/2/3 — aşağıda)
-  2. Provenance authority — V1 uniform Scip override vs V2 gerçek axis source'ları
+  + `required_source` matrix PredicateSet decision divergence (Scip/TreeSitter)
+- **Semantic (baseline availability):** ❌ Case 4 baseline-availability divergence
+  (delta-introduced subject, V1 current_measured vs V2 UnavailableAllIntroduced) —
+  subject/value parity KORUNSA bile ayrışan üçüncü boyut
+- **Pipeline mutation-decision drift:** ⏸ NotReached (Cases Q5 Vision/Held'da durur) —
+  P2-0B.8 bekliyor
+- **Ontolojik:** ⚠️ **Üç** migration/policy kararı gerekli (yukarıda detay):
+  1. Subject authority (Yol 1/2/3)
+  2. Provenance authority (INV-T4 normatif hedef) — migration sınırı + backward-compat
+  3. Baseline-availability policy — delta-introduced subject için Reject/Held/OperatorApproval
 
-**P2-1 durumu:** `BLOCKED — iki ontolojik authority kararı required (subject + provenance)`
+**P2-1 durumu:** `BLOCKED — üç semantic migration/policy kararı required`
 
 **Reviewer önerisi (uzun vadeli yön):** Task-authoritative migration (Yol 2) —
 `task.predicate.scope → subject authority`, `structural delta → impact authority`,
 `affected_nodes → agent-declared impact hint/telemetry`. Yol 3 (affected == scope)
 reddedilir çünkü subject/impact ayrımını çökertir. Provenance authority için V1
-uniform Scip override'dan V2 gerçek axis source'larına geçiş tercih edilir (INV-T4
-conformance).
+uniform Scip override'dan V2 gerçek axis source'larına geçiş normatif hedef (INV-T4).
+Baseline-availability için OSP epistemik çizgisi uydurma scalar yerine typed Unavailable
+korumayı tercih eder; sonrasında Held/Suspended, operator escalation veya fail-closed
+rejection politikalarından hangisi uygulanacağı ayrıca belirlenir.
 
 ---
 
@@ -422,6 +486,7 @@ conformance).
 | `wide_affected_scope_shows_subject_authority_divergence` | measurement_v1_v2_parity.rs | ✅ |
 | `removed_edge_external_source_shows_affected_contamination` | measurement_v1_v2_parity.rs | ✅ |
 | `delta_introduced_subject_shows_baseline_semantics_divergence` | measurement_v1_v2_parity.rs | ✅ |
+| `required_source_matrix_shows_provenance_authority_divergence` | measurement_v1_v2_parity.rs | ✅ (review tur 3: gerçek `PredicateSet::evaluate_completion`) |
 
 ---
 

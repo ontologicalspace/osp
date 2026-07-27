@@ -63,7 +63,6 @@ pub struct CharacterizationCase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CaseClass {
-    /// task.predicate.scope == proposal.affected_nodes — parity expected.
     MatchingScope,
     /// proposal.affected_nodes ⊃ task.predicate.scope — known production-reachable divergence.
     WideAffectedScope,
@@ -324,13 +323,14 @@ fn canonical_json_bytes(value: &serde_json::Value) -> Vec<u8> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Case 001: matching-single-node (baseline parity)
+// Case 001: matching-single-node (subject/value parity, source divergence)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Task targets Node(1) via `Node(1)` predicate scope; proposal declares
 /// `affected_nodes=[1]`. Node 1 pre-exists in space.
 ///
-/// Subject set identical V1/V2 → all metrics parity expected. Baseline parity case.
+/// Subject set + axis value bits parity (V1/V2 aynı centroid). Source divergence INV-T4
+/// (V1 uniform Scip override vs V2 engine axis defaults — Migration 2).
 fn matching_single_node_001() -> CharacterizationCase {
     use osp_core::agent::DeltaProposal;
     use osp_core::space::{Node, NodeKind};

@@ -39,7 +39,7 @@
       "source": "synthetic_adversarial",
       "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline Unavailable (AllMembersIntroducedByDelta) → fail-closed; V1 always has current_measured.",
       "builder_digest_blake3": "5513da86f5f4b19b8ad74e808c23917ac344d1c974fb6a98f9c6ee7b0d4592cb",
-      "notes": "V2 'progress unprovable without baseline' semantics vs V1 'always has current_measured'. Decision divergence expected."
+      "notes": "Baseline-availability divergence (3rd migration dimension): V1 current_measured always vs V2 UnavailableAllIntroduced. Subject/value parity (no subject-authority divergence). Pipeline mutation-decision drift NotReached (Held). Decision-level impact pending P2-0B.8."
     }
   ]
 }

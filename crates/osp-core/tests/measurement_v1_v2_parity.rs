@@ -92,12 +92,34 @@ fn matching_scope_baseline_case_shows_parity() {
         case.id
     );
 
-    // 2. 5-axis value bits parity.
+    // 2. 5-axis value bits — exact golden snapshot (review tur 4 P1-1).
+    // Önceki assert_eq!(vals_v1, vals_v2) golden DEĞİLDİ (ikisi birlikte değişebilir).
+    // Artık her iki taraf ayrı exact pin — measurement implementation değişirse stale.
     let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
+    eprintln!("  matching value bits: V1={:?} V2={:?}", vals_v1, vals_v2);
     assert_eq!(
-        vals_v1, vals_v2,
-        "matching scope: 5-axis value bits parity; case {}\nV1={:?}\nV2={:?}",
-        case.id, vals_v1, vals_v2
+        vals_v1,
+        [
+            4602678819172646912u64,
+            4602678819172646912,
+            4607182418800017408,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V1 matching 1-node centroid exact bits; case {}",
+        case.id
+    );
+    assert_eq!(
+        vals_v2,
+        [
+            4602678819172646912u64,
+            4602678819172646912,
+            4607182418800017408,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V2 matching 1-node centroid exact bits (subject parity); case {}",
+        case.id
     );
 
     // 3. 5-axis sources — **matching scope'ta BİLE divergence beklenir** (review P0-2).
@@ -535,22 +557,20 @@ fn removed_edge_external_source_shows_affected_contamination() {
     );
 }
 
-/// `delta-introduced-subject-001`: V2 baseline semantics divergence.
+/// `delta-introduced-subject-001`: baseline-availability divergence (3rd migration).
 ///
 /// Subject node 10000 delta-introduced (base space'te yok, delta ile geliyor —
-/// `node_from_spec` id 10_000+0).
-/// - V1: current_measured her zaman var → loss_before hesaplanır → improvement evaluable.
+/// `node_from_spec` id 10_000+0). **Review tur 4 P0-1:** subject authority divergence
+/// YOK (V1 affected={10000} == V2 task scope={10000}). Ayrışan tek ontolojik boyut:
+/// **baseline availability**.
+/// - V1: `current_measured` her zaman var → loss_before hesaplanır → improvement evaluable.
 /// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` →
-///   project_v1_loss_before_compatibility fail-closed (loss_before=loss_after →
-///   improved=false → Reject).
+///   project_v1_loss_before_compatibility fail-closed (loss_before=loss_after).
 ///
-/// **Review P0-1 fix:** Önceki fixture task scope `Node(1)` + delta `NewNodeSpec`
-/// (id=10000) kullanıyordu → kimlik uyuşmazlığı → SubjectScope hatası (baseline
-/// unavailable DEĞİL). Şimdi task scope `Node(10000)` → gerçek AllMembersIntroducedByDelta.
-///
-/// **Karakterizasyon bulgusu:** Bu case V1'in "her zaman current_measured var"
-/// semantiği ile V2'nin "baseline yoksa progress kanıtlanamaz" (fail-closed)
-/// semantiği arasındaki ontolojik ayrımın somut kanıtı.
+/// Bu, subject authority + provenance authority'den **bağımsız üçüncü** bir migration
+/// boyutudur: delta-introduced subject için geçmiş baseline yoksa ne yapılsın?
+/// (Reject / Held-Suspended / RequireOperatorApproval — test-only projection şu an
+/// sessizce Reject policy'sini uyguluyor).
 #[test]
 fn delta_introduced_subject_shows_baseline_semantics_divergence() {
     let case = build_all_cases()
@@ -559,25 +579,96 @@ fn delta_introduced_subject_shows_baseline_semantics_divergence() {
         .expect("DeltaIntroducedSubject case olmalı");
     let (obs_v1, obs_v2) = observe_case(&case);
 
-    // V2 measurement: Produced + UnavailableAllIntroduced (kesin pin — review P0-1).
-    // Önceki "Unavailable VEYA SubjectScope" toleransı characterization için fazla
-    // genişti; fixture düzeltmesi ile artık exact beklenen observation dondurulur.
+    // === Subject set parity (P0-1: subject authority divergence YOK) ===
+    let (subj_v1, subj_v2) = measurement_subjects(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        sorted(&subj_v1),
+        vec![10_000],
+        "V1 affected = {{10000}} (case design); got {subj_v1:?}"
+    );
+    assert_eq!(
+        sorted(&subj_v2),
+        vec![10_000],
+        "V2 subject = {{10000}} (task scope); got {subj_v2:?}"
+    );
+    assert_eq!(
+        sorted(&subj_v1),
+        sorted(&subj_v2),
+        "Case 4 SUBJECT AUTHORITY PARITY: V1 affected == V2 task scope (ikisi {{10000}}). \
+         Subject authority divergence YOK — ayrışan boyut baseline availability."
+    );
+
+    // === Axis value bits parity (subject aynı → centroid aynı) ===
+    let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
+    eprintln!(
+        "  delta-introduced value bits: V1={:?} V2={:?}",
+        vals_v1, vals_v2
+    );
+    // Subject aynı ({10000}) → after centroid aynı → value bits eşit.
+    assert_eq!(
+        vals_v1,
+        [
+            0u64,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V1 delta-introduced 1-node centroid exact bits; case {}",
+        case.id
+    );
+    assert_eq!(
+        vals_v2,
+        [
+            0u64,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557
+        ],
+        "V2 delta-introduced 1-node centroid exact bits (subject parity); case {}",
+        case.id
+    );
+    assert_eq!(
+        vals_v1, vals_v2,
+        "value parity (subject authority divergence yok)"
+    );
+
+    // === Source divergence (INV-T4 — provenance authority, exact snapshot) ===
+    use osp_core::coords::MetricSource;
+    let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        src_v1,
+        [MetricSource::Scip; 5],
+        "V1 uniform Scip; case {}",
+        case.id
+    );
+    assert_eq!(
+        src_v2,
+        [
+            MetricSource::TreeSitter,
+            MetricSource::Placeholder,
+            MetricSource::TreeSitter,
+            MetricSource::Heuristic,
+            MetricSource::Heuristic,
+        ],
+        "V2 engine axis defaults; case {}",
+        case.id
+    );
+
+    // === Baseline availability divergence (3RD migration dimension — P0-1) ===
+    // Bu, subject/value/source'dan BAĞIMSIZ bir ontolojik boyut.
     match &obs_v2.measurement {
         MeasurementObservation::Produced { baseline_kind, .. } => {
             assert_eq!(
                 *baseline_kind,
                 Some(common::BaselineKind::UnavailableAllIntroduced),
-                "delta-introduced subject (task scope Node(10000) = delta node id) → \
-                 V2 baseline UnavailableAllIntroduced (fail-closed). Got baseline_kind: {baseline_kind:?}"
+                "V2 baseline UnavailableAllIntroduced (delta-introduced subject, no prior baseline); case {}",
+                case.id
             );
         }
-        other => panic!(
-            "V2 measurement Produced+UnavailableAllIntroduced olmalı (fixture P0-1 fix \
-             ile subject node delta'da mevcut); got {other:?}"
-        ),
+        other => panic!("V2 Produced+UnavailableAllIntroduced olmalı; got {other:?}"),
     }
-
-    // V1 baseline tracking yapmaz (None) — current_measured her zaman var.
     match &obs_v1.measurement {
         MeasurementObservation::Produced { baseline_kind, .. } => {
             assert_none_or_not_unavailable(
@@ -588,17 +679,13 @@ fn delta_introduced_subject_shows_baseline_semantics_divergence() {
         other => panic!("V1 measurement Produced olmalı; got {other:?}"),
     }
 
-    // **Review tur 3 P0-2 fix:** Pipeline (decision) karşılaştırması.
-    // Case 4'te V1/V2 pipeline observation'ları log'la — decision-drift var mı yok mu
-    // gerçek observation ile göster. Rapor "decision-drift = 1" iddia ediyordu ama
-    // test kanıtlamıyordu. Bu case Q5 Vision'da duruyor (placeholder computed_raw),
-    // yani PredicateGate'e ulaşmıyor — gerçek mutation decision drift BURADA ölçülemez.
+    // === Pipeline observation (log — NotReached N/A mutation decision) ===
+    // Case 4 Q5 PASSED (coupling 0.0 ≤ vision bound) → PredicateGate'e ulaştı → Held
+    // (witness quorum). predicate_completion/mutation_decision surfaced DEĞİL (Held
+    // EngineCommitResult'da outcome taşımaz). Mutation decision drift = NotReached.
     eprintln!("  delta-introduced V1 pipeline: {:?}", obs_v1.pipeline);
     eprintln!("  delta-introduced V2 pipeline: {:?}", obs_v2.pipeline);
-    // Pipeline observation'larını dondur (rapor için) — ama decision-drift iddiası
-    // KALDIRILDI (Cases Q5 Vision'da durur, PredicateGate'e ulaşmaz). Bu case sadece
-    // baseline-semantics divergence kanıtlar (V2 fail-closed loss_before projection).
-    // P2-0B.8 (non-default computed_raw ile Q5 geçişi) decision-drift ölçümü için gerekli.
+    // Pipeline decision-drift: mutation_decision None (Held surfaced değil) → NotReached.
 }
 
 fn assert_none_or_not_unavailable(baseline_kind: &Option<common::BaselineKind>, msg: &str) {
