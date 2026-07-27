@@ -69,13 +69,18 @@ impl LanguageAdapter for JavaScriptAdapter {
             Some(t) => t,
             None => return Vec::new(),
         };
-        // JS has no abstract keyword — all classes are concrete (is_abstract=false)
-        shared::walk_class_defs(
-            tree.root_node(),
-            source,
+        // JS has no abstract keyword — all classes are concrete (is_abstract=false).
+        // Old code passed the global is_class_def list + "__NEVER_MATCH__"; the only
+        // kind the JS grammar actually produces from that list is `class_declaration`
+        // (JS grammar has no `interface_declaration`). Anonymous `class` expression
+        // nodes were never in the list → still not counted.
+        use shared::{AbstractnessRule, DeclarationKindSpec, NameStrategy};
+        const JS_SPECS: &[DeclarationKindSpec] = &[DeclarationKindSpec::new(
             "class_declaration",
-            &["__NEVER_MATCH__"], // JS has no abstract → always false
-        )
+            AbstractnessRule::Never,
+            NameStrategy::FirstIdentifierFallback,
+        )];
+        shared::walk_class_defs(tree.root_node(), source, JS_SPECS)
     }
 }
 
