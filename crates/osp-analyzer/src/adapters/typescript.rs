@@ -72,12 +72,38 @@ impl LanguageAdapter for TypeScriptAdapter {
                 Some(t) => t,
                 None => return Vec::new(),
             };
-        shared::walk_class_defs(
-            tree.root_node(),
-            source,
-            "class_declaration",
-            &["abstract class", "interface "],
-        )
+        // PR A bit-identical mapping (grammar inventory verified 2026-07-24):
+        //   class_declaration          → LegacyTextContains (old substring test)
+        //   abstract_class_declaration → Always (old: matched via substring "abstract class")
+        //   interface_declaration      → Always (old force_abstract)
+        //   type_alias_declaration     → Always (old force_abstract)
+        // PRESERVED EXCLUSION: `enum_declaration` exists in the TS grammar but was
+        // never in the old is_class_def list → still not counted. Do NOT add it.
+        // PRESERVED EXCLUSION: anonymous `class` expression node → not counted.
+        use shared::{AbstractnessRule, DeclarationKindSpec, NameStrategy};
+        const TS_SPECS: &[DeclarationKindSpec] = &[
+            DeclarationKindSpec::new(
+                "class_declaration",
+                AbstractnessRule::LegacyTextContains(&["abstract class", "interface "]),
+                NameStrategy::FirstIdentifierFallback,
+            ),
+            DeclarationKindSpec::new(
+                "abstract_class_declaration",
+                AbstractnessRule::Always,
+                NameStrategy::FirstIdentifierFallback,
+            ),
+            DeclarationKindSpec::new(
+                "interface_declaration",
+                AbstractnessRule::Always,
+                NameStrategy::FirstIdentifierFallback,
+            ),
+            DeclarationKindSpec::new(
+                "type_alias_declaration",
+                AbstractnessRule::Always,
+                NameStrategy::FirstIdentifierFallback,
+            ),
+        ];
+        shared::walk_class_defs(tree.root_node(), source, TS_SPECS)
     }
 }
 
