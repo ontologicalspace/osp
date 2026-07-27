@@ -582,16 +582,15 @@ fn removed_edge_external_source_001() -> CharacterizationCase {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Task predicate scope node'ları tamamen delta ile introduced (space'te YOK).
-/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` (typed
-///   representation — geçmiş baseline yok).
-/// - V1: current_measured her zaman var → loss_before hesaplanır.
+/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` (typed).
+/// - V1: `DefaultFallback` — subject base'de yok → `compute_raw_from_delta` empty
+///   positions → `RawPosition::default()` (sıfır koordinat).
 ///
-/// **Review tur 5 P0-1:** Bu case **baseline representation divergence** kanıtlar
-/// (V1 baseline typed değil, V2 UnavailableAllIntroduced). **Policy/decision
-/// divergence KANITLAMAZ** — Case 4 predicate `Coupling ≤ 0.5` + measured coupling 0.0
-/// → `PredicateSetResult::Completed` → `AcceptAsCompleted` (completion-first decision
-/// core improved'a bakmaz). Unavailable projection'ın decision etkisi SADECE
-/// `NotCompleted` + improvement-sensitive policy dalında observable (P2-0B.8 fixture).
+/// **Review tur 7-9:** Bu case **baseline epistemic availability divergence** kanıtlar
+/// (V1 yokluk → sıfır, V2 typed UnavailableAllIntroduced). **Policy/decision divergence
+/// KANITLAMAZ** — Case 4 `Completed` → `AcceptAsCompleted` (completion-first core
+/// improved'a bakmaz). Policy etkisi SADECE `NotCompleted` + improvement-sensitive policy
+/// dalında observable (P2-0B.8 fixture).
 ///
 /// Bu case V2'nin "baseline yoksa progress kanıtlanamaz" semantiğini V1'in
 /// "her zaman current_measured var" semantiğinden ayırır.
@@ -664,8 +663,9 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         class: CaseClass::DeltaIntroducedSubject,
         source: CaseSource::SyntheticAdversarial,
         description: "Subject node 10000 delta-introduced (node_from_spec id). \
-            V2 baseline UnavailableAllIntroduced (representation divergence); \
-            V1 always has current_measured. Policy/decision impact pending P2-0B.8."
+            V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty \
+            positions → RawPosition::default). Availability divergence; policy/decision \
+            impact hipotez (P2-0B.8)."
             .to_string(),
         space,
         task,
@@ -721,7 +721,7 @@ pub enum MeasurementObservation {
     Failed { error: MeasurementFailureClass },
     /// V1 path measurement'ı tracking yapmaz (compute_raw_from_delta infallible).
     ///
-    /// **Not:** V1 harness şu an `Produced { subject, baseline_kind: None }`
+    /// **Not:** V1 harness `Produced { subject, baseline: LegacyComputed{...} }`
     /// üretir — bu varyant hiçbir builder tarafından üretilmez. Future-use: V1'in
     /// "measurement tracking yok" durumunu explicit temsil etmek için ayrılabilir.
     /// Şu an sadece matcher'larda referans edilir.

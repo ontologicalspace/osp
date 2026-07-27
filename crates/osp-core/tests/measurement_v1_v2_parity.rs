@@ -642,6 +642,8 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         );
         assert_eq!(*sources, [osp_core::coords::MetricSource::Scip; 5]);
         assert_eq!(*loss_bits, 4604544271217802189);
+    } else {
+        panic!("V1 LegacyComputed baseline olmalı; case {}", case.id);
     }
     if let MeasurementObservation::Produced {
         baseline:
@@ -831,6 +833,8 @@ fn removed_edge_external_source_shows_affected_contamination() {
         );
         assert_eq!(*sources, [osp_core::coords::MetricSource::Scip; 5]);
         assert_eq!(*loss_bits, 4604544271217802189);
+    } else {
+        panic!("V1 LegacyComputed baseline olmalı; case {}", case.id);
     }
     if let MeasurementObservation::Produced {
         baseline:
@@ -871,21 +875,21 @@ fn removed_edge_external_source_shows_affected_contamination() {
     }
 }
 
-/// `delta-introduced-subject-001`: baseline-availability representation divergence
-/// (review tur 5: policy/decision divergence hipotez, P2-0B.8 fixture gerek).
+/// `delta-introduced-subject-001`: baseline epistemic availability divergence
+/// (review tur 7-9: availability divergence kanıtlandı, policy/decision hipotez).
 ///
 /// Subject node 10000 delta-introduced (base space'te yok, delta ile geliyor —
-/// `node_from_spec` id 10_000+0). **Review tur 4 P0-1:** subject authority divergence
-/// YOK (V1 affected={10000} == V2 task scope={10000}). Ayrışan tek ontolojik boyut:
-/// **baseline availability representation**.
-/// - V1: `current_measured` her zaman var → loss_before hesaplanır.
+/// `node_from_spec` id 10_000+0). Subject authority divergence YOK (V1 affected={10000}
+/// == V2 task scope={10000}). Ayrışan ontolojik boyut: **baseline epistemic availability**.
+/// - V1: `DefaultFallback` — subject base'de yok → `compute_raw_from_delta` empty
+///   positions → `RawPosition::default()` (sıfır koordinat).
 /// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` (typed).
 ///
-/// **Review tur 5 P0-1:** Bu case **representation divergence** kanıtlar (V1 baseline
-/// typed değil, V2 UnavailableAllIntroduced). **Policy/decision divergence KANITLAMAZ** —
-/// Case 4 predicate `Coupling ≤ 0.5` + measured coupling 0.0 → `Completed` →
-/// `AcceptAsCompleted` (completion-first decision core improved'a bakmaz). Unavailable
-/// projection'ın decision etkisi SADECE `NotCompleted` + improvement-sensitive policy
+/// **Review tur 7-9:** Bu case **availability divergence** kanıtlar (V1 yokluk → sıfır,
+/// V2 typed Unavailable). **Policy/decision divergence KANITLAMAZ** — Case 4 predicate
+/// `Coupling ≤ 0.5` + measured coupling 0.0 → `Completed` → `AcceptAsCompleted`
+/// (completion-first decision core improved'a bakmaz). Policy etkisi SADECE `NotCompleted`
+/// + improvement-sensitive policy dalında observable (P2-0B.8 fixture).
 /// dalında observable (P2-0B.8 fixture).
 #[test]
 fn delta_introduced_subject_shows_baseline_epistemic_availability_divergence() {

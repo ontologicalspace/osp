@@ -69,7 +69,7 @@ Bu rapor, üç ontolojik boyut için pro/con analizi sağlar ve kararı bekler.
 | `matching_scope` | affected_nodes = task scope | task predicate scope | parity |
 | `wide_affected_scope` | affected_nodes ⊃ task scope | task scope (dar) | **divergence** |
 | `removed_edge_external_source` | affected + removed_edges.from | task scope (harici node hariç) | divergence |
-| `delta_introduced_subject` | current_measured (always) | UnavailableAllIntroduced (no prior baseline) | baseline-availability divergence |
+| `delta_introduced_subject` | DefaultFallback (sıfır koordinat) | UnavailableAllIntroduced (typed) | epistemic availability divergence |
 
 ---
 
@@ -129,7 +129,7 @@ durdu (placeholder `computed_raw` → theta ihlali) → PredicateGate **NotReach
 | Entropy | 0.5 | 0.5 | eşit |
 | Witness depth | 0.4094 | 0.4094 | eşit |
 | Source provenance | uniform `Scip` (hepsi) | karışık (`TreeSitter`/`Placeholder`/`Heuristic`) | **farklı** |
-| Baseline | None (current_measured) | Available | farklı tracking |
+| Baseline | LegacyComputed (AffectedCentroid) | Available | schema structural, availability parity |
 | Pipeline | StoppedBeforeCommit (Vision) | StoppedBeforeCommit (Vision) | eşit (tesadüfen — Q5 her ikisinde de fail) |
 
 **Kritik yorum:**
@@ -164,7 +164,7 @@ kodu ile somutlaştı.
 
 ---
 
-### Case 4: `delta-introduced-subject-001` (baseline representation divergence) ✅
+### Case 4: `delta-introduced-subject-001` (baseline epistemic availability divergence) ✅
 
 **Girdi:** Task `Node(10000)` scope, node 10000 delta-introduced via `NewNodeSpec`
 (`node_from_spec` id = 10_000 + 0).
@@ -193,7 +193,7 @@ decision etkisi **observable DEĞİL**. Decision etkisi SADECE `NotCompleted` +
 improvement-sensitive policy dalında olabilir — o fixture P2-0B.8 gerek.
 
 **Özet (review tur 6 canonical):**
-- Representation divergence: **kanıtlandı** (V1 typed değil vs V2 UnavailableAllIntroduced).
+- Availability divergence: **kanıtlandı** (V1 DefaultFallback — yokluk → sıfır koordinat — vs V2 UnavailableAllIntroduced).
 - Policy/decision divergence: **kanıtlanmadı** (hipotez).
 - Case 4 exact mutation decision: **V1/V2 AcceptAsCompleted parity**.
 - P2-0B.8: `NotCompleted` + `AcceptImprovement` policy fixture gerekli.
@@ -212,15 +212,15 @@ baseline gözleminde representation/availability/value-source/decision ayrımı 
 — V1 `None` "baseline yok" değil "typed değil" demektir; delta-introduced subject için
 V1 `RawPosition::default()` (DefaultFallback) üretir.
 
-**Frozen fixture corpus (4 case) — review tur 8 ayrı baseline boyutları:**
+**Frozen fixture corpus (4 case) — review tur 9 ayrı baseline boyutları (loss dahil):**
 
-| Class | Subject-set div | Axis-value div (after) | Baseline schema (structural) | Baseline availability | Baseline value bits | Baseline source | Pipeline mutation-decision |
-|---|---:|---:|---:|---:|---:|---:|---|
-| matching_scope | 0 | 0 | **1** (LegacyComputed↔Available) | 0 (Available parity) | 0 (parity) | **1** (Scip↔engine-native) | NotReached (Q5 Vision) |
-| wide_affected_scope | **1** | **1** | **1** (LegacyComputed↔Available) | 0 (Available parity) | 0 (parity) | **1** | NotReached (Q5 Vision) |
-| removed_edge_external_source | **1** | **1** | **1** (LegacyComputed↔Available) | 0 (Available parity) | 0 (parity) | **1** | NotReached (Q5 Vision) |
-| delta_introduced_subject | **0** | 0 | **1** (LegacyComputed↔Unavailable) | **1** (DefaultFallback↔Unavailable) | **N/A** (V2 Unavailable — value yok) | **N/A** (V2 Unavailable — source yok) | **Observed(AcceptAsCompleted), parity** |
-| **Toplam** | **2/4** | **2/4** | **4/4** (structural) | **1/4** | 0/3 + N/A 1 | **3/3** (Available case'lerde) + N/A 1 | NotReached 3/4 + Observed+Equal 1/4 |
+| Class | Subject-set div | Axis-value div (after) | Baseline schema | Baseline availability | Baseline value bits | Baseline source | Baseline loss bits | Pipeline mutation-decision |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| matching_scope | 0 | 0 | **1** | 0 | 0 (parity) | **1** | 0 (parity) | NotReached (Q5 Vision) |
+| wide_affected_scope | **1** | **1** | **1** | 0 | 0 (parity) | **1** | 0 (parity) | NotReached (Q5 Vision) |
+| removed_edge | **1** | **1** | **1** | 0 | 0 (parity) | **1** | 0 (parity) | NotReached (Q5 Vision) |
+| delta_introduced | **0** | 0 | **1** | **1** | **N/A** | **N/A** | **N/A** | **Observed(AcceptAsCompleted), parity** |
+| **Toplam** | **2/4** | **2/4** | **4/4** | **1/4** | 0/3 + N/A | **3/3** + N/A | 0/3 + N/A | NotReached 3/4 + Equal 1/4 |
 
 **Kritik (review tur 7/8):**
 - **Baseline schema:** 4/4 structural — V1 `LegacyComputed` (scalar/untyped) ↔ V2 typed
@@ -328,7 +328,7 @@ P2-1, **üç ontolojik boyutu** içerir — ikisi **kanıtlanmış** migration k
 provenance authority ve baseline availability aynı ontolojik karar değildir (review tur 4
 P0-1 bulgusu: Case 4 subject/value parity KORUR ama baseline representation diverge eder).
 **Review tur 5 P0-1 daraltma:** Migration 3 policy/decision divergence kanıtlanmadı —
-representation divergence kanıtlandı, policy etkisi hipotez.
+availability divergence kanıtlandı, policy etkisi hipotez.
 
 ### Migration 1: Subject Authority — KANITLANDI
 
@@ -354,17 +354,17 @@ V1 uniform Scip davranışı compatibility gerçeğidir; V2 engine-native per-ax
 provenance normatif hedeftir. `required_source` matrix (yukarıda) bu migration'ın
 PredicateSet-level decision impact'ini kanıtladı.
 
-### Migration 3: Baseline Epistemic Availability & Policy (review tur 5/6/7)
+### Migration 3: Baseline Epistemic Availability & Policy (review tur 5-9)
 
-Case 4'ün ortaya çıkardığı üçüncü boyut. **Review tur 7 P0 çeyrekleme:** baseline
-gözleminde dört ayrı boyut vardır — schema, availability state, baseline value/source,
-decision effect. Bunlar karıştırılmamalı.
+Case 4'ün ortaya çıkardığı üçüncü boyut. **Review tur 9 canonical:** baseline gözleminde
+ayrı boyutlar vardır — schema, availability, value bits, source, loss bits, decision effect.
+Bunlar karıştırılmamalı (tur 8/9 P0).
 
-1. **Baseline schema divergence — KANITLANDI (4/4 structural).**
+1. **Baseline schema — 4/4 structural.**
    V1 `LegacyComputed` (scalar/untyped), V2 typed (`Available` | `Unavailable`). Her
-   4 case'te structural fark (V1 schema V2'den farklı).
+   4 case'te structural fark.
 
-2. **Baseline availability-state divergence — KANITLANDI (1/4).**
+2. **Baseline availability — 1/4 divergence.**
    - Cases 1/2/3: V1 `AffectedCentroid` (subject space'te), V2 `Available` → **availability parity**.
    - Case 4: V1 `DefaultFallback` (subject node 10000 base'de yok → `compute_raw_from_delta`
      empty positions → `RawPosition::default()`, engine.rs:2329-2330), V2 typed
@@ -373,18 +373,25 @@ decision effect. Bunlar karıştırılmamalı.
    **Önemli (tur 7):** V1 "current_measured her zaman var" DEĞİL — delta-introduced subject
    için V1 yokluğu sıfır koordinaya çeviriyor. `RawPosition::default()` bir baseline kanıtı
    DEĞİL — `LegacyDefaultFallback`. OSP "bilinmeyeni ölçülmüş değer gibi sunmama" çizgisine
-   aykırı. Bu, "typed/untyped representation" değil, **epistemik availability yorumu** farkı.
+   aykırı.
 
-3. **Baseline value/source divergence — KANITLANDI (1/4).**
-   Case 4: V1 `RawPosition::default()` (sıfır) vs V2 typed none. Cases 1/2/3'te V1/V2
-   baseline value/source parity (AffectedCentroid / Available aynı subject üzerinden).
-   **Not:** Cases 2/3'te V1 baseline subject geniş affected, V2 dar task scope — baseline
-   value/source drift oluşabilir; mevcut test bunu ölçüyor (BaselineObservation value/source).
+3. **Baseline value bits — 0/3 divergence + Case 4 N/A.**
+   Cases 1/2/3'te V1/V2 value parity (AffectedCentroid/Available aynı subject üzerinden
+   aynı centroid). Case 4 **N/A** — V2 `Unavailable` olduğu için value yoktur;
+   `RawPosition::default()` ile "typed none"ı value divergence saymak OSP ilkesini ihlal eder.
 
-4. **Baseline policy/decision divergence — HİPOTEZ (kanıtlanmadı).**
+4. **Baseline source — 3/3 divergence + Case 4 N/A.**
+   Cases 1/2/3'te V1 uniform Scip ↔ V2 engine-native (INV-T4 provenance authority baseline
+   boyutunda da divergence). Case 4 **N/A** (V2 Unavailable).
+
+5. **Baseline loss bits — 0/3 divergence + Case 4 N/A.**
+   Cases 1/2/3'te V1/V2 loss parity (aynı value + aynı target → aynı loss). Case 4 **N/A**.
+   Loss ayrı raporlanmalı — decision'ın `improved` dalıyla ilişkisi nedeniyle önemli.
+
+6. **Baseline policy/decision — Case 4 parity; policy divergence HİPOTEZ.**
    Case 4 `Completed` → `AcceptAsCompleted` (completion-first core improved'a bakmaz) →
-   projection etkisiz → **Observed(AcceptAsCompleted) V1/V2 parity**. Decision etkisi
-   SADECE `NotCompleted` + improvement-sensitive policy dalında olabilir (P2-0B.8 fixture).
+   **Observed(AcceptAsCompleted) V1/V2 parity**. Policy etkisi SADECE `NotCompleted` +
+   improvement-sensitive policy dalında olabilir (P2-0B.8 fixture).
 
 **Bu yüzden Migration 3 "zorunlu migration kararı" olarak resmileştirilmedi.** Üç olası
 yorum:
@@ -508,7 +515,7 @@ gösterdi:
 - **Semantic (provenance authority, INV-T4):** ❌ Matching scope'ta BİLE source divergence
   + `required_source` matrix PredicateSet decision divergence (Scip/TreeSitter) — **kanıtlandı**
 - **Semantic (baseline availability):** ⚠️ Case 4 baseline **representation** divergence
-  (V1 typed değil, V2 UnavailableAllIntroduced) — **kanıtlandı**. **Policy/decision**
+  (V1 DefaultFallback, V2 UnavailableAllIntroduced) — **kanıtlandı**. **Policy/decision**
   divergence — **hipotez** (Case 4 Completed → projection etkisiz; NotCompleted fixture
   P2-0B.8 gerek).
 - **Pipeline mutation-decision (tur 6):** Case 4 **Observed(AcceptAsCompleted)** V1/V2
@@ -517,7 +524,7 @@ gösterdi:
 - **Ontolojik:** ⚠️ **İki kanıtlanmış + bir hipotez** migration kararı:
   1. Subject authority (Yol 1/2/3) — **kanıtlandı**
   2. Provenance authority (INV-T4 normatif hedef) — **kanıtlandı** (migration sınırı + backward-compat)
-  3. Baseline-availability policy — **hipotez** (representation divergence kanıtlandı,
+  3. Baseline-availability policy — **hipotez** (availability divergence kanıtlandı,
      policy/decision divergence P2-0B.8 fixture bekliyor — Case 4 Completed'da projection
      etkisiz, AcceptAsCompleted parity gözlendi)
 
