@@ -14,7 +14,7 @@
       "class": "matching_scope",
       "source": "synthetic_adversarial",
       "description": "Task targets Node(1) via Node(1) predicate scope; proposal declares affected_nodes=[1]. Node 1 pre-exists in space. Subject set identical V1/V2 — parity expected for all metrics.",
-      "builder_digest_blake3": "3dd55cc6cc3e1d560de5c610894b061d319b55f35a193d116eac0ddbbef68b62",
+      "builder_digest_blake3": "6670d7b4a453ba5724d524e173036c0f50ba60322d8d0e1556144f73516b9288",
       "notes": "Baseline parity case. If this diverges, the harness itself is broken."
     },
     {
@@ -22,7 +22,7 @@
       "class": "wide_affected_scope",
       "source": "synthetic_adversarial",
       "description": "KNOWN production-reachable divergence. Task Node(1) predicate scope; proposal affected_nodes=[1,2,3]. V1 subject={1,2,3} (affected centroid), V2 subject={1} (task scope centroid). Divergence expected across subject/values/loss/decision.",
-      "builder_digest_blake3": "3473f30ef5d5a841574178911a74eb8a8ceb5343b96a6cc75f885ee0f0722abe",
+      "builder_digest_blake3": "be3365b6411eb0aeec41f41b487969027a0109ffde3ca2100b61f37470df9758",
       "notes": "Core ontological divergence case — subject authority: LLM-affected vs task-derived. P2-1 cannot open without resolving this."
     },
     {
@@ -30,7 +30,7 @@
       "class": "removed_edge_external_source",
       "source": "synthetic_adversarial",
       "description": "Task Node(1) scope; affected_nodes=[1] but removed_edges[0].from=9 (external node). V1 folds 9 into affected set (navigator pattern), V2 subject scope {1} excludes it. Divergence in V1 centroid only.",
-      "builder_digest_blake3": "605eb68770778bb28602b9bc56be96858a391f430d29338f4093401efa2f5d24",
+      "builder_digest_blake3": "1690fd36d4727631ae5bce06dcabd993c26c0fbbbb0b971dc3dbdf15c916c878",
       "notes": "removed_edges.from external to task scope — V1 affected-set contamination."
     },
     {
@@ -38,7 +38,7 @@
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
       "description": "Subject node 1 delta-introduced (not in base space). V2 baseline Unavailable (AllMembersIntroducedByDelta) → project_v1_loss_before_compatibility fail-closed (loss_before=loss_after → improved=false → Reject). V1 always has current_measured → improvement evaluable.",
-      "builder_digest_blake3": "61f183ecba0b5545eb64e0f1171e2683d6421766300e18cbd98da4e5c825faaa",
+      "builder_digest_blake3": "5513da86f5f4b19b8ad74e808c23917ac344d1c974fb6a98f9c6ee7b0d4592cb",
       "notes": "V2 'progress unprovable without baseline' semantics vs V1 'always has current_measured'. Decision divergence expected."
     }
   ]

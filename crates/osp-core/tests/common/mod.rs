@@ -294,6 +294,18 @@ pub fn serialize_case_bytes(case: &CharacterizationCase) -> Vec<u8> {
     let task = canonical_json_bytes(&task_val);
     let proposal = canonical_json_bytes(&proposal_val);
     let mut combined = Vec::new();
+    // **Review P2 fix:** metadata (id/class/source/description) da digest'e dahil —
+    // builder bu alanları değiştirirse manifest metadata ile drift olmadan digest
+    // değişmeli. Domain-separator ile alanları ayır (collision yok).
+    combined.extend_from_slice(b"faz8_p2_case_id\x00");
+    combined.extend_from_slice(case.id.as_bytes());
+    combined.extend_from_slice(b"\x00faz8_p2_case_class\x00");
+    combined.extend_from_slice(format!("{:?}", case.class).as_bytes());
+    combined.extend_from_slice(b"\x00faz8_p2_case_source\x00");
+    combined.extend_from_slice(format!("{:?}", case.source).as_bytes());
+    combined.extend_from_slice(b"\x00faz8_p2_case_description\x00");
+    combined.extend_from_slice(case.description.as_bytes());
+    combined.extend_from_slice(b"\x00faz8_p2_payload\x00");
     combined.extend_from_slice(&space);
     combined.extend_from_slice(&task);
     combined.extend_from_slice(&proposal);
@@ -577,6 +589,13 @@ fn removed_edge_external_source_001() -> CharacterizationCase {
 ///
 /// Bu case V2'nin "baseline yoksa progress kanıtlanamaz" semantiğini V1'in
 /// "her zaman current_measured var" semantiğinden ayırır.
+///
+/// **Review P0-1 fix:** Task scope `Node(10000)` — `build_claim_from_proposal`/
+/// `node_from_spec` (navigator.rs:312-318) `NewNodeSpec`'ten `id: 10_000 + index`
+/// üretir. Önceki kod task scope `Node(1)` kullanıyordu ama delta node `10000`
+/// oluyordu → subject node 1 ne base'de ne delta'da → SubjectScope hatası
+/// "baseline unavailable" DEĞİL, kimlik uyuşmazlığı sonucuydu. Şimdi task scope
+/// delta-produced id ile match ediyor → gerçek AllMembersIntroducedByDelta yolu.
 fn delta_introduced_subject_001() -> CharacterizationCase {
     use osp_core::agent::NewNodeSpec;
     use osp_core::space::{Node, NodeKind};
@@ -585,8 +604,8 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         TaskPolicy, TaskStatus, WeightedPredicate,
     };
 
-    // Space: node 10 mevcut (delta-introduced değil, ama subject node 10 değil).
-    // Subject node = 1, delta ile introduced.
+    // Space: node 10 mevcut (delta-introduced değil, subject node 10 değil).
+    // Subject node = 10000, delta ile introduced (node_from_spec 10_000 + 0 = 10000).
     let mut space = Space::new();
     space.insert_node(Node {
         id: 10,
@@ -599,7 +618,8 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         metric: PredicateAxis::Coupling,
         operator: ComparisonOp::Le,
         threshold: 0.5,
-        scope: PredicateScope::Node(1), // node 1 space'te YOK — delta ile introduced
+        // node_from_spec ilk NewNodeSpec için id=10000 üretir → subject ile match.
+        scope: PredicateScope::Node(10_000),
         required_source: None,
         tolerance: 0.0,
     };
@@ -622,14 +642,14 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         status: TaskStatus::Pending,
     };
 
-    // Proposal: delta node 1'i introduced; affected_nodes=[1].
+    // Proposal: delta node 10000'i introduced; affected_nodes=[10000].
     let proposal = DeltaProposal {
         new_nodes: vec![NewNodeSpec {
             kind: NodeKind::Module,
             initial_mass: 1.0,
             connected_to: vec![],
         }],
-        affected_nodes: vec![1],
+        affected_nodes: vec![10_000],
         ..Default::default()
     };
 
@@ -637,8 +657,9 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         id: "delta-introduced-subject-001".to_string(),
         class: CaseClass::DeltaIntroducedSubject,
         source: CaseSource::SyntheticAdversarial,
-        description: "Subject node 1 delta-introduced. V2 baseline Unavailable → \
-            fail-closed (improved=false→Reject); V1 always has current_measured."
+        description: "Subject node 10000 delta-introduced (node_from_spec id). \
+            V2 baseline Unavailable (AllMembersIntroducedByDelta) → fail-closed; \
+            V1 always has current_measured."
             .to_string(),
         space,
         task,
@@ -665,16 +686,24 @@ pub struct CharacterizationObservation {
 
 /// Measurement producer sonucu (V1: compute_raw_from_delta infallible;
 /// V2-candidate: measure_task_delta fallible).
+///
+/// **Review P0-2 fix:** Artık subject/value-bits/sources her iki path için de taşır
+/// (V1 subject = affected_nodes, V2 subject = task scope). Exact parity assertion'ları
+/// için gerekli zenginleştirme.
 #[derive(Debug, Clone)]
 pub enum MeasurementObservation {
     /// Measurement başarıyla üretildi.
     Produced {
-        /// V2-candidate subject scope (task.predicate.scope üyeleri).
-        /// V1 için `None` (V1 subject = affected_nodes, farklı kaynak).
-        subject: Option<Vec<u64>>,
+        /// Subject node set (V1: affected_nodes ∪ removed_edges.from; V2: task.predicate.scope).
+        /// Exact parity assertion'ları için gerçek set (approximation DEĞİL).
+        subject: Vec<u64>,
         /// After-state measured position (V1: compute_raw→provenanced_from_raw;
         /// V2-candidate: measurement.after()).
         measured_after: osp_core::trajectory::ProvenancedRawPosition,
+        /// 5-axis value bits — exact `to_bits()` parity için (review P0-2).
+        values_bits: [u64; 5],
+        /// 5-axis sources — exact source parity için (review P0-2, INV-T4).
+        sources: [osp_core::coords::MetricSource; 5],
         /// V2-candidate baseline kind (Available | Unavailable).
         /// V1 için `None` (V1 always has current_measured).
         baseline_kind: Option<BaselineKind>,
@@ -683,7 +712,7 @@ pub enum MeasurementObservation {
     Failed { error: MeasurementFailureClass },
     /// V1 path measurement'ı tracking yapmaz (compute_raw_from_delta infallible).
     ///
-    /// **Not:** V1 harness şu an `Produced { subject: None, baseline_kind: None }`
+    /// **Not:** V1 harness şu an `Produced { subject, baseline_kind: None }`
     /// üretir — bu varyant hiçbir builder tarafından üretilmez. Future-use: V1'in
     /// "measurement tracking yok" durumunu explicit temsil etmek için ayrılabilir.
     /// Şu an sadece matcher'larda referans edilir.
@@ -700,6 +729,33 @@ pub enum BaselineKind {
     /// baseline gerektiren case henüz yok). Matcher'da referans edilir — future-use
     /// (P2-0B kalan: mixed_per_axis_sources veya subgraph-introduced case eklendiğinde).
     UnavailablePartialNew,
+}
+
+/// 5-axis value bits (coupling/cohesion/instability/entropy/witness_depth sırasıyla).
+/// Exact parity assertion'ları için `to_bits()` — NaN/signed-zero/rounding farkları
+/// dahil tüm bit-level farkları yakalar (review P0-2).
+pub fn axis_value_bits(pos: &osp_core::trajectory::ProvenancedRawPosition) -> [u64; 5] {
+    [
+        pos.coupling.value.to_bits(),
+        pos.cohesion.value.to_bits(),
+        pos.instability.value.to_bits(),
+        pos.entropy.value.to_bits(),
+        pos.witness_depth.value.to_bits(),
+    ]
+}
+
+/// 5-axis sources (coupling/cohesion/instability/entropy/witness_depth sırasıyla).
+/// Exact source parity — INV-T4 required_source predicate'leri için kritik (review P0-2).
+pub fn axis_sources(
+    pos: &osp_core::trajectory::ProvenancedRawPosition,
+) -> [osp_core::coords::MetricSource; 5] {
+    [
+        pos.coupling.source,
+        pos.cohesion.source,
+        pos.instability.source,
+        pos.entropy.source,
+        pos.witness_depth.source,
+    ]
 }
 
 /// MeasurementError varyantlarının characterization sınıflandırması
@@ -1046,8 +1102,13 @@ pub fn evaluate_v1_case(
     });
 
     let measurement = MeasurementObservation::Produced {
-        subject: None, // V1 subject = affected_nodes (farklı kaynak), None = "not tracked"
-        measured_after: measured,
+        // V1 subject = affected_nodes ∪ removed_edges.from (navigator.rs:810-815).
+        subject: affected.clone(),
+        measured_after: measured.clone(),
+        // **Review P0-2:** 5-axis value bits + sources — exact parity için.
+        // V1 provenanced_from_raw(..., Scip) tüm axis'lere uniform Scip verir.
+        values_bits: axis_value_bits(&measured),
+        sources: axis_sources(&measured),
         baseline_kind: None, // V1 always has current_measured
     };
 
@@ -1135,27 +1196,27 @@ pub fn evaluate_v2_candidate_case(
         }
     };
     let measurement = MeasurementObservation::Produced {
-        // **Review P1-7 note:** Bu `subject` harness-side bir approximation'dır —
-        // engine'in `CanonicalSubjectScope` derivation'ı (measure_task_delta step 3)
-        // ile aynı DEĞİL. Sınırlamalar: (1) heterogeneous scope'lar (Node+Subgraph
-        // karışık) engine'de HeterogeneousPredicateScopes hatası verirken burada
-        // sessizce flatten edilir; (2) Module scope burada vec![] döner ama engine
-        // SubjectScopeResolutionFailed üretir. Telemetry/raporlama amaçlı; V2-candidate
-        // subject authority kararının ontolojik kanıtı için motor davranışını (Failed
-        // varyant) kullan.
-        subject: Some(
-            case.task
-                .target_predicate_set
-                .predicates
-                .iter()
-                .flat_map(|wp| match &wp.predicate.scope {
-                    osp_core::trajectory::PredicateScope::Node(n) => vec![*n],
-                    osp_core::trajectory::PredicateScope::Subgraph(ns) => ns.clone(),
-                    osp_core::trajectory::PredicateScope::Module(_) => vec![],
-                })
-                .collect(),
-        ),
+        // **Review P1-7 note + P0-2 fix:** `subject` artık Vec<u64> (Option değil).
+        // Harness-side approximation olduğu korunur (doc yukarıda), ama exact parity
+        // assertion'ları için gerçek task scope set taşınır. Sınırlamalar: heterogeneous
+        // scope'lar engine'de HeterogeneousPredicateScopes hatası verirken burada
+        // sessizce flatten edilir; Module scope vec![] döner ama engine SubjectScopeResolutionFailed
+        // üretir. Bu case'lerde measurement Failed olur, Produced'a hiç gelinmez.
+        subject: case
+            .task
+            .target_predicate_set
+            .predicates
+            .iter()
+            .flat_map(|wp| match &wp.predicate.scope {
+                osp_core::trajectory::PredicateScope::Node(n) => vec![*n],
+                osp_core::trajectory::PredicateScope::Subgraph(ns) => ns.clone(),
+                osp_core::trajectory::PredicateScope::Module(_) => vec![],
+            })
+            .collect(),
         measured_after: measured_for_commit.clone(),
+        // **Review P0-2:** 5-axis value bits + sources — exact parity için.
+        values_bits: axis_value_bits(&measured_for_commit),
+        sources: axis_sources(&measured_for_commit),
         baseline_kind,
     };
 

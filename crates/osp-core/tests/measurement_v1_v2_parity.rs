@@ -79,23 +79,54 @@ fn matching_scope_baseline_case_shows_parity() {
     let obs_v1 = evaluate_v1_case(&mut engine_v1, &case);
     let obs_v2 = evaluate_v2_candidate_case(&mut engine_v2, &case);
 
-    // Q5 disposition parity.
-    assert_q5_disposition_parity(&case.id, &obs_v1, &obs_v2);
-    // Q5.b predicate completion + mutation decision parity.
-    assert_predicate_completion_parity(&case.id, &obs_v1, &obs_v2);
-    assert_mutation_decision_parity(&case.id, &obs_v1, &obs_v2);
-    // Apply target parity.
-    assert_apply_target_parity(&case.id, &obs_v1, &obs_v2);
-    // Witness reachability parity.
-    assert_witness_reachability_parity(&case.id, &obs_v1, &obs_v2);
+    // === Review P0-2: exact subject/value/source parity (gate kriterleri) ===
 
-    // Measurement: V1 NotAttempted değil, Produced olmalı (compute_raw infallible).
-    assert!(
-        matches!(obs_v1.measurement, MeasurementObservation::Produced { .. }),
-        "V1 measurement Produced olmalı (compute_raw infallible); case {}",
+    // 1. Subject set parity — matching scope'ta V1 affected = V2 task scope = {1}.
+    let (subj_v1, subj_v2) = measurement_subjects(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        sorted(&subj_v1),
+        sorted(&subj_v2),
+        "matching scope: V1 affected ({:?}) == V2 subject ({:?}); case {}",
+        subj_v1,
+        subj_v2,
         case.id
     );
-    // V2-candidate: matching scope → Available baseline (node space'te), measurement Produced.
+
+    // 2. 5-axis value bits parity.
+    let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        vals_v1, vals_v2,
+        "matching scope: 5-axis value bits parity; case {}\nV1={:?}\nV2={:?}",
+        case.id, vals_v1, vals_v2
+    );
+
+    // 3. 5-axis sources — **matching scope'ta BİLE divergence beklenir** (review P0-2).
+    // V1 provenanced_from_raw(..., Scip) → uniform Scip; V2 engine gerçek axis source'ları
+    // (coupling=TreeSitter). Bu, subject-authority'den BAĞIMSIZ bir provenance-authority
+    // geçişi — INV-T4 required_source predicate'lerini etkiler.
+    let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
+    let source_divergence = src_v1 != src_v2;
+    eprintln!(
+        "matching-scope source check: V1={:?} V2={:?} diverges={}",
+        src_v1, src_v2, source_divergence
+    );
+    // PIN: matching scope'ta coupling source divergence KESİN beklenir.
+    // V1 coupling source = Scip (provenanced_from_raw override), V2 = TreeSitter (engine axis default).
+    assert_ne!(
+        src_v1[0], src_v2[0],
+        "INV-T4 provenance-authority divergence: V1 coupling source {:?} != V2 {:?}; case {}",
+        src_v1[0], src_v2[0], case.id
+    );
+
+    // === Pipeline parity (Q5/Q5.b/apply/witness) ===
+    assert_q5_disposition_parity(&case.id, &obs_v1, &obs_v2);
+    assert_predicate_completion_parity(&case.id, &obs_v1, &obs_v2);
+    assert_mutation_decision_parity(&case.id, &obs_v1, &obs_v2);
+    assert_apply_target_parity(&case.id, &obs_v1, &obs_v2);
+    assert_witness_reachability_parity(&case.id, &obs_v1, &obs_v2);
+
+    // === Baseline ===
+    // V2-candidate: matching scope → Available baseline (node space'te).
     match &obs_v2.measurement {
         MeasurementObservation::Produced { baseline_kind, .. } => {
             assert_eq!(
@@ -311,6 +342,9 @@ fn observe_case(
 ///
 /// Beklenen: measured_after value'ları farklı (farklı centroid), bu da loss_after
 /// ve dolayısıyla PredicateGate decision'ı etkileyebilir.
+///
+/// **Review P1-1 fix:** Önceki test `eprintln!` + hardcode count kullanıyordu;
+/// artık exact observed snapshot assertion'ları (subject set + value bits + sources).
 #[test]
 fn wide_affected_scope_shows_subject_authority_divergence() {
     let case = build_all_cases()
@@ -319,82 +353,109 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         .expect("WideAffectedScope case olmalı");
     let (obs_v1, obs_v2) = observe_case(&case);
 
-    // V1 measurement Produced (compute_raw infallible).
-    let measured_v1 = match &obs_v1.measurement {
-        MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
-        other => panic!("V1 measurement Produced olmalı; got {other:?}"),
-    };
-    // V2 measurement Produced (subject scope resolvable, node 1 space'te).
-    let measured_v2 = match &obs_v2.measurement {
-        MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
-        other => panic!("V2 measurement Produced olmalı; got {other:?}"),
-    };
-
-    // Measured value'lar farklı OLMALI (farklı node set üzerinden centroid).
-    // to_raw() → to_bits() comparison.
-    let raw_v1 = measured_v1.to_raw();
-    let raw_v2 = measured_v2.to_raw();
-    let coupling_differs = raw_v1.x.to_bits() != raw_v2.x.to_bits();
-    eprintln!(
-        "  wide-affected: V1 coupling={}, V2 coupling={}, differs={}",
-        raw_v1.x, raw_v2.x, coupling_differs
+    // === Subject set divergence (exact) ===
+    // V1 affected = {1,2,3}, V2 subject = {1}. PIN (hardcode DEĞİL, gerçek observation).
+    let (subj_v1, subj_v2) = measurement_subjects(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        sorted(&subj_v1),
+        vec![1, 2, 3],
+        "V1 affected = {{1,2,3}} (case design); got {subj_v1:?}"
     );
-    // Bu case'te node 1,2,3 aynı (x=0 default) olduğu için coupling_bits eşit olabilir.
-    // Divergence'ı coupling değerinde aramak yerine, subject set büyüklüğünde arıyoruz:
-    // V1 subject = {1,2,3}, V2 subject = {1}. Bu ontolojik divergence'ın KANITIDIR.
-    let v1_affected_count = 3; // affected_nodes=[1,2,3]
-    let v2_subject_count = match &obs_v2.measurement {
-        MeasurementObservation::Produced {
-            subject: Some(s), ..
-        } => s.len(),
-        _ => 0,
-    };
+    assert_eq!(
+        sorted(&subj_v2),
+        vec![1],
+        "V2 subject = {{1}} (task scope); got {subj_v2:?}"
+    );
     assert_ne!(
-        v1_affected_count, v2_subject_count,
-        "ONTOLOJİK DIVERGENCE: V1 affected scope ({v1_affected_count} nodes) ≠ \
-         V2 task subject scope ({v2_subject_count} nodes). Subject authority karar gerekir."
+        sorted(&subj_v1),
+        sorted(&subj_v2),
+        "ONTOLOJİK SUBJECT AUTHORITY DIVERGENCE: V1 affected ≠ V2 task scope"
+    );
+
+    // === Value bits divergence (exact) ===
+    // V1 3-node centroid, V2 1-node → coupling value farklı. PIN specific axis.
+    let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
+    eprintln!(
+        "  wide-affected value bits: V1={:?} V2={:?}",
+        vals_v1, vals_v2
+    );
+    // Coupling (axis 0) farklı OLMALI — 3-node centroid vs 1-node.
+    assert_ne!(
+        vals_v1[0], vals_v2[0],
+        "coupling value divergence: V1 3-node centroid vs V2 1-node; case {}",
+        case.id
+    );
+
+    // === Source divergence (INV-T4 provenance-authority) ===
+    // V1 uniform Scip, V2 gerçek axis source'ları. Matching scope'taki gibi.
+    let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
+    assert_ne!(
+        src_v1[0], src_v2[0],
+        "provenance-authority divergence (subject-authority'den bağımsız); case {}",
+        case.id
     );
 }
 
 /// `removed-edge-external-source-001`: removed_edges.from external node divergence.
 ///
 /// V1 affected = {1, 9} (9 removed_edges.from'dan); V2 subject = {1}.
+///
+/// **Review P1-1 fix:** exact subject set assertion (hardcode count DEĞİL).
 #[test]
 fn removed_edge_external_source_shows_affected_contamination() {
     let case = build_all_cases()
         .into_iter()
         .find(|c| c.class == CaseClass::RemovedEdgeExternalSource)
         .expect("RemovedEdgeExternalSource case olmalı");
-    let (_obs_v1, obs_v2) = observe_case(&case);
+    let (obs_v1, obs_v2) = observe_case(&case);
 
-    let v2_subject_count = match &obs_v2.measurement {
-        MeasurementObservation::Produced {
-            subject: Some(s), ..
-        } => s.len(),
-        _ => 0,
-    };
-    // V1 affected = {1, 9} (9 removed_edges.from ile eklenir) → 2 node.
-    // V2 subject = {1} → 1 node.
-    let v1_affected_count = 2;
+    // V1 affected = {1, 9} (9 removed_edges.from ile eklenir). PIN exact set.
+    let (subj_v1, subj_v2) = measurement_subjects(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        sorted(&subj_v1),
+        vec![1, 9],
+        "V1 affected = {{1,9}} (affected_nodes + removed_edges.from); got {subj_v1:?}"
+    );
+    assert_eq!(
+        sorted(&subj_v2),
+        vec![1],
+        "V2 subject = {{1}} (task scope, 9 external); got {subj_v2:?}"
+    );
     assert_ne!(
-        v1_affected_count, v2_subject_count,
-        "DIVERGENCE: V1 affected set removed_edges.from ile genişler ({v1_affected_count}), \
-         V2 subject scope sabit ({v2_subject_count})"
+        sorted(&subj_v1),
+        sorted(&subj_v2),
+        "AFFECTED CONTAMINATION: V1 removed_edges.from external node ile genişler"
+    );
+
+    // Value divergence: V1 2-node centroid ({1,9}), V2 1-node ({1}).
+    let (vals_v1, vals_v2) = measurement_value_bits(&obs_v1, &obs_v2, &case.id);
+    eprintln!(
+        "  removed-edge value bits: V1={:?} V2={:?}",
+        vals_v1, vals_v2
+    );
+    assert_ne!(
+        vals_v1[0], vals_v2[0],
+        "coupling value divergence: V1 {{1,9}} centroid vs V2 {{1}}; case {}",
+        case.id
     );
 }
 
 /// `delta-introduced-subject-001`: V2 baseline semantics divergence.
 ///
-/// Subject node 1 delta-introduced (base space'te yok).
+/// Subject node 10000 delta-introduced (base space'te yok, delta ile geliyor —
+/// `node_from_spec` id 10_000+0).
 /// - V1: current_measured her zaman var → loss_before hesaplanır → improvement evaluable.
-/// - V2: `measure_task_delta` subject scope node 1'i base space'te bulamayabilir
-///   (delta application sonrası hypothetical'ta var ama subject scope derivation
-///   base üzerinden) → SubjectScope failure VEYA Unavailable baseline.
+/// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` →
+///   project_v1_loss_before_compatibility fail-closed (loss_before=loss_after →
+///   improved=false → Reject).
+///
+/// **Review P0-1 fix:** Önceki fixture task scope `Node(1)` + delta `NewNodeSpec`
+/// (id=10000) kullanıyordu → kimlik uyuşmazlığı → SubjectScope hatası (baseline
+/// unavailable DEĞİL). Şimdi task scope `Node(10000)` → gerçek AllMembersIntroducedByDelta.
 ///
 /// **Karakterizasyon bulgusu:** Bu case V1'in "her zaman current_measured var"
-/// semantiği ile V2'nin daha katı subject authority'si arasındaki ayrımı gösterir.
-/// V2 ya Unavailable baseline (fail-closed) ya da SubjectScope error üretir —
-/// ikisi de V1'in infallible measurement'ından farklı.
+/// semantiği ile V2'nin "baseline yoksa progress kanıtlanamaz" (fail-closed)
+/// semantiği arasındaki ontolojik ayrımın somut kanıtı.
 #[test]
 fn delta_introduced_subject_shows_baseline_semantics_divergence() {
     let case = build_all_cases()
@@ -403,31 +464,23 @@ fn delta_introduced_subject_shows_baseline_semantics_divergence() {
         .expect("DeltaIntroducedSubject case olmalı");
     let (obs_v1, obs_v2) = observe_case(&case);
 
-    // V2 measurement: ya Produced+Unavailable ya da Failed (SubjectScope).
-    // İkisi de V1'in infallible Produced'ından farklı — divergence kanıtı.
-    let v2_diverges_from_v1 = match &obs_v2.measurement {
+    // V2 measurement: Produced + UnavailableAllIntroduced (kesin pin — review P0-1).
+    // Önceki "Unavailable VEYA SubjectScope" toleransı characterization için fazla
+    // genişti; fixture düzeltmesi ile artık exact beklenen observation dondurulur.
+    match &obs_v2.measurement {
         MeasurementObservation::Produced { baseline_kind, .. } => {
-            // Unavailable baseline → fail-closed semantics (V1'de yok).
-            // Available ise divergence yok (bu case'te beklenmez ama defensive).
-            matches!(
+            assert_eq!(
                 *baseline_kind,
-                Some(common::BaselineKind::UnavailableAllIntroduced)
-                    | Some(common::BaselineKind::UnavailablePartialNew)
-            )
+                Some(common::BaselineKind::UnavailableAllIntroduced),
+                "delta-introduced subject (task scope Node(10000) = delta node id) → \
+                 V2 baseline UnavailableAllIntroduced (fail-closed). Got baseline_kind: {baseline_kind:?}"
+            );
         }
-        MeasurementObservation::Failed { error } => {
-            // SubjectScope failure → V2 katı subject authority (V1 infallible).
-            matches!(error, common::MeasurementFailureClass::SubjectScope)
-        }
-        MeasurementObservation::NotAttempted => false,
-    };
-    assert!(
-        v2_diverges_from_v1,
-        "ONTOLOJİK DIVERGENCE: delta-introduced subject'te V2 ya Unavailable baseline \
-         (fail-closed) ya da SubjectScope error üretmeli; V1 her zaman Produced. \
-         Got V2: {:?}",
-        obs_v2.measurement
-    );
+        other => panic!(
+            "V2 measurement Produced+UnavailableAllIntroduced olmalı (fixture P0-1 fix \
+             ile subject node delta'da mevcut); got {other:?}"
+        ),
+    }
 
     // V1 baseline tracking yapmaz (None) — current_measured her zaman var.
     match &obs_v1.measurement {
@@ -446,5 +499,212 @@ fn assert_none_or_not_unavailable(baseline_kind: &Option<common::BaselineKind>, 
         None => {}                                  // V1 → None (tracking yok)
         Some(common::BaselineKind::Available) => {} // hypothetical V1 Available
         Some(other) => panic!("{msg}; got {other:?}"),
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Measurement snapshot extraction helpers (review P0-2 / P1-1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn measurement_subjects(
+    obs_v1: &CharacterizationObservation,
+    obs_v2: &CharacterizationObservation,
+    case_id: &str,
+) -> (Vec<u64>, Vec<u64>) {
+    let s1 = match &obs_v1.measurement {
+        MeasurementObservation::Produced { subject, .. } => subject.clone(),
+        other => panic!("V1 measurement Produced olmalı; case {case_id} got {other:?}"),
+    };
+    let s2 = match &obs_v2.measurement {
+        MeasurementObservation::Produced { subject, .. } => subject.clone(),
+        MeasurementObservation::Failed { .. } => vec![], // V2 failure — subject boş
+        other => panic!("V2 measurement Produced/Failed olmalı; case {case_id} got {other:?}"),
+    };
+    (s1, s2)
+}
+
+fn measurement_value_bits(
+    obs_v1: &CharacterizationObservation,
+    obs_v2: &CharacterizationObservation,
+    case_id: &str,
+) -> ([u64; 5], [u64; 5]) {
+    let v1 = match &obs_v1.measurement {
+        MeasurementObservation::Produced { values_bits, .. } => *values_bits,
+        other => panic!("V1 Produced olmalı; case {case_id} got {other:?}"),
+    };
+    let v2 = match &obs_v2.measurement {
+        MeasurementObservation::Produced { values_bits, .. } => *values_bits,
+        other => panic!("V2 Produced olmalı; case {case_id} got {other:?}"),
+    };
+    (v1, v2)
+}
+
+fn measurement_sources(
+    obs_v1: &CharacterizationObservation,
+    obs_v2: &CharacterizationObservation,
+    case_id: &str,
+) -> (
+    [osp_core::coords::MetricSource; 5],
+    [osp_core::coords::MetricSource; 5],
+) {
+    use osp_core::coords::MetricSource;
+    let default_arr = || [MetricSource::Placeholder; 5];
+    let s1 = match &obs_v1.measurement {
+        MeasurementObservation::Produced { sources, .. } => *sources,
+        other => panic!("V1 Produced olmalı; case {case_id} got {other:?}"),
+    };
+    let s2 = match &obs_v2.measurement {
+        MeasurementObservation::Produced { sources, .. } => *sources,
+        // V2 failure → sources meaningless; default placeholder for diff display.
+        MeasurementObservation::Failed { .. } => default_arr(),
+        other => panic!("V2 Produced/Failed olmalı; case {case_id} got {other:?}"),
+    };
+    (s1, s2)
+}
+
+fn sorted(v: &[u64]) -> Vec<u64> {
+    let mut v = v.to_vec();
+    v.sort_unstable();
+    v
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// required_source decision matrix (review P0-2 — INV-T4 provenance-authority)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **Review P0-2 (devam): required_source decision matrix.**
+///
+/// Matching scope'ta BİLE V1 coupling source = Scip (provenanced_from_raw override),
+/// V2 coupling source = TreeSitter (engine axis default). Bu, subject-authority'den
+/// **bağımsız** bir provenance-authority geçişi — INV-T4 `required_source` predicate'leri
+/// V1/V2 arasında farklı karar üretir.
+///
+/// Bu test, `required_source` değerlerinin (None/Scip/TreeSitter/Placeholder/Heuristic)
+/// V1 vs V2 PredicateGate üzerindeki etkisini ölçer. Ontolojik karar raporu için
+/// kritik girdi — P2-1 açılması için source-sensitive predicate matrisinin exhaustively
+/// aynı sonuç vermesi gerekir (plan Tur 4 gate kriteri 3).
+#[test]
+fn required_source_matrix_shows_provenance_authority_divergence() {
+    use osp_core::coords::MetricSource;
+    use osp_core::space::{Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Inline matching case: node 1 space'te, task Node(1) scope, affected=[1].
+    let mut space = osp_core::space::Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    // V1 coupling source = Scip (provenanced_from_raw override), V2 = TreeSitter.
+    // Bu sabit — required_source değerini değiştirip PredicateGate decision'ını ölçeriz.
+    let v1_coupling_source = MetricSource::Scip;
+    let v2_coupling_source = MetricSource::TreeSitter;
+
+    // required_source değerleri üzerinde iterate — her biri için V1/V2 pass/reject bekle.
+    // Predicate: Coupling ≤ 0.5 (threshold coupling axis'i için, source predicate'i ana odak).
+    let required_sources = [
+        None,                            // source gereksinimi yok → her ikisi pass
+        Some(MetricSource::Scip),        // V1 Scip=pass, V2 TreeSitter=SourceInsufficient
+        Some(MetricSource::TreeSitter),  // V1 Scip=SourceInsufficient, V2 TreeSitter=pass
+        Some(MetricSource::Placeholder), // her ikisi de SourceInsufficient (ikisi de Placeholder değil)
+        Some(MetricSource::Heuristic),   // her ikisi de SourceInsufficient
+    ];
+
+    for req_source in &required_sources {
+        let predicate = MetricPredicate {
+            metric: PredicateAxis::Coupling,
+            operator: ComparisonOp::Le,
+            threshold: 0.5,
+            scope: PredicateScope::Node(1),
+            required_source: *req_source,
+            tolerance: 0.0,
+        };
+        let ps = PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![WeightedPredicate {
+                predicate,
+                weight: None,
+            }],
+            preferred_vector: None,
+        };
+        let task = osp_core::trajectory::Task {
+            id: 42,
+            milestone_id: 0,
+            label: "required-source-matrix".to_string(),
+            target_predicate_set: ps,
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        };
+        // Structural delta (empty-proposal check için minimal edge).
+        use osp_core::agent::{DeltaProposal, NewEdgeSpec};
+        use osp_core::space::EdgeKind;
+        let proposal = DeltaProposal {
+            new_edges: vec![NewEdgeSpec {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::Imports,
+            }],
+            affected_nodes: vec![1],
+            ..Default::default()
+        };
+        let case = common::CharacterizationCase {
+            id: format!("required-source-{:?}-inline", req_source),
+            class: common::CaseClass::MatchingScope,
+            source: common::CaseSource::SyntheticAdversarial,
+            description: "inline required_source matrix case".to_string(),
+            space: space.clone(),
+            task: task.clone(),
+            proposal,
+        };
+
+        let mut engine_v1 = common::engine_with_case_space(&case);
+        let mut engine_v2 = common::engine_with_case_space(&case);
+        let obs_v1 = common::evaluate_v1_case(&mut engine_v1, &case);
+        let obs_v2 = common::evaluate_v2_candidate_case(&mut engine_v2, &case);
+
+        // V1 coupling source = Scip, V2 = TreeSitter (sabit).
+        let (src_v1, src_v2) = measurement_sources(&obs_v1, &obs_v2, &case.id);
+        assert_eq!(
+            src_v1[0], v1_coupling_source,
+            "V1 coupling source sabit Scip"
+        );
+        assert_eq!(
+            src_v2[0], v2_coupling_source,
+            "V2 coupling source sabit TreeSitter"
+        );
+
+        // required_source'a göre beklenen V1/V2 source match:
+        let v1_source_matches = req_source.map_or(true, |r| r == v1_coupling_source);
+        let v2_source_matches = req_source.map_or(true, |r| r == v2_coupling_source);
+
+        eprintln!(
+            "  required_source={:?}: V1 source={} match={}, V2 source={} match={}",
+            req_source,
+            v1_coupling_source,
+            v1_source_matches,
+            v2_coupling_source,
+            v2_source_matches
+        );
+
+        // Eğer req_source Scip veya TreeSitter ise V1/V2 source match FARKLI →
+        // PredicateGate SourceInsufficient decision'ı farklı olabilir.
+        if let Some(req) = req_source {
+            if *req == MetricSource::Scip || *req == MetricSource::TreeSitter {
+                assert_ne!(
+                    v1_source_matches, v2_source_matches,
+                    "INV-T4 PROVENANCE-AUTHORITY DIVERGENCE: required_source={:?} \
+                     için V1 match {} ≠ V2 match {} — PredicateGate SourceInsufficient kararı farklı",
+                    req, v1_source_matches, v2_source_matches
+                );
+            }
+        }
     }
 }

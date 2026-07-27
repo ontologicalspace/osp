@@ -35,6 +35,17 @@ fn every_case_builder_digest_matches_manifest() {
     let manifest = load_manifest(&root).expect("manifest yüklenmeli");
     let cases = build_all_cases();
 
+    // **Review P2:** manifest ID uniqueness — duplicate ID'ler characterization'da
+    // karışıklığa yol açar.
+    let mut seen_ids = std::collections::HashSet::new();
+    for manifest_case in &manifest.cases {
+        assert!(
+            seen_ids.insert(&manifest_case.id),
+            "duplicate case ID in manifest: {}",
+            manifest_case.id
+        );
+    }
+
     // Manifest'teki her case için karşılık gelen builder olmalı + digest eşit olmalı.
     for manifest_case in &manifest.cases {
         let built = cases
@@ -46,6 +57,21 @@ fn every_case_builder_digest_matches_manifest() {
             actual_digest, manifest_case.builder_digest_blake3,
             "case {} builder digest mismatch — builder drift olmuş; \
              bootstrap helper'ı ile manifest'i güncelle",
+            manifest_case.id
+        );
+        // **Review P2 fix:** metadata eşitliği — builder class/source/description'ı
+        // değiştirirse digest zaten değişir (metadata artık serialize_case_bytes'ta),
+        // ama explicit equality ek olarak pinler (class/source enum, description string).
+        assert_eq!(
+            format!("{:?}", built.class),
+            format!("{:?}", manifest_case.class),
+            "case {} class mismatch (builder vs manifest)",
+            manifest_case.id
+        );
+        assert_eq!(
+            format!("{:?}", built.source),
+            format!("{:?}", manifest_case.source),
+            "case {} source mismatch (builder vs manifest)",
             manifest_case.id
         );
     }
@@ -64,15 +90,18 @@ fn every_case_builder_digest_matches_manifest() {
 #[test]
 fn path_traversal_outside_root_rejected() {
     let root = characterization_root(env!("CARGO_MANIFEST_DIR"));
-    // `../` kaçışı — cases.json parent'ına çıkma denemesi.
-    let result = load_fixture_bytes(&root, "../../Cargo.toml");
+    // **Review P1-2 fix:** `../../../Cargo.toml` repo root'taki MEVCUT Cargo.toml'a
+    // ulaşır → containment guard gerçekten çalışır (PathEscapesRoot). Önceki
+    // `../../Cargo.toml` repo/tests/Cargo.toml'a gidiyordu (yok → ReadFailed), yani
+    // containment kontrolü hiç çalışmadan test geçiyordu.
+    let result = load_fixture_bytes(&root, "../../../Cargo.toml");
     assert!(
         matches!(
             result,
             Err(common::FixtureLoadError::PathEscapesRoot { .. })
-                | Err(common::FixtureLoadError::ReadFailed { .. })
         ),
-        "root dışına kaçış reddedilmeli; got {result:?}"
+        "root dışına kaçış PathEscapesRoot ile reddedilmeli (ReadFailed DEĞIL — \
+         containment guard gerçekten çalışmalı); got {result:?}"
     );
 }
 
