@@ -252,6 +252,7 @@ pub fn build_all_cases() -> Vec<CharacterizationCase> {
         wide_affected_scope_001(),
         removed_edge_external_source_001(),
         delta_introduced_subject_001(),
+        delta_introduced_subject_policy_001(),
     ]
 }
 
@@ -666,6 +667,135 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
             V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty \
             positions → RawPosition::default). Availability divergence; policy/decision \
             impact hipotez (P2-0B.8)."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+/// `delta-introduced-subject-policy-001`: P2-0B.8 policy fixture — NotCompleted +
+/// AcceptImprovement dalında **V1 legacy DefaultFallback baseline projection** ile
+/// **V2 candidate fail-closed projection** arasında migration-relevant policy/decision
+/// divergence üreten case.
+///
+/// `delta_introduced_subject_001`'in (Case 4) yapısal topolojisi korunur (subject node
+/// 10000 delta-introduced, base space'te yok → V1 DefaultFallback, V2
+/// UnavailableAllIntroduced). Üç değişiklik Case 4'ün `Completed → AcceptAsCompleted`
+/// (completion-first core, improved'a bakmaz) dalını **NotCompleted + improvement-sensitive**
+/// dalına taşır:
+///
+/// 1. **Predicate:** `Coupling >= 0.7` (measured coupling 0.5 → false → NotCompleted).
+///    Case 4 `Coupling <= 0.5` idi → measured 0.0 true → Completed.
+/// 2. **preferred_vector:** `(0.8, 0.5, 0.5, 0, 0)` — coupling/cohesion/instability
+///    target'ı. Case 4 `None` idi → target=zero → loss_before=loss_after → improved imkansız.
+/// 3. **TaskPolicy:** `AcceptImprovement` + `allow_progress_checkpoint: true` (g2c idiom).
+///    Case 4 `StrictReject` + default idi → NotCompleted reject, improved'a bakmaz.
+///
+/// **Reciprocal Imports edges:** `10000→10` (Ce=1, `connected_to` üzerinden) VE `10→10000`
+/// (Ca=1, `new_edges` üzerinden). Sadece outgoing edge Ce=1/Ca=0 → instability=1.0 →
+/// `max_instability=0.85` hard-cap ihlali → improved=false. Reciprocal ile Ce=1, Ca=1 →
+/// instability=0.5 (hard-cap altında).
+///
+/// **Beklenen karar ayrışması:**
+/// - V1: DefaultFallback zero baseline + target (0.8,0.5,0.5) → loss_before ≈ 1.068;
+///   measured after (0.5,0.5,0.5) → loss_after = 0.3 → improved=true (loss drop 0.768 >
+///   0.02, hard-cap'ler geçer) → `AcceptAsProgress` → `Lane(TrajectoryCheckpoint)` (INV-T8).
+/// - V2: `project_v1_loss_before_compatibility_v2` Unavailable dalı → loss_before=loss_after
+///   → improved=false → `Reject` → `NotApplied` (INV-T8), witness değerlendirilmez → `Evaluated`.
+///
+/// Bu fixture production-reachable structural topology üzerinde gelecekteki migration'ın
+/// policy/decision divergence'ını karakterize eder; iki production implementation'ı
+/// karşılaştırmaz.
+fn delta_introduced_subject_policy_001() -> CharacterizationCase {
+    use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
+    use osp_core::coords::RawPosition;
+    use osp_core::space::{EdgeKind, Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateFailurePolicy, PredicateMode,
+        PredicateScope, PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 10 mevcut (Module — delta-introduced değil, subject node 10 değil).
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 10,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    // Predicate: Coupling >= 0.7 — measured coupling 0.5 → false → NotCompleted.
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Ge,
+        threshold: 0.7,
+        // node_from_spec ilk NewNodeSpec için id=10000 üretir → subject ile match.
+        scope: PredicateScope::Node(10_000),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        // Target vector: coupling 0.8, cohesion 0.5, instability 0.5 (3 eksen trajectory_loss).
+        preferred_vector: Some(RawPosition {
+            x: 0.8,
+            y: 0.5,
+            z: 0.5,
+            w: 0.0,
+            v: 0.0,
+        }),
+    };
+    let task = Task {
+        id: 43, // Case 4 task id 42 — çakışma yok.
+        milestone_id: 0,
+        label: "delta-introduced-subject-policy-001".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true, // ZORUNLU — improved değerlendirilmesi için.
+            min_improvement_delta: 0.02,     // default.
+            ..Default::default()
+        },
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Reciprocal Imports edges → Ce=1 (outgoing 10000→10) + Ca=1 (incoming 10→10000)
+    // → instability = Ce/(Ce+Ca) = 0.5 (hard-cap 0.85 altında).
+    let proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 1.0,
+            // 10000 → 10 (outgoing Imports) → Ce=1.
+            connected_to: vec![(10, EdgeKind::Imports)],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            // 10 → 10000 (incoming Imports) → Ca=1.
+            from: 10,
+            to: 10_000,
+            kind: EdgeKind::Imports,
+        }],
+        affected_nodes: vec![10_000],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "delta-introduced-subject-policy-001".to_string(),
+        class: CaseClass::DeltaIntroducedSubject,
+        source: CaseSource::SyntheticAdversarial,
+        description: "Production-reachable structural topology üzerinde V1 legacy \
+            DefaultFallback projection ile V2 candidate fail-closed projection arasında \
+            migration-relevant policy/decision divergence. NotCompleted + \
+            AcceptImprovement: V1 → loss_before > loss_after → improved → \
+            AcceptAsProgress (TrajectoryCheckpoint, Held); V2 → loss_before=loss_after \
+            → improved=false → Reject (NotApplied, Evaluated). Migration 3 (b) hipotezi \
+            kanıtlandı."
             .to_string(),
         space,
         task,
