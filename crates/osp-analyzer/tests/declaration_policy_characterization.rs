@@ -202,7 +202,7 @@ class Dog extends Animal { bark() {} }
 ";
     assert_eq!(
         defs_of(&JavaScriptAdapter, src),
-        vec![("Animal".to_string(), false), ("Dog".to_string(), false),]
+        vec![("Animal".to_string(), false), ("Dog".to_string(), false)]
     );
 }
 
@@ -281,10 +281,7 @@ type Dog struct { Name string }
     let got = defs_of(&GoAdapter, src);
     assert_eq!(
         got,
-        vec![
-            ("Animal".to_string(), true),
-            ("Dog".to_string(), false),
-        ]
+        vec![("Animal".to_string(), true), ("Dog".to_string(), false)]
     );
 }
 
