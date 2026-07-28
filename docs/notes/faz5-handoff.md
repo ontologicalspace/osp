@@ -1,12 +1,14 @@
-# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 MERGED; PR #87-A policy fixture hazır)
+# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 + #91 MERGED; PR #87-B Q5 theta hazır)
 
 ## Repository state
 
 ```
-Branch: wip/faz8-p2-p2-0b8-policy-fixture (main e4675b2'den)
-HEAD: policy fixture + counter-fixture + frozen digest sync
-PR #85: MERGED (squash e4675b2 → main) — Faz 8-P2 P2-0A+B characterization
-PR #87-A: policy fixture hazır (Part 1/2 — issue #87 kapanmaz, #87-B beklenir)
+Branch: wip/faz8-p2-p2-0b8-q5-theta (main efede00'den)
+HEAD: Q5 exact theta engine-unit characterization
+PR #85: MERGED (squash e4675b2) — Faz 8-P2 P2-0A+B characterization
+PR #91 (#87-A): MERGED (squash efede00) — policy fixture (Part 1/2)
+PR #87-B: Q5 exact theta hazır (Part 2/2 — Closes #87)
+Issue #92: subject-authority → raw → Q5 theta downstream (follow-up, açıldı)
 Worktree: clean (source) — sadece untracked docs var
 ```
 
@@ -102,29 +104,31 @@ production-reachable structural topology üzerinde migration-relevant.
 ## Sıradaki adımlar
 
 ### PR #85 — MERGED ✓
-Squash merge `e4675b2` → main (2026-07-28). Characterization canonical.
+Squash merge `e4675b2` → main. Characterization canonical.
 
-### PR #87-A — policy fixture (BU BRANCH, hazırlanıyor)
-**Part 1/2** — issue #87 kapanmaz, #87-B beklenir. `delta-introduced-subject-policy-001`
-fixture ile Migration 3 (b) policy/decision divergence KANITLANDI. Production koduna
-dokunulmadı — yalnızca test altyapısı + frozen fixture + docs.
+### PR #91 (#87-A) — MERGED ✓
+Squash merge `efede00` → main. `delta-introduced-subject-policy-001` fixture ile Migration 3
+(b) policy/decision divergence KANITLANDI.
 
-### PR #87-B — Q5 exact theta engine-unit (sonraki)
-**Part 2/2** — issue #87'yi kapatır. `Q5ThetaCharacterization` struct'ı populate eden
-engine-unit test (şu an dead, common/mod.rs:1071-1075). V1/V2 theta bits exact karşılaştırma.
+### PR #87-B — Q5 exact theta engine-unit (BU BRANCH, hazırlanıyor)
+**Part 2/2 — Closes #87.** Q5 theta parity koşullu KANITLANDI (engine.rs `#[cfg(test)]`
+`Q5ThetaObservation`). Q5 kendi başına divergence kaynağı DEĞİL; upstream raw + context
+eşitliğini korur, divergence'ı yansıtır. Subject-authority theta etkisi OUT OF SCOPE
+(issue #92 follow-up). Production koduna dokunulmadı.
 
-### Ontolojik migration kararları (PR #87-A/#87-B sonrası, ayrı karar)
-1. Subject authority: Yol 1/2/3 (reviewer Yol 2 tercihi)
+### Ontolojik migration kararları (PR #87-B sonrası, ayrı karar)
+1. Subject authority: Yol 1/2/3 (reviewer Yol 2 tercihi) — Q5 theta downstream etkisi issue #92
 2. Provenance authority: V2 engine-native normatif hedef — migration sınırı + backward-compat
-3. **Baseline-availability policy: KANITLANDI (PR #87-A)** — Migration 3 (b) doğrulandı,
+3. **Baseline-availability policy: KANITLANDI (PR #91)** — Migration 3 (b) doğrulandı,
    policy/decision divergence migration-relevant. Üçüncü zorunlu migration kararı olarak
    resmileştirilmeli.
 
 ### P2-0B kalan iş (GitHub issue)
 - **#86 (P2-0B.7):** MCP Workspace before-baseline characterization
-- **#87 (P2-0B.8):** Q5 exact theta (PR #87-B) — policy fixture kısmı PR #87-A ile TAMAMLANDI
+- **#87 (P2-0B.8):** KAPANIYOR (PR #87-B) — policy fixture (PR #91) + Q5 exact theta (PR #87-B)
 - **#88:** mixed_per_axis_sources dedicated matrisi
 - **#89:** task-snapshot drift adversarial
+- **#92:** subject-authority → raw → Q5 theta downstream (follow-up, açıldı)
 
 ### P2-1 (caller migration, ancak migration kararları sonrası, ayrı plan)
 - `measure_task_delta_checked` (public boundary)
