@@ -315,20 +315,21 @@ impl DeclarationKindSpec {
 
 /// **Compatibility wrapper — pre-PR-A public API.** Retained so external
 /// `osp-analyzer` consumers that call `walk_class_defs(root, source, kind, patterns)`
-/// keep compiling. Behavior is bit-identical to the original: the same hard-coded
-/// global `is_class_def` kind list, the same `force_abstract` for
-/// `interface_declaration` / `type_alias_declaration`, and the same
+/// keep compiling *without warnings*. Behavior is bit-identical to the original:
+/// the same hard-coded global `is_class_def` kind list, the same `force_abstract`
+/// for `interface_declaration` / `type_alias_declaration`, and the same
 /// `abstract_patterns` substring test over each node's full text.
 ///
 /// New code should call [`walk_class_defs_with_specs`] instead. This wrapper does
 /// NOT route through the spec system because `abstract_patterns` is a runtime
 /// (non-`'static`) slice that `AbstractnessRule::LegacyTextContains` cannot hold;
-/// it reproduces the old logic directly. Migrating callers to specs and removing
-/// this wrapper is a later cleanup PR.
-#[deprecated(
-    since = "0.x",
-    note = "use walk_class_defs_with_specs with adapter-owned DeclarationKindSpecs"
-)]
+/// it reproduces the old logic directly.
+///
+/// NOTE: intentionally NOT `#[deprecated]`. A deprecation attribute would turn every
+/// existing call site into a warning, which breaks downstream builds using
+/// `#![deny(warnings)]` / `RUSTFLAGS=-D warnings` (this repo's CI included) — that
+/// is an API-compatibility break, contrary to PR A's pure-refactor goal. Marking it
+/// deprecated is a separate, explicit API-migration PR.
 pub fn walk_class_defs(
     root: Node,
     source: &str,
@@ -383,7 +384,7 @@ pub fn walk_class_defs(
 /// from `specs` (adapter-owned) instead of a hard-coded global list.
 ///
 /// This is the new adapter-facing entry point (PR A). The legacy positional-args
-/// `walk_class_defs` is retained as a compatibility wrapper below.
+/// `walk_class_defs` is retained as a compatibility wrapper above.
 pub fn walk_class_defs_with_specs(
     root: Node,
     source: &str,
