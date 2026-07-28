@@ -96,9 +96,10 @@ impl LanguageAdapter for RustAdapter {
         // trait_item text contains "trait " (abstract) and struct/enum usually don't
         // (concrete), but this preserves the exact substring semantics including:
         // KNOWN-DIVERGENCE(RUST-ABST-003): a struct/enum whose text contains "trait "
-        // (e.g. in a doc comment or string literal) is marked abstract. Preserved
-        // verbatim in PR A; fix tracked separately. Migration off LegacyTextContains
-        // (struct/enum → Never, trait → Always) is a later bug-fix PR.
+        // (e.g. an inline comment inside the declaration range, or a string literal)
+        // is marked abstract. Preserved verbatim in PR A; fix tracked separately.
+        // Migration off LegacyTextContains (struct/enum → Never, trait → Always) is a
+        // later bug-fix PR.
         use shared::{AbstractnessRule, DeclarationKindSpec, NameStrategy};
         const RUST_SPECS: &[DeclarationKindSpec] = &[
             DeclarationKindSpec::new(
@@ -117,7 +118,7 @@ impl LanguageAdapter for RustAdapter {
                 NameStrategy::FirstIdentifierFallback,
             ),
         ];
-        shared::walk_class_defs(tree.root_node(), source, RUST_SPECS)
+        shared::walk_class_defs_with_specs(tree.root_node(), source, RUST_SPECS)
     }
 }
 
