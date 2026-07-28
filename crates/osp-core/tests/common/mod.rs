@@ -819,7 +819,7 @@ fn delta_introduced_subject_policy_001() -> CharacterizationCase {
 /// (SyntaxViolation/TaskValidation/MeasurementError) ve tam commit sonuçları aynı
 /// modelde temsil edilebilir. Integration test uydurma değer ÜRETMEZ —
 /// `q5_theta_bits` yalnız `Q5Observation::Rejected` içinde (failure observable),
-/// successful theta ayrı engine-unit (`Q5ThetaCharacterization`).
+/// successful theta ayrı engine-unit (engine.rs #[cfg(test)] Q5ThetaObservation).
 #[derive(Debug, Clone)]
 pub struct CharacterizationObservation {
     pub measurement: MeasurementObservation,
@@ -1070,7 +1070,7 @@ pub enum PipelineObservation {
 
 /// Q5 vision gözlemi — successful theta public API'den AÇILMAZ (TaskCommitResult'ta yok),
 /// yalnız failure'da `VisionViolation.theta` observable. Successful theta engine-unit
-/// (`Q5ThetaCharacterization`) karakterize eder.
+/// (engine.rs #[cfg(test)] Q5ThetaObservation, PR #87-B) karakterize eder.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Q5Observation {
     /// Q5 çalışmadı (commit stopped before Q5).
@@ -1221,19 +1221,11 @@ impl PipelineStage {
     }
 }
 
-/// Q5 exact theta bits (engine-unit'ten — integration public API'den alamaz).
-#[derive(Debug, Clone)]
-/// Q5 exact theta bits (engine-unit'ten — integration public API'den alamaz).
-///
-/// **TODO (P2-0B.8 kalan iş):** Henüz hiçbir engine-unit test bu struct'ı üretmiyor.
-/// P2-0B.8 (Q5 exact theta engine-unit characterization) tamamlanana kadar dead.
-/// Case 2/3 Q5 Vision'da durduğu için PredicateGate decision-drift ölçülemedi;
-/// non-default `computed_raw` ile Q5'i geçen case'ler gerekiyor.
-pub struct Q5ThetaCharacterization {
-    pub case_id: String,
-    pub v1_theta_bits: u64,
-    pub v2_candidate_theta_bits: u64,
-}
+// Successful Q5 theta is intentionally not reconstructed by the integration
+// characterization harness. It is observed at the authoritative engine-unit
+// boundary (engine.rs #[cfg(test)] — PR #87-B Q5ThetaObservation); integration
+// observations expose theta only on typed Q5 rejection
+// (EngineCommitError::VisionViolation).
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // V1 vs V2-candidate harness (P2-0B.5)

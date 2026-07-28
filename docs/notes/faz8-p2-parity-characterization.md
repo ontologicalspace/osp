@@ -57,7 +57,8 @@ Bu rapor, üç ontolojik boyut için pro/con analizi sağlar ve kararı bekler.
   determinism.
 - **Stage-aware observation modeli:** `CharacterizationObservation` (measurement +
   pipeline ayrımı). Erken duruşlar (syntax/bind/validate/measurement) temsil
-  edilebilir. Q5 exact theta ayrı engine-unit (public API'den alınamaz).
+  edilebilir. Q5 exact theta engine-unit `Q5ThetaObservation` (PR #87-B) — integration
+  public API'den successful theta alınamaz (yalnız `EngineCommitError::VisionViolation`).
 - **V1 vs V2-candidate harness:** İki ayrı engine instance'ı (state izolasyonu),
   aynı başlangıç `SpaceDigest`. V2 "candidate projection" (production V2 consumer
   henüz yok).
@@ -317,9 +318,45 @@ geçti (coupling 0.0 ≤ vision bound), PredicateGate'e ulaştı, **Held** oldu 
 `AuthorizationContext` gerçek outcome taşır → **Observed(AcceptAsCompleted)** V1/V2
 parity (tur 6 P0-1: Held fabrication yanlıştı). Pipeline mutation-decision: **ölçüldü,
 eşit** (Case 4); Cases 1/2/3 NotReached. Sadece `required_source` matrix (yukarıda)
-INV-T4 PredicateSet decision divergence kanıtladı. Pipeline-level decision-drift için
-non-default `computed_raw` + Evaluated outcome P2-0B.8'de (Cases 1/2/3'ü PredicateGate'e
-ulaştırmak + Case 4'te Evaluated witness).
+INV-T4 PredicateSet decision divergence kanıtladı. Pipeline-level decision-drift
+**PR #91 policy fixture ile KANITLANDI** (`delta-introduced-subject-policy-001`:
+V1 AcceptAsProgress vs V2 Reject).
+
+---
+
+## Q5 Exact Theta Engine-Unit Characterization (PR #87-B, P2-0B.8)
+
+**Koşullu Q5 theta parity KANITLANDI:** Aynı engine revision + bit-exact aynı
+measured-after raw position + aynı captured `EffectiveVisionGateContext` üreten V1/V2-
+candidate yolları, mevcut source-blind `CosineDeviation` semantiğinde bit-exact aynı theta
+ve aynı Q5 verdict üretir (engine.rs `#[cfg(test)]` `Q5ThetaObservation`).
+
+**Ontolojik sonuç:** Q5 kendi başına yeni bir migration divergence kaynağı DEĞİL; upstream
+`computed_raw` ve captured vision context eşitliğini deterministik olarak korur, upstream
+divergence'ı yansıtır. Formel: `Q5(V1) = Q5(V2)` ancak `Raw(V1) = Raw(V2)` ve
+`Context(V1) = Context(V2)` ise.
+
+**Migration boyutu ayrımı:**
+- **Provenance authority (INV-T4):** `MetricSource` cosine hesabına katılmaz → Q5-neutral.
+- **Baseline availability:** Q5 after-state girdisinin parçası değil → Q5-neutral.
+- **Subject authority:** OUT OF SCOPE (issue #92) — farklı subject kümeleri → farklı raw →
+  theta parity varsayılamaz.
+
+**Cases 1/2/3 superseded:** Özgün issue #87 scope'u "Cases 1/2/3'ü PredicateGate'e ulaştıracak
+non-default `computed_raw`" istiyordu. Bu PR bunun yerine exact theta parity'yi ayrı non-default
+engine-unit fixture (PR #91 reciprocal topology) ile kanıtladı. Cases 1/2/3'ün placeholder-failure
+karakterizasyonu (Q5 Vision ihlali) korunuyor; structural anlamını değiştirmek yerine exact theta
+ayrı fixture ile karakterize edildi.
+
+**Test hiyerarşisi (engine.rs `#[cfg(test)]`):**
+- **Test 1** (`q5_theta_v1_v2_exact_parity_under_same_raw_and_captured_context`): V1/V2 migration
+  parity proof — 4 katman frozen characterization (fixture identity → producer evidence →
+  captured context identity → exact theta + actual verdict).
+- **Test 2** (`q5_theta_changes_for_selected_orthogonal_effective_visions`): Observation/metric
+  sensitivity control — authority/migration proof DEĞİL; helper'ın effective vision'a duyarlı
+  olduğunu + Violation branch production theta ↔ recompute exact bağını kanıtlar.
+- **Test 3** (`q5_theta_observation_preserves_asymmetric_axis_order`): Observation representation
+  regression guard — migration proof DEĞİL; x/y/z/w/v axis sıralaması.
 
 ---
 

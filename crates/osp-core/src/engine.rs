@@ -6705,4 +6705,514 @@ v = 0.5
         // Not: V1 yolunu aynı testte çalıştırmak production V2 consumer gerektirir
         // (P2-0B'de iki-engine izolasyon ile karakterize edilecektir).
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // **Faz 8-P2 — P2-0B.8: Q5 Exact Theta Engine-Unit Characterization (PR #87-B)**
+    //
+    // V1/V2-candidate Q5 yollarının exact theta parity'sini engine-unit seviyesinde
+    // karakterize eder. Integration public API'den successful theta observable değil
+    // (TaskCommitResult theta taşımaz) — engine-unit `CosineDeviation.theta` captured
+    // authoritative context üzerinden recompute, actual verdict gerçek engine gate'ten.
+    //
+    // **Ontolojik sonuç (koşullu):** Q5 kendi başına divergence kaynağı DEĞİL; upstream
+    // raw + captured context eşitliğini korur, upstream divergence'ı yansıtır.
+    // Q5(V1) = Q5(V2) ancak Raw(V1) = Raw(V2) ve Context(V1) = Context(V2) ise.
+    // Subject-authority divergence (issue #92) kapsam dışı.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// PR #87-B fixture — PR #91 structural koşulunu birebir yeniden üretir (mass 1.0).
+    /// Genel `mod_node` (mass 0.0 → measurement clamp 0.01) DEĞİŞTİRİLMEZ — bu PR özel.
+    fn q5_fixture_module(id: u64) -> Node {
+        Node {
+            id,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            cohesion: None,
+            ..Default::default()
+        }
+    }
+
+    /// Q5 vision verdict — gerçek engine gate sonucundan (manuel `theta <= bound` DEĞİL).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Q5VerdictObservation {
+        /// theta <= bound — Q5 geçti, sonraki gate'e devam.
+        Passed,
+        /// theta > bound — Q5 ihlali (engine reject).
+        Violated,
+    }
+
+    /// Q5 theta observation — tek migration yolunun (V1 veya V2-candidate) Q5 karar
+    /// zinciri girdileri ve sonucu. PR #87-B: V1/V2 theta parity kanıtı.
+    ///
+    /// **theta_bits:** captured authoritative context üzerinden recompute (production
+    /// check_vision_raw_with_context ile aynı CosineDeviation.theta). Successful
+    /// theta production API'den observable değil.
+    /// **actual_verdict:** gerçek engine.check_claim_vision_with_context sonucu (manuel
+    /// DEĞİL). Violation yolunda production violation.theta ↔ recompute exact parity.
+    #[derive(Debug, Clone, PartialEq)]
+    struct Q5ThetaObservation {
+        computed_raw_bits: [u64; 5],
+        vision_subject: crate::authorization::CanonicalVisionSubject,
+        effective_vision_bits: [u64; 5],
+        vision_source: crate::vision::VisionSource,
+        role_inference_semver: u32,
+        vision_selection_semver: u32,
+        deviation_semver: u32,
+        theta_bound_bits: u64,
+        theta_bits: u64,
+        actual_verdict: Q5VerdictObservation,
+    }
+
+    /// 5-eksen RawPosition → to_bits() array.
+    fn q5_axis_bits(raw: &RawPosition) -> [u64; 5] {
+        [
+            raw.x.to_bits(),
+            raw.y.to_bits(),
+            raw.z.to_bits(),
+            raw.w.to_bits(),
+            raw.v.to_bits(),
+        ]
+    }
+
+    /// Verilen claim + engine üzerinden Q5 theta observation üret.
+    /// V1/V2 ayrı çağrılır — aynı helper, farklı computed_raw kaynağı.
+    ///
+    /// **actual_verdict** gerçek engine.check_claim_vision_with_context'ten (exact variant
+    /// match — yeni engine hatası sessizce Violated diye sınıflandırılmaz). **theta_bits**
+    /// captured authoritative context üzerinden recompute (production ile aynı çağrı).
+    fn observe_q5_theta(engine: &SpaceEngine, claim: &Claim) -> Q5ThetaObservation {
+        use crate::vision::CosineDeviation;
+        use crate::vision::DeviationMetric;
+
+        // Authoritative context capture (production commit_task_claim ile aynı).
+        let context = engine
+            .effective_vision_gate_context(claim)
+            .expect("authoritative Q5 context must resolve in test");
+        let selection = &context.selection;
+
+        // theta: captured context üzerinden recompute (production check_vision_raw_with_context).
+        let theta = CosineDeviation.theta(
+            &claim.computed_raw,
+            &selection.effective_vision,
+            engine.space(),
+        );
+
+        // actual_verdict: gerçek engine gate, exact variant match.
+        let actual_result = engine.check_claim_vision_with_context(claim, &context);
+        let actual_verdict = match actual_result {
+            Ok(()) => Q5VerdictObservation::Passed,
+            Err(EngineCommitError::VisionViolation { violation, bound }) => {
+                // Production violation theta ↔ captured-context recompute exact parity.
+                assert_eq!(
+                    violation.theta.to_bits(),
+                    theta.to_bits(),
+                    "production violation theta must equal captured-context recomputation"
+                );
+                assert_eq!(
+                    violation.raw, claim.computed_raw,
+                    "violation evidence must bind the exact evaluated raw"
+                );
+                assert_eq!(
+                    bound.to_bits(),
+                    context.theta_bound.to_bits(),
+                    "violation evidence must bind captured theta bound"
+                );
+                Q5VerdictObservation::Violated
+            }
+            Err(other) => panic!("unexpected non-Q5 error from vision gate: {other:?}"),
+        };
+
+        Q5ThetaObservation {
+            computed_raw_bits: q5_axis_bits(&claim.computed_raw),
+            vision_subject: selection.subject,
+            effective_vision_bits: q5_axis_bits(selection.effective_vision.raw()),
+            vision_source: selection.effective_vision.source(),
+            role_inference_semver: selection.role_inference_semver,
+            vision_selection_semver: selection.vision_selection_semver,
+            deviation_semver: context.deviation_semver,
+            theta_bound_bits: context.theta_bound.to_bits(),
+            theta_bits: theta.to_bits(),
+            actual_verdict,
+        }
+    }
+
+    /// **PR #87-B Test 1:** Aynı engine revision + bit-exact aynı measured-after raw
+    /// position + aynı captured `EffectiveVisionGateContext` üreten V1/V2-candidate
+    /// yolları, mevcut `CosineDeviation` semantiğinde bit-exact aynı theta ve aynı Q5
+    /// verdict üretir. Sıralı kanıt zinciri (tautoloji DEĞİL — gerçek üretim yolları).
+    ///
+    /// **Scope:** matching subject/value + delta-introduced subject (after-value parity).
+    /// Subject-authority divergent yollar OUT OF SCOPE (issue #92).
+    ///
+    /// 4 katman frozen characterization: fixture identity → producer evidence →
+    /// captured context identity → exact theta + actual verdict.
+    #[test]
+    fn q5_theta_v1_v2_exact_parity_under_same_raw_and_captured_context() {
+        // === Fixture identity önkoşulları ===
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(q5_fixture_module(10));
+        // V1 baseline subject base space'te YOK (kalıcı characterization).
+        assert!(
+            !engine.space().nodes.contains_key(&10_000),
+            "V1 baseline subject must be absent from base space"
+        );
+        // Reciprocal Imports edges (PR #91 geometrisi): 10000→10 (Ce) + 10→10000 (Ca).
+        let delta_node = q5_fixture_module(10_000);
+        // node_from_spec id kullanılmıyor — claim delta_node id explicit 10_000.
+        let delta_edges = vec![edge(10_000, 10), edge(10, 10_000)];
+        let probe_claim = claim_with_task_id(42, vec![delta_node], delta_edges, vec![]);
+        // Structural fixture mass exact (P1-1).
+        assert_eq!(
+            engine.space().nodes[&10].mass.to_bits(),
+            1.0f64.to_bits(),
+            "fixture node mass 1.0"
+        );
+        assert_eq!(
+            probe_claim.delta_nodes[0].mass.to_bits(),
+            1.0f64.to_bits(),
+            "delta node mass 1.0"
+        );
+
+        let revision_before = engine
+            .current_space_view_revision()
+            .expect("revision before measurement");
+
+        let task = task_with_node_scope(10_000, 42);
+
+        // === Tek structural claim — iki raw producer (P1-2) ===
+        // V1 raw: compute_raw_from_delta (infallible, public).
+        let v1_raw = engine.compute_raw_from_delta(
+            &probe_claim.delta_nodes,
+            &probe_claim.delta_edges,
+            &probe_claim.removed_edges,
+            &[10_000],
+        );
+        // V2 raw: measure_task_delta().after().to_raw() — aynı revision nesnesi (P2-4).
+        let probe_bound = crate::trajectory::TaskBoundClaim {
+            claim: &probe_claim,
+            task: &task,
+        };
+        let measurement = engine
+            .measure_task_delta(&probe_bound, &revision_before, None)
+            .expect("V2 measurement");
+
+        // === V2 baseline-unavailable önkoşulu (P1-3 + P2-3 exact member list) ===
+        use crate::measurement::{BaselineUnavailableReason, MeasurementBaseline};
+        match measurement.before() {
+            MeasurementBaseline::Unavailable {
+                reason: BaselineUnavailableReason::AllMembersIntroducedByDelta { members },
+            } => {
+                assert_eq!(members, &[10_000], "baseline members exact = [10000]");
+            }
+            other => panic!("expected AllMembersIntroducedByDelta([10000]), got {other:?}"),
+        }
+
+        let v2_raw = measurement.after().to_raw();
+
+        // === İki claim: tek structural identity clone + farklı raw producer ===
+        let mut v1_claim = probe_claim.clone();
+        v1_claim.computed_raw = v1_raw;
+        let mut v2_claim = probe_claim.clone();
+        v2_claim.computed_raw = v2_raw;
+
+        let obs_v1 = observe_q5_theta(&engine, &v1_claim);
+        let obs_v2 = observe_q5_theta(&engine, &v2_claim);
+
+        // === Revision invariant (P2-1: kontrol edilen = measurement'a sunulan) ===
+        let revision_after = engine
+            .current_space_view_revision()
+            .expect("revision after measurement");
+        assert_eq!(
+            revision_before, revision_after,
+            "characterization must remain within one engine revision"
+        );
+
+        // === Producer evidence — exact literal golden (P0) ===
+        const EXPECTED_RAW_BITS: [u64; 5] = [
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557,
+        ];
+        assert_ne!(
+            EXPECTED_RAW_BITS, [0u64; 5],
+            "fixture must remain non-default"
+        );
+        assert_eq!(
+            obs_v1.computed_raw_bits, EXPECTED_RAW_BITS,
+            "V1 engine-produced non-default raw golden"
+        );
+        assert_eq!(
+            obs_v2.computed_raw_bits, EXPECTED_RAW_BITS,
+            "V2 engine-produced non-default raw golden"
+        );
+        assert_eq!(
+            obs_v1.computed_raw_bits, obs_v2.computed_raw_bits,
+            "raw parity"
+        );
+
+        // === Context evidence — semantic golden (P1-2: probe DEĞİL, sözleşmeden) ===
+        use crate::authorization::{
+            CanonicalVisionSubject, DEVIATION_SEMANTICS_VERSION, ROLE_INFERENCE_SEMANTICS_VERSION,
+            VISION_SELECTION_SEMANTICS_VERSION,
+        };
+        use crate::space::NodeRole;
+        use crate::vision::VisionSource;
+        // Runtime builtin override — vision_config hardcoded (0.40, 0.60, 0.35);
+        // w/v global vision'dan (zero) inherit.
+        const EXPECTED_EFFECTIVE_VISION_BITS: [u64; 5] = [
+            4600877379321698714, // 0.40
+            4603579539098121011, // 0.60
+            4599976659396224614, // 0.35
+            0,                   // w global zero inherit
+            0,                   // v global zero inherit
+        ];
+        assert_eq!(
+            obs_v1.effective_vision_bits, EXPECTED_EFFECTIVE_VISION_BITS,
+            "Runtime builtin effective vision exact golden (V1)"
+        );
+        assert_eq!(
+            obs_v2.effective_vision_bits, EXPECTED_EFFECTIVE_VISION_BITS,
+            "Runtime builtin effective vision exact golden (V2)"
+        );
+        // theta_bound — EngineConfig::default_calibrated() 0.3.
+        assert_eq!(
+            obs_v1.theta_bound_bits,
+            0.3f64.to_bits(),
+            "default calibrated theta bound golden"
+        );
+        assert_eq!(obs_v2.theta_bound_bits, 0.3f64.to_bits());
+        // Role — CanonicalNodeRole opaque newtype, domain enum'dan üret (probe literal DEĞİL).
+        let expected_role = crate::canonical_tags::CanonicalNodeRole::try_from(&NodeRole::Runtime)
+            .expect("Runtime canonical role mapping (Runtime => 4 stable)");
+        assert_eq!(
+            obs_v1.vision_subject,
+            CanonicalVisionSubject::Role(expected_role),
+            "expected subject Role(Runtime)"
+        );
+        assert_eq!(
+            obs_v1.vision_source,
+            VisionSource::BuiltinRole,
+            "expected source BuiltinRole"
+        );
+        // Semver constants.
+        assert_eq!(
+            obs_v1.role_inference_semver,
+            ROLE_INFERENCE_SEMANTICS_VERSION
+        );
+        assert_eq!(
+            obs_v1.vision_selection_semver,
+            VISION_SELECTION_SEMANTICS_VERSION
+        );
+        assert_eq!(obs_v1.deviation_semver, DEVIATION_SEMANTICS_VERSION);
+        // Context parity (constants + semantic golden iki taraf birlikte drift'i kapatır).
+        assert_eq!(
+            obs_v1.vision_subject, obs_v2.vision_subject,
+            "vision subject parity"
+        );
+        assert_eq!(
+            obs_v1.vision_source, obs_v2.vision_source,
+            "vision source parity"
+        );
+        assert_eq!(obs_v1.role_inference_semver, obs_v2.role_inference_semver);
+        assert_eq!(
+            obs_v1.vision_selection_semver,
+            obs_v2.vision_selection_semver
+        );
+        assert_eq!(obs_v1.deviation_semver, obs_v2.deviation_semver);
+
+        // === Q5 evidence — exact theta literal + actual Passed verdict (P0) ===
+        const EXPECTED_THETA_BITS: u64 = 4592614916806596616;
+        assert_eq!(
+            obs_v1.theta_bits, EXPECTED_THETA_BITS,
+            "V1 exact theta golden"
+        );
+        assert_eq!(
+            obs_v2.theta_bits, EXPECTED_THETA_BITS,
+            "V2 exact theta golden"
+        );
+        assert_eq!(obs_v1.theta_bits, obs_v2.theta_bits, "theta parity");
+        assert_eq!(
+            obs_v1.actual_verdict,
+            Q5VerdictObservation::Passed,
+            "fixture must reach beyond Q5 (V1)"
+        );
+        assert_eq!(
+            obs_v2.actual_verdict,
+            Q5VerdictObservation::Passed,
+            "fixture must reach beyond Q5 (V2)"
+        );
+        assert_eq!(
+            obs_v1.actual_verdict, obs_v2.actual_verdict,
+            "Q5 verdict parity"
+        );
+    }
+
+    /// Asymmetric control raw — Test 2 (metric sensitivity) ve Test 3 (axis-order
+    /// representation guard) aynı kontrol geometrisine bağlanır (P2-1 non-blocking).
+    const Q5_ASYMMETRIC_CONTROL_RAW: RawPosition = RawPosition {
+        x: 0.31,
+        y: 0.67,
+        z: 0.42,
+        w: 0.18,
+        v: 0.73,
+    };
+
+    /// Engine + Runtime role override (x,y,z). User override builtin'den önce seçilir →
+    /// source `RoleProfile`. w/v global vision'dan (zero) inherit.
+    fn measurement_engine_with_runtime_vision(x: f64, y: f64, z: f64) -> SpaceEngine {
+        let mut engine = make_measurement_engine();
+        engine.config.role_overrides.insert(
+            "Runtime".to_string(),
+            crate::vision_config::RoleVisionOverride {
+                x: Some(x),
+                y: Some(y),
+                z: Some(z),
+            },
+        );
+        engine
+    }
+
+    /// **PR #87-B Test 2:** Observation helper effective vision'a duyarlıdır — seçilmiş
+    /// iki orthogonal `RoleProfile` vision context aynı asymmetric raw'a karşı farklı
+    /// theta üretir. Authority veya migration parity kanıtı DEĞİL; observation/metric
+    /// sensitivity control. İki theta literal bit golden ile pinlenir.
+    ///
+    /// Vision A = (1,0,0,0,0): raw'a karşı theta ≈ 0.36 > 0.3 → Violated (helper Violation
+    /// branch icra — production violation.theta ↔ recompute exact bağ). Vision B =
+    /// (0,1,0,0,0): theta ≈ 0.20 < 0.3 → Passed.
+    #[test]
+    fn q5_theta_changes_for_selected_orthogonal_effective_visions() {
+        use crate::authorization::CanonicalVisionSubject;
+        use crate::space::NodeRole;
+        use crate::vision::VisionSource;
+
+        let expected_runtime =
+            crate::canonical_tags::CanonicalNodeRole::try_from(&NodeRole::Runtime)
+                .expect("Runtime canonical role mapping");
+
+        // Production delta node claim — aynı structural identity iki engine'e.
+        let delta_node = q5_fixture_module(10_000);
+        let claim_a = {
+            let mut c = claim_with_task_id(42, vec![delta_node.clone()], vec![], vec![]);
+            c.computed_raw = Q5_ASYMMETRIC_CONTROL_RAW;
+            c
+        };
+        let claim_b = {
+            let mut c = claim_with_task_id(42, vec![delta_node], vec![], vec![]);
+            c.computed_raw = Q5_ASYMMETRIC_CONTROL_RAW;
+            c
+        };
+
+        let engine_a = measurement_engine_with_runtime_vision(1.0, 0.0, 0.0);
+        let engine_b = measurement_engine_with_runtime_vision(0.0, 1.0, 0.0);
+        let obs_a = observe_q5_theta(&engine_a, &claim_a);
+        let obs_b = observe_q5_theta(&engine_b, &claim_b);
+
+        // Aynı raw (kontrol değişkeni).
+        assert_eq!(
+            obs_a.computed_raw_bits, obs_b.computed_raw_bits,
+            "aynı asymmetric raw"
+        );
+        // Exact vision golden — orthogonal (P1-4: assert_ne collinear olabilir).
+        assert_eq!(
+            obs_a.effective_vision_bits,
+            [1.0f64.to_bits(), 0, 0, 0, 0],
+            "vision A = (1,0,0,0,0)"
+        );
+        assert_eq!(
+            obs_b.effective_vision_bits,
+            [0, 1.0f64.to_bits(), 0, 0, 0],
+            "vision B = (0,1,0,0,0)"
+        );
+        // Context sabitleri (ikisi arasında değişen tek şey vision numeric vector).
+        assert_eq!(
+            obs_a.vision_source,
+            VisionSource::RoleProfile,
+            "source A RoleProfile"
+        );
+        assert_eq!(
+            obs_b.vision_source,
+            VisionSource::RoleProfile,
+            "source B RoleProfile"
+        );
+        assert_eq!(
+            obs_a.vision_subject,
+            CanonicalVisionSubject::Role(expected_runtime),
+            "subject A Role(Runtime)"
+        );
+        assert_eq!(
+            obs_b.vision_subject,
+            CanonicalVisionSubject::Role(expected_runtime),
+            "subject B Role(Runtime)"
+        );
+        assert_eq!(
+            obs_a.theta_bound_bits,
+            0.3f64.to_bits(),
+            "bound A exact golden"
+        );
+        assert_eq!(
+            obs_b.theta_bound_bits,
+            0.3f64.to_bits(),
+            "bound B exact golden"
+        );
+        assert_eq!(obs_a.role_inference_semver, obs_b.role_inference_semver);
+        assert_eq!(obs_a.vision_selection_semver, obs_b.vision_selection_semver);
+        assert_eq!(obs_a.deviation_semver, obs_b.deviation_semver);
+
+        // Exact theta golden + farklı (non-collinear → farklı theta, bu kontrol için).
+        const EXPECTED_THETA_A_BITS: u64 = 4600217245640530306; // probe ölçümü
+        const EXPECTED_THETA_B_BITS: u64 = 4596542068693448854; // probe ölçümü
+        assert_eq!(
+            obs_a.theta_bits, EXPECTED_THETA_A_BITS,
+            "theta A literal golden"
+        );
+        assert_eq!(
+            obs_b.theta_bits, EXPECTED_THETA_B_BITS,
+            "theta B literal golden"
+        );
+        assert_ne!(
+            obs_a.theta_bits, obs_b.theta_bits,
+            "orthogonal vision → farklı theta"
+        );
+
+        // Verdict — Violated (A) helper Violation branch'ini gerçekten icra eder
+        // (production violation.theta ↔ recompute exact bağ). Passed (B).
+        assert_eq!(
+            obs_a.actual_verdict,
+            Q5VerdictObservation::Violated,
+            "vision A theta > 0.3 → Violated (helper Violation branch icra)"
+        );
+        assert_eq!(
+            obs_b.actual_verdict,
+            Q5VerdictObservation::Passed,
+            "vision B theta < 0.3 → Passed"
+        );
+    }
+
+    /// **PR #87-B Test 3:** Observation helper x/y/z/w/v axis sıralamasını korur.
+    /// Simetrik 0.5 değerlerinin gizleyebileceği axis-order/projection hatalarını yakalar.
+    /// **Migration parity proof DEĞİL** — observation representation regression guard.
+    #[test]
+    fn q5_theta_observation_preserves_asymmetric_axis_order() {
+        let engine = make_measurement_engine();
+        let claim = {
+            let mut c = claim_with_task_id(42, vec![q5_fixture_module(10_000)], vec![], vec![]);
+            c.computed_raw = Q5_ASYMMETRIC_CONTROL_RAW;
+            c
+        };
+        let obs = observe_q5_theta(&engine, &claim);
+        assert_eq!(
+            obs.computed_raw_bits,
+            [
+                0.31f64.to_bits(),
+                0.67f64.to_bits(),
+                0.42f64.to_bits(),
+                0.18f64.to_bits(),
+                0.73f64.to_bits(),
+            ],
+            "observation preserves asymmetric x/y/z/w/v axis order"
+        );
+    }
 }
