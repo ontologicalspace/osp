@@ -876,7 +876,8 @@ fn removed_edge_external_source_shows_affected_contamination() {
 }
 
 /// `delta-introduced-subject-001`: baseline epistemic availability divergence
-/// (review tur 7-9: availability divergence kanıtlandı, policy/decision hipotez).
+/// (review tur 7-9: availability divergence kanıtlandı; policy/decision divergence
+/// sibling `delta-introduced-subject-policy-001` tarafından KANITLANDI).
 ///
 /// Subject node 10000 delta-introduced (base space'te yok, delta ile geliyor —
 /// `node_from_spec` id 10_000+0). Subject authority divergence YOK (V1 affected={10000}
@@ -885,18 +886,26 @@ fn removed_edge_external_source_shows_affected_contamination() {
 ///   positions → `RawPosition::default()` (sıfır koordinat).
 /// - V2: `MeasurementBaseline::Unavailable { AllMembersIntroducedByDelta }` (typed).
 ///
-/// **Review tur 7-9:** Bu case **availability divergence** kanıtlar (V1 yokluk → sıfır,
-/// V2 typed Unavailable). **Policy/decision divergence KANITLAMAZ** — Case 4 predicate
-/// `Coupling ≤ 0.5` + measured coupling 0.0 → `Completed` → `AcceptAsCompleted`
-/// (completion-first decision core improved'a bakmaz). Policy etkisi SADECE `NotCompleted`
-/// + improvement-sensitive policy dalında observable (P2-0B.8 fixture).
-/// dalında observable (P2-0B.8 fixture).
+/// Bu case **availability divergence** kanıtlar (V1 yokluk → sıfır, V2 typed
+/// Unavailable). **Policy/decision divergence bu case'te observable DEĞİL** — Case 4
+/// predicate `Coupling ≤ 0.5` + measured coupling 0.0 → `Completed` → `AcceptAsCompleted`
+/// (completion-first decision core improved'a bakmaz). Policy etkisi sibling
+/// `delta-introduced-subject-policy-001` fixture'ında (NotCompleted + AcceptImprovement
+/// dalı) KANITLANDI — V1 AcceptAsProgress vs V2 Reject.
 #[test]
 fn delta_introduced_subject_shows_baseline_epistemic_availability_divergence() {
+    // **Hardening:** Exact ID ile seçim — `delta_introduced_subject_policy_001` de aynı
+    // `CaseClass::DeltaIntroducedSubject` altında olduğu için class-only selection bu testi
+    // sessizce yanlış case'e kaydırabilirdi. Builder sırası değişse bile exact ID seçer.
     let case = build_all_cases()
         .into_iter()
-        .find(|c| c.class == CaseClass::DeltaIntroducedSubject)
-        .expect("DeltaIntroducedSubject case olmalı");
+        .find(|c| c.id == "delta-introduced-subject-001")
+        .expect("delta-introduced-subject-001 case olmalı");
+    assert_eq!(
+        case.class,
+        CaseClass::DeltaIntroducedSubject,
+        "class invariant — exact ID seçiminden sonra class hala DeltaIntroducedSubject"
+    );
     let (obs_v1, obs_v2) = observe_case(&case);
 
     // === Subject set parity (P0-1: subject authority divergence YOK) ===
@@ -1077,9 +1086,417 @@ fn delta_introduced_subject_shows_baseline_epistemic_availability_divergence() {
         case.id
     );
     // **Review tur 6 sonuçu:** Case 4 pipeline mutation-decision ÖLÇÜLDÜ ve eşit
-    // (Observed(AcceptAsCompleted) V1/V2 parity). Baseline policy/decision divergence
-    // hâlâ hipotez — Case 4 Completed → projection etkisiz. P2-0B.8 NotCompleted +
-    // AcceptImprovement fixture gerek.
+    // (Observed(AcceptAsCompleted) V1/V2 parity). Case 4 Completed → projection etkisiz;
+    // policy/decision divergence bu case'te observable DEĞİL — sibling
+    // `delta-introduced-subject-policy-001` fixture'ı (NotCompleted + AcceptImprovement)
+    // divergence'ı KANITLADI.
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// P2-0B.8 — Policy fixture (delta-introduced-subject-policy-001)
+//
+// V1 legacy DefaultFallback baseline projection ile V2 candidate fail-closed projection
+// arasında migration-relevant policy/decision divergence üreten NotCompleted +
+// AcceptImprovement case. Migration 3 (b) hipotezini besler. Case geometrisi reciprocal
+// Imports edges (Ce=1, Ca=1 → instability 0.5) + preferred_vector (0.8, 0.5, 0.5) ile
+// kurulu — tek outgoing edge Ce=1/Ca=0 → instability 1.0 → max_instability=0.85 hard-cap
+// ihlali → improved=false olurdu; reciprocal edge bunu önler.
+//
+// Golden değerler probe ile ölçüldü, literal olarak pinlendi. Production-reachable
+// structural topology üzerinde gelecekteki migration'ın policy/decision divergence'ını
+// karakterize eder; iki production implementation'ı karşılaştırmaz.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **V1/V2 policy/decision divergence:** `delta-introduced-subject-policy-001` NotCompleted +
+/// AcceptImprovement dalında iki projection arasında karar ayrışması üretir.
+///
+/// - V1: DefaultFallback zero baseline + target (0.8,0.5,0.5) → loss_before ≈ 1.068;
+///   measured after (0.5,0.5,0.5) → loss_after = 0.3 → improved=true →
+///   `AcceptAsProgress` → `Lane(TrajectoryCheckpoint)` (INV-T8) → `Held`.
+/// - V2: `project_v1_loss_before_compatibility_v2` Unavailable dalı → loss_before=loss_after
+///   → improved=false → `Reject` → `NotApplied` (INV-T8), witness değerlendirilmez →
+///   `Evaluated` (engine.rs:1456-1464 Reject early-return).
+///
+/// Subject/value/source/baseline tüm alanlar frozen golden olarak pinlenir.
+#[test]
+fn delta_introduced_policy_shows_v1_v2_decision_divergence() {
+    use osp_core::coords::MetricSource;
+    use osp_core::trajectory::{ApplyTarget, CommitLane, MutationDecision, PredicateCompletion};
+    let case = build_all_cases()
+        .into_iter()
+        .find(|c| c.id == "delta-introduced-subject-policy-001")
+        .expect("delta-introduced-subject-policy-001 case olmalı");
+    assert_eq!(
+        case.class,
+        CaseClass::DeltaIntroducedSubject,
+        "class invariant — exact ID seçiminden sonra class hala DeltaIntroducedSubject"
+    );
+
+    assert_engines_start_from_identical_space(&case);
+    let (obs_v1, obs_v2) = observe_case(&case);
+
+    // === Subject set parity (V1 affected == V2 task scope == {10000}) ===
+    let (subj_v1, subj_v2) = measurement_subjects(&obs_v1, &obs_v2, &case.id);
+    assert_eq!(
+        sorted(&subj_v1),
+        vec![10_000],
+        "V1 affected = {{10000}} (case design); got {subj_v1:?}"
+    );
+    assert_eq!(
+        sorted(&subj_v2),
+        vec![10_000],
+        "V2 subject = {{10000}} (task scope); got {subj_v2:?}"
+    );
+
+    // === V1 measurement produced — frozen golden (probe'dan) ===
+    let (v1_measured, v1_baseline_loss_bits) = match &obs_v1.measurement {
+        common::MeasurementObservation::Produced {
+            measured_after,
+            values_bits,
+            sources,
+            baseline:
+                common::BaselineObservation::LegacyComputed {
+                    values_bits: bv,
+                    sources: bs,
+                    loss_bits,
+                    derivation: common::LegacyBaselineDerivation::DefaultFallback,
+                },
+            ..
+        } => {
+            // V1 measured-after 5-axis value bits (probe golden).
+            assert_eq!(
+                *values_bits,
+                [
+                    4602678819172646912u64, // coupling 0.5
+                    4602678819172646912,    // cohesion 0.5
+                    4602678819172646912,    // instability 0.5
+                    4602678819172646912,    // entropy 0.5
+                    4601046424471046557,    // witness_depth ≈ 0.4094
+                ],
+                "V1 measured-after value bits (case {})",
+                case.id
+            );
+            // V1 measured-after sources — uniform Scip (provenanced_from_raw override).
+            assert_eq!(
+                *sources,
+                [MetricSource::Scip; 5],
+                "V1 measured-after uniform Scip (case {})",
+                case.id
+            );
+            // V1 baseline — DefaultFallback zero + uniform Scip + probe golden loss bits.
+            assert_eq!(
+                *bv, [0u64; 5],
+                "V1 DefaultFallback zero baseline (case {})",
+                case.id
+            );
+            assert_eq!(
+                *bs,
+                [MetricSource::Scip; 5],
+                "V1 baseline uniform Scip (case {})",
+                case.id
+            );
+            assert_eq!(
+                *loss_bits, 4607487347736372296u64,
+                "V1 DefaultFallback baseline loss bits (loss_before ≈ 1.0677); case {}",
+                case.id
+            );
+            (measured_after.clone(), *loss_bits)
+        }
+        other => panic!("V1 produced + LegacyComputed(DefaultFallback) olmalı; got {other:?}"),
+    };
+
+    // === V2 measurement produced — UnavailableAllIntroduced + INV-T4 provenance divergence ===
+    let v2_after_sources = match &obs_v2.measurement {
+        common::MeasurementObservation::Produced {
+            values_bits,
+            sources,
+            baseline:
+                common::BaselineObservation::Unavailable(common::BaselineKind::UnavailableAllIntroduced),
+            ..
+        } => {
+            // V2 measured-after value bits — V1 ile parity (subject/value authority parity).
+            assert_eq!(
+                *values_bits,
+                [
+                    4602678819172646912u64,
+                    4602678819172646912,
+                    4602678819172646912,
+                    4602678819172646912,
+                    4601046424471046557,
+                ],
+                "V2 measured-after value bits (subject parity); case {}",
+                case.id
+            );
+            // V2 sources — engine-native per-axis (INV-T4) — V1 uniform Scip'ten DIVERGE.
+            assert_eq!(
+                *sources,
+                [
+                    MetricSource::TreeSitter,  // coupling
+                    MetricSource::Placeholder, // cohesion
+                    MetricSource::TreeSitter,  // instability
+                    MetricSource::Heuristic,   // entropy
+                    MetricSource::Heuristic,   // witness_depth
+                ],
+                "V2 gerçek engine axis sources (INV-T4 native provenance); case {}",
+                case.id
+            );
+            *sources
+        }
+        other => {
+            panic!("V2 produced + Unavailable(UnavailableAllIntroduced) olmalı; got {other:?}")
+        }
+    };
+    assert_ne!(
+        v2_after_sources,
+        [MetricSource::Scip; 5],
+        "INV-T4 PROVENANCE DIVERGENCE: V2 sources ≠ V1 uniform Scip; case {}",
+        case.id
+    );
+
+    // === Decision-input scalar frozen evidence (PR #91 review P1) ===
+    //
+    // V2 candidate fail-closed projection'ın MERKEZİ iddiası: commit_task_claim'e
+    // geçirilen loss_before == loss_after. Helper `project_v1_loss_before_compatibility_v2`
+    // gelecekte değişse (Unavailable → 0.0 / NAN / loss_after-0.01) decision sonucu (Reject)
+    // aynı kalabilir — bu yüzden projection scalar'ı kendisi frozen evidence olmalı.
+    let v1_decision = obs_v1
+        .decision_input
+        .expect("V1 commit'e ulaştı → decision_input Some olmalı");
+    let v2_decision = obs_v2
+        .decision_input
+        .expect("V2 commit'e ulaştı → decision_input Some olmalı");
+
+    // V1: commit_task_claim'e geçirilen loss_before, observation baseline loss_bits ile
+    // AYNI kaynak (trajectory_loss(current_measured, target)) — frozen evidence parity.
+    assert_eq!(
+        v1_decision.loss_before_bits, v1_baseline_loss_bits,
+        "V1 decision-input loss_before == baseline loss_bits (aynı current_measured kaynağı); case {}",
+        case.id
+    );
+    // V1 improved önkoşulu: loss_after < loss_before - min_delta.
+    let loss_before = f64::from_bits(v1_decision.loss_before_bits);
+    let loss_after = f64::from_bits(v1_decision.loss_after_bits);
+    assert!(
+        loss_after < loss_before - case.task.policy.min_improvement_delta,
+        "V1 improved önkoşulu: loss_after ({}) < loss_before ({}) - min_delta ({}); case {}",
+        loss_after,
+        loss_before,
+        case.task.policy.min_improvement_delta,
+        case.id
+    );
+
+    // V2: fail-closed equality projection — loss_before == loss_after (frozen evidence).
+    assert_eq!(
+        v2_decision.loss_before_bits, v2_decision.loss_after_bits,
+        "V2 candidate fail-closed projection: loss_before == loss_after; case {}",
+        case.id
+    );
+    // V2 loss_after == V1 loss_after (aynı measured (0.5,0.5,0.5) + aynı target →
+    // aynı trajectory_loss). loss_after literal ≈ 0.3 (sqrt(0.09)) — ULP-hassas olduğu
+    // için literal pin YERİNE V1 loss_after parity'si (aynı computed loss) pinlenir.
+    assert_eq!(
+        v2_decision.loss_after_bits, v1_decision.loss_after_bits,
+        "V2 loss_after == V1 loss_after (aynı measured + target → aynı loss); case {}",
+        case.id
+    );
+    // V2 fail-closed: loss_before = loss_after (equality projection).
+    assert_eq!(
+        v2_decision.loss_before_bits, v2_decision.loss_after_bits,
+        "V2 fail-closed: loss_before = loss_after (Unavailable → loss_after projection); case {}",
+        case.id
+    );
+
+    // === Hard-cap önkoşulları direct assert (PR #91 review P1) ===
+    //
+    // improved için üç hard-cap assess_improvement_v1 içinde kontrol edilir. Threshold
+    // EffectiveImprovementPolicy::current_semantics()'ten (literal 0.85/0.85/0.15 DEĞİL);
+    // threshold değişirse bu assertion güncellenir.
+    let improvement_policy = osp_core::trajectory::EffectiveImprovementPolicy::current_semantics();
+    assert!(
+        v1_measured.coupling.value < improvement_policy.max_coupling,
+        "coupling hard-cap: {} < {}; case {}",
+        v1_measured.coupling.value,
+        improvement_policy.max_coupling,
+        case.id
+    );
+    assert!(
+        v1_measured.instability.value < improvement_policy.max_instability,
+        "instability hard-cap: {} < {}; case {}",
+        v1_measured.instability.value,
+        improvement_policy.max_instability,
+        case.id
+    );
+    assert!(
+        v1_measured.cohesion.value > improvement_policy.min_cohesion,
+        "cohesion hard-cap: {} > {}; case {}",
+        v1_measured.cohesion.value,
+        improvement_policy.min_cohesion,
+        case.id
+    );
+
+    // === EXACT V1 pipeline — AcceptAsProgress → TrajectoryCheckpoint → Held (INV-T8) ===
+    let expected_v1 = common::PipelineObservation::CommitReached {
+        q5: common::Q5Observation::Passed,
+        predicate_completion: Some(PredicateCompletion::NotCompleted),
+        mutation_decision: Some(MutationDecision::AcceptAsProgress),
+        apply_target: Some(ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint)),
+        witness_reachability: common::WitnessReachability::Held,
+    };
+    assert_eq!(
+        obs_v1.pipeline, expected_v1,
+        "V1 AcceptAsProgress → TrajectoryCheckpoint → Held (INV-T8); case {}",
+        case.id
+    );
+
+    // === EXACT V2 pipeline — Reject → NotApplied → Evaluated (witness yok, INV-T8) ===
+    let expected_v2 = common::PipelineObservation::CommitReached {
+        q5: common::Q5Observation::Passed,
+        predicate_completion: Some(PredicateCompletion::NotCompleted),
+        mutation_decision: Some(MutationDecision::Reject),
+        apply_target: Some(ApplyTarget::NotApplied),
+        witness_reachability: common::WitnessReachability::Evaluated,
+    };
+    assert_eq!(
+        obs_v2.pipeline, expected_v2,
+        "V2 Reject → NotApplied → Evaluated (Reject early-return, witness yok); case {}",
+        case.id
+    );
+
+    // === DECISION DIVERGENCE — Migration 3 (b) hipotezi kanıtlandı ===
+    assert_ne!(
+        obs_v1.pipeline, obs_v2.pipeline,
+        "POLICY/DECISION DIVERGENCE: V1 AcceptAsProgress ≠ V2 Reject (NotCompleted + \
+         AcceptImprovement + DefaultFallback baseline projection); case {}",
+        case.id
+    );
+    let md_v1 = common::MutationDecisionObservation::from_observations(&obs_v1.pipeline);
+    let md_v2 = common::MutationDecisionObservation::from_observations(&obs_v2.pipeline);
+    assert_eq!(
+        md_v1,
+        common::MutationDecisionObservation::Observed(MutationDecision::AcceptAsProgress),
+        "V1 Observed(AcceptAsProgress); case {}",
+        case.id
+    );
+    assert_eq!(
+        md_v2,
+        common::MutationDecisionObservation::Observed(MutationDecision::Reject),
+        "V2 Observed(Reject); case {}",
+        case.id
+    );
+}
+
+/// **Counter-fixture:** `min_improvement_delta = 1.0` ile V1 AcceptAsProgress'improvement
+/// kaynaklı olduğunu kanıtla. Aynı case, sadece `min_improvement_delta` değiştirilir
+/// (loss drop ≈ 0.768 < 1.0 → improved=false → Reject). **Taze engine** ile çalışır
+/// (state izolasyonu).
+///
+/// V1 measured-after + baseline bit'leri ana fixture ile AYNI olmalı — değişen tek
+/// karar girdisi `min_improvement_delta`. Bu, V1 AcceptAsProgress'in improvement'tan
+/// geldiğini exact gösterir (harici koşul değil).
+#[test]
+fn counter_fixture_min_delta_blocks_v1_accept_as_progress() {
+    use osp_core::coords::MetricSource;
+    use osp_core::trajectory::{ApplyTarget, MutationDecision, PredicateCompletion};
+    // Aynı builder — sadece min_improvement_delta = 1.0 (loss drop ≈ 0.768 < 1.0).
+    let mut case = build_all_cases()
+        .into_iter()
+        .find(|c| c.id == "delta-introduced-subject-policy-001")
+        .expect("delta-introduced-subject-policy-001 case olmalı");
+    case.task.policy.min_improvement_delta = 1.0;
+
+    // TAZE engine — izolasyon (clone yetersiz, evaluate mutates).
+    let mut engine_v1_counter = common::engine_with_case_space(&case);
+    let obs_v1_counter = common::evaluate_v1_case(&mut engine_v1_counter, &case);
+
+    // === Measured-after + baseline parity — değişen tek girdi min_improvement_delta ===
+    let (
+        counter_baseline_values,
+        counter_baseline_sources,
+        counter_baseline_loss_bits,
+        counter_after_values,
+        counter_after_sources,
+    ) = match &obs_v1_counter.measurement {
+        common::MeasurementObservation::Produced {
+            values_bits,
+            sources,
+            baseline:
+                common::BaselineObservation::LegacyComputed {
+                    values_bits: bv,
+                    sources: bs,
+                    loss_bits,
+                    derivation: common::LegacyBaselineDerivation::DefaultFallback,
+                },
+            ..
+        } => (*bv, *bs, *loss_bits, *values_bits, *sources),
+        other => panic!("counter V1 produced olmalı; got {other:?}"),
+    };
+    assert_eq!(
+        counter_baseline_values, [0u64; 5],
+        "counter baseline parity — DefaultFallback zero (case {})",
+        case.id
+    );
+    assert_eq!(
+        counter_baseline_sources,
+        [MetricSource::Scip; 5],
+        "counter baseline sources parity (case {})",
+        case.id
+    );
+    assert_eq!(
+        counter_baseline_loss_bits, 4607487347736372296u64,
+        "counter baseline loss parity (case {})",
+        case.id
+    );
+    assert_eq!(
+        counter_after_values,
+        [
+            4602678819172646912u64,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557,
+        ],
+        "counter measured-after values parity (case {})",
+        case.id
+    );
+    assert_eq!(
+        counter_after_sources,
+        [MetricSource::Scip; 5],
+        "counter measured-after sources parity (case {})",
+        case.id
+    );
+
+    // === EXACT counter pipeline — Reject → NotApplied → Evaluated (INV-T8) ===
+    assert_eq!(
+        obs_v1_counter.pipeline,
+        common::PipelineObservation::CommitReached {
+            q5: common::Q5Observation::Passed,
+            predicate_completion: Some(PredicateCompletion::NotCompleted),
+            mutation_decision: Some(MutationDecision::Reject),
+            apply_target: Some(ApplyTarget::NotApplied),
+            witness_reachability: common::WitnessReachability::Evaluated,
+        },
+        "counter V1: min_delta=1.0 → improved=false → Reject → Evaluated; case {}",
+        case.id
+    );
+
+    // Loss drop < min_delta (1.0) — improved=false kanıtı (decision-input scalar'ından).
+    let counter_decision = obs_v1_counter
+        .decision_input
+        .expect("counter V1 commit'e ulaştı → decision_input Some olmalı");
+    let loss_before = f64::from_bits(counter_decision.loss_before_bits);
+    let loss_after = f64::from_bits(counter_decision.loss_after_bits);
+    assert_eq!(
+        counter_decision.loss_before_bits, counter_baseline_loss_bits,
+        "counter decision-input loss_before == baseline loss_bits (aynı kaynak); case {}",
+        case.id
+    );
+    assert!(
+        loss_after >= loss_before - case.task.policy.min_improvement_delta,
+        "counter: loss_after ({}) >= loss_before ({}) - min_delta (1.0) → improved=false; case {}",
+        loss_after,
+        loss_before,
+        case.id
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

@@ -5,7 +5,7 @@
     "matching_scope": "task.predicate.scope and proposal.affected_nodes describe the same node set — subject/value parity but INV-T4 source divergence (V1 Scip override vs V2 TreeSitter axis)",
     "wide_affected_scope": "proposal.affected_nodes is a strict superset of task.predicate.scope — known production-reachable divergence (V1 measures wider centroid)",
     "removed_edge_external_source": "removed_edges[*].from references a node outside task.predicate.scope — divergence (V1 folds into affected set)",
-    "delta_introduced_subject": "task.predicate.scope members are all introduced by the delta — V2 baseline UnavailableAllIntroduced (typed), V1 DefaultFallback (empty positions → RawPosition::default)",
+    "delta_introduced_subject": "task.predicate.scope members are all introduced by the delta — V2 baseline UnavailableAllIntroduced (typed), V1 DefaultFallback (empty positions → RawPosition::default). Two cases: (1) delta-introduced-subject-001 baseline availability divergence; (2) delta-introduced-subject-policy-001 NotCompleted + AcceptImprovement policy/decision divergence (Migration 3 (b) proof — V1 AcceptAsProgress vs V2 Reject).",
     "mixed_per_axis_sources": "subject members report different MetricSource per axis — V2 per-axis provenance (Mixed possible) vs V1 uniform Scip"
   },
   "cases": [
@@ -37,9 +37,17 @@
       "id": "delta-introduced-subject-001",
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
-      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty positions → RawPosition::default). Availability divergence; policy/decision impact hipotez (P2-0B.8).",
-      "builder_digest_blake3": "91f925fef8dde5971d8882fe96a90a985b2b1b35fca0002ed3f1aa405d621f61",
-      "notes": "Baseline epistemic availability divergence: V1 DefaultFallback (yokluk → RawPosition::default sıfır) vs V2 UnavailableAllIntroduced (typed). Subject/value parity. Pipeline Observed(AcceptAsCompleted) V1/V2 parity (Held authorization.outcome). Policy/decision divergence hipotez — NotCompleted+AcceptImprovement fixture P2-0B.8."
+      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty positions → RawPosition::default). Availability divergence (Completed → AcceptAsCompleted parity; policy etkisi bu case'te observable DEĞİL — sibling delta-introduced-subject-policy-001 divergence'ı gösterir).",
+      "builder_digest_blake3": "de9c6e7248f4d70c49cfe370a451f3dbd127bc7c1e52e8e6cd38ef476054df7a",
+      "notes": "Baseline epistemic availability divergence: V1 DefaultFallback (yokluk → RawPosition::default sıfır) vs V2 UnavailableAllIntroduced (typed). Subject/value parity. Pipeline Observed(AcceptAsCompleted) V1/V2 parity (Held authorization.outcome) — Completed olduğu için projection etkisiz. Bu Case 4 tek başına policy etkisini göstermez; sibling delta-introduced-subject-policy-001 fixture'ı (NotCompleted + AcceptImprovement) policy/decision divergence'ı gösterir."
+    },
+    {
+      "id": "delta-introduced-subject-policy-001",
+      "class": "delta_introduced_subject",
+      "source": "synthetic_adversarial",
+      "description": "Production-reachable structural topology üzerinde V1 legacy DefaultFallback projection ile V2 candidate fail-closed projection arasında migration-relevant policy/decision divergence. NotCompleted + AcceptImprovement: V1 → loss_before > loss_after → improved → AcceptAsProgress (TrajectoryCheckpoint, Held); V2 → loss_before=loss_after → improved=false → Reject (NotApplied, Evaluated). Migration 3 (b) hipotezi kanıtlandı.",
+      "builder_digest_blake3": "15f5c97e197686f903861fcf2201da086913f91c33bf1bea1affc3f7cc4b5954",
+      "notes": "Migration 3 (b) policy/decision divergence PROVEN. Case geometrisi: reciprocal Imports edges (Ce=1, Ca=1 → instability 0.5, max_instability=0.85 hard-cap altında) + preferred_vector (0.8, 0.5, 0.5) + Coupling>=0.7 (measured 0.5 → NotCompleted) + AcceptImprovement policy + allow_progress_checkpoint=true. Counter-fixture (min_improvement_delta=1.0) V1 AcceptAsProgress'in improvement kaynaklı olduğunu kanıtlar. INV-T4 provenance divergence da V1 uniform Scip vs V2 engine-native per-axis olarak observable."
     }
   ]
 }

@@ -252,6 +252,7 @@ pub fn build_all_cases() -> Vec<CharacterizationCase> {
         wide_affected_scope_001(),
         removed_edge_external_source_001(),
         delta_introduced_subject_001(),
+        delta_introduced_subject_policy_001(),
     ]
 }
 
@@ -664,8 +665,143 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
         source: CaseSource::SyntheticAdversarial,
         description: "Subject node 10000 delta-introduced (node_from_spec id). \
             V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty \
-            positions → RawPosition::default). Availability divergence; policy/decision \
-            impact hipotez (P2-0B.8)."
+            positions → RawPosition::default). Availability divergence (Completed → \
+            AcceptAsCompleted parity; policy etkisi bu case'te observable DEĞİL — sibling \
+            delta-introduced-subject-policy-001 divergence'ı gösterir)."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+/// `delta-introduced-subject-policy-001`: P2-0B.8 policy fixture — NotCompleted +
+/// AcceptImprovement dalında **V1 legacy DefaultFallback baseline projection** ile
+/// **V2 candidate fail-closed projection** arasında migration-relevant policy/decision
+/// divergence üreten case.
+///
+/// `delta_introduced_subject_001`'den (Case 4) **dört değişiklikle** türetilir. Korunan
+/// şey yapısal topoloji DEĞİL (edge geometrisi değişti — aşağıda), epistemik koşuldur:
+/// subject node `10000` base space'te yok, delta ile tanıtılır → V1 `DefaultFallback`,
+/// V2 `UnavailableAllIntroduced` baseline yoluna girer. Case 4'ün `Completed →
+/// AcceptAsCompleted` (completion-first core, improved'a bakmaz) dalını **NotCompleted +
+/// improvement-sensitive** dalına taşıyan dört değişiklik:
+///
+/// 1. **Predicate:** `Coupling >= 0.7` (measured coupling 0.5 → false → NotCompleted).
+///    Case 4 `Coupling <= 0.5` idi → measured 0.0 true → Completed.
+/// 2. **preferred_vector:** `(0.8, 0.5, 0.5, 0, 0)` — coupling/cohesion/instability
+///    target'ı. Case 4 `None` idi → target=zero → loss_before=loss_after → improved imkansız.
+/// 3. **TaskPolicy:** `AcceptImprovement` + `allow_progress_checkpoint: true` (g2c idiom).
+///    Case 4 `StrictReject` + default idi → NotCompleted reject, improved'a bakmaz.
+/// 4. **Edge geometrisi:** reciprocal Imports edges `10000→10` (Ce=1, `connected_to`) +
+///    `10→10000` (Ca=1, `new_edges`). Case 4 `connected_to: vec![]` (edge yok) → measured
+///    coupling 0.0. Reciprocal edge measured coupling 0.5 üretir ve instability 0.5
+///    (Ce=1, Ca=1) `max_instability=0.85` hard-cap altında tutar (tek outgoing Ce=1/Ca=0 →
+///    instability 1.0 → hard-cap ihlali → improved=false).
+///
+/// **Reciprocal Imports edge gerekliliği:** Sadece outgoing edge Ce=1/Ca=0 →
+/// instability=1.0 → `max_instability=0.85` hard-cap ihlali → improved=false. Reciprocal
+/// ile Ce=1, Ca=1 → instability=0.5 (hard-cap altında).
+///
+/// **Beklenen karar ayrışması:**
+/// - V1: DefaultFallback zero baseline + target (0.8,0.5,0.5) → loss_before ≈ 1.068;
+///   measured after (0.5,0.5,0.5) → loss_after = 0.3 → improved=true (loss drop 0.768 >
+///   0.02, hard-cap'ler geçer) → `AcceptAsProgress` → `Lane(TrajectoryCheckpoint)` (INV-T8).
+/// - V2: `project_v1_loss_before_compatibility_v2` Unavailable dalı → loss_before=loss_after
+///   → improved=false → `Reject` → `NotApplied` (INV-T8), witness değerlendirilmez → `Evaluated`.
+///
+/// Bu fixture production-reachable structural topology üzerinde gelecekteki migration'ın
+/// policy/decision divergence'ını karakterize eder; iki production implementation'ı
+/// karşılaştırmaz.
+fn delta_introduced_subject_policy_001() -> CharacterizationCase {
+    use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
+    use osp_core::coords::RawPosition;
+    use osp_core::space::{EdgeKind, Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateFailurePolicy, PredicateMode,
+        PredicateScope, PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 10 mevcut (Module — delta-introduced değil, subject node 10 değil).
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 10,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    // Predicate: Coupling >= 0.7 — measured coupling 0.5 → false → NotCompleted.
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Ge,
+        threshold: 0.7,
+        // node_from_spec ilk NewNodeSpec için id=10000 üretir → subject ile match.
+        scope: PredicateScope::Node(10_000),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        // Target vector: coupling 0.8, cohesion 0.5, instability 0.5 (3 eksen trajectory_loss).
+        preferred_vector: Some(RawPosition {
+            x: 0.8,
+            y: 0.5,
+            z: 0.5,
+            w: 0.0,
+            v: 0.0,
+        }),
+    };
+    let task = Task {
+        id: 43, // Case 4 task id 42 — çakışma yok.
+        milestone_id: 0,
+        label: "delta-introduced-subject-policy-001".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true, // ZORUNLU — improved değerlendirilmesi için.
+            min_improvement_delta: 0.02,     // default.
+            ..Default::default()
+        },
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Reciprocal Imports edges → Ce=1 (outgoing 10000→10) + Ca=1 (incoming 10→10000)
+    // → instability = Ce/(Ce+Ca) = 0.5 (hard-cap 0.85 altında).
+    let proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 1.0,
+            // 10000 → 10 (outgoing Imports) → Ce=1.
+            connected_to: vec![(10, EdgeKind::Imports)],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            // 10 → 10000 (incoming Imports) → Ca=1.
+            from: 10,
+            to: 10_000,
+            kind: EdgeKind::Imports,
+        }],
+        affected_nodes: vec![10_000],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "delta-introduced-subject-policy-001".to_string(),
+        class: CaseClass::DeltaIntroducedSubject,
+        source: CaseSource::SyntheticAdversarial,
+        description: "Production-reachable structural topology üzerinde V1 legacy \
+            DefaultFallback projection ile V2 candidate fail-closed projection arasında \
+            migration-relevant policy/decision divergence. NotCompleted + \
+            AcceptImprovement: V1 → loss_before > loss_after → improved → \
+            AcceptAsProgress (TrajectoryCheckpoint, Held); V2 → loss_before=loss_after \
+            → improved=false → Reject (NotApplied, Evaluated). Migration 3 (b) hipotezi \
+            kanıtlandı."
             .to_string(),
         space,
         task,
@@ -688,6 +824,31 @@ fn delta_introduced_subject_001() -> CharacterizationCase {
 pub struct CharacterizationObservation {
     pub measurement: MeasurementObservation,
     pub pipeline: PipelineObservation,
+    /// `commit_task_claim`'e gerçekten geçirilen decision-input scalar'ları
+    /// (PR #91 review P1). `Some` ⟺ PredicateGate'e ulaşıldı (`commit_task_claim` Ok /
+    /// `EngineCommitResult` üretildi) — yalnızca `EngineCommitResult` ile decision yolu
+    /// tamamlandığında scalar'lar meaningful. Measurement early-return (commit çağrılmadan)
+    /// VE `commit_task_claim` Err (engine çağrıldı ama PredicateGate'e ulaşmadı, örn Q5
+    /// Vision ihlali) durumlarında `None`. V2 candidate fail-closed projection
+    /// (`loss_before == loss_after`) exact frozen evidence olarak pinlenir — sadece
+    /// decision sonucu DEĞİL, projection zincirinin tamamı.
+    pub decision_input: Option<DecisionInputObservation>,
+}
+
+/// `commit_task_claim`'e geçirilen gerçek decision-input scalar'ları.
+///
+/// **PR #91 review P1:** V2 candidate fail-closed projection'ın (`loss_before ==
+/// loss_after`) frozen evidence olması için, helper'ın `commit_task_claim`'e geçirilen
+/// `loss_before` değeri observation'a taşınır. Aksi halde projection helper gelecekte
+/// değişse (`Unavailable → 0.0` veya `→ loss_after - 0.01`) test decision sonucu (`Reject`)
+/// aynı kaldığı için yeşil kalırdı — "equality fail-closed projection" iddiası çürür.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DecisionInputObservation {
+    /// `TaskCommitInput.loss_before` — `commit_task_claim`'e geçirilen değer.
+    pub loss_before_bits: u64,
+    /// `trajectory_loss(measured_after, target)` — `assess_improvement_v1`'in
+    /// karşılaştırdığı loss_after.
+    pub loss_after_bits: u64,
 }
 
 /// Measurement producer sonucu (V1: compute_raw_from_delta infallible;
@@ -1218,6 +1379,20 @@ pub fn evaluate_v1_case(
         measured: measured.clone(),
     });
 
+    // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
+    // V1 loss_before = trajectory_loss(current_measured, target) (yukarıda baseline loss_bits
+    // ile aynı kaynak). loss_after = trajectory_loss(measured_after, target).
+    //
+    // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate decision yoluna
+    // ulaşıldığında (commit_task_claim Ok) Some — Err (StoppedBeforeCommit) olsa bile engine
+    // çağrıldıysa scalar'lar gönderildi, ama decision yolu tamamlanmadı. Doc contract: Some ⟺
+    // PredicateGate'e ulaşıldı (EngineCommitResult üretildi).
+    let loss_after = osp_core::trajectory::trajectory_loss(&measured, &target);
+    let decision_input = result.as_ref().ok().map(|_| DecisionInputObservation {
+        loss_before_bits: loss_before.to_bits(),
+        loss_after_bits: loss_after.to_bits(),
+    });
+
     let measurement = MeasurementObservation::Produced {
         // V1 subject = affected_nodes ∪ removed_edges.from (navigator.rs:810-815).
         subject: affected.clone(),
@@ -1243,6 +1418,7 @@ pub fn evaluate_v1_case(
     CharacterizationObservation {
         measurement,
         pipeline,
+        decision_input,
     }
 }
 
@@ -1294,6 +1470,7 @@ pub fn evaluate_v2_candidate_case(
                     stage,
                     error: class,
                 },
+                decision_input: None,
             };
         }
     };
@@ -1388,6 +1565,20 @@ pub fn evaluate_v2_candidate_case(
         measured: measured_for_commit,
     });
 
+    // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
+    // V2 candidate fail-closed projection: loss_before = project_v1_loss_before_compatibility_v2
+    // (Unavailable dalı → loss_after). loss_after = trajectory_loss(token.after(), target).
+    // token move edilmedi (clone ile extracted), loss_after helper projection ile aynı after.
+    //
+    // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate decision yoluna
+    // ulaşıldığında (commit_task_claim Ok) Some — Err (StoppedBeforeCommit) scalar'lar gönderildi
+    // ama decision yolu tamamlanmadı. Doc contract: Some ⟺ PredicateGate'e ulaşıldı.
+    let loss_after = osp_core::trajectory::trajectory_loss(token.after(), &target);
+    let decision_input = result.as_ref().ok().map(|_| DecisionInputObservation {
+        loss_before_bits: loss_before.to_bits(),
+        loss_after_bits: loss_after.to_bits(),
+    });
+
     let pipeline = match result {
         Ok(commit_result) => finalize_pipeline_observation_commit_reached(&commit_result),
         Err(e) => PipelineObservation::StoppedBeforeCommit {
@@ -1399,6 +1590,7 @@ pub fn evaluate_v2_candidate_case(
     CharacterizationObservation {
         measurement,
         pipeline,
+        decision_input,
     }
 }
 

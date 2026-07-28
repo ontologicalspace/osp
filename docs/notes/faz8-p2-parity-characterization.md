@@ -13,9 +13,9 @@ P2-0B, V1 (`compute_raw_from_delta` + `provenanced_from_raw`) ile V2-candidate
 (`measure_task_delta` + V1 compatibility projection) arasındaki **gözlemlenebilir
 semantic divergence'ı** somut olarak ölçtü. Sonuç:
 
-> **Exact V1/V2 semantic parity KANITLANAMAZ.** İki **kanıtlanmış** ontolojik
-> divergence boyutu + bir **hipotez** boyutu mevcut. P2-1 (caller migration), kanıtlanmış
-> iki authority kararı verilmeden açılamaz; üçüncü (baseline policy) P2-0B.8 fixture bekliyor.
+> **Exact V1/V2 semantic parity KANITLANAMAZ.** Üç **kanıtlanmış** ontolojik
+> divergence boyutu mevcut. P2-1 (caller migration), üç authority kararı da verilmeden
+> açılamaz; üçüncü (baseline policy) PR #87-A ile KANITLANDI (P2-0B.8 fixture).
 
 ### Üç ontolojik boyut (review tur 2/4/5 birikimi)
 
@@ -187,16 +187,18 @@ decision core `improved`'a bakmaz). Held `AuthorizationContext` gerçek outcome 
 (engine.rs:1133) → `Observed(AcceptAsCompleted)` V1/V2 parity. **Pipeline mutation-decision
 ölçüldü ve eşit** — NotReached/ReachedButUnsurfaced DEĞİL (tur 5 yanlıştı).
 
-**Baseline policy/decision divergence — HİPOTEZ (kanıtlanmadı):** Case 4 `Completed`
-olduğu için `project_v1_loss_before_compatibility` (loss_before=loss_after) projection'ın
-decision etkisi **observable DEĞİL**. Decision etkisi SADECE `NotCompleted` +
-improvement-sensitive policy dalında olabilir — o fixture P2-0B.8 gerek.
+**Baseline policy/decision divergence — KANITLANDI (PR #87-A, P2-0B.8):** Case 4
+`Completed` olduğu için `project_v1_loss_before_compatibility` (loss_before=loss_after)
+projection'ın decision etkisi **observable DEĞİLDİ**. `delta-introduced-subject-policy-001`
+fixture ile `NotCompleted` + `AcceptImprovement` dalında policy/decision divergence
+**KANITLANDI**: V1 `AcceptAsProgress` (TrajectoryCheckpoint, Held) vs V2 `Reject` (NotApplied,
+Evaluated). Counter-fixture (min_delta=1.0) V1 kabulünün improvement kaynaklı olduğunu doğrular.
 
-**Özet (review tur 6 canonical):**
+**Özet (PR #87-A güncellemesi):**
 - Availability divergence: **kanıtlandı** (V1 DefaultFallback — yokluk → sıfır koordinat — vs V2 UnavailableAllIntroduced).
-- Policy/decision divergence: **kanıtlanmadı** (hipotez).
-- Case 4 exact mutation decision: **V1/V2 AcceptAsCompleted parity**.
-- P2-0B.8: `NotCompleted` + `AcceptImprovement` policy fixture gerekli.
+- Policy/decision divergence: **KANITLANDI** (delta-introduced-subject-policy-001; Migration 3 (b) doğrulandı).
+- Case 4 exact mutation decision: **V1/V2 AcceptAsCompleted parity** (Completed dalı, projection etkisiz).
+- P2-0B.8: **TAMAMLANDI** — `NotCompleted` + `AcceptImprovement` policy fixture (`delta-introduced-subject-policy-001`) + counter-fixture.
 
 **Fixture notu:** task scope `Node(10000)` = delta node id (`node_from_spec` 10_000+0).
 Önceki fixture `Node(1)` kullanıyordu → kimlik uyuşmazlığı → SubjectScope hatası.
@@ -388,21 +390,37 @@ Bunlar karıştırılmamalı (tur 8/9 P0).
    Cases 1/2/3'te V1/V2 loss parity (aynı value + aynı target → aynı loss). Case 4 **N/A**.
    Loss ayrı raporlanmalı — decision'ın `improved` dalıyla ilişkisi nedeniyle önemli.
 
-6. **Baseline policy/decision — Case 4 parity; policy divergence HİPOTEZ.**
+6. **Baseline policy/decision — Case 4 parity; policy divergence KANITLANDI (PR #87-A, P2-0B.8).**
    Case 4 `Completed` → `AcceptAsCompleted` (completion-first core improved'a bakmaz) →
    **Observed(AcceptAsCompleted) V1/V2 parity**. Policy etkisi SADECE `NotCompleted` +
-   improvement-sensitive policy dalında olabilir (P2-0B.8 fixture).
+   improvement-sensitive policy dalında observable olduğu teorisi, **`delta-introduced-subject-policy-001`**
+   fixture ile KANITLANDI (Migration 3 (b) yorumu doğrulandı):
 
-**Bu yüzden Migration 3 "zorunlu migration kararı" olarak resmileştirilmedi.** Üç olası
-yorum:
-- (a) Availability/value divergence yeterli — typed `Unavailable` korunmalı, policy kararı
-  INV-T9 normatif çerçevesinde zaten belirlenmiş olabilir (referans gerek).
-- (b) Policy/decision divergence gerçek bir olasılık — `NotCompleted` + `AcceptImprovement`
-  fixture ile P2-0B.8'de kanıtlanmalı.
-- (c) Üçüncü migration kararı olarak resmileştirilmeli — Reject / Held-Suspended /
-  RequireOperatorApproval policy ayrı karar.
+   - **Case:** delta-introduced subject (V1 `DefaultFallback` / V2 `UnavailableAllIntroduced`),
+     predicate `Coupling >= 0.7` (measured 0.5 → `NotCompleted`), policy `AcceptImprovement`
+     + `allow_progress_checkpoint: true`, reciprocal Imports edges (Ce=1, Ca=1 → instability 0.5,
+     `max_instability=0.85` hard-cap altında), preferred_vector `(0.8, 0.5, 0.5)`.
+   - **V1 legacy DefaultFallback baseline projection:** zero baseline + target → loss_before ≈ 1.068;
+     measured after (0.5,0.5,0.5) → loss_after = 0.3 → `improved=true` (loss drop 0.768 > 0.02,
+     hard-cap'ler geçer) → **`AcceptAsProgress`** → `Lane(TrajectoryCheckpoint)` (INV-T8) → `Held`.
+   - **V2 candidate fail-closed projection:** `project_v1_loss_before_compatibility_v2` Unavailable
+     dalı → loss_before=loss_after → `improved=false` → **`Reject`** → `NotApplied` (INV-T8),
+     witness değerlendirilmez → `Evaluated` (engine.rs:1456-1464 Reject early-return).
+   - **Counter-fixture (proof of causality):** `min_improvement_delta = 1.0` (loss drop 0.768 < 1.0)
+     → V1 de `Reject` üretir. V1 `AcceptAsProgress`'in improvement'tan geldiği exact kanıtlandı
+     (harici koşul değil).
+   - **INV-T4 provenance divergence** da bu case'te observable (V1 uniform Scip ↔ V2 engine-native
+     per-axis), Migration 2 ile örtüşür.
 
-Bu PR (a) ve (b) arasında bir sonuca varmaz; P2-0B.8 fixture'ı (b)'yi açıklar.
+**Bu yüzden Migration 3 artık zorunlu migration kararı olarak resmileştirilmelidir.** Üç yorumdan
+**(b) KANITLANDI** — policy/decision divergence production-reachable structural topology üzerinde
+V1 legacy DefaultFallback projection ile V2 candidate fail-closed projection arasında gerçek bir
+olasılıktır. (a) (availability/value yeterli) yetersiz — policy etkisi ayrı observable. (c) (Reject /
+Held-Suspended / RequireOperatorApproval policy ayrı karar)Migration kararı olarak değerlendirilmeli.
+
+**Not:** Bu fixture production-reachable structural topology üzerinde gelecekteki migration'ın
+policy/decision divergence'ını karakterize eder; iki production implementation'ı karşılaştırmaz
+(V2 henüz candidate projection — P2-1 caller migration sonrası production'a taşınacak).
 
 ### Reviewer uzun vadeli yön önerisi
 

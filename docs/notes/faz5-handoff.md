@@ -1,24 +1,24 @@
-# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 review APPROVED, merge hazır)
+# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 MERGED; PR #87-A policy fixture hazır)
 
 ## Repository state
 
 ```
-Branch: wip/faz8-p2-characterization
-HEAD: 2b88a8d (review tur 9 — Migration 3 canonical sync + fail-closed golden)
-Remote HEAD: 2b88a8d (sync — local = remote)
-PR #85: review APPROVED (9 review turu, characterization-only, production kodu değişmedi)
-Push status: P2-0A + P2-0B + 9 review fix turu PUSHED
+Branch: wip/faz8-p2-p2-0b8-policy-fixture (main e4675b2'den)
+HEAD: policy fixture + counter-fixture + frozen digest sync
+PR #85: MERGED (squash e4675b2 → main) — Faz 8-P2 P2-0A+B characterization
+PR #87-A: policy fixture hazır (Part 1/2 — issue #87 kapanmaz, #87-B beklenir)
 Worktree: clean (source) — sadece untracked docs var
-Mergeable: MERGEABLE
 ```
 
-## PR #85 Özet
+## PR #85 Özet (MERGED)
 
 **Faz 8-P2 P2-0A+B — V1/V2 Measurement Characterization.** Production koduna
-dokunulmadı — sadece test altyapısı + docs + fixture. P2-1 (caller migration)
-BLOCKED — iki kanıtlanmış + bir hipotez ontolojik migration kararı bekliyor.
+dokunulmadı — sadece test altyapısı + docs + fixture. Squash merge `e4675b2` → main.
+Üç ontolojik boyut karakterize edildi: subject authority (KANITLANDI), provenance
+authority INV-T4 (KANITLANDI), baseline epistemic availability (availability KANITLANDI,
+policy HİPOTEZ → **PR #87-A ile KANITLANDI**).
 
-### Commit zinciri (12 commit, 483e8a4..2b88a8d)
+### Commit zinciri (squash → e4675b2, orijinal 13 commit)
 
 - `483e8a4` P2-0A construction feasibility (4 test + rapor)
 - `2b4377a` P2-0B altyapı + observation model + harness + baseline parity
@@ -55,11 +55,14 @@ V1 `provenanced_from_raw(..., Scip)` uniform Scip; V2 engine gerçek per-axis so
 source divergence var. `required_source` matrix ile PredicateSet-level decision divergence
 kanıtlandı (Scip/TreeSitter).
 
-### Migration 3: Baseline epistemic availability — availability KANITLANDI, policy HİPOTEZ
+### Migration 3: Baseline epistemic availability & policy — KANITLANDI (PR #87-A)
 V1 `DefaultFallback` (yokluk → `RawPosition::default()` sıfır koordinat), V2 typed
 `UnavailableAllIntroduced`. Case 4 `Completed` → `AcceptAsCompleted` parity (projection
-etkisiz). Policy/decision divergence `NotCompleted` + improvement-sensitive fixture
-(P2-0B.8) bekliyor.
+etkisiz). **Policy/decision divergence KANITLANDI** — `delta-introduced-subject-policy-001`
+fixture (PR #87-A): V1 `AcceptAsProgress` (TrajectoryCheckpoint, Held) vs V2 `Reject`
+(NotApplied, Evaluated). Counter-fixture (min_delta=1.0) V1 kabulünün improvement kaynaklı
+olduğunu doğrular. Migration 3 (b) yorumu doğrulandı — policy/decision divergence
+production-reachable structural topology üzerinde migration-relevant.
 
 ## Divergence Özeti (tur 9 canonical)
 
@@ -98,19 +101,30 @@ etkisiz). Policy/decision divergence `NotCompleted` + improvement-sensitive fixt
 
 ## Sıradaki adımlar
 
-### Merge PR #85 → main
-PR review APPROVED, MERGEABLE. Merge sonrası main güncellenecek.
+### PR #85 — MERGED ✓
+Squash merge `e4675b2` → main (2026-07-28). Characterization canonical.
 
-### Ontolojik migration kararları (bu PR'ın raporu ile, ayrı karar)
+### PR #87-A — policy fixture (BU BRANCH, hazırlanıyor)
+**Part 1/2** — issue #87 kapanmaz, #87-B beklenir. `delta-introduced-subject-policy-001`
+fixture ile Migration 3 (b) policy/decision divergence KANITLANDI. Production koduna
+dokunulmadı — yalnızca test altyapısı + frozen fixture + docs.
+
+### PR #87-B — Q5 exact theta engine-unit (sonraki)
+**Part 2/2** — issue #87'yi kapatır. `Q5ThetaCharacterization` struct'ı populate eden
+engine-unit test (şu an dead, common/mod.rs:1071-1075). V1/V2 theta bits exact karşılaştırma.
+
+### Ontolojik migration kararları (PR #87-A/#87-B sonrası, ayrı karar)
 1. Subject authority: Yol 1/2/3 (reviewer Yol 2 tercihi)
 2. Provenance authority: V2 engine-native normatif hedef — migration sınırı + backward-compat
-3. Baseline-availability policy: P2-0B.8 fixture sonrası netleşecek
+3. **Baseline-availability policy: KANITLANDI (PR #87-A)** — Migration 3 (b) doğrulandı,
+   policy/decision divergence migration-relevant. Üçüncü zorunlu migration kararı olarak
+   resmileştirilmeli.
 
-### P2-0B kalan iş (GitHub issue olarak açıldı)
-- **P2-0B.7:** MCP Workspace before-baseline characterization
-- **P2-0B.8:** Q5 exact theta + NotCompleted+AcceptImprovement baseline-policy fixture
-- mixed_per_axis_sources dedicated matrisi
-- task-snapshot drift adversarial
+### P2-0B kalan iş (GitHub issue)
+- **#86 (P2-0B.7):** MCP Workspace before-baseline characterization
+- **#87 (P2-0B.8):** Q5 exact theta (PR #87-B) — policy fixture kısmı PR #87-A ile TAMAMLANDI
+- **#88:** mixed_per_axis_sources dedicated matrisi
+- **#89:** task-snapshot drift adversarial
 
 ### P2-1 (caller migration, ancak migration kararları sonrası, ayrı plan)
 - `measure_task_delta_checked` (public boundary)
