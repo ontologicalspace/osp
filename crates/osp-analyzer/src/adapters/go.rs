@@ -105,7 +105,7 @@ impl LanguageAdapter for GoAdapter {
             AbstractnessRule::LegacyTextContains(&["interface"]),
             NameStrategy::FirstIdentifierFallback,
         )];
-        shared::walk_class_defs(tree.root_node(), source, GO_SPECS)
+        shared::walk_class_defs_with_specs(tree.root_node(), source, GO_SPECS)
     }
 }
 
