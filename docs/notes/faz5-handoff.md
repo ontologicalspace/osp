@@ -1,255 +1,146 @@
-# INV-T9 #70 Commit 4b Faz 5 + Faz 8-P1 — Handoff (PR #84 APPROVED, merge hazır)
+# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 review APPROVED, merge hazır)
 
 ## Repository state
 
 ```
-Branch: wip/inv-t9-70-commit4b
-HEAD: 48ca733 (PR #84 review r7 P2 cleanup)
-Remote HEAD: 48ca733 (sync — local = remote)
-PR #84: APPROVED (7 review turu, production 9.8/10, test 9.9/10)
-Push status: Faz 5 + Faz 8-P1 + 7 review fix turu PUSHED
+Branch: wip/faz8-p2-characterization
+HEAD: 2b88a8d (review tur 9 — Migration 3 canonical sync + fail-closed golden)
+Remote HEAD: 2b88a8d (sync — local = remote)
+PR #85: review APPROVED (9 review turu, characterization-only, production kodu değişmedi)
+Push status: P2-0A + P2-0B + 9 review fix turu PUSHED
 Worktree: clean (source) — sadece untracked docs var
+Mergeable: MERGEABLE
 ```
 
-## PR #84 Review Zinciri (7 tur, tamamı CLOSED)
-1. P0-1 task-goal TOCTOU + P0-2 loss_before + P1 snapshot
-2. P0-2 cross-artifact + P1 ontological + no-op + epsilon
-3. P0 persisted restore parity + P1 gerçek branch
-4. P0 yanlış katman (en kritik) + P1 exact + P2 typed
-5. Test closure (exact assertions + cleanup)
-6. Context validator P0 coverage (counter-example)
-7. Exact AcceptAsProgress (son açık) + P2 temizlik
+## PR #85 Özet
 
-**Tüm blocking bulgular kapandı.** Production mimari 9.8/10, merge readiness 9.8/10.
-- docs/osp-3ay-hedef-karti.md
-- docs/osp-papers-comparison.md
+**Faz 8-P2 P2-0A+B — V1/V2 Measurement Characterization.** Production koduna
+dokunulmadı — sadece test altyapısı + docs + fixture. P2-1 (caller migration)
+BLOCKED — iki kanıtlanmış + bir hipotez ontolojik migration kararı bekliyor.
 
-Series base: main @ 45686dc
-Faz 5 review base (allow karşılaştırma): b8bdd00
-```
+### Commit zinciri (12 commit, 483e8a4..2b88a8d)
 
-## Last fully verified state
+- `483e8a4` P2-0A construction feasibility (4 test + rapor)
+- `2b4377a` P2-0B altyapı + observation model + harness + baseline parity
+- `58f60e4` P2-0B divergence characterization + ontolojik karar raporu
+- `fb040fe`..`2b88a8d` 9 review fix turu
 
-```
-Commands:
-  cargo fmt --all -- --check
-  RUSTFLAGS="-D warnings" cargo build -p osp-core --lib
-  RUSTFLAGS="-D warnings" cargo test -p osp-core --lib
-  RUSTFLAGS="-D warnings" cargo test -p osp-core --test engine_measurement_single_producer
-  RUSTFLAGS="-D warnings" cargo test -p osp-core --test measurement_binding_typelevel
+### PR #85 Review zinciri (9 tur)
 
-Results:
-  fmt: clean (0 diff)
-  build: 0 warning (-D warnings)
-  lib test: 1244 passed, 0 failed
-  engine_measurement_single_producer: green (compile_fail)
-  measurement_binding_typelevel: green
+| Tur | Ana bulgu | Düzeltme |
+|---|---|---|
+| 1 | 4 P0 (Held/Rejected fabrication, V1 loss_before, Test 3 sentinel, rapor overclaim) | Tur 6'da Held fabrication çürütüldü |
+| 2 | 2 P0 (Case 4 fixture ID Node(10000), matching source divergence + required_source matrix) | required_source matrix gerçek PredicateSet ile |
+| 3 | 2 P0 (required_source matrix gerçek evaluate_completion, Case 4 decision-drift kaldırma) | PredicateSet-level decision divergence |
+| 4 | 2 P0 (Case 4 üçüncü boyut, pipeline NotReached) | Baseline availability 3. migration boyutu |
+| 5 | 2 P0 (representation vs policy divergence, NotReached vs ReachedButUnsurfaced) | Case 4 Completed → projection etkisiz |
+| 6 | 2 P0 (Held outcome observable, Case 4 Observed(AcceptAsCompleted)) | Tur 1 fabrication çürütüldü |
+| 7 | 1 P0 (baseline DefaultFallback — V1 yokluk → sıfır koordinat) | BaselineObservation model |
+| 8 | 2 P0 (schema 1/4↔4/4 çelişkisi, exact baseline golden) | 4/4 structural + exact golden |
+| 9 | 1 P0 (Migration 3 canonical sync + fail-closed) | 6 boyuta ayrım + tüm metadata senkron |
 
-Notable: 1245 → 1244 (commit2_rejected_gate testi Faz 8'e ertelendi — bundle
-sadece GatePassed üretir, RejectedByGate Faz 8 hard-gate).
-```
+## Üç Ontolojik Boyut (P2-1 blocked)
 
-## Checkpoint A — Tamamlandı (Adım 1-20, issue #83)
+### Migration 1: Subject authority — KANITLANDI
+V1 subject = `proposal.affected_nodes` (LLM-declared), V2 subject = `task.predicate.scope`
+(task-derived). Case 2/3'te farklı node set → farklı centroid → farklı measured values.
 
-### Faz 5 adımları (issue #83 Checkpoint A = Adım 1-20)
-- **Adım 1-15**: reverse projection, canonical V2 infrastructure, digest continuity,
-  decision core, error taxonomy, module structure (13 commit, b8bdd00..cacdabd)
-- **Adım 16-20** (`8fe5fa5`, push edildi): atomik V2 proof bundle + TOCTOU closure
-  - Adım 16: AuthorizationBasisV2 13→17 field + 4-field commitment parity + digest encoder
-  - Adım 18: VerifiedGateEvaluationBundleV2 (opaque, from_gate_passed private)
-  - Adım 19: evaluate_task_gate_v2 (3 digest recheck + predicate exactly once +
-    completion-first loss matrisi + decision core)
-  - Adım 20: build_authorization_context_v2(bundle,...) — single bundle consume,
-    engine.rs → gate_v2.rs taşındı (self. = 0)
-- **Adım 17** (`488be1b`, push edildi): restore validators (P0-B + P0-C)
-  - validate_predicate_basis_semantics_v2: semantics version + PredicateSet restore +
-    validate_predicate_goal_for_commit (P0-B: All+Some reject)
-  - validate_gate_decision_semantics_v2: completion-first matris recheck (P0-C)
+Reviewer tercihi: **Yol 2 (task-authoritative)** — `task.predicate.scope → subject authority`,
+`structural delta → impact authority`, `affected_nodes → impact hint/telemetry`. Yol 3
+(affected == scope) reddedilir — subject/impact ayrımını çökertir.
 
-### Review geçmişi (issue #83 v8 plan + kod review)
-- v8 plan frozen (9.8/10 APPROVED, 8 review turu)
-- Adım 16-20 kod review: REQUEST CHANGES (5 P0 + 5 P1) → tümü address edildi
-  - P0-1: predicate_basis binding epoch'unda DEĞIL (bundle-scoped)
-  - P0-2: builder completion-first loss (preferred-vector'dan DEĞIL)
-  - P0-3: 4-field commitment parity (digest + identity)
-  - P0-4: dedicated predicate basis encoder (result + semantics_version + policy)
-  - P1-1: TryFrom<&Task> authoritative projection (unwrap YOK)
-  - P1-2: dedicated policy digest error variant
-  - P1-3: nested wire tipleri deny_unknown_fields
-  - P1-4: predicate_gate_policy_digest (generic policy_digest DEĞIL)
-  - P1-5: allow 19 (17 değil)
+### Migration 2: Provenance authority (INV-T4) — KANITLANDI
+V1 `provenanced_from_raw(..., Scip)` uniform Scip; V2 engine gerçek per-axis source'ları
+(TreeSitter/Placeholder/Heuristic). Normatif hedef (Paper 1/2). Matching scope'ta BİLE
+source divergence var. `required_source` matrix ile PredicateSet-level decision divergence
+kanıtlandı (Scip/TreeSitter).
 
-## Still blocking (Faz 8 scope dışı)
+### Migration 3: Baseline epistemic availability — availability KANITLANDI, policy HİPOTEZ
+V1 `DefaultFallback` (yokluk → `RawPosition::default()` sıfır koordinat), V2 typed
+`UnavailableAllIntroduced`. Case 4 `Completed` → `AcceptAsCompleted` parity (projection
+etkisiz). Policy/decision divergence `NotCompleted` + improvement-sensitive fixture
+(P2-0B.8) bekliyor.
 
-### Faz 5 Faz 8 wiring bekleyen (3 allow)
-- `engine.rs`: bundle accessor (predicate_gate_policy_digest) — Faz 8 production wiring
-- `authorization.rs`: VerifiedCanonicalTaskGoalEvidenceV2 (struct + impl) — Faz 8
-  context-restore katmanı consumer bekleyen
-- `gate_v2.rs`: ProducedTrajectoryLossEvidence producer (new/is_finite/loss_before/
-  loss_after) — Adım 17 helper doğrudan canonical üretti, producer-side evidence
-  Faz 7/restore bekleyen
+## Divergence Özeti (tur 9 canonical)
 
-Bu 3 allow Adım 17 sonrası "gerçek" dead-code — Faz 8 production wiring +
-Faz 7 as_owned + context-restore katmanı consumer olmadığı için. Faz 5 Checkpoint A
-kapsamında 0'a inemez (Faz 8/Faz 7 işi).
+| Boyut | Frozen incidence |
+|---|---|
+| Subject-set divergence | 2/4 (Case 2/3) |
+| Axis-value divergence | 2/4 (Case 2/3) |
+| Baseline schema (structural) | 4/4 |
+| Baseline availability | 1/4 (Case 4) |
+| Baseline value bits | 0/3 + N/A (Case 4) |
+| Baseline source | 3/3 + N/A (Case 4) |
+| Baseline loss bits | 0/3 + N/A (Case 4) |
+| Source divergence (INV-T4) | 4/4 |
+| Pipeline mutation-decision | NotReached 3/4 + Observed+Equal 1/4 |
+| Inline PredicateSet decision (required_source matrix) | 2/5 |
 
-### Faz 8 (kapsam dışı)
-- production wiring (commit_task_claim V2 projection)
-- RejectedByGate proof producer + NotEvaluated/hard-gate evidence
-- navigator/persistence V2
-- AuthorizationReceiptV2 + EngineCommitError mapping
-- TaskCommitInput smart ctor
+## Key file:line references
 
-### Faz 9 (kapsam dışı)
-- V1 adapter + V1 path remove
-- TaskGoalDigest domain sep V1 naming değerlendirme
+- `TaskCommitInput` struct: engine.rs:108-121 (legacy fields korunur — Faz 8a smart ctor)
+- `measure_task_delta`: engine.rs:2366-2541 (pub, production-accessible)
+- `compute_raw_from_delta`: engine.rs:2284-2342 (legacy, infallible — empty positions → default)
+- `commit_task_claim`: engine.rs:1380-1518 (V1 path — body değişmez)
+- `EngineCommitResult::Held { authorization }`: engine.rs:1133 (gerçek outcome taşır)
+- `AuthorizationContext.outcome`: authorization.rs:5514 (AttemptOutcome)
+- `PredicateSet::evaluate_completion`: trajectory.rs:326
+- `MetricPredicate::evaluate`: trajectory.rs:233 (INV-T4 required_source)
 
-## Allow closure (Faz 5 temporary allow)
-```
-Before (Adım 16-20 öncesi): 19
-After Adım 16-20: 7 (consumer'ı olanlar kaldırıldı)
-After Adım 17: 3 (restore validator allow'ları kaldırıldı — PredicateBasisConsistencyError
-              + GateSemanticConsistencyError artık consumer'a sahip)
-Kalan 3: Faz 8 wiring + Faz 7 as_owned + context-restore bekleyen (Faz 5 dışı)
-```
+### Test infrastructure
+- `crates/osp-core/tests/common/mod.rs` — shared helper (case builders, manifest loader,
+  observation model, V1/V2 harness, BaselineObservation, MutationDecisionObservation)
+- `crates/osp-core/tests/measurement_v1_v2_parity.rs` — Yüzey 1 characterization (5 test)
+- `crates/osp-core/tests/faz8_p2_manifest_guard.rs` — frozen fixture guard (4 test)
+- `crates/osp-core/tests/faz8_p2_manifest_bootstrap.rs` — digest update helper (2 test)
+- `tests/data/faz8_p2_characterization/cases.json` + `cases.blake3` — frozen manifest
+- `crates/osp-core/src/engine.rs` test modülü — P2-0A construction feasibility (4 test)
 
-## Golden byte contracts (Adım 16-20 + Adım 17 sonrası)
-- `FAZ4_BASIS_V2_GOLDEN_HEX`: `696d39df204325cfb9781c621c8dcd6cfcfde42557f9731a0c7f32064ce36c17`
-  (Adım 17 regolden — fixture loss NotRequired oldu, matris consistency)
-- `FAZ4_CONTEXT_V2_GOLDEN_HEX`: `f2818b8bf55b9cc22d6f0fbe68f968fcf5afc3be326547ceb94d954dab568890`
-- `OSP/TASK-GOAL/V1` golden (`03a3ad38...`): UNCHANGED — TryFrom<&Task> delegate byte-identical
-- `authorization_basis_v2_wire.json`: regen (+4 field Adım 16, loss NotRequired Adım 17)
+## Sıradaki adımlar
 
-## Frozen conversion decisions (güncel)
-- Makroya blanket reverse conversion YOK
-- Tam 4 manuel From<Tag> for Domain
-- Structural canonical restore checked TryFrom
-- TryFrom<&Task> for CanonicalTaskGoalEvidenceV2 — tek authoritative forward projection
-- TaskGoalDigest::compute delegate eder (iki paralel projection YOK)
-- All mode + None weight (P0-B: All+Some reject)
+### Merge PR #85 → main
+PR review APPROVED, MERGEABLE. Merge sonrası main güncellenecek.
 
-## Review düzeltmeleri (tamamlanan, tekrar YAPILMAYACAK)
-- ✅ Adım 16-20 kod review tüm P0/P1 (5+5)
-- ✅ Adım 17 P0-B (restore task-goal validation) + P0-C (semantics version matris)
+### Ontolojik migration kararları (bu PR'ın raporu ile, ayrı karar)
+1. Subject authority: Yol 1/2/3 (reviewer Yol 2 tercihi)
+2. Provenance authority: V2 engine-native normatif hedef — migration sınırı + backward-compat
+3. Baseline-availability policy: P2-0B.8 fixture sonrası netleşecek
 
-## Key file:line references (Adım 16-20 + 17 sonrası)
-- `AuthorizationBasisV2` (17 field): authorization.rs ~L2712-2757
-- `AuthorizationBasisV2::new` (17 param): authorization.rs ~L2775-2810
-- `validate_semantics` (+ 4-field parity + Adım 17 validator'lar): authorization.rs ~L2830
-- `validate_predicate_basis_semantics_v2` (P0-B): authorization.rs ~L2970
-- `validate_gate_decision_semantics_v2` (P0-C matris): authorization.rs ~L3040
-- `encode_canonical_predicate_evaluation_basis_v2` (P0-4 dedicated): authorization.rs ~L3660
-- `AuthorizationBasisDigestV2::compute` (+4 encoding): authorization.rs ~L3295
-- `VerifiedGateEvaluationBundleV2`: gate_v2.rs ~L165
-- `evaluate_task_gate_v2`: gate_v2.rs ~L312
-- `compute_completion_first_loss_and_decision` (matris): gate_v2.rs ~L497
-- `build_authorization_context_v2` (free fn, bundle): gate_v2.rs ~L640
-- `TryFrom<&Task> for CanonicalTaskGoalEvidenceV2`: authorization.rs ~L427
-- `faz4_basis_v2_raw_parts` (fixture, +4 field, NotRequired loss): authorization.rs ~L14353
+### P2-0B kalan iş (GitHub issue olarak açıldı)
+- **P2-0B.7:** MCP Workspace before-baseline characterization
+- **P2-0B.8:** Q5 exact theta + NotCompleted+AcceptImprovement baseline-policy fixture
+- mixed_per_axis_sources dedicated matrisi
+- task-snapshot drift adversarial
 
-## Do not change (plan negatif koşulları)
-- commit_task_claim / EngineCommitResult / TaskCommitInput in Faz 5
-- V1 wire/digests (golden korumasız DEĞİL — frozen)
-- RejectedByGate producer + NotEvaluated before Faz 8
-- bundle decomposition visibility (private)
-- declared_weight None vs Some(1.0) digest distinction
-- OSP/TASK-GOAL/V1 golden hex (03a3ad38...) — compute_from_canonical continuity
-- authorization.rs → mod.rs taşıma YOK
-- #[from] YOK in Faz 5 error taxonomy (explicit map_err)
-- predicate exactly once (tek evaluate_completion çağrısı)
-- restore'da 2. predicate evaluator YOK
+### P2-1 (caller migration, ancak migration kararları sonrası, ayrı plan)
+- `measure_task_delta_checked` (public boundary)
+- Probe Claim → preflight-measure → final Claim → V1 commit_task_claim
+- Lokal adapter (navigator + MCP) + repo-level oracle
 
-## Next execution order (Faz 8 veya sonraki faz)
-1. **Verify HEAD/worktree/push state** (Adım 17 commit + push)
-2. **Faz 8 production wiring** — commit_task_claim V2 projection, RejectedByGate producer,
-   navigator/persistence V2, AuthorizationReceiptV2
-3. **Faz 9** — V1 adapter + V1 path remove
-4. **Faz 11** — osp-desktop #80
+### Faz 8a (engine cutover)
+- `commit_task_claim` → V2 authorization consumer
+- Smart ctor + legacy field kaldırma
+- Target authority birleştirme
+- Preflight tekrarı kaldırma
 
----
+## CI Doğrulama (HEAD 2b88a8d)
 
-## Faz 8-P1 — Downstream V2 Readiness (TAMAMLANDI — Adım 1-11)
-
-**Plan:** 5 review turunda sağlamlaştırıldı, onaylandı (frozen implementation-ready).
-**Durum:** Adım 1-11 TAMAMLANDI. CI workspace-wide `-D warnings` green.
-
-### CI durumu (tam doğrulandı)
 ```
 cargo fmt --all -- --check: clean
 RUSTFLAGS="-D warnings" cargo build --workspace --all-targets --exclude osp-desktop: clean
-RUSTFLAGS="-D warnings" cargo test -p osp-core --lib: 1252 passed, 0 failed
+RUSTFLAGS="-D warnings" cargo test -p osp-core --lib: 1271 passed
 RUSTFLAGS="-D warnings" cargo test -p osp-core --test engine_measurement_single_producer: 7 passed
 RUSTFLAGS="-D warnings" cargo test -p osp-core --test measurement_binding_typelevel: 1 passed
+RUSTFLAGS="-D warnings" cargo test -p osp-core --test measurement_v1_v2_parity: 5 passed
+RUSTFLAGS="-D warnings" cargo test -p osp-core --test faz8_p2_manifest_guard: 4 passed
+RUSTFLAGS="-D warnings" cargo test -p osp-core --test faz8_p2_manifest_bootstrap: 2 passed
 ```
 
-### Adım 1-11 tamam
-1. `SuspendedAttemptEvidenceV2` + digest (context digest bound, `OSP/ATTEMPT-EVIDENCE/V2`)
-2. `validate_suspension_eligibility_v2` (8 invariant, private fn)
-3. `PendingAuthorizationV2` (asimetrik creation/load API — P0-1)
-4. `RevisionRequiredV2` (runtime-only, NO Serialize — P0-1)
-5. `PersistedAuthorizationContextV2` wrapper + wire DTO + private `restore_from_wire` (P0-2)
-6. `PendingAuthorizationEnvelopeV2` (`try_new_held` tek public root, defensive verify)
-7. Versioned dispatch + sum-type + `load_pending_authorization_versioned`
-8. Store trait additive `persist_v2` + Filesystem V2 override + `load_versioned`
-9. `LowerHex32` strict wire parse (Adım 7'de inline)
+## Not
 
-### Tip genişletmeleri (Adım 5 riski doğrulandı, çözüldü)
-- `WitnessNotRequiredReason` Deserialize (additive, V1 frozen)
-- `CanonicalWitnessRequirementV2::required`/`not_required` constructor + accessors
-- `CanonicalWitnessRequirementV2Error` +2 variant
-- `AuthorizationContextDigestV2::from_bytes` + `AuthorizationContextV2::restore` (private)
+Bu PR **migration yapmıyor** — characterization + üç ontolojik boyut için kanıt üretiyor.
+PR #84'ün "Faz 5 = semantic closure, Faz 8a = orchestration cutover" sınırını koruyor.
+P2-1 ancak migration kararları sonrası açılır.
 
-### Kalan dead-code (3, Faz 8a navigator consumer)
-- `PendingAuthorizationV2Error::WitnessHoldReasonMismatch`/`WitnessSnapshotMismatch` variants
-- `PendingAuthorizationV2::attempt_num` accessor
-- `PersistedAuthorizationContextV2::into_context` accessor
-
-### Adım 10-11 (sonraki oturum)
-- **Adım 10:** V2 adversarial test matrisi (Faz 5 `commit2_build_authorization_context_v2_pipeline`
-  reuse). Kalan 3 dead-code'u consumer yapar. Tamper schema test `.v99`'a retarget EDİLDİ.
-- **Adım 11:** CI workspace-wide `-D warnings` green.
-
-### Faz 8-P1 frozen kararlar (5 review turu)
-- `AuthorizationContextDigestV2` reuse (var, auth.rs:3673)
-- V2 evidence context digest'e bağlı (basis DEĞİL)
-- Envelope tam context (basis + gate_evaluation + witness_requirement)
-- Raw DTO → checked domain restore
-- Generic `AuthorizationReceiptV2` bu fazda YOK
-- Navigator methods Faz 8a'ya
-- V1/V2 strict schema dispatch; V1 artifact backward compat
-- Evidence constructor digest üretmez (V1 pattern mirror)
-- Asimetrik creation/load API; load outer stored korur (overwrite ETMEZ)
-- `try_new_held` caller-provided digest/identity kabul etmez
-- `from_verified_parts` her zaman `envelope.verify()` çağırır
-- Wire loader `try_new_held` çağırmaz (creation/restore ayrı)
-- `RevisionRequiredV2`: Serialize YOK, Deserialize YOK
-- `PersistedAuthorizationContextV2` wrapper frozen; restore private method
-- Public entrypoints: `try_new_held` + `load_pending_authorization_versioned` +
-  `load_versioned` + `persist_v2`
-- `validate_suspension_eligibility_v2` private (Faz 8a `witness_dispatch_requirement_v2`)
-
-### Faz 8 roadmap (review 1. tur)
-```
-Faz 8-P1: additive downstream V2 readiness (BU — Adım 1-9 done, 10-11 next)
-Faz 8-P2: measurement caller migration (navigator/MCP compute_raw → measure_task_delta)
-Faz 8a:   engine cutover (commit_task_claim → V2, V1 producer silme, atomik)
-Faz 8b:   AuthorizationReceiptV2 (Satisfied/application receipt)
-Faz 8c:   persistence + downstream migration (PendingAuthorizationEnvelopeV2 restore)
-```
-
-### Sonraki adım (Faz 8-P2)
-PR #84 APPROVED, merge hazır. Sıradaki:
-1. **Merge PR #84** → main (wip/inv-t9-70-commit4b → main)
-2. **Faz 8-P2:** Measurement caller migration (navigator/MCP compute_raw →
-   measure_task_delta). `TaskCommitInput::new` + `EngineMeasurement` typed result.
-   navigator.rs:873 + osp-mcp/server.rs:876 TaskCommitInput literal construction →
-   smart ctor. compute_raw_from_delta/provenanced_from_flat/trajectory_loss kaldır.
-3. **Faz 8a:** Engine cutover (commit_task_claim → V2, V1 producer silme, atomik)
-
-### Faz 8-P2 scope (yeni oturum)
-- navigator.rs:618 loss_before üretimi kaldır (Faz 8-P1 evaluator measurement'dan derive)
-- navigator.rs:873 TaskCommitInput literal → `TaskCommitInput::new(claim, omega, resolver, measurement)`
-- osp-mcp/server.rs:868-884 aynı pattern
-- `measure_task_delta` (engine.rs:2366) production caller kazan (şu an test-only)
-- `compute_raw_from_delta`/`provenanced_from_raw`/`trajectory_loss` caller'ları azalır
-- V1 TaskCommitInput field'ları (target/loss_before/measured) → measurement: EngineMeasurement
+Referans: `docs/notes/faz8-p2-parity-characterization.md` (tur 9 canonical).
+`docs/notes/faz8-p2-construction-feasibility.md` (P2-0A raporu).
