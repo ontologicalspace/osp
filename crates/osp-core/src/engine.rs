@@ -6406,4 +6406,303 @@ v = 0.5
             "non-finite loss_after → NonFiniteLossAfter; got {err:?}"
         );
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // **Faz 8-P2 — P2-0A: Construction Feasibility Closure**
+    //
+    // Bu testler, planlanmış P2-1 caller migration'ının *yapısal* önkoşullarını
+    // (herhangi bir production kod değişikliği YAPMADAN) karakterize eder:
+    //
+    // 1. Probe → measure → final Claim akışı: binding-relevant structural identity
+    //    (TaskClaimDigest) + EngineMeasurementDigest + typed field parity. computed_raw
+    //    projection bilinçli olarak değişir ama digest/evidence koruması altındadır.
+    // 2. Compile-time alias kanıtı: `ProvenancedRawPosition = MeasuredRawPosition`
+    //    (pub use re-export) — `measurement.after().clone()` doğrudan assignable.
+    // 3. Binding-before-measurement: mevcut `measure_task_delta` producer contract'ı.
+    // 4. Q5-vs-measurement error precedence: exact V1 precedence sağlanamaz —
+    //    characterization finding (migration requirement DEĞİL).
+    //
+    // **Not:** Bu testler P2-1 implementation'ını PINLEMEZ. Gelecekteki
+    // `measure_task_delta_checked` boundary'si için "binding must precede
+    // validate_for_commit" contract test'i P2-1'de eklenecektir.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// **P2-0A.1:** Probe Claim (placeholder `computed_raw`) → `measure_task_delta` →
+    /// final Claim (`computed_raw = measurement.after().to_raw()`) akışı, tüm
+    /// binding-relevant digest'leri ve typed measurement field'larını korur.
+    ///
+    /// `measure_task_delta` `claim.computed_raw`/`claim.intent`'i OKUMAZ (sadece
+    /// `task_id` + structural delta). `TaskClaimDigest` yalnızca `claim_id + task_id +
+    /// author + structural_delta_digest` bağlar. Dolayısıyla probe (placeholder raw)
+    /// ve final (measurement-derived raw) Claim'ler **aynı binding-relevant structural
+    /// identity**'ye sahiptir; `computed_raw` projection bilinçli olarak değişir.
+    ///
+    /// Test, iki-call feasibility modeli kullanır (production single-call source-contract
+    /// P2-1'de pinlenecektir):
+    /// ```text
+    /// probe Claim → measure_task_delta → probe_measurement
+    /// final Claim (computed_raw = probe_measurement.after().to_raw()) → measure_task_delta
+    ///   → final_measurement
+    /// assert parity: digest + typed fields + TaskClaimDigest
+    /// ```
+    #[test]
+    fn faz8_p2_probe_final_claim_preserves_measurement_and_binding_identity() {
+        use crate::measurement::TaskClaimDigest;
+
+        // Engine + task + delta: subject scope node-1 mevcut space'te (Available baseline).
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(mod_node(1));
+        let task = task_with_node_scope(1, 42);
+        // Structural delta: node-2 introduced (delta). Subject = {1} (task scope).
+        let structural_delta_nodes = vec![mod_node(2)];
+        let revision = engine.current_space_view_revision().unwrap();
+
+        // --- Probe Claim: placeholder computed_raw (RawPosition::default()) ---
+        let probe_claim = claim_with_task_id(42, structural_delta_nodes.clone(), vec![], vec![]);
+        let probe_bound = crate::trajectory::TaskBoundClaim {
+            claim: &probe_claim,
+            task: &task,
+        };
+        let probe_measurement = engine
+            .measure_task_delta(&probe_bound, &revision, None)
+            .expect("probe measurement must succeed");
+
+        // --- Final Claim: computed_raw = probe_measurement.after().to_raw() ---
+        // Aynı claim.id (1), task_id (42), author (100), structural delta — sadece
+        // computed_raw değişti (placeholder → measurement-derived projection).
+        let mut final_claim = claim_with_task_id(42, structural_delta_nodes, vec![], vec![]);
+        final_claim.computed_raw = probe_measurement.after().to_raw();
+        let final_bound = crate::trajectory::TaskBoundClaim {
+            claim: &final_claim,
+            task: &task,
+        };
+        let final_measurement = engine
+            .measure_task_delta(&final_bound, &revision, None)
+            .expect("final measurement must succeed");
+
+        // --- EngineMeasurementDigest parity ---
+        let probe_meas_digest = probe_measurement
+            .compute_digest()
+            .expect("probe EngineMeasurementDigest");
+        let final_meas_digest = final_measurement
+            .compute_digest()
+            .expect("final EngineMeasurementDigest");
+        assert_eq!(
+            probe_meas_digest.as_bytes(),
+            final_meas_digest.as_bytes(),
+            "EngineMeasurementDigest must be identical: measurement depends only on task_id + \
+             structural delta (NOT computed_raw/intent)"
+        );
+
+        // --- Typed field parity ---
+        assert_eq!(
+            probe_measurement.before(),
+            final_measurement.before(),
+            "baseline (before) must match — same subject scope, same space"
+        );
+        assert_eq!(
+            probe_measurement.after(),
+            final_measurement.after(),
+            "after centroid must match — same hypothetical delta applied"
+        );
+        assert_eq!(
+            probe_measurement.request(),
+            final_measurement.request(),
+            "MeasurementRequest must match — same subject/impact/revision/structural delta"
+        );
+
+        // --- TaskClaimDigest (binding-relevant structural identity) parity ---
+        let probe_structural =
+            crate::authorization::canonical_structural_delta_from_claim(&probe_claim)
+                .expect("probe canonical structural delta");
+        let final_structural =
+            crate::authorization::canonical_structural_delta_from_claim(&final_claim)
+                .expect("final canonical structural delta");
+        let probe_delta_digest =
+            crate::measurement::MeasurementDeltaDigest::compute_from_canonical(&probe_structural)
+                .expect("probe MeasurementDeltaDigest");
+        let final_delta_digest =
+            crate::measurement::MeasurementDeltaDigest::compute_from_canonical(&final_structural)
+                .expect("final MeasurementDeltaDigest");
+        let probe_claim_digest = TaskClaimDigest::compute(&probe_claim, 42, &probe_delta_digest)
+            .expect("probe TaskClaimDigest");
+        let final_claim_digest = TaskClaimDigest::compute(&final_claim, 42, &final_delta_digest)
+            .expect("final TaskClaimDigest");
+        assert_eq!(
+            probe_claim_digest.as_bytes(),
+            final_claim_digest.as_bytes(),
+            "TaskClaimDigest (binding-relevant structural identity) must be identical — \
+             computed_raw/intent are NOT part of claim commitment"
+        );
+
+        // --- Sanity: computed_raw projection bilinçli olarak DEĞİŞTİ ---
+        // Bu, "Claim tamamen aynıdır" iddiasını çürütür — sadece binding-relevant
+        // structural identity aynıdır; computed projection bilinçli değişir.
+        assert_ne!(
+            probe_claim.computed_raw,
+            final_claim.computed_raw,
+            "computed_raw must DIFFER: probe=placeholder(default), final=measurement.after().to_raw()"
+        );
+        assert_eq!(
+            final_claim.computed_raw,
+            probe_measurement.after().to_raw(),
+            "final computed_raw must equal probe measurement.after().to_raw() (V2 candidate projection)"
+        );
+    }
+
+    /// **P2-0A.2:** Compile-time alias kanıtı — `ProvenancedRawPosition`
+    /// (`crate::trajectory`) ile `MeasuredRawPosition` (`crate::coords`) aynı Rust tipi
+    /// (`pub use` re-export alias, trajectory.rs:125). Bu, `measurement.after()`'ın
+    /// (dönen `&MeasuredRawPosition`) `TaskCommitInput.measured` alanına
+    /// (`ProvenancedRawPosition`) doğrudan assignable olduğunu kanıtlar.
+    ///
+    /// Eğer bu test derlenirse, P2-1 caller migration'ında explicit per-axis conversion
+    /// (reviewer Tur 1 P1-2 endişesi) GEREKMEZ — `clone()` yeterlidir.
+    #[test]
+    fn faz8_p2_provenanced_raw_position_is_measured_raw_position_alias() {
+        use crate::coords::MeasuredRawPosition;
+        use crate::trajectory::ProvenancedRawPosition;
+
+        // Compile-time proof: iki tip aynı — aynı value her iki isimle de assignable.
+        let measured: MeasuredRawPosition = MeasuredRawPosition {
+            coupling: crate::coords::AxisMeasurement {
+                value: 0.5,
+                source: crate::coords::MetricSource::Scip,
+            },
+            cohesion: crate::coords::AxisMeasurement {
+                value: 0.4,
+                source: crate::coords::MetricSource::Scip,
+            },
+            instability: crate::coords::AxisMeasurement {
+                value: 0.3,
+                source: crate::coords::MetricSource::Scip,
+            },
+            entropy: crate::coords::AxisMeasurement {
+                value: 0.2,
+                source: crate::coords::MetricSource::Scip,
+            },
+            witness_depth: crate::coords::AxisMeasurement {
+                value: 0.1,
+                source: crate::coords::MetricSource::Scip,
+            },
+        };
+        let as_provenanced: ProvenancedRawPosition = measured.clone();
+        // Runtime proof: equality holds across alias names.
+        assert_eq!(measured, as_provenanced);
+        // Round-trip via trait method.
+        let raw = as_provenanced.to_raw();
+        assert_eq!(raw.x, 0.5);
+        assert_eq!(raw.y, 0.4);
+        assert_eq!(raw.z, 0.3);
+        assert_eq!(raw.w, 0.2);
+        assert_eq!(raw.v, 0.1);
+    }
+
+    /// **P2-0A.3:** Mevcut `measure_task_delta` producer contract'ı pinler —
+    /// binding verification (`claim.task_id == task.id`) measurement work'tan ÖNCE
+    /// çalışır.
+    ///
+    /// **Önemli kapsam notu:** Bu test MEVCUT producer'ı pinler. Gelecekteki
+    /// `measure_task_delta_checked` boundary'si için "binding must precede
+    /// `Task::validate_for_commit`" contract test'i P2-1 implementation'ında
+    /// eklenecektir (bu scope'ta `measure_task_delta_checked` henüz YOK).
+    ///
+    /// Sentinel: `claim.task_id != task.id` ile birlikte GEÇERSİZ task declaration
+    /// (non-finite threshold) verilir. Eğer producer binding kontrolünü measurement
+    /// work'tan sonra yapsaydı, başka bir hata (measurement-scope failure veya
+    /// silent acceptance) dönebilirdi. Bu test `TaskBindingMismatch`'ın önceliğini
+    /// pinler.
+    #[test]
+    fn measure_task_delta_rejects_binding_mismatch_before_measurement_work() {
+        let engine = make_measurement_engine();
+        // **Sentinel (review P0-3 fix):** task_b Module scope kullanır — eğer producer
+        // binding check'i measurement work'tan SONRA yapsaydı, measurement work
+        // (subject scope derivation) `SubjectScopeResolutionFailed` üretiridi (Module
+        // scope Commit 3 fail-closed, engine.rs:2553+). Binding check ÖNCE olduğu için
+        // `TaskBindingMismatch` döner — bu ordering kanıtı.
+        //
+        // Önceki kod `task_with_node_scope(1, 20)` (geçerli task) kullanıyordu; bu
+        // sentinel değildi çünkü valid task ile measurement work hata üretmezdi ve
+        // binding check'in sırasını pinlemezdi.
+        let task_b = task_with_module_scope(20);
+        // Claim task_id=10 ile (≠ task_b.id=20) — structural forgery.
+        let claim = claim_with_task_id(10, vec![mod_node(1)], vec![], vec![]);
+        let bound = crate::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &task_b,
+        };
+        let revision = engine.current_space_view_revision().unwrap();
+        let result = engine.measure_task_delta(&bound, &revision, None);
+        // Binding mismatch measurement work'tan önce yakalanır. Eğer sonra olsaydı,
+        // Module scope → SubjectScopeResolutionFailed dönerdi.
+        assert!(
+            matches!(
+                result,
+                Err(crate::measurement::MeasurementError::TaskBindingMismatch {
+                    claim_task_id: 10,
+                    bound_task_id: 20
+                })
+            ),
+            "binding mismatch (claim_task_id=10 vs bound_task_id=20) must be rejected BEFORE \
+             measurement work; if binding were checked after measurement, Module scope would \
+             have produced SubjectScopeResolutionFailed; got {result:?}"
+        );
+    }
+
+    /// **P2-0A.4:** Q5 vision failure ile measurement failure birleşik durumda,
+    /// V1 (compute_raw_from_delta infallible → Q5 sonra) ile P2-candidate
+    /// (measure_task_delta fallible → measurement Q5'ten önce) arasında exact error
+    /// precedence değişir.
+    ///
+    /// **Characterization finding** (migration requirement DEĞİL): exact V1 pipeline
+    /// error precedence (`Q4 → bind → validate → Q5 → PredicateGate → Q6 → witness`)
+    /// P2-1'de TAM olarak sağlanamaz, çünkü Q5 final `claim.computed_raw` gerektirir
+    /// ve `measure_task_delta` fallible'dir. Bu, P2-1 için "yeni operational boundary"
+    /// olarak kabul edilen bir precedence daralmasıdır:
+    ///
+    /// - **Korunur:** Q4 syntax, task-binding, task-declaration precedence
+    ///   (via gelecekteki `measure_task_delta_checked`).
+    /// - **Değişir:** Measurement producer hataları (revision/scope/coordinate/axis)
+    ///   final Q5'ten önce oluşabilir.
+    ///
+    /// Bu test somut bir örnek üretir: subject scope'u çözülemeyen bir task
+    /// (Module scope — `SubjectScopeResolutionFailed`) ile aynı claim üzerinde Q5
+    /// de fail edecek olsaydı, V1 yolu Q5'i çalıştırıp `VisionViolation` dönerken
+    /// P2-candidate `MeasurementError` döner. Bu scope'ta her iki yolu da aynı
+    /// engine'de çalıştıramayız (production V2 consumer henüz yok), bu yüzden
+    /// test yalnızca P2-candidate measurement error'ını doğrular; Q5'in aynı
+    /// claim'de de fail edebileceği raporda belgelenir.
+    #[test]
+    fn faz8_p2_q5_vs_measurement_precedence_characterization() {
+        // Task with Module scope — measure_task_delta SubjectScopeResolutionFailed üretir
+        // (Module scope Commit 3 fail-closed). Bu, measurement producer error'ının
+        // Q5'ten ÖNCE observable olduğuna somut bir örnek.
+        let engine = make_measurement_engine();
+        let task = task_with_module_scope(42);
+        let claim = claim_with_task_id(42, vec![], vec![], vec![]);
+        let bound = crate::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &task,
+        };
+        let revision = engine.current_space_view_revision().unwrap();
+        let result = engine.measure_task_delta(&bound, &revision, None);
+        // P2-candidate: measurement producer error (scope resolution failure).
+        assert!(
+            matches!(
+                result,
+                Err(crate::measurement::MeasurementError::SubjectScopeResolutionFailed(_))
+            ),
+            "P2-candidate measurement producer error must be observable; got {result:?}"
+        );
+        // Karşılaştırma (rapor için): aynı claim'in V1 commit_task_claim yolu Q5
+        // vision'ı çalıştırır. Eğer claim.computed_raw (placeholder default = zero
+        // vector) vision bound'unu ihlal ediyorsa V1 `VisionViolation` döner;
+        // aksi halde PredicateGate'e geçer ve task declaration hatası
+        // (`validate_for_commit`) ancak o noktada yakalanır. Her iki durumda da
+        // V1'in döndürdüğü error P2-candidate'in `MeasurementError`'ından FARKLIdır —
+        // bu exact V1 precedence'ın sağlanamadığı somut kanıttır.
+        //
+        // Not: V1 yolunu aynı testte çalıştırmak production V2 consumer gerektirir
+        // (P2-0B'de iki-engine izolasyon ile karakterize edilecektir).
+    }
 }

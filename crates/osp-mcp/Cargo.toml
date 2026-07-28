@@ -34,3 +34,7 @@ schemars = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+# Faz 8-P2 P2-0B: characterization fixture digest doğrulaması (Workspace ölçüm davranışı
+# test'leri). Test-only — production MCP binary runtime dependency yüzeyini büyütmez.
+# Transitif osp-core→blake3 doğrudan kullanılamadığı için explicit dev-dep gerek.
+blake3 = "1"

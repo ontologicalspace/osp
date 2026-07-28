@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "description": "Faz 8-P2 P2-0B characterization corpus — V1 (compute_raw_from_delta + provenanced_from_raw) vs V2-candidate (measure_task_delta) semantic divergence measurement. Case content is produced by Rust builders (crates/osp-core/tests/common/faz8_p2_cases.rs); this manifest pins each case's serialized-bytes BLAKE3 digest so builder drift is DETECTED (explicit fixture+digest update required). Corpus change is detected by digest verification, not prevented.",
+  "divergence_classes": {
+    "matching_scope": "task.predicate.scope and proposal.affected_nodes describe the same node set — subject/value parity but INV-T4 source divergence (V1 Scip override vs V2 TreeSitter axis)",
+    "wide_affected_scope": "proposal.affected_nodes is a strict superset of task.predicate.scope — known production-reachable divergence (V1 measures wider centroid)",
+    "removed_edge_external_source": "removed_edges[*].from references a node outside task.predicate.scope — divergence (V1 folds into affected set)",
+    "delta_introduced_subject": "task.predicate.scope members are all introduced by the delta — V2 baseline UnavailableAllIntroduced (typed), V1 DefaultFallback (empty positions → RawPosition::default)",
+    "mixed_per_axis_sources": "subject members report different MetricSource per axis — V2 per-axis provenance (Mixed possible) vs V1 uniform Scip"
+  },
+  "cases": [
+    {
+      "id": "matching-single-node-001",
+      "class": "matching_scope",
+      "source": "synthetic_adversarial",
+      "description": "Task targets Node(1); proposal affected_nodes=[1]. Subject/value parity but source divergence (INV-T4: V1 Scip override vs V2 TreeSitter axis).",
+      "builder_digest_blake3": "00ef0bc3d3dd61ebb0645b9520263bdd9425af7833caaf1502ee48ed077398b5",
+      "notes": "Subject/value parity case. Source divergence (INV-T4) present even in matching scope — required_source matrix quantifies decision impact."
+    },
+    {
+      "id": "wide-affected-scope-001",
+      "class": "wide_affected_scope",
+      "source": "synthetic_adversarial",
+      "description": "Task Node(1) scope; affected_nodes=[1,2,3]. KNOWN divergence: V1 measures centroid over {1,2,3}, V2 over {1}.",
+      "builder_digest_blake3": "be3365b6411eb0aeec41f41b487969027a0109ffde3ca2100b61f37470df9758",
+      "notes": "Core ontological divergence case — subject authority: LLM-affected vs task-derived. P2-1 cannot open without resolving this."
+    },
+    {
+      "id": "removed-edge-external-source-001",
+      "class": "removed_edge_external_source",
+      "source": "synthetic_adversarial",
+      "description": "Task Node(1); affected=[1] + removed_edge from=9 (external). V1 folds 9 into affected set; V2 subject scope {1} excludes it.",
+      "builder_digest_blake3": "1690fd36d4727631ae5bce06dcabd993c26c0fbbbb0b971dc3dbdf15c916c878",
+      "notes": "removed_edges.from external to task scope — V1 affected-set contamination."
+    },
+    {
+      "id": "delta-introduced-subject-001",
+      "class": "delta_introduced_subject",
+      "source": "synthetic_adversarial",
+      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty positions → RawPosition::default). Availability divergence; policy/decision impact hipotez (P2-0B.8).",
+      "builder_digest_blake3": "91f925fef8dde5971d8882fe96a90a985b2b1b35fca0002ed3f1aa405d621f61",
+      "notes": "Baseline epistemic availability divergence: V1 DefaultFallback (yokluk → RawPosition::default sıfır) vs V2 UnavailableAllIntroduced (typed). Subject/value parity. Pipeline Observed(AcceptAsCompleted) V1/V2 parity (Held authorization.outcome). Policy/decision divergence hipotez — NotCompleted+AcceptImprovement fixture P2-0B.8."
+    }
+  ]
+}
