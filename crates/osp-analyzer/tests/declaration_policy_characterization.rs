@@ -1,20 +1,24 @@
 //! Characterization tests for PR A (declaration-policy extraction).
 //!
-//! These tests pin the EXACT `extract_class_defs` output — the full
-//! `DefView { name, is_abstract, methods, source_location }` list per adapter,
-//! with exact counts and ordering — across the `shared::walk_class_defs`
-//! refactor. They are deliberately behavior-freezing: a test name here does NOT
-//! assert the behavior is *correct*, only that the refactor did not *change* it.
+//! These tests pin `extract_class_defs` behavior across the
+//! `shared::walk_class_defs_with_specs` refactor. Most tests assert the
+//! **(name, is_abstract) matrix** per adapter with exact counts and ordering
+//! (via `defs_of`); one Python test asserts the **full `DefView`** projection
+//! — name, is_abstract, methods, and source_location — as a representative
+//! full-field characterization (via `views_of`). They are deliberately
+//! behavior-freezing: a test name here does NOT assert the behavior is
+//! *correct*, only that the refactor did not *change* it.
 //!
 //! Several tests encode KNOWN-DIVERGENCE cases (pre-existing bugs preserved
 //! verbatim by PR A). Fixing any of them is a separate bug-fix PR that must
 //! rerun the corpus and update these tests as a deliberate, documented event.
 //!
-//! Coverage rationale: the pre-existing inline adapter unit tests only checked
+//! Coverage note: the pre-existing inline adapter unit tests only checked
 //! `is_abstract` presence via `.any(...)` and rarely the exact count or the
-//! `name` field. That leaves grouped-type under-count, name extraction, method
-//! lists and source offsets unguarded. These characterization tests close those
-//! gaps via the full `DefView` projection.
+//! `name` field. That left grouped-type under-count and name extraction
+//! unguarded; the (name, is_abstract) matrix closes those. Full per-adapter
+//! `DefView` goldens (methods + offsets for every language) and a legacy-oracle
+//! matrix are left to a follow-up test-hardening PR.
 
 use osp_analyzer::adapters::go::GoAdapter;
 use osp_analyzer::adapters::javascript::JavaScriptAdapter;
@@ -98,8 +102,8 @@ class Comparable(Protocol):
 fn characterization_python_full_defview_methods_and_location() {
     // Exercises the FULL DefView projection (name, is_abstract, methods,
     // source_location) — not just (name, is_abstract) — to back the file-header
-    // "EXACT extract_class_defs output" claim. Freezes method-list ordering and the
-    // byte offset of each declaration.
+    // "full DefView" claim. Freezes method-list ordering and the byte offset of
+    // each declaration.
     let src = "\
 class Animal(ABC):
     def speak(self): pass
