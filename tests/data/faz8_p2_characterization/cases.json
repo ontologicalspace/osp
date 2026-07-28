@@ -37,9 +37,9 @@
       "id": "delta-introduced-subject-001",
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
-      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty positions → RawPosition::default). Availability divergence; policy/decision impact hipotez (P2-0B.8).",
-      "builder_digest_blake3": "91f925fef8dde5971d8882fe96a90a985b2b1b35fca0002ed3f1aa405d621f61",
-      "notes": "Baseline epistemic availability divergence: V1 DefaultFallback (yokluk → RawPosition::default sıfır) vs V2 UnavailableAllIntroduced (typed). Subject/value parity. Pipeline Observed(AcceptAsCompleted) V1/V2 parity (Held authorization.outcome). Policy/decision divergence hipotez — NotCompleted+AcceptImprovement fixture P2-0B.8."
+      "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty positions → RawPosition::default). Availability divergence (Completed → AcceptAsCompleted parity; policy etkisi bu case'te observable DEĞİL — sibling delta-introduced-subject-policy-001 divergence'ı gösterir).",
+      "builder_digest_blake3": "de9c6e7248f4d70c49cfe370a451f3dbd127bc7c1e52e8e6cd38ef476054df7a",
+      "notes": "Baseline epistemic availability divergence: V1 DefaultFallback (yokluk → RawPosition::default sıfır) vs V2 UnavailableAllIntroduced (typed). Subject/value parity. Pipeline Observed(AcceptAsCompleted) V1/V2 parity (Held authorization.outcome) — Completed olduğu için projection etkisiz. Bu Case 4 tek başına policy etkisini göstermez; sibling delta-introduced-subject-policy-001 fixture'ı (NotCompleted + AcceptImprovement) policy/decision divergence'ı gösterir."
     },
     {
       "id": "delta-introduced-subject-policy-001",
