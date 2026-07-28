@@ -313,6 +313,67 @@ impl DeclarationKindSpec {
     }
 }
 
+/// **Compatibility wrapper — pre-PR-A public API.** Retained so external
+/// `osp-analyzer` consumers that call `walk_class_defs(root, source, kind, patterns)`
+/// keep compiling. Behavior is bit-identical to the original: the same hard-coded
+/// global `is_class_def` kind list, the same `force_abstract` for
+/// `interface_declaration` / `type_alias_declaration`, and the same
+/// `abstract_patterns` substring test over each node's full text.
+///
+/// New code should call [`walk_class_defs_with_specs`] instead. This wrapper does
+/// NOT route through the spec system because `abstract_patterns` is a runtime
+/// (non-`'static`) slice that `AbstractnessRule::LegacyTextContains` cannot hold;
+/// it reproduces the old logic directly. Migrating callers to specs and removing
+/// this wrapper is a later cleanup PR.
+#[deprecated(
+    since = "0.x",
+    note = "use walk_class_defs_with_specs with adapter-owned DeclarationKindSpecs"
+)]
+pub fn walk_class_defs(
+    root: Node,
+    source: &str,
+    _class_node_kind: &str, // ignored — matched the old global kind list
+    abstract_patterns: &[&str],
+) -> Vec<ClassDef> {
+    let source_bytes = source.as_bytes();
+    let mut defs = Vec::new();
+    let mut stack = vec![root];
+    while let Some(n) = stack.pop() {
+        let k = n.kind();
+        let is_class_def = k == "class_definition"        // Python
+            || k == "class_declaration"                     // JS/TS
+            || k == "abstract_class_declaration"            // TS abstract
+            || k == "interface_declaration"                 // TS/JS interface (abstract — Martin)
+            || k == "type_alias_declaration"                // TS type alias (abstract surface)
+            || k == "struct_item"                           // Rust concrete
+            || k == "trait_item"                            // Rust abstract (trait)
+            || k == "enum_item"                             // Rust concrete (enum)
+            || k == "type_declaration"; // Go
+        let force_abstract = k == "interface_declaration" || k == "type_alias_declaration";
+        if is_class_def {
+            // Preserve the old early-return + substring semantics exactly.
+            if let Ok(full_text) = n.utf8_text(source_bytes) {
+                let is_abstract =
+                    force_abstract || abstract_patterns.iter().any(|&p| full_text.contains(p));
+                if let Some(name) = find_first_identifier(&n, source_bytes) {
+                    defs.push(ClassDef {
+                        name,
+                        is_abstract,
+                        methods: find_methods(&n, source_bytes),
+                        source_location: n.start_byte(),
+                    });
+                }
+            }
+        }
+        for i in (0..n.child_count()).rev() {
+            if let Some(c) = n.child(i) {
+                stack.push(c);
+            }
+        }
+    }
+    defs
+}
+
 /// Walk AST, collect class/type declarations matching one of `specs` by node kind.
 ///
 /// **Traversal is preserved verbatim from the pre-PR-A implementation**
@@ -320,7 +381,14 @@ impl DeclarationKindSpec {
 /// therefore every downstream count and snapshot — stays bit-identical. The only
 /// change is that the recognized kind set and the abstractness/name rules now come
 /// from `specs` (adapter-owned) instead of a hard-coded global list.
-pub fn walk_class_defs(root: Node, source: &str, specs: &[DeclarationKindSpec]) -> Vec<ClassDef> {
+///
+/// This is the new adapter-facing entry point (PR A). The legacy positional-args
+/// `walk_class_defs` is retained as a compatibility wrapper below.
+pub fn walk_class_defs_with_specs(
+    root: Node,
+    source: &str,
+    specs: &[DeclarationKindSpec],
+) -> Vec<ClassDef> {
     let source_bytes = source.as_bytes();
     let mut defs = Vec::new();
     let mut stack = vec![root];
