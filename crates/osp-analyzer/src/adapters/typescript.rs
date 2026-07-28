@@ -74,9 +74,20 @@ impl LanguageAdapter for TypeScriptAdapter {
             };
         // PR A bit-identical mapping (grammar inventory verified 2026-07-24):
         //   class_declaration          → LegacyTextContains (old substring test)
-        //   abstract_class_declaration → Always (old: matched via substring "abstract class")
-        //   interface_declaration      → Always (old force_abstract)
-        //   type_alias_declaration     → Always (old force_abstract)
+        //   abstract_class_declaration → LegacyTextContains (see note below)
+        //   interface_declaration      → Always (old force_abstract, unconditional)
+        //   type_alias_declaration     → Always (old force_abstract, unconditional)
+        //
+        // BIT-IDENTICAL NOTE (abstract_class_declaration): the old code applied the
+        // pattern set ["abstract class","interface "] to ALL matched kinds via a
+        // substring test over the node's FULL SOURCE TEXT — NOT a token-level check.
+        // `abstract /* gap */ class Shape` parses as abstract_class_declaration but its
+        // source text does NOT contain the contiguous substring "abstract class", so the
+        // old code yielded is_abstract=false. Mapping it to Always would flip that to
+        // true — a behavior change. So this kind keeps LegacyTextContains. Migration to
+        // a proper kind-level rule is a later bug-fix PR.
+        //   interface_declaration / type_alias_declaration WERE unconditionally forced
+        //   abstract by the old force_abstract branch → Always is exact for those two.
         // PRESERVED EXCLUSION: `enum_declaration` exists in the TS grammar but was
         // never in the old is_class_def list → still not counted. Do NOT add it.
         // PRESERVED EXCLUSION: anonymous `class` expression node → not counted.
@@ -89,7 +100,7 @@ impl LanguageAdapter for TypeScriptAdapter {
             ),
             DeclarationKindSpec::new(
                 "abstract_class_declaration",
-                AbstractnessRule::Always,
+                AbstractnessRule::LegacyTextContains(&["abstract class", "interface "]),
                 NameStrategy::FirstIdentifierFallback,
             ),
             DeclarationKindSpec::new(
