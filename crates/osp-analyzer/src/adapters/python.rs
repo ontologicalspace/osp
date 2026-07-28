@@ -76,7 +76,7 @@ impl LanguageAdapter for PythonAdapter {
             AbstractnessRule::LegacyTextContains(&["ABC", "Protocol", "ABCMeta"]),
             NameStrategy::FirstIdentifierFallback,
         )];
-        shared::walk_class_defs(tree.root_node(), source, PY_SPECS)
+        shared::walk_class_defs_with_specs(tree.root_node(), source, PY_SPECS)
     }
 }
 
