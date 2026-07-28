@@ -114,7 +114,7 @@ impl LanguageAdapter for TypeScriptAdapter {
                 NameStrategy::FirstIdentifierFallback,
             ),
         ];
-        shared::walk_class_defs(tree.root_node(), source, TS_SPECS)
+        shared::walk_class_defs_with_specs(tree.root_node(), source, TS_SPECS)
     }
 }
 
