@@ -69,15 +69,19 @@ impl LanguageAdapter for JavaScriptAdapter {
             Some(t) => t,
             None => return Vec::new(),
         };
-        // JS has no abstract keyword — all classes are concrete (is_abstract=false).
-        // Old code passed the global is_class_def list + "__NEVER_MATCH__"; the only
-        // kind the JS grammar actually produces from that list is `class_declaration`
-        // (JS grammar has no `interface_declaration`). Anonymous `class` expression
-        // nodes were never in the list → still not counted.
+        // JS has no abstract keyword. The old code passed the sentinel
+        // ["__NEVER_MATCH__"] and tested it as a substring over the class node's
+        // FULL text. BIT-IDENTICAL: we must keep LegacyTextContains here, NOT Never —
+        // if the sentinel string literally appears inside a class body (e.g.
+        // `return "__NEVER_MATCH__"`), the old code marked it abstract. Migrating to
+        // Never (the semantically correct "JS is never abstract") is a behavior change
+        // deferred to a later bug-fix PR.
+        // Only `class_declaration` from the old global list exists in the JS grammar
+        // (no `interface_declaration`); anonymous `class` expr was never counted.
         use shared::{AbstractnessRule, DeclarationKindSpec, NameStrategy};
         const JS_SPECS: &[DeclarationKindSpec] = &[DeclarationKindSpec::new(
             "class_declaration",
-            AbstractnessRule::Never,
+            AbstractnessRule::LegacyTextContains(&["__NEVER_MATCH__"]),
             NameStrategy::FirstIdentifierFallback,
         )];
         shared::walk_class_defs(tree.root_node(), source, JS_SPECS)
