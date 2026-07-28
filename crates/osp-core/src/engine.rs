@@ -6745,7 +6745,7 @@ v = 0.5
     /// zinciri girdileri ve sonucu. PR #87-B: V1/V2 theta parity kanıtı.
     ///
     /// **theta_bits:** captured authoritative context üzerinden recompute (production
-    /// check_vision_raw_with_context:1821 ile aynı CosineDeviation.theta). Successful
+    /// check_vision_raw_with_context ile aynı CosineDeviation.theta). Successful
     /// theta production API'den observable değil.
     /// **actual_verdict:** gerçek engine.check_claim_vision_with_context sonucu (manuel
     /// DEĞİL). Violation yolunda production violation.theta ↔ recompute exact parity.
@@ -6790,7 +6790,7 @@ v = 0.5
             .expect("authoritative Q5 context must resolve in test");
         let selection = &context.selection;
 
-        // theta: captured context üzerinden recompute (production check_vision_raw_with_context:1821).
+        // theta: captured context üzerinden recompute (production check_vision_raw_with_context).
         let theta = CosineDeviation.theta(
             &claim.computed_raw,
             &selection.effective_vision,
@@ -7074,7 +7074,7 @@ v = 0.5
         engine
     }
 
-    /// **PR #87-B Test 2:** Observation helper effective vision'a duarlıdır — seçilmiş
+    /// **PR #87-B Test 2:** Observation helper effective vision'a duyarlıdır — seçilmiş
     /// iki orthogonal `RoleProfile` vision context aynı asymmetric raw'a karşı farklı
     /// theta üretir. Authority veya migration parity kanıtı DEĞİL; observation/metric
     /// sensitivity control. İki theta literal bit golden ile pinlenir.

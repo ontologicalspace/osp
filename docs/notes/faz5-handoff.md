@@ -1,15 +1,12 @@
-# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 + #91 MERGED; PR #87-B Q5 theta hazır)
+# INV-T9 #70 Faz 8-P2 — Handoff (PR #85 + #91 MERGED; PR #93 Q5 theta hazır)
 
 ## Repository state
 
 ```
-Branch: wip/faz8-p2-p2-0b8-q5-theta (main efede00'den)
-HEAD: Q5 exact theta engine-unit characterization
 PR #85: MERGED (squash e4675b2) — Faz 8-P2 P2-0A+B characterization
 PR #91 (#87-A): MERGED (squash efede00) — policy fixture (Part 1/2)
-PR #87-B: Q5 exact theta hazır (Part 2/2 — Closes #87)
+PR #93 (#87-B): Q5 exact theta HAZIR (Part 2/2 — Closes #87)
 Issue #92: subject-authority → raw → Q5 theta downstream (follow-up, açıldı)
-Worktree: clean (source) — sadece untracked docs var
 ```
 
 ## PR #85 Özet (MERGED)
@@ -110,7 +107,7 @@ Squash merge `e4675b2` → main. Characterization canonical.
 Squash merge `efede00` → main. `delta-introduced-subject-policy-001` fixture ile Migration 3
 (b) policy/decision divergence KANITLANDI.
 
-### PR #87-B — Q5 exact theta engine-unit (BU BRANCH, hazırlanıyor)
+### PR #93 (#87-B) — Q5 exact theta engine-unit (HAZIR, review bekliyor)
 **Part 2/2 — Closes #87.** Q5 theta parity koşullu KANITLANDI (engine.rs `#[cfg(test)]`
 `Q5ThetaObservation`). Q5 kendi başına divergence kaynağı DEĞİL; upstream raw + context
 eşitliğini korur, divergence'ı yansıtır. Subject-authority theta etkisi OUT OF SCOPE
