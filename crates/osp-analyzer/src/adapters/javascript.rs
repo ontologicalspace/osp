@@ -84,7 +84,7 @@ impl LanguageAdapter for JavaScriptAdapter {
             AbstractnessRule::LegacyTextContains(&["__NEVER_MATCH__"]),
             NameStrategy::FirstIdentifierFallback,
         )];
-        shared::walk_class_defs(tree.root_node(), source, JS_SPECS)
+        shared::walk_class_defs_with_specs(tree.root_node(), source, JS_SPECS)
     }
 }
 
