@@ -187,10 +187,25 @@ computed_raw ile fail etmeli.
 **İhlal örneği:** Agent "coupling 0.4 oldu" der, predicate bunu kabul eder → INV #4 ihlali.
 **Koruma mekanizması:** `check_claim_predicate(claim, task)` — claim.computed_raw zorunlu.
 
+**MD-1 normative note (Faz 8-P2 migration decision):** Engine measurement subject'ini
+canonical task scope'tan türetir (`derive_task_subject_scope(task)`). Task-bound measurement
+subject authority canonical task predicate scope'tur; `Task.target_predicate_set.predicates[*]
+.predicate.scope` değerlerinin ayrı ayrı `CanonicalSubjectScope` olarak çözülmesiyle elde
+edilir (heterojen → `HeterogeneousPredicateScopes` fail-closed). Caller-declared `affected_nodes`
+measurement authority DEĞİL; impact hint veya compatibility observation. Bu INV-T3'ün
+(engine ölçer) extension'ıdır; dayanağı INV-T2 (operator task hedefini/scope'unu tanımlar) —
+task declaration'ı ölçülen gerçekliğin sınırını tanımlar, engine bunu canonical subject'a
+çözer. Subject (task scope) ve impact (structural delta) ayrı tutulur. (Status: planned —
+MD-1 accepted, caller cutover Faz 8a; `docs/notes/faz8-p2-migration-decisions.md`.)
+
 ### INV-T4 — Predicate provenance (RawPosition provenance taşımalı)
 **Status:** planned (Aşama A)
-**Tanım:** MetricPredicate `required_source` ile "measured/scip" zorunlu kılabilir.
-Placeholder/heuristic kaynaklı ölçümlerle task kapatılamaz (epistemolojik bütünlük).
+**Tanım:** MetricPredicate `required_source` ile "measured/scip" zorunlu kılabilir. Explicit
+`required_source` şartı bulunan predicate, eşleşmeyen source ile task'ı tamamlayamaz
+(`SourceInsufficient`). Placeholder/Heuristic/Mixed evidence, exact authority şartını
+karşılayamaz. `required_source = None` ise source authority constraint yoktur; numeric
+değerlendirme tüm MetricSource değerleri için devam eder (gerçek provenance evidence içinde
+korunur).
 **Kritik (review v3):** Çıplak `RawPosition` (f64) provenance taşıyamaz. INV-T4'ün
 type-level enforce edilmesi için **her axis'in source'unu taşıyan** ölçüm tipi gerekir.
 **Yapısal garanti:** `ProvenancedRawPosition` — her axis için `AxisMetric { value, source }`:
@@ -204,15 +219,28 @@ pub struct ProvenancedRawPosition {
 fn evaluate(&self, pos: &ProvenancedRawPosition) -> PredicateResult {
     let m = pos.axis(self.metric);  // AxisMetric (value + source)
     if self.required_source.map_or(false, |req| m.source != req) {
-        return PredicateResult::SourceInsufficient;  // placeholder ile task kapatılamaz
+        return PredicateResult::SourceInsufficient;  // explicit required_source, target axis source ile eşleşmedi
     }
     self.op.compare(m.value, self.threshold) ? ...
 }
 ```
-**Test:** `placeholder_metric_cannot_close_task` — coupling.source=Placeholder ile predicate
-satisfied olsa bile `SourceInsufficient` → task Done olmaz.
-**İhlal örneği:** "Coupling ölçülmedi (placeholder 0.5) ama 0.55'in altında" → task kapanır →
-ölçülmemiş başarı iddiası. ProvenancedRawPosition ile source type-level, runtime check değil.
+**Test:** `placeholder_metric_cannot_satisfy_exact_source_requirement` —
+`required_source = Some(Scip)`, coupling source = Placeholder, numeric threshold karşılanır →
+`SourceInsufficient` (exact authority şartı karşılanmadı).
+**İhlal örneği:** Predicate `required_source=Some(Scip)` isterken Placeholder kaynaklı coupling
+değeri numeric threshold'u karşılar ve source kontrolü olmadan task'ı kapatırsa INV-T4 ihlalidir.
+`required_source=None` ise source authority constraint yoktur — Placeholder/Heuristic/Mixed
+dahil tüm MetricSource değerleri numeric evaluation'a girebilir (gerçek provenance evidence
+içinde korunur).
+
+**MD-2 normative note (Faz 8-P2 migration decision):** Predicate source authority,
+engine-native per-axis provenance'dır. V1 uniform-source projection (`provenanced_from_raw(..., Scip)`)
+normatif evidence DEĞİL; yalnız geçici versioned compatibility observation. Exact source
+gereksinimi değerlendirilen eksenin kendi provenance'ına uygulanır — aggregate veya synthetic
+source etiketi per-axis evidence'ın yerine geçemez. Hedef axis `Mixed` ise hiçbir `Exact(X)`
+şartını karşılamaz (fail-closed `SourceInsufficient`). Axis'ler arası heterojenlik güvenilmez
+DEĞİL — predicate yalnız kendi axis'ini kontrol eder. (Status: planned — MD-2 accepted,
+authority cutover engine-internal Faz 8a öncesi; `docs/notes/faz8-p2-migration-decisions.md`.)
 
 ### INV-T5 — Task ≠ Claim (Aşama B güncelleme: static Claim taskless olabilir)
 **Status:** planned (Aşama A) + **implemented (Aşama B — Claim.task_id + TaskBoundClaim)**
@@ -290,6 +318,15 @@ Sonsuz context-loop ve token patlaması önlenir.
 **İhlal örneği:** Agent 50 kez dener, token $50 harcar, hiç ilerlemez → kaynak israfı.
 **Koruma mekanizması:** N aşıldığında task `Blocked` → operator replan veya N'i artır.
 
+**MD-3 planned extension (Faz 8-P2 migration decision):** `MeasurementBaseline::Unavailable`
+altında improvement assessment yapılamaz → `MutationDecision::AcceptAsProgress` üretilemez.
+Typed unavailable baseline hiçbir compatibility projection ile synthetic numeric baseline'a
+çevrilerek progress kanıtı oluşturamaz. `AcceptAsProgress` yalnız aynı subject identity'sine
+bağlı, karşılaştırılabilir
+bir `MeasurementBaseline::Available` üzerinden, engine-measured loss azalması kanıtlandığında
+üretilebilir. (Status: planned — MD-3 accepted, implementation pending;
+`docs/notes/faz8-p2-migration-decisions.md`.)
+
 ### INV-T8 — Progress checkpoint isolation (review v3 — INV-T6'dan ayrı)
 **Status:** planned (Aşama B)
 **Tanım:** `AcceptAsProgress` olan mutation task'ı **tamamlamaz** ve **mainline'a doğrudan
@@ -325,6 +362,19 @@ impl MutationDecision {
 `reject_produces_not_applied` — Reject → `ApplyTarget::NotApplied` (değil Sandbox).
 **İhlal örneği:** predicate fail, loss improved, AcceptAsProgress, yanlışlıkla main branch
 merge → OSP güven modeli çöker (progress ≠ merge, ama merge oldu).
+
+**MD-3 planned extension (Faz 8-P2 migration decision):** Yeni `MutationDecision::AcceptAsColdStart`
+varyantı — `BaselineUnavailableReason::AllMembersIntroducedByDelta` altında, explicit
+`ColdStartPolicy` ve operator authorization ile kabul edilen izole mutation. Improvement veya
+completion iddiası taşımaz. Planned mapping:
+```rust
+MutationDecision::AcceptAsColdStart => ApplyTarget::Lane(CommitLane::Sandbox)
+```
+Negatif kurallar: `AcceptAsColdStart ↛ Mainline`, `↛ TrajectoryCheckpoint` (TrajectoryCheckpoint
+"ölçülmüş ilerleme" için ayrılmış; cold-start improvement kanıtlanamaz). `AcceptAsColdStart`
+`Sandbox`'a uygulanır; Mainline promotion ancak sonraki engine measurement altında normal
+`AcceptAsCompleted` ile. (Status: planned — MD-3 accepted, implementation pending;
+`docs/notes/faz8-p2-migration-decisions.md`.)
 
 ### INV-T9 — External-Evidence Suspension Isolation (review turu 1-4, Paper 2 conformance fix)
 **Status:** implemented (fix/inv-t9-witness-suspension PR)
@@ -384,6 +434,14 @@ Agent failure ile external-evidence-waiting karışır; INV-T7 yanlış failure 
 staleness re-measure + cross-process resume) P1 takip PR'ındadır. Bu PR suspension semantics +
 claim continuity + budget isolation kurar; `PendingAuthorizationEnvelope` embedded
 `AuthorizationBasis` taşıdığı için P1 yeniden tasarım gerektirmez.
+
+**MD-3 planned extension (Faz 8-P2 migration decision):** `BaselineUnavailableReason::AllMembersIntroducedByDelta`
++ `NotCompleted` + `ColdStartPolicy::RequireOperatorApproval` → `Suspended(ColdStartAuthorizationRequired)`
+→ mutation uygulanmaz, maneuver budget tüketilmez, agent retry başlatılmaz. Operator onayı
+sonrasında `AcceptAsColdStart → Sandbox` apply (INV-T8 extension). Onay öncesi `Sandbox` yalnız
+**intended apply target**; gerçek mutation onaydan sonra. Default `ColdStartPolicy::Disallow`
+fail-closed `Reject`. `PartialNewSubject` cold-start override paylaşmaz. (Status: planned —
+MD-3 accepted, implementation pending; `docs/notes/faz8-p2-migration-decisions.md`.)
 
 ---
 
