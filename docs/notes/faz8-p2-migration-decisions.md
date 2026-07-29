@@ -1,0 +1,385 @@
+# Faz 8-P2 Migration Decisions
+
+**Status:** Accepted (Faz 5 closure — semantic decisions; implementation pending)
+**Decision date:** 2026-07-29
+**Evidence baseline:** PR #85 (P2-0A+B characterization), PR #91 (#87-A policy fixture),
+PR #93 (#87-B Q5 exact theta), Issue #92 (subject-authority → raw → Q5 follow-up)
+
+Bu belge Faz 8-P2 V1/V2 measurement semantic divergence characterization'ının üç ontolojik
+migration boyutu için **canonical karar kaydıdır**. Tartışma günlüğü değil; normatif kararın
+kaynağıdır. Her karar bağımsız kimlik taşır (MD-1/MD-2/MD-3); biri değiştiğünde diğerleri
+otomatik değişmiş sayılmaz.
+
+**Authority sırası (kanıt → karar → norm → uygulama):**
+```
+characterization tests / PR'lar (evidence)
+        ↓
+migration decision note (bu belge — karar)
+        ↓
+spec / invariants.md (norm — sistem ne yapmak zorunda)
+        ↓
+implementation issues + PR'lar (uygulama)
+```
+
+Issue'lar kararın kanıt ve uygulama geçmişidir, kararın kendisi değildir.
+
+## Karar Özeti
+
+| Karar | Normatif hedef | Compatibility (geçici) | Cutover |
+|---|---|---|---|
+| **MD-1** Subject | task scope authority | Yol 1 compat producer (affected_nodes) | Faz 8a caller cutover |
+| **MD-2** Provenance | engine-native per-axis | V1 uniform Scip projection | engine-internal, Faz 8a öncesi |
+| **MD-3** Baseline Policy | typed Unavailable + fail-closed | V1 DefaultFallback (legacy) | policy implementation |
+
+Deployment sırası: MD-1/MD-2/MD-3 normative decisions → #88 → #92 → MD-2 authority cutover →
+MD-1 caller cutover (Faz 8a) → MD-3 policy implementation → compatibility cleanup (Faz 8a).
+
+---
+
+## MD-1 — Subject Authority
+
+### Context
+
+Task-bound değerlendirmede ölçüm subject'ini (hangi node kümesi ölçülüyor) hangi authority
+belirler?
+
+- **V1:** `proposal.affected_nodes` (LLM-declared) — navigator/MCP caller'ın sunduğu küme.
+  Mirror: `navigator.rs:810-815`, MCP `server.rs:835-836` (`proposal.affected_nodes.clone()`).
+- **V2:** `task.predicate.scope` (task-derived) — task declaration'ının canonical scope'u.
+
+### Observed evidence (PR #85, KANITLANDI)
+
+- **Case 2** (`wide-affected-scope-001`): V1 affected={1,2,3}, V2 scope={1} → coupling
+  **0.166 → 0.5 (3x)**, instability 0.5 → 1.0.
+- **Case 3** (`removed-edge-external-source-001`): V1 affected={1,9} (`removed_edges.from`
+  eklenir), V2 scope={1} → coupling 0.25 vs 0.5.
+- **Divergence 2/4** frozen corpus case'inde.
+- **Q5 theta downstream etkisi:** Subject-authority divergent topology'de raw farklı → theta
+  parity varsayılamaz (Issue #92, production cutover evidence gate).
+
+### Reviewer ontolojik çerçevesi (kabul)
+
+```
+task.predicate.scope  → measurement subject authority
+structural delta      → impact authority
+affected_nodes        → agent-declared impact hint / telemetry
+```
+
+Subject ve impact ayrı tutulur. Bir delta `Node(1)` hedeflerken Node 9'u yapısal olarak
+etkileyebilir; bu meşru — affected her zaman scope'tan geniş olabilir.
+
+### Decision
+
+**Normatif hedef:** Task-bound measurement subject authority = canonical task predicate
+scope. Caller-declared `affected_nodes` measurement authority DEĞİL; impact hint / telemetry
+/ compatibility observation olarak.
+
+**Uygulama geçişi (P2-1, additive):** Yol 1 compatibility producer — caller davranışı
+değişmez. Canonical task-derived subject üretimi + compatibility gözlemi additive eklenir.
+**Status açık:** Yol 1 = compatibility projection, Yol 2 = normative authority.
+
+**Caller authority cutover (Faz 8a):** Gerçek cutover + Case 2/3 expected semantic-change
+regolden (tarihsel bağ korunarak — sessiz overwrite değil) + compatibility yüzeyi kaldırma
++ downstream Q5/predicate güncellemeleri.
+
+### Normative rule
+
+> Task-bound measurement subject authority canonical task predicate scope'tur.
+> Caller-declared `affected_nodes` authority değildir; yalnız impact hint veya compatibility
+> observation olarak kullanılabilir.
+
+### Rejected alternatives
+
+- **Yol 3 (`affected == scope` invariant):** Ontolojik olarak yanlış — subject/impact
+  ayrımını çökertir. Bir delta Node(1) hedeflerken Node 9'u yapısal olarak etkileyebilir;
+  bu meşru. `affected == scope` zorunluluğu bu gerçeği inkâr eder. Ayrıca LLM output contract
+  değişir + backward-compat kırılır.
+- **Doğrudan Yol 2 (P2-1'de cutover):** Semantic closure (Faz 5) ile orchestration migration
+  (Faz 8a) aynı anda — review edilebilirliği düşürür, rollback zor, causal attribution
+  (drift'in subject/aggregate-source/exact-enforcement'tan mı geldiği) bulanıklaşır.
+
+### Compatibility consequence
+
+- PR #84 "Faz 5 closure / Faz 8a cutover" sınırı **korunur** (9/10 kritik).
+- P2-1 additive: iki subject üretimi (canonical + compat shadow) aynı anda observable.
+- Case 2/3 divergence frozen evidence olarak korunur; Faz 8a'da "expected semantic change"
+  olarak regolden (eski golden tarihsel bağ ile).
+
+### Required implementation
+
+- Canonical task-derived subject üretimi (`measure_task_delta` zaten task scope kullanır).
+- Compatibility producer (legacy affected_nodes ölçen, shadow observation).
+- SubjectAuthorityDriftObservation (P2-1 additive).
+- Issue #92: Case 2/3 tam decision drift matrisi (subject→raw→theta→Q5→predicate→decision).
+
+### Cutover acceptance criteria (Faz 8a gate, Issue #92 kanıtı sonrası)
+
+- Tüm driftler açıklanabilir ve subject-set farkına bağlanabilir.
+- Sessiz veya tesadüfi context drift yok.
+- Q5/predicate/policy değişiklikleri sınıflandırılmış (drift türü: NoDrift /
+  SourceLabelOnly / PredicateResultDrift / PolicyDecisionDrift / MutationDecisionDrift).
+- Eski ve yeni golden'lar tarihsel korunmuş.
+- Caller cutover sonrası yalnız Yol 2 (task scope) mutation authority.
+
+---
+
+## MD-2 — Provenance Authority
+
+### Context
+
+Predicate source şartı (INV-T4 `required_source`) aggregate label üzerinden mi, per-axis
+provenance üzerinden mi uygulanır? Ölçülen eksen değerlerinin hangi kaynakları karar vermeye
+yetkilidir?
+
+- **V1:** `provenanced_from_raw(..., Scip)` — tüm axis'lere **uniform Scip**. OSP epistemik
+  ilkesine aykırı ("bilinmeyeni Scip etiketleme" — source laundering).
+- **V2:** Engine-native per-axis source (coupling=TreeSitter, cohesion=Placeholder,
+  instability=TreeSitter, entropy=Heuristic, witness_depth=Heuristic).
+
+### Observed evidence (PR #85 + INV-T4, KANITLANDI)
+
+- **required_source matrix (2/5 PredicateSet decision divergence):** `required_source =
+  Some(Scip)` → V1 `Completed` (uniform Scip), V2 `SourceInsufficient` (engine TreeSitter).
+  `Some(TreeSitter)` → V1 `SourceInsufficient`, V2 `Completed`.
+- **Subject-authority'den BAĞIMSIZ** — matching scope'ta bile source divergence (Case 1).
+- **INV-T4 (normatif, spec'lenmiş):** `required_source` ile per-axis source zorunlu;
+  placeholder/heuristic ile task kapatılamaz. `ProvenancedRawPosition` type-level enforce.
+
+### Decision
+
+**Normatif hedef:** Engine-native per-axis provenance = normatif authority. V1 uniform-source
+projection normatif evidence DEĞİL; yalnız açıkça versioned compatibility observation olarak
+geçici.
+
+**Mixed decision matrix:**
+- **Axis'ler arası heterojenlik** (coupling=TreeSitter, cohesion=Heuristic) → güvenilmez
+  DEĞİL; per-axis değerlendirme (predicate kendi axis'ini kontrol eder).
+- **Hedef axis `Mixed` + `Exact(X)`** → `SourceInsufficient` (fail-closed — "içinde X olabilir"
+  yetmez; `Mixed` içeriksiz, contribution oranını taşımaz).
+- **`Mixed` + `None`** → numeric değerlendirme devam; `Mixed` evidence içinde korunur.
+- **Başka axis Mixed** → predicate etkilenmez (coupling predicate ≠ whole-vector provenance
+  predicate).
+
+**Cutover (engine-internal, Faz 8a öncesi):** Subject-authority caller cutover'dan bağımsız.
+Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a temizlik.
+
+### Normative rule
+
+> Predicate source authority, engine-native per-axis provenance'dır. Exact source gereksinimi,
+> değerlendirilen eksenin kendi provenance'ına uygulanır. Aggregate veya synthetic source
+> etiketi, per-axis evidence'ın yerine geçemez. Hedef axis `Mixed` ise hiçbir `Exact(X)`
+> şartını karşılamaz.
+
+### Rejected alternatives
+
+- **Per-axis gradual (coupling→native, cohesion→V1):** Aynı predicate değerlendirmesinde iki
+  authority modelinin karışması yeni ara semantik üretir. Kademelilik shadow/authoritative
+  evaluator seviyesinde olmalı, eksen bazında değil.
+- **MD-1 ile birleşik cutover (Faz 8a):** Subject + provenance aynı anda — causal attribution
+  zorlaşır (drift subject-set'tan mı, aggregate source'tan mı, exact enforcement'tan mı).
+
+### Compatibility consequence
+
+- V1 uniform Scip projection geçici telemetry/compatibility report/migration diagnostics
+  için korunur; **karar üretmez** (authority değil).
+- `Mixed` davranışı mevcut `MetricSource::Mixed` (içeriksiz) ile; gelecekte `Mixed(BTreeSet)`
+  (#78) richer policy mümkün.
+
+### Required implementation
+
+1. **#88 (mixed_per_axis_sources matrisi)** kapat: `None`/`Exact(Scip)`/`Exact(TreeSitter)`/
+   `Exact(Heuristic)`/mixed/mismatch × V1 uniform Scip vs V2 per-axis.
+2. **Dual evaluation** (shadow comparison): compat (V1 uniform) vs native (V2 per-axis),
+   ProvenanceAuthorityDriftObservation. Candidate yol mutation authority değil.
+3. **Drift sınıflandırması:** NoDrift / SourceLabelOnly / PredicateResultDrift /
+   PolicyDecisionDrift / MutationDecisionDrift / UnexpectedContextDrift.
+4. **Native provenance authoritative** (#88 + dual-evaluation kanıtı sonrası).
+5. **Compatibility kaldırma** (Faz 8a temizlik).
+
+### Gelecekte `Mixed(BTreeSet)` (#78)
+
+- `Exact(X)` yalnız `source == X` veya `constituent set == {X}` iken geçmeli.
+- `Mixed({TreeSitter, Heuristic})` → `Exact(TreeSitter)` karşılamaz.
+- Yeni source requirement türleri düşünülebilir: `Contains(X)` / `AllOf({X,Y})` /
+  `AtLeastAuthorityLevel(...)` — ama bu ayrı bir karardır.
+
+---
+
+## MD-3 — Baseline Availability Policy
+
+### Context
+
+Typed unavailable baseline karar hattında neye dönüşür? Baseline mevcut değilken sistem hangi
+normatif davranışı göstermeli?
+
+- **V1:** `DefaultFallback` (delta-introduced subject yokluk → `RawPosition::default()` sıfır
+  koordinat) → improvement hesaplanabilir (loss_before > loss_after).
+- **V2:** Typed `Unavailable { reason }` — `AllMembersIntroducedByDelta` / `PartialNewSubject`.
+
+### Observed evidence (PR #91, KANITLANDI)
+
+- **Policy/decision divergence:** `delta-introduced-subject-policy-001` — V1 DefaultFallback
+  → `AcceptAsProgress` (TrajectoryCheckpoint, Held); V2 fail-closed → `Reject` (NotApplied,
+  Evaluated). Counter-fixture (`min_improvement_delta=1.0`): V1 de Reject — improvement
+  kaynaklı kanıt.
+- **`AllMembersIntroducedByDelta` ≠ `PartialNewSubject`** — aynı ontolojik durum DEĞİL.
+
+### Decision
+
+**Normatif kurallar:**
+1. Baseline availability reason typed + normatif evidence; synthetic numeric baseline'a
+   dönüştürülemez.
+2. **`AcceptAsProgress` yalnız `Available` baseline ile kanıtlanabilir** — Unavailable altında
+   ASLA (invariant).
+3. **`Completed` baseline'dan bağımsız** → `AcceptAsCompleted` (improvement iddiası yok;
+   after-state hedefi karşılıyor).
+4. **`AllMembersIntroducedByDelta`** = typed cold-start; default fail-closed `Reject`; typed
+   `ColdStartPolicy` opt-in.
+5. Opt-in improvement/`AcceptAsProgress` üretmez → `Suspended(ColdStartAuthorizationRequired)`
+   → operator approves → `AcceptAsColdStart` (yeni karar sınıfı, Sandbox).
+6. **`PartialNewSubject`** cold-start override paylaşmaz (before/after subject identity
+   karşılaştırılabilir değil) — fail-closed/Suspended.
+
+**Reason-aware policy matrisi (ilk sürüm, dar):**
+
+| Predicate | Baseline | Policy | Sonuç |
+|---|---|---|---|
+| `Completed` | `Available` | herhangi | `AcceptAsCompleted` |
+| `Completed` | `AllMembersIntroduced` | herhangi | `AcceptAsCompleted` (improvement iddiası yok) |
+| `NotCompleted` | `Available` | `StrictReject` | `Reject` |
+| `NotCompleted` | `Available` | `AcceptImprovement` | Gerçek improvement hesabı |
+| `NotCompleted` | `AllMembersIntroduced` | default (Disallow) | fail-closed `Reject` |
+| `NotCompleted` | `AllMembersIntroduced` | `RequireOperatorApproval` | `Suspended(ColdStartAuthorizationRequired)` → `AcceptAsColdStart` |
+| `NotCompleted` | `PartialNewSubject` | herhangi | fail-closed `Reject`/`Suspended` (cold-start override yok) |
+| herhangi | Measurement error | herhangi | typed error (policy değil) |
+| herhangi | Source insufficient | herhangi | provenance sonucu (MD-2, baseline policy değil) |
+
+Future reason'lar için uydurma davranış yok: `unknown/unhandled reason → fail-closed`.
+
+### `AcceptAsColdStart` — yeni karar sınıfı
+
+- `AcceptAsColdStart ≠ AcceptAsProgress ≠ AcceptAsCompleted`.
+- `AcceptAsColdStart → ApplyTarget::Lane(CommitLane::Sandbox)` (INV-T8).
+- **Neden Sandbox, TrajectoryCheckpoint değil:** TrajectoryCheckpoint "ölçülmüş ilerleme" için
+  ayrılmış; cold-start improvement kanıtlanamaz. Sandbox "operator-authorized isolated
+  application" semantiği.
+- **Lifecycle iki aşamalı:**
+  - Onay öncesi: `Suspended(ColdStartAuthorizationRequired)` → mutation uygulanmaz (INV-T9),
+    maneuver budget tüketilmez, agent retry başlatılmaz.
+  - Onay sonrası: `AcceptAsColdStart → Sandbox` apply.
+- **Mainline'a promote edilmez** — sonraki engine measurement altında normal
+  `AcceptAsCompleted` gerekir.
+
+### Normative rule (spec'e INV-T6/T8/T9 extension olarak)
+
+- **INV-T6 extension:** `MeasurementBaseline::Unavailable` → improvement assessment
+  yapılamaz → `AcceptAsProgress` üretilemez. Typed unavailable baseline hiçbir compatibility
+  projection ile synthetic numeric baseline'a çevrilerek progress kanıtı oluşturamaz.
+- **INV-T8 extension:** `AcceptAsColdStart → ApplyTarget::Lane(CommitLane::Sandbox)`.
+  Negatif: `AcceptAsColdStart ↛ Mainline`, `↛ TrajectoryCheckpoint`.
+- **INV-T9 extension:** `AllMembersIntroducedByDelta` + `ColdStartPolicy::RequireOperatorApproval`
+  → `Suspended(ColdStartAuthorizationRequired)` → mutation uygulanmaz.
+
+### Rejected alternatives
+
+- **Tek global `Reject` (tüm Unavailable):** Güvenli ama anlam kaybettirir — "kanıtlanmış
+  başarısızlık" ile "karar vermeye yetecek bilginin bulunmaması" aynı outcome'a çöker.
+  `AllMembersIntroducedByDelta` cold-start'ı `Reject` ile eşlemek ontolojik bilgi kaybettirir.
+- **Yeni `INV-M3` invariant:** MD-3 davranışı zaten INV-T6 (improvement epistemolojisi) +
+  INV-T8 (isolation mapping) + INV-T9 (authorization suspension) kesişiminde. Yeni invariant
+  dört yerde tekrar + drift riski.
+- **`AcceptAsColdStart → TrajectoryCheckpoint`:** Lane ontolojisini genişletir —
+  TrajectoryCheckpoint hem kanıtlanmış progress hem progress olduğu bilinmeyen operator
+  istisnası olur. INV-T8 temiz ayrımı zayıflar.
+- **`Allow` cold-start policy varyantı:** Yeni node ekleyen her task'ın karşılaştırmasız
+  progress üretmesine dönüşür. Boolean `allow_cold_start` belirsiz.
+
+### Type model (planned)
+
+```rust
+enum ColdStartPolicy {
+    Disallow,              // default — fail-closed Reject
+    RequireOperatorApproval,
+    // AllowAutomatically — ŞİMDİLİK YOK (karşılaştırmasız progress riski)
+}
+
+enum MutationDecision {
+    Reject,
+    AcceptAsProgress,
+    AcceptAsCompleted,
+    RequireOperatorApproval,
+    AcceptAsColdStart,  // MD-3 — improvement/completion iddiası taşımaz
+}
+```
+
+`PartialNewSubject` için gelecekte ayrı `PartialBaselinePolicy` enum (Suspend/RequireRebaselining).
+
+### Required implementation (spec planned, implementation ayrı)
+
+- `ColdStartPolicy` typed enum + default Disallow.
+- `AcceptAsColdStart` append-only canonical tag + serde backward compat.
+- `ApplyTarget = Sandbox`; unavailable baseline altında `AcceptAsProgress` imkansız.
+- Operator approval öncesi no mutation (INV-T9 Suspended).
+- Authorization evidence/replay parity + `ColdStartAcceptanceEvidence`.
+- Exact matrix tests.
+
+---
+
+## Cross-decision invariants
+
+Üç kararın birlikte tutarlılığı:
+
+1. **Üçü de "normative hedef şimdi + compatibility geçici" pattern'i** — MD-1 (Yol 2 normatif,
+   Yol 1 compat), MD-2 (engine-native normatif, uniform Scip compat), MD-3 (typed Unavailable
+   normatif, DefaultFallback legacy).
+2. **INV-T4/INV-T8/INV-T9 spec'leriyle uyumlu** — tüm kararlar mevcut invariant'ları
+   güçlendiriyor, zayıflatmıyor. MD-3 yeni INV-M3 AÇMAZ, mevcut üç invariant'a planned
+   extension ekler.
+3. **`AcceptAsProgress` semantic korunuyor** — MD-3 bunu yalnız Available baseline ile
+   sınırlayarak INV-T8 (progress checkpoint) anlamını koruyor.
+4. **Fail-closed default** — MD-3 default Reject, MD-2 Mixed exact fail-closed, MD-1 subject
+   authority task-derived (caller'a güvenmiyor).
+5. **MD-1 ↔ MD-3 tutarlılık:** AllMembersIntroducedByDelta zaten task scope üyeleri
+   delta-introduced. MD-1 (task authority subject'i belirler) + MD-3 (cold-start bu subject'in
+   özelliği) tutarlı.
+6. **MD-2 ↔ MD-3 ayrım:** SourceInsufficient baseline policy DEĞİL (MD-3 matrisinde
+   "provenance sonucu"). Doğru ayrım.
+
+## Migration ordering
+
+```
+MD-1/MD-2/MD-3 normative decisions (Faz 5 closure — BU BELGE)
+        ↓
+#88 (mixed provenance characterization)
+        ↓
+#92 (subject-authority drift characterization)
+        ↓
+MD-2 authority cutover (engine-internal, Faz 8a öncesi)
+        ↓
+MD-1 caller cutover (Faz 8a) + Case 2/3 semantic-change regolden
+        ↓
+MD-3 policy implementation (AcceptAsColdStart + ColdStartPolicy + spec extensions)
+        ↓
+compatibility code cleanup (Faz 8a)
+```
+
+## Spec changes
+
+Bu decision note kabul edildikten sonra (aynı PR veya hemen sonrası):
+
+- **INV-T6 planned extension:** unavailable baseline → `AcceptAsProgress` imkansız.
+- **INV-T8 planned extension:** `AcceptAsColdStart → Sandbox`; negatif Mainline/TrajectoryCheckpoint.
+- **INV-T9 planned extension:** cold-start authorization öncesi `Suspended`, no mutation.
+- **MD-1 normative note:** subject authority = task scope (INV-T2 operator-defines-target
+  bağlantısı).
+- **MD-2 normative note:** provenance authority = engine-native per-axis (INV-T4 bağlantısı).
+
+Status: `planned — MD-x accepted, implementation pending`. Production Rust koduna dokunulmaz.
+
+## Follow-up issues
+
+- **Subject-authority caller migration** (MD-1 implementation — Faz 8a).
+- **Provenance enforcement** (MD-2 implementation — engine-internal cutover).
+- **Baseline policy implementation** (MD-3 implementation — AcceptAsColdStart + ColdStartPolicy).
+- **#88** mixed_per_axis_sources matrisi (MD-2 evidence gate).
+- **#92** subject-authority → raw → Q5 theta downstream (MD-1 cutover gate).
