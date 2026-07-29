@@ -219,15 +219,19 @@ pub struct ProvenancedRawPosition {
 fn evaluate(&self, pos: &ProvenancedRawPosition) -> PredicateResult {
     let m = pos.axis(self.metric);  // AxisMetric (value + source)
     if self.required_source.map_or(false, |req| m.source != req) {
-        return PredicateResult::SourceInsufficient;  // placeholder ile task kapatılamaz
+        return PredicateResult::SourceInsufficient;  // explicit required_source, target axis source ile eşleşmedi
     }
     self.op.compare(m.value, self.threshold) ? ...
 }
 ```
-**Test:** `placeholder_metric_cannot_close_task` — coupling.source=Placeholder ile predicate
-satisfied olsa bile `SourceInsufficient` → task Done olmaz.
-**İhlal örneği:** "Coupling ölçülmedi (placeholder 0.5) ama 0.55'in altında" → task kapanır →
-ölçülmemiş başarı iddiası. ProvenancedRawPosition ile source type-level, runtime check değil.
+**Test:** `placeholder_metric_cannot_satisfy_exact_source_requirement` —
+`required_source = Some(Scip)`, coupling source = Placeholder, numeric threshold karşılanır →
+`SourceInsufficient` (exact authority şartı karşılanmadı).
+**İhlal örneği:** Predicate `required_source=Some(Scip)` isterken Placeholder kaynaklı coupling
+değeri numeric threshold'u karşılar ve source kontrolü olmadan task'ı kapatırsa INV-T4 ihlalidir.
+`required_source=None` ise source authority constraint yoktur — Placeholder/Heuristic/Mixed
+dahil tüm MetricSource değerleri numeric evaluation'a girebilir (gerçek provenance evidence
+içinde korunur).
 
 **MD-2 normative note (Faz 8-P2 migration decision):** Predicate source authority,
 engine-native per-axis provenance'dır. V1 uniform-source projection (`provenanced_from_raw(..., Scip)`)
@@ -317,7 +321,8 @@ Sonsuz context-loop ve token patlaması önlenir.
 **MD-3 planned extension (Faz 8-P2 migration decision):** `MeasurementBaseline::Unavailable`
 altında improvement assessment yapılamaz → `MutationDecision::AcceptAsProgress` üretilemez.
 Typed unavailable baseline hiçbir compatibility projection ile synthetic numeric baseline'a
-çevrilerek progress kanıtı oluşturamaz. `AcceptAsProgress` yalnız bitişik ve karşılaştırılabilir
+çevrilerek progress kanıtı oluşturamaz. `AcceptAsProgress` yalnız aynı subject identity'sine
+bağlı, karşılaştırılabilir
 bir `MeasurementBaseline::Available` üzerinden, engine-measured loss azalması kanıtlandığında
 üretilebilir. (Status: planned — MD-3 accepted, implementation pending;
 `docs/notes/faz8-p2-migration-decisions.md`.)

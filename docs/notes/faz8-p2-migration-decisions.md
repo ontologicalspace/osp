@@ -31,8 +31,10 @@ Issue'lar kararın kanıt ve uygulama geçmişidir, kararın kendisi değildir.
 | **MD-2** Provenance | engine-native per-axis | V1 uniform Scip projection | engine-internal, Faz 8a öncesi |
 | **MD-3** Baseline Policy | typed Unavailable + fail-closed | V1 DefaultFallback (legacy) | policy implementation |
 
-Deployment sırası: MD-1/MD-2/MD-3 normative decisions → #88 → #92 → MD-2 authority cutover →
-MD-1 caller cutover (Faz 8a) → MD-3 policy implementation → compatibility cleanup (Faz 8a).
+Deployment sırası: Normatif karar sırası MD-1 → MD-2 → MD-3'tür (nedensel bağımlılık);
+deployment sırası seri DEĞİLDİR. Her karar aşağıdaki "Migration ordering" dependency DAG
+içinde kendi evidence gate'i üzerinden bağımsız ilerler (MD-2 engine-internal — MD-1 caller
+cutover'ı beklemeden; MD-3 bağımsız).
 
 ---
 
@@ -91,8 +93,8 @@ regolden (tarihsel bağ korunarak — sessiz overwrite değil) + compatibility y
 >
 > Canonical task-derived measurement subject, `derive_task_subject_scope(task)` ile elde edilir:
 > `Task.target_predicate_set.predicates[*].predicate.scope` değerlerinin ayrı ayrı
-> `CanonicalSubjectScope` olarak çözülmesi. Bütün predicate scope'ları bitişik aynı canonical
-> member set'e çözülmelidir; heterojen scope'lar `MeasurementError::HeterogeneousPredicateScopes`
+> `CanonicalSubjectScope` olarak çözülmesi. Bütün predicate scope'ları aynı canonical member
+> set'e çözülmelidir; heterojen scope'lar `MeasurementError::HeterogeneousPredicateScopes`
 > typed error ile fail-closed reddedilir. `Node(id)` singleton scope, `Subgraph(ids)` canonicalize
 > edilir; `Module(name)` ancak canonical module resolver mevcutsa çözülür, aksi durumda
 > `SubjectScopeResolutionError::ModuleResolutionUnavailable` üretir.
@@ -153,8 +155,10 @@ yetkilidir?
   Some(Scip)` → V1 `Completed` (uniform Scip), V2 `SourceInsufficient` (engine TreeSitter).
   `Some(TreeSitter)` → V1 `SourceInsufficient`, V2 `Completed`.
 - **Subject-authority'den BAĞIMSIZ** — matching scope'ta bile source divergence (Case 1).
-- **INV-T4 (normatif, spec'lenmiş):** `required_source` ile per-axis source zorunlu;
-  placeholder/heuristic ile task kapatılamaz. `ProvenancedRawPosition` type-level enforce.
+- **INV-T4 (normatif, spec'lenmiş):** Explicit `required_source` şartı bulunan predicate,
+  eşleşmeyen source ile task'ı tamamlayamaz (Placeholder/Heuristic/Mixed exact authority
+  şartını karşılayamaz). `required_source=None` ise source authority constraint yoktur.
+  `ProvenancedRawPosition` type-level enforce.
 
 ### Decision
 
@@ -251,17 +255,19 @@ normatif davranışı göstermeli?
    dönüştürülemez.
 2. **`AcceptAsProgress` yalnız `Available` baseline ile kanıtlanabilir** — Unavailable altında
    ASLA (invariant).
-3. **`Completed` baseline'dan bağımsız** → `AcceptAsCompleted` (improvement iddiası yok;
-   after-state hedefi karşılıyor).
+3. **`PredicateSetResult::Completed` baseline availability reason'dan bağımsızdır.**
+   `Available`, `AllMembersIntroducedByDelta` ve `PartialNewSubject` altında
+   `AcceptAsCompleted` üretir — improvement iddiası taşımaz; after-state doğrudan task
+   predicate'ini karşılar.
 4. **`AllMembersIntroducedByDelta`** = typed cold-start; default fail-closed `Reject`; typed
    `ColdStartPolicy` opt-in.
 5. Opt-in improvement/`AcceptAsProgress` üretmez → `Suspended(ColdStartAuthorizationRequired)`
    → operator approves → `AcceptAsColdStart` (yeni karar sınıfı, Sandbox).
-6. **`PartialNewSubject`** cold-start override paylaşmaz — before/after subject identity'si
-   karşılaştırılabilir değil (centroid üyelik kümesi değişti). **İlk sürüm: terminal `Reject`**
-   (no mutation); `BaselineUnavailableReason::PartialNewSubject` evidence içinde korunur.
-   Gelecekte ayrı karar ile `PartialBaselinePolicy::RequireRebaselining` →
-   `Suspended(PartialBaselineRebaselineRequired)` eklenebilir (suspension reason + resume
+6. **`NotCompleted` + `PartialNewSubject`** ilk sürümde terminal `Reject` üretir (no mutation).
+   Before/after subject identity'si karşılaştırılabilir değil (centroid üyelik kümesi
+   değişti); cold-start override paylaşılmaz. `BaselineUnavailableReason::PartialNewSubject`
+   evidence içinde korunur. Gelecekte ayrı karar ile `PartialBaselinePolicy::RequireRebaselining`
+   → `Suspended(PartialBaselineRebaselineRequired)` eklenebilir (suspension reason + resume
    authority + beklenecek evidence + maneuver budget davranışı + intended apply target
    tanımlanarak). Bu PR'da `Suspended` seçilseydi bu beş alanın tanımlanması gerekirdi;
    ilk sürüm `Reject` bu belirsizliği kapatır.
@@ -272,6 +278,7 @@ normatif davranışı göstermeli?
 |---|---|---|---|
 | `Completed` | `Available` | herhangi | `AcceptAsCompleted` |
 | `Completed` | `AllMembersIntroduced` | herhangi | `AcceptAsCompleted` (improvement iddiası yok) |
+| `Completed` | `PartialNewSubject` | herhangi | `AcceptAsCompleted` (completion baseline'dan bağımsız) |
 | `NotCompleted` | `Available` | `StrictReject` | `Reject` |
 | `NotCompleted` | `Available` | `AcceptImprovement` | Gerçek improvement hesabı |
 | `NotCompleted` | `AllMembersIntroduced` | default (Disallow) | fail-closed `Reject` |
