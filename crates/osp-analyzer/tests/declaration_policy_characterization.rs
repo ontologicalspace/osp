@@ -179,7 +179,10 @@ fn characterization_ts_enum_not_counted() {
     // never in the old is_class_def list → not counted. Adding it would change
     // Nc and break bit-identical. This test fails loudly if someone adds it.
     let src = "enum Color { Red, Green, Blue }\n";
-    assert_eq!(defs_of(&TypeScriptAdapter, src), Vec::<(String, bool)>::new());
+    assert_eq!(
+        defs_of(&TypeScriptAdapter, src),
+        Vec::<(String, bool)>::new()
+    );
 }
 
 #[test]
@@ -187,7 +190,10 @@ fn characterization_ts_anonymous_class_expr_not_counted() {
     // PRESERVED EXCLUSION: anonymous `class` expression node is not a
     // `class_declaration` → not counted.
     let src = "const C = class { m() {} };\n";
-    assert_eq!(defs_of(&TypeScriptAdapter, src), Vec::<(String, bool)>::new());
+    assert_eq!(
+        defs_of(&TypeScriptAdapter, src),
+        Vec::<(String, bool)>::new()
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
