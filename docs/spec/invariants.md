@@ -187,19 +187,25 @@ computed_raw ile fail etmeli.
 **İhlal örneği:** Agent "coupling 0.4 oldu" der, predicate bunu kabul eder → INV #4 ihlali.
 **Koruma mekanizması:** `check_claim_predicate(claim, task)` — claim.computed_raw zorunlu.
 
-**MD-1 normative note (Faz 8-P2 migration decision):** Task-bound measurement subject
-authority canonical task predicate scope'tur (`task.predicate.scope`). Caller-declared
-`affected_nodes` measurement authority DEĞİL; yalnız impact hint veya compatibility observation
-olarak kullanılabilir. Bu INV-T2'nin (operator tanımlar hedef) measurement subject seviyesine
-genişlemesidir — task declaration'ı ölçülen gerçekliğin sınırını tanımlar. Subject (task scope)
-ve impact (structural delta) ayrı tutulur: bir delta `Node(1)` hedeflerken Node 9'u yapısal
-olarak etkileyebilir. (Status: planned — MD-1 accepted, caller cutover Faz 8a;
-`docs/notes/faz8-p2-migration-decisions.md`.)
+**MD-1 normative note (Faz 8-P2 migration decision):** Engine measurement subject'ini
+canonical task scope'tan türetir (`derive_task_subject_scope(task)`). Task-bound measurement
+subject authority canonical task predicate scope'tur; `Task.target_predicate_set.predicates[*]
+.predicate.scope` değerlerinin ayrı ayrı `CanonicalSubjectScope` olarak çözülmesiyle elde
+edilir (heterojen → `HeterogeneousPredicateScopes` fail-closed). Caller-declared `affected_nodes`
+measurement authority DEĞİL; impact hint veya compatibility observation. Bu INV-T3'ün
+(engine ölçer) extension'ıdır; dayanağı INV-T2 (operator task hedefini/scope'unu tanımlar) —
+task declaration'ı ölçülen gerçekliğin sınırını tanımlar, engine bunu canonical subject'a
+çözer. Subject (task scope) ve impact (structural delta) ayrı tutulur. (Status: planned —
+MD-1 accepted, caller cutover Faz 8a; `docs/notes/faz8-p2-migration-decisions.md`.)
 
 ### INV-T4 — Predicate provenance (RawPosition provenance taşımalı)
 **Status:** planned (Aşama A)
-**Tanım:** MetricPredicate `required_source` ile "measured/scip" zorunlu kılabilir.
-Placeholder/heuristic kaynaklı ölçümlerle task kapatılamaz (epistemolojik bütünlük).
+**Tanım:** MetricPredicate `required_source` ile "measured/scip" zorunlu kılabilir. Explicit
+`required_source` şartı bulunan predicate, eşleşmeyen source ile task'ı tamamlayamaz
+(`SourceInsufficient`). Placeholder/Heuristic/Mixed evidence, exact authority şartını
+karşılayamaz. `required_source = None` ise source authority constraint yoktur; numeric
+değerlendirme tüm MetricSource değerleri için devam eder (gerçek provenance evidence içinde
+korunur).
 **Kritik (review v3):** Çıplak `RawPosition` (f64) provenance taşıyamaz. INV-T4'ün
 type-level enforce edilmesi için **her axis'in source'unu taşıyan** ölçüm tipi gerekir.
 **Yapısal garanti:** `ProvenancedRawPosition` — her axis için `AxisMetric { value, source }`:

@@ -1,4 +1,4 @@
-# INV-T9 #70 Faz 8-P2 — Handoff (PR #85/#91/#93 MERGED; migration decisions hazırlanıyor)
+# INV-T9 #70 Faz 8-P2 — Handoff (PR #85/#91/#93 MERGED; PR #98 migration decisions HAZIR)
 
 ## Repository state
 
@@ -6,7 +6,7 @@
 PR #85: MERGED (squash e4675b2) — Faz 8-P2 P2-0A+B characterization
 PR #91 (#87-A): MERGED (squash efede00) — policy fixture (Part 1/2)
 PR #93 (#87-B): MERGED (squash 7c670ff) — Q5 exact theta (Part 2/2, Closes #87)
-Migration decisions: HAZIRLANIYOR (MD-1/MD-2/MD-3 — decision note + spec planned extensions)
+PR #98: migration decisions HAZIR — MD-1/MD-2/MD-3 Accepted (review bekliyor)
 Issue #92: subject-authority → raw → Q5 theta downstream (follow-up, açıldı)
 Issue #95/#96/#97: MD-1/MD-2/MD-3 implementation tracking
 ```
@@ -112,7 +112,7 @@ Squash merge `efede00` → main. `delta-introduced-subject-policy-001` fixture i
 ### PR #93 (#87-B) — MERGED ✓
 Squash merge `7c670ff` → main. Q5 theta parity koşullu KANITLANDI. Issue #87 KAPANDI.
 
-### Ontolojik migration kararları — HAZIRLANIYOR (BU BRANCH)
+### Ontolojik migration kararları — PR #98 HAZIR (MD-1/MD-2/MD-3 Accepted, review bekliyor)
 **MD-1/MD-2/MD-3 canonical decision note + spec planned extensions.** `docs/notes/faz8-p2-migration-decisions.md`:
 - **MD-1 Subject Authority:** task scope normatif (Yol 2); Yol 1 compat producer P2-1; caller cutover Faz 8a (#95).
 - **MD-2 Provenance Authority:** engine-native per-axis normatif; uniform Scip compat; engine-internal cutover Faz 8a öncesi (#96).

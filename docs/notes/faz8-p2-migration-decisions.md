@@ -44,7 +44,8 @@ Task-bound değerlendirmede ölçüm subject'ini (hangi node kümesi ölçülüy
 belirler?
 
 - **V1:** `proposal.affected_nodes` (LLM-declared) — navigator/MCP caller'ın sunduğu küme.
-  Mirror: `navigator.rs:810-815`, MCP `server.rs:835-836` (`proposal.affected_nodes.clone()`).
+  Mirror: `AgentNavigator::run_task` legacy affected_nodes producer; MCP claim-evaluation
+  affected_nodes producer (`proposal.affected_nodes.clone()`).
 - **V2:** `task.predicate.scope` (task-derived) — task declaration'ının canonical scope'u.
 
 ### Observed evidence (PR #85, KANITLANDI)
@@ -84,9 +85,17 @@ regolden (tarihsel bağ korunarak — sessiz overwrite değil) + compatibility y
 
 ### Normative rule
 
-> Task-bound measurement subject authority canonical task predicate scope'tur.
-> Caller-declared `affected_nodes` authority değildir; yalnız impact hint veya compatibility
-> observation olarak kullanılabilir.
+> Task-bound measurement subject authority canonical task predicate scope'tur. Caller-declared
+> `affected_nodes` authority değildir; yalnız impact hint veya compatibility observation olarak
+> kullanılabilir.
+>
+> Canonical task-derived measurement subject, `derive_task_subject_scope(task)` ile elde edilir:
+> `Task.target_predicate_set.predicates[*].predicate.scope` değerlerinin ayrı ayrı
+> `CanonicalSubjectScope` olarak çözülmesi. Bütün predicate scope'ları bitişik aynı canonical
+> member set'e çözülmelidir; heterojen scope'lar `MeasurementError::HeterogeneousPredicateScopes`
+> typed error ile fail-closed reddedilir. `Node(id)` singleton scope, `Subgraph(ids)` canonicalize
+> edilir; `Module(name)` ancak canonical module resolver mevcutsa çözülür, aksi durumda
+> `SubjectScopeResolutionError::ModuleResolutionUnavailable` üretir.
 
 ### Rejected alternatives
 
@@ -133,8 +142,10 @@ yetkilidir?
 
 - **V1:** `provenanced_from_raw(..., Scip)` — tüm axis'lere **uniform Scip**. OSP epistemik
   ilkesine aykırı ("bilinmeyeni Scip etiketleme" — source laundering).
-- **V2:** Engine-native per-axis source (coupling=TreeSitter, cohesion=Placeholder,
-  instability=TreeSitter, entropy=Heuristic, witness_depth=Heuristic).
+- **V2:** Engine-native per-axis source — source engine axis implementation'ından gelir ve
+  per-axis korunur (PR #85 characterization coordinate system'inde gözlenen: coupling/instability
+  TreeSitter, cohesion Placeholder, entropy/witness_depth Heuristic — fixture-scoped örnek,
+  normative "source değerleri bunlardır" DEĞİL).
 
 ### Observed evidence (PR #85 + INV-T4, KANITLANDI)
 
@@ -167,8 +178,17 @@ Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a tem
 
 > Predicate source authority, engine-native per-axis provenance'dır. Exact source gereksinimi,
 > değerlendirilen eksenin kendi provenance'ına uygulanır. Aggregate veya synthetic source
-> etiketi, per-axis evidence'ın yerine geçemez. Hedef axis `Mixed` ise hiçbir `Exact(X)`
-> şartını karşılamaz.
+> etiketi, per-axis evidence'ın yerine geçemez.
+>
+> **`required_source` davranış matrisi (Exact(X) ≡ `required_source = Some(X)` shorthand):**
+> - `required_source = None` → source authority constraint yok; tüm `MetricSource` değerleri
+>   (Placeholder/Heuristic/Mixed dahil) numeric evaluation'a girebilir. Gerçek provenance
+>   evidence içinde aynen korunur (laundering yok).
+> - `required_source = Some(X)` → target axis source tam olarak X olmalı. `Mixed` hiçbir
+>   `Some(X)`'i karşılamaz → `SourceInsufficient` (fail-closed).
+>
+> `Exact(X)` bu dokümanda `required_source = Some(X)` için kavramsal shorthand'tir; production
+> type modelinde ayrı `Exact` requirement enum'u YOK.
 
 ### Rejected alternatives
 
@@ -237,8 +257,14 @@ normatif davranışı göstermeli?
    `ColdStartPolicy` opt-in.
 5. Opt-in improvement/`AcceptAsProgress` üretmez → `Suspended(ColdStartAuthorizationRequired)`
    → operator approves → `AcceptAsColdStart` (yeni karar sınıfı, Sandbox).
-6. **`PartialNewSubject`** cold-start override paylaşmaz (before/after subject identity
-   karşılaştırılabilir değil) — fail-closed/Suspended.
+6. **`PartialNewSubject`** cold-start override paylaşmaz — before/after subject identity'si
+   karşılaştırılabilir değil (centroid üyelik kümesi değişti). **İlk sürüm: terminal `Reject`**
+   (no mutation); `BaselineUnavailableReason::PartialNewSubject` evidence içinde korunur.
+   Gelecekte ayrı karar ile `PartialBaselinePolicy::RequireRebaselining` →
+   `Suspended(PartialBaselineRebaselineRequired)` eklenebilir (suspension reason + resume
+   authority + beklenecek evidence + maneuver budget davranışı + intended apply target
+   tanımlanarak). Bu PR'da `Suspended` seçilseydi bu beş alanın tanımlanması gerekirdi;
+   ilk sürüm `Reject` bu belirsizliği kapatır.
 
 **Reason-aware policy matrisi (ilk sürüm, dar):**
 
@@ -250,7 +276,7 @@ normatif davranışı göstermeli?
 | `NotCompleted` | `Available` | `AcceptImprovement` | Gerçek improvement hesabı |
 | `NotCompleted` | `AllMembersIntroduced` | default (Disallow) | fail-closed `Reject` |
 | `NotCompleted` | `AllMembersIntroduced` | `RequireOperatorApproval` | `Suspended(ColdStartAuthorizationRequired)` → `AcceptAsColdStart` |
-| `NotCompleted` | `PartialNewSubject` | herhangi | fail-closed `Reject`/`Suspended` (cold-start override yok) |
+| `NotCompleted` | `PartialNewSubject` | herhangi | terminal `Reject` (cold-start override yok; PartialBaselinePolicy gelecekte ayrı) |
 | herhangi | Measurement error | herhangi | typed error (policy değil) |
 | herhangi | Source insufficient | herhangi | provenance sonucu (MD-2, baseline policy değil) |
 
@@ -347,21 +373,34 @@ enum MutationDecision {
 
 ## Migration ordering
 
+Üç karar **nedensel bağımlılık sırasında** karar verildi (MD-1 subject → MD-2 provenance → MD-3
+baseline policy), ama **deployment bağımsız yollar** izleyebilir. Seri liste yerine dependency DAG:
+
 ```
-MD-1/MD-2/MD-3 normative decisions (Faz 5 closure — BU BELGE)
-        ↓
-#88 (mixed provenance characterization)
-        ↓
-#92 (subject-authority drift characterization)
-        ↓
-MD-2 authority cutover (engine-internal, Faz 8a öncesi)
-        ↓
-MD-1 caller cutover (Faz 8a) + Case 2/3 semantic-change regolden
-        ↓
-MD-3 policy implementation (AcceptAsColdStart + ColdStartPolicy + spec extensions)
-        ↓
-compatibility code cleanup (Faz 8a)
+PR #98 Accepted (BU BELGE — MD-1/MD-2/MD-3 normative decisions)
+│
+├─ MD-1 (Subject Authority):
+│  P2-1 additive subject observation (#95-A)
+│  → #92 drift characterization (cutover evidence gate)
+│  → Faz 8a caller cutover (#95-B)
+│
+├─ MD-2 (Provenance Authority):  [MD-1'den bağımsız, engine-internal]
+│  #88 frozen mixed-source matrix (evidence gate)
+│  → #96 dual evaluation (shadow comparison)
+│  → engine-internal authority cutover (Faz 8a ÖNCESİ)
+│
+└─ MD-3 (Baseline Policy):  [MD-1/MD-2'den bağımsız]
+   #97 policy implementation (AcceptAsColdStart + ColdStartPolicy)
+   → bağımsız ilerleyebilir
+   → cold-start opt-in kullanılmadan önce tamamlanmalı
+
+Faz 8a compatibility cleanup
+→ ilgili authority cutover'ları tamamlandıktan sonra
 ```
+
+**Bağımsızlık:** MD-2 engine-internal (caller'a görünmez) — MD-1 caller cutover'ı beklemeden
+authority cutover yapabilir. MD-3 policy implementation MD-1/MD-2'den bağımsız. #92 (MD-1 gate)
+MD-2'nin önkoşulu DEĞİL — seri liste bunu yanlış bağlıyordu.
 
 ## Spec changes
 
