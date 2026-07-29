@@ -1,4 +1,4 @@
-# INV-T9 #70 Faz 8-P2 — Handoff (PR #85/#91/#93 MERGED; PR #98 migration decisions HAZIR)
+# INV-T9 #70 Faz 8-P2 — Handoff (Faz 8-P2 characterization + migration decisions TAMAM)
 
 ## Repository state
 
@@ -6,9 +6,10 @@
 PR #85: MERGED (squash e4675b2) — Faz 8-P2 P2-0A+B characterization
 PR #91 (#87-A): MERGED (squash efede00) — policy fixture (Part 1/2)
 PR #93 (#87-B): MERGED (squash 7c670ff) — Q5 exact theta (Part 2/2, Closes #87)
-PR #98: migration decisions HAZIR — MD-1/MD-2/MD-3 Accepted (review bekliyor)
-Issue #92: subject-authority → raw → Q5 theta downstream (follow-up, açıldı)
-Issue #95/#96/#97: MD-1/MD-2/MD-3 implementation tracking
+PR #98: MERGED (squash f463af0) — migration decisions MD-1/MD-2/MD-3 Accepted + spec extensions
+
+Faz 8-P2 characterization + ontolojik migration kararları TAMAM.
+Issue #87 KAPANDI. Üç implementation tracking + P2-1 + Faz 8a + 2 evidence gate açık.
 ```
 
 ## PR #85 Özet (MERGED)
@@ -102,44 +103,59 @@ production-reachable structural topology üzerinde migration-relevant.
 
 ## Sıradaki adımlar
 
-### PR #85 — MERGED ✓
-Squash merge `e4675b2` → main. Characterization canonical.
+### Faz 8-P2 characterization + migration decisions — TAMAM ✓
+- PR #85 (squash `e4675b2`): V1/V2 measurement characterization — 3 ontolojik boyut KANITLANDI
+- PR #91 (squash `efede00`): Migration 3(b) policy/decision divergence KANITLANDI
+- PR #93 (squash `7c670ff`): Q5 theta parity koşullu KANITLANDI; Issue #87 KAPANDI
+- PR #98 (squash `f463af0`): MD-1/MD-2/MD-3 normative decisions Accepted + spec planned extensions
 
-### PR #91 (#87-A) — MERGED ✓
-Squash merge `efede00` → main. `delta-introduced-subject-policy-001` fixture ile Migration 3
-(b) policy/decision divergence KANITLANDI.
+### Açık işler (10 issue/PR)
 
-### PR #93 (#87-B) — MERGED ✓
-Squash merge `7c670ff` → main. Q5 theta parity koşullu KANITLANDI. Issue #87 KAPANDI.
+**P2-0B characterization kalan (evidence gate'ler):**
+- **#86** (P2-0B.7) — MCP Workspace before-baseline characterization (Yüzey 2)
+- **#88** — mixed_per_axis_sources dedicated matrisi (MD-2 evidence gate)
+- **#89** — task-snapshot drift adversarial characterization (resolver A vs B)
+- **#92** — subject-authority → raw → Q5 theta downstream (MD-1 cutover gate)
 
-### Ontolojik migration kararları — PR #98 HAZIR (MD-1/MD-2/MD-3 Accepted, review bekliyor)
-**MD-1/MD-2/MD-3 canonical decision note + spec planned extensions.** `docs/notes/faz8-p2-migration-decisions.md`:
-- **MD-1 Subject Authority:** task scope normatif (Yol 2); Yol 1 compat producer P2-1; caller cutover Faz 8a (#95).
-- **MD-2 Provenance Authority:** engine-native per-axis normatif; uniform Scip compat; engine-internal cutover Faz 8a öncesi (#96).
-- **MD-3 Baseline Policy:** typed Unavailable normatif + `AcceptAsColdStart` (Sandbox) + `ColdStartPolicy` (#97).
-Spec planned extensions: INV-T3 (MD-1; dayanak INV-T2), INV-T4 (MD-2), INV-T6/T8/T9 (MD-3).
+**MD implementation (normative decisions Accepted, implementation pending):**
+- **#95** — MD-1 subject-authority caller migration (Faz 8a)
+- **#96** — MD-2 provenance enforcement (engine-internal cutover, Faz 8a öncesi)
+- **#97** — MD-3 baseline policy (AcceptAsColdStart + ColdStartPolicy)
 
-### P2-0B kalan iş (GitHub issue)
-- **#86 (P2-0B.7):** MCP Workspace before-baseline characterization
-- **#87 (P2-0B.8):** KAPANDI (PR #91 + #93) — policy fixture + Q5 exact theta
-- **#88:** mixed_per_axis_sources dedicated matrisi (MD-2 evidence gate)
-- **#89:** task-snapshot drift adversarial
-- **#92:** subject-authority → raw → Q5 theta downstream (MD-1 cutover gate)
-- **#95:** MD-1 implementation — subject-authority caller migration (Faz 8a)
-- **#96:** MD-2 implementation — provenance enforcement (engine-internal cutover)
-- **#97:** MD-3 implementation — baseline policy (AcceptAsColdStart + ColdStartPolicy)
+**Orchestration:**
+- **#99** — P2-1 measure_task_delta_checked public boundary (additive Faz 5)
+- **#100** — Faz 8a engine cutover (commit_task_claim → V2 authorization consumer + cleanup)
 
-### P2-1 (caller migration, migration kararları Accepted — additive Faz 5)
-- `measure_task_delta_checked` (public boundary)
-- Probe Claim → preflight-measure → final Claim → V1 commit_task_claim
-- Lokal adapter (navigator + MCP) + repo-level oracle
-- MD-1 compatibility producer (Yol 1, shadow observation) + SubjectAuthorityDriftObservation
+### Deployment dependency DAG
 
-### Faz 8a (engine cutover)
-- `commit_task_claim` → V2 authorization consumer
-- Smart ctor + legacy field kaldırma
-- Target authority birleştirme
-- Preflight tekrarı kaldırma
+```
+Normative decisions (PR #98 MERGED)
+│
+├─ MD-1 (Subject):
+│  #99 P2-1 additive observation → #95-A
+│  → #92 drift characterization (cutover gate)
+│  → #95-B Faz 8a caller cutover
+│
+├─ MD-2 (Provenance):  [engine-internal, MD-1'den bağımsız]
+│  #88 frozen mixed-source matrix (evidence gate)
+│  → #96 dual evaluation → engine-internal authority cutover (Faz 8a öncesi)
+│
+└─ MD-3 (Baseline Policy):  [bağımsız]
+   #97 policy implementation (AcceptAsColdStart + ColdStartPolicy)
+   → bağımsız ilerleyebilir
+
+#86, #89 — bağımsız P2-0B characterization (MD'lere bağlı değil)
+
+Faz 8a (#100) — #95-B + #96 + #97 tamamlandıktan sonra
+```
+
+### Önerilen sıradaki adım
+
+1. **#88 (MD-2 evidence gate)** — mixed_per_axis_sources matrisi; #96 (MD-2 implementation) önkoşulu
+2. **#97 (MD-3 policy)** — AcceptAsColdStart + ColdStartPolicy; bağımsız, P2-1 açmadan başlanabilir
+3. **#99 (P2-1)** — measure_task_delta_checked public boundary; MD-1 compatibility producer
+
+Kritik yol: MD-2 (#88→#96) → Faz 8a engine cutover (#100). MD-1 (#99→#95) ve MD-3 (#97) paralel.
 
 ## CI Doğrulama (HEAD 2b88a8d)
 
