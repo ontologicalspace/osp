@@ -117,7 +117,7 @@ Squash merge `7c670ff` → main. Q5 theta parity koşullu KANITLANDI. Issue #87 
 - **MD-1 Subject Authority:** task scope normatif (Yol 2); Yol 1 compat producer P2-1; caller cutover Faz 8a (#95).
 - **MD-2 Provenance Authority:** engine-native per-axis normatif; uniform Scip compat; engine-internal cutover Faz 8a öncesi (#96).
 - **MD-3 Baseline Policy:** typed Unavailable normatif + `AcceptAsColdStart` (Sandbox) + `ColdStartPolicy` (#97).
-Spec planned extensions: INV-T2 (MD-1), INV-T4 (MD-2), INV-T6/T8/T9 (MD-3).
+Spec planned extensions: INV-T3 (MD-1; dayanak INV-T2), INV-T4 (MD-2), INV-T6/T8/T9 (MD-3).
 
 ### P2-0B kalan iş (GitHub issue)
 - **#86 (P2-0B.7):** MCP Workspace before-baseline characterization
