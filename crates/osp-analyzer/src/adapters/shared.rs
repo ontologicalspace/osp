@@ -482,7 +482,10 @@ fn extract_declaration_name(node: &Node, source: &[u8], strategy: &NameStrategy)
             while let Some(n) = stack.pop() {
                 if n.kind() == *container_kind {
                     if let Some(name_node) = n.child_by_field_name(field) {
-                        return name_node.utf8_text(source).ok().map(|s| s.trim().to_string());
+                        return name_node
+                            .utf8_text(source)
+                            .ok()
+                            .map(|s| s.trim().to_string());
                     }
                 }
                 for i in (0..n.child_count()).rev() {
