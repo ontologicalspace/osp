@@ -211,8 +211,16 @@ Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a tem
 
 ### Required implementation
 
-1. **#88 (mixed_per_axis_sources matrisi)** kapat: `None`/`Exact(Scip)`/`Exact(TreeSitter)`/
-   `Exact(Heuristic)`/mixed/mismatch × V1 uniform Scip vs V2 per-axis.
+1. **#88 (mixed_per_axis_sources matrisi)** — IMPLEMENTED IN PR (merge pending). 6-case
+   MixedPerAxisSources frozen evidence contract: cohesion axis, Subgraph[1,2] scope. V2
+   measured cohesion = Mixed (aggregate [Scip, Placeholder]); V1 legacy projected = Scip.
+   5 predicate evaluation case (None/Scip/TreeSitter/Heuristic/Placeholder — Mixed fail-closed)
+   + 1 declaration-validation case (required_source=Mixed → InvalidRequiredMetricSource commit
+   reject). Mixed gerçek cohesion aggregation hattından doğar. Ayrıca DirectPerAxisAuthority
+   family (5 case, Coupling/Node(1)) pozitif-matching kontrolü (PR #85 inline matrix frozen
+   corpus'a taşındı). Measured-subject digest V1 — tek canonicalization authority (SpaceDigest,
+   PredicateAxisTag, CanonicalPredicateScope, CanonicalSubjectScope, CanonicalStructuralDelta).
+   Normative evidence mainline after merge.
 2. **Dual evaluation** (shadow comparison): compat (V1 uniform) vs native (V2 per-axis),
    ProvenanceAuthorityDriftObservation. Candidate yol mutation authority değil.
 3. **Drift sınıflandırması:** NoDrift / SourceLabelOnly / PredicateResultDrift /
@@ -226,6 +234,15 @@ Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a tem
 - `Mixed({TreeSitter, Heuristic})` → `Exact(TreeSitter)` karşılamaz.
 - Yeni source requirement türleri düşünülebilir: `Contains(X)` / `AllOf({X,Y})` /
   `AtLeastAuthorityLevel(...)` — ama bu ayrı bir karardır.
+
+### #88 evidence-schema notu (duplicate rejection)
+
+Duplicate proposal elements are rejected by the `MEASUREMENT_SUBJECT:V1` evidence schema to
+preserve one canonical representation. This characterization does not assert that every
+equivalent raw `DeltaProposal` is currently rejected by the production proposal ingress.
+Production `CanonicalStructuralDelta::try_new` kullanıldığı için node/edge structural duplicate
+ve cross-list conflict production semantiğiyle reddedilir; `affected_nodes` duplicate-reject
+`CanonicalSubjectScope::try_new` üzerinden (test değil, production).
 
 ---
 
