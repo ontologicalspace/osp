@@ -26,6 +26,26 @@ fn print_case_digests_for_manifest_update() {
     println!("=== Toplam case: {} ===", digests.len());
 }
 
+/// **Faz 8-P2 #88:** Measured-subject digest'leri (production canonical tipler üzerinden).
+/// `DirectPerAxisAuthority`/`MixedPerAxisSources` family'leri için `cases.json`'daki
+/// `measured_subject_digest_blake3` alanını günceller. Eski 5 case digest üretmez (None).
+#[test]
+fn print_case_measured_subject_digests_for_manifest_update() {
+    let digests = common::compute_case_measured_subject_digests();
+    println!("=== Faz 8-P2 measured-subject digests (cases.json measured_subject_digest_blake3 alanı için) ===");
+    println!("[");
+    for (id, digest) in &digests {
+        match digest {
+            Ok(hex) => {
+                println!("  {{ \"id\": \"{id}\", \"measured_subject_digest_blake3\": \"{hex}\" }},")
+            }
+            Err(e) => println!("  // {id}: measured-subject digest üretilemedi — {e:?}"),
+        }
+    }
+    println!("]");
+    println!("=== Toplam case: {} ===", digests.len());
+}
+
 #[test]
 fn print_sidecar_digest_for_manifest_update() {
     let root = common::characterization_root(env!("CARGO_MANIFEST_DIR"));

@@ -72,10 +72,21 @@ pub enum CaseClass {
     DeltaIntroducedSubject,
     /// subject members report different MetricSource per axis — provenance divergence.
     ///
-    /// **TODO (P2-0B kalan iş):** Henüz case builder üretemez (build_all_cases'te yok).
-    /// Case 2 (wide-affected) zaten per-axis source divergence gösterdi ama dedicated
-    /// required_source matrisi (Any/Exact(Scip)/Exact(Heuristic)/mixed/mismatch) eksik.
+    /// **Faz 8-P2 #88 (MD-2 evidence contract):** Cohesion axis, Subgraph[1,2] scope. V2
+    /// measured cohesion source = Mixed (aggregate [Scip, Placeholder]); V1 legacy
+    /// projected = uniform Scip. 6-case required_source matrisi: None/Scip/TreeSitter/
+    /// Heuristic/Placeholder (predicate evaluation) + Mixed (declaration validation reject).
+    /// `Mixed` gerçek cohesion aggregation hattından doğar (elle enjekte edilmez).
     MixedPerAxisSources,
+    /// Concrete V2 per-axis source required source ile eşleşince predicate completion
+    /// `Completed`; legacy V1 projection (uniform Scip) eşleşmeyince `SourceInsufficient`.
+    ///
+    /// **Faz 8-P2 #88 (MD-2 pozitif-matching kontrolü):** Coupling axis, Node(1) scope.
+    /// V1 legacy projected coupling = Scip; V2 measured = TreeSitter (engine topology).
+    /// 5-case required_source matrisi (PR #85 inline matrix frozen corpus'a taşınır):
+    /// None/Scip/TreeSitter/Placeholder/Heuristic. `required_source=TreeSitter → V2 Completed`
+    /// dalı pozitif-matching kontrolü (MixedPerAxisSources'ta kayıp).
+    DirectPerAxisAuthority,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -101,6 +112,12 @@ pub struct ManifestCase {
     pub builder_digest_blake3: String,
     #[serde(default)]
     pub notes: String,
+    /// **Faz 8-P2 #88:** Measured-subject digest (production canonical tipler üzerinden).
+    /// `DirectPerAxisAuthority`/`MixedPerAxisSources` family'leri için: aynı family içindeki
+    /// case'ler aynı measured-subject digest'ine sahiptir (farklı declaration yorumları).
+    /// Eski 5 case + `None` (backward-compatible; measured-subject digest yok).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measured_subject_digest_blake3: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -253,7 +270,30 @@ pub fn build_all_cases() -> Vec<CharacterizationCase> {
         removed_edge_external_source_001(),
         delta_introduced_subject_001(),
         delta_introduced_subject_policy_001(),
+        // Faz 8-P2 #88 — DirectPerAxisAuthority family (5 case).
+        direct_coupling_required_none_001(),
+        direct_coupling_required_scip_001(),
+        direct_coupling_required_tree_sitter_001(),
+        direct_coupling_required_placeholder_001(),
+        direct_coupling_required_heuristic_001(),
+        // Faz 8-P2 #88 — MixedPerAxisSources family (6 case).
+        mixed_cohesion_required_none_001(),
+        mixed_cohesion_required_scip_001(),
+        mixed_cohesion_required_tree_sitter_001(),
+        mixed_cohesion_required_heuristic_001(),
+        mixed_cohesion_required_placeholder_001(),
+        mixed_cohesion_required_mixed_invalid_001(),
     ]
+}
+
+/// **Faz 8-P2 #88:** Class'a göre case filtreleme — behavioral test'ler frozen corpus'tan
+/// yükler. `DirectPerAxisAuthority`/`MixedPerAxisSources` family'leri için matrix test'leri
+/// bu helper üzerinden ilgili subset'i çeker.
+pub fn load_cases_by_class(class: CaseClass) -> Vec<CharacterizationCase> {
+    build_all_cases()
+        .into_iter()
+        .filter(|c| c.class == class)
+        .collect()
 }
 
 /// Builder → manifest digest güncelleme helper'ı (test amaçlı).
@@ -269,6 +309,230 @@ pub fn compute_case_digests() -> Vec<(String, String)> {
             (case.id, blake3_hex(&bytes))
         })
         .collect()
+}
+
+/// **Faz 8-P2 #88:** Measured-subject digest helper'ları için case ID + digest çifti.
+///
+/// `compute_case_digests`'ten ayrı çünkü measured-subject digest fallible (exact-one
+/// predicate guard, Module scope unsupported). Bootstrap bu helper'ı çağırıp
+/// `measured_subject_digest_blake3` alanını günceller.
+pub fn compute_case_measured_subject_digests() -> Vec<(String, Result<String, SubjectDigestError>)>
+{
+    build_all_cases()
+        .into_iter()
+        .map(|case| {
+            let digest = compute_measured_subject_digest(&case);
+            (case.id, digest.map(|bytes| blake3_hex(&bytes)))
+        })
+        .collect()
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Measured-subject digest V1 — production canonical tipler üzerinden tek authority
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Faz 8-P2 #88 (MD-2 evidence contract). `MEASUREMENT_SUBJECT:V1` digest sözleşmesi:
+// aynı family içindeki case'ler (farklı required_source declaration) aynı measured-subject
+// digest'ine sahiptir — ontolojik olarak aynı fiziksel subject + aynı measurement selector.
+//
+// **Tek canonicalization authority:** Tüm parçalar production tiplerine bağlanır:
+// - SpaceDigest::compute (authorization.rs:1305) — canonical node/edge content
+// - PredicateAxisTag (canonical_tags.rs:167) — stable numeric axis tag
+// - CanonicalPredicateScope (authorization.rs:608) — scope_tag + identity_bytes
+// - CanonicalSubjectScope (measurement.rs:113) — sort + duplicate reject + empty reject
+// - CanonicalStructuralDelta::try_new (authorization.rs:207) — sort + duplicate/conflict reject
+//
+// Test katmanı ikinci bir canonicalizer YAZMAZ. `affected_nodes` structural delta içine
+// karıştırılmaz — ayrı `legacy-selector` segmentinde (V1 measurement selector).
+
+/// Measured-subject digest hesaplama hataları (V1 evidence schema).
+///
+/// Bu hatalar **digest evidence schema** kararıdır — production proposal ingress
+/// davranışını temsil ETMEZ. Production canonicalization hataları (`CanonicalizationError`,
+/// `MeasurementDigestError`) buraya map edilir.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum SubjectDigestError {
+    /// Exact-one predicate invariant: characterization case tek predicate taşımalı.
+    /// Digest V1 yalnızca exact-one characterization case'lerini kabul eder (zero/multi
+    /// fail-closed). Pozitif corpus assertion'ına güvenilmez — negatif testlerle kanıtlanır.
+    #[error("expected exactly one predicate, got {actual}")]
+    ExpectedExactlyOnePredicate { actual: usize },
+    /// `PredicateScope::Module` V1 evidence schema'da desteklenmez (characterization
+    /// case'leri Node/Subgraph kullanır). Out-of-scope olmak fail-closed test'ten ayrı.
+    #[error("unsupported scope for measured-subject digest V1: {scope:?}")]
+    UnsupportedScope {
+        scope: osp_core::trajectory::PredicateScope,
+    },
+    /// Boş Subgraph scope — production `CanonicalSubgraphScope::try_new` empty'yi reject
+    /// etmez; V1 evidence schema kendi dar kararıyla reddeder.
+    #[error("empty subgraph scope")]
+    EmptySubgraphScope,
+    /// Production canonicalization hatası (duplicate node id, duplicate edge identity,
+    /// cross-list conflict, non-finite field) — production semantiğiyle reddedilir.
+    #[error("production canonicalization failed: {0}")]
+    ProductionCanonicalization(String),
+}
+
+/// Measured-subject digest için segment append — u64 big-endian length prefix.
+///
+/// Frozen digest platformdan bağımsız: byte width (u64) + endianness (big-endian)
+/// sözleşmenin parçası. `usize → u64` checked (digest segment length'u makul sınırlarda).
+fn append_segment(out: &mut Vec<u8>, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).expect("digest segment length fits u64");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(bytes);
+}
+
+/// Bir case'in measured-subject digest bytes'ını üretir (production canonical tiplerle).
+///
+/// **Ontolojik parçalar** (hepsi production tipleri):
+/// 1. `space-content:v1` — `SpaceDigest::compute(space)` (position HARİÇ — author content)
+/// 2. `axis-encoding:v1` — `PredicateAxisTag` stable numeric tag
+/// 3. `predicate-scope:v1` — `CanonicalPredicateScope` (V2 task-authoritative subject)
+/// 4. `legacy-selector:v1` — `CanonicalSubjectScope` (V1 affected_nodes measurement selector)
+/// 5. `structural-delta:v1` — `CanonicalStructuralDelta` (uygulanacak fiziksel değişim)
+///
+/// Digest'ten hariç: required_source, comparison_operator, threshold, tolerance, case_id,
+/// description (declaration/policy interpretation — full-case digest'te ayrışır).
+pub fn serialize_measured_subject_bytes(
+    case: &CharacterizationCase,
+) -> Result<Vec<u8>, SubjectDigestError> {
+    use osp_core::authorization::{
+        CanonicalEdge, CanonicalEdgeIdentity, CanonicalEdgeKind, CanonicalPredicateScope,
+        CanonicalStructuralDelta, CanonicalSubgraphScope, SpaceDigest,
+    };
+    use osp_core::canonical_tags::PredicateAxisTag;
+    use osp_core::measurement::CanonicalSubjectScope;
+
+    // Exact-one predicate guard — V1 digest yalnızca exact-one characterization case'leri.
+    let predicates = &case.task.target_predicate_set.predicates;
+    let [wp] = predicates.as_slice() else {
+        return Err(SubjectDigestError::ExpectedExactlyOnePredicate {
+            actual: predicates.len(),
+        });
+    };
+    let predicate = &wp.predicate;
+
+    let mut bytes = Vec::new();
+    append_segment(&mut bytes, b"OSP:F8P2:MEASUREMENT_SUBJECT:V1");
+
+    // 1. Space content digest (production SpaceDigest — canonical node/edge, position HARİÇ).
+    let space_digest = SpaceDigest::compute(&case.space)
+        .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+    append_segment(&mut bytes, b"space-content:v1");
+    append_segment(&mut bytes, space_digest.as_bytes());
+
+    // 2. Axis encoding (production PredicateAxisTag — stable numeric, Debug/serde DEĞİL).
+    let axis_tag = PredicateAxisTag::try_from(&predicate.metric)
+        .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+    append_segment(&mut bytes, b"axis-encoding:v1");
+    append_segment(&mut bytes, &[axis_tag.as_u8()]);
+
+    // 3. Predicate scope (production CanonicalPredicateScope — V2 task-authoritative subject).
+    //    Node(1) ≠ Subgraph([1]): scope_tag ayrımı (Node=0, Subgraph=2).
+    let canonical_scope = match &predicate.scope {
+        osp_core::trajectory::PredicateScope::Node(id) => CanonicalPredicateScope::Node(*id),
+        osp_core::trajectory::PredicateScope::Subgraph(ids) => {
+            if ids.is_empty() {
+                return Err(SubjectDigestError::EmptySubgraphScope);
+            }
+            let canonical = CanonicalSubgraphScope::try_new(ids.clone())
+                .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+            CanonicalPredicateScope::Subgraph(canonical)
+        }
+        osp_core::trajectory::PredicateScope::Module(_) => {
+            return Err(SubjectDigestError::UnsupportedScope {
+                scope: predicate.scope.clone(),
+            });
+        }
+    };
+    append_segment(&mut bytes, b"predicate-scope:v1");
+    append_segment(&mut bytes, &[canonical_scope.scope_tag()]);
+    append_segment(&mut bytes, &canonical_scope.identity_bytes());
+
+    // 4. Legacy measurement selector (V1 affected_nodes — ayrı segment, structural delta DEĞİL).
+    //    affected_nodes boşsa delta_nodes'dan türetilmediği için empty → empty subject reject.
+    let selector_ids = case.proposal.affected_nodes.clone();
+    let canonical_selector = CanonicalSubjectScope::try_new(selector_ids)
+        .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+    append_segment(&mut bytes, b"legacy-selector:v1");
+    let selector_bytes: Vec<u8> = canonical_selector
+        .member_ids()
+        .iter()
+        .flat_map(|id| id.to_le_bytes())
+        .collect();
+    append_segment(&mut bytes, &selector_bytes);
+
+    // 5. Structural delta (production CanonicalStructuralDelta::try_new — tek canonicalization).
+    //    Raw DeltaProposal → CanonicalNode/Edge/Identity (production tipleriyle), sonra try_new
+    //    (sort + duplicate node id reject + duplicate edge identity reject + cross-list conflict).
+    let new_nodes: Vec<osp_core::authorization::CanonicalNode> = vec![]; // characterization case'leri delta_nodes kullanmaz.
+    let new_edges: Vec<CanonicalEdge> = case
+        .proposal
+        .new_edges
+        .iter()
+        .map(|spec| {
+            Ok(CanonicalEdge {
+                from: spec.from,
+                to: spec.to,
+                kind: CanonicalEdgeKind::try_from(&spec.kind)
+                    .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
+                is_type_only: false,
+            })
+        })
+        .collect::<Result<Vec<_>, SubjectDigestError>>()?;
+    let removed_edges: Vec<CanonicalEdgeIdentity> = case
+        .proposal
+        .removed_edges
+        .iter()
+        .map(|er| {
+            Ok(CanonicalEdgeIdentity::new(
+                er.from,
+                er.to,
+                CanonicalEdgeKind::try_from(&er.kind)
+                    .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
+            ))
+        })
+        .collect::<Result<Vec<_>, SubjectDigestError>>()?;
+    let structural = CanonicalStructuralDelta::try_new(new_nodes, new_edges, removed_edges)
+        .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+    append_segment(&mut bytes, b"structural-delta:v1");
+    append_segment(
+        &mut bytes,
+        &serialize_canonical_structural_delta(&structural),
+    );
+
+    Ok(bytes)
+}
+
+/// `CanonicalStructuralDelta`'yı digest segment bytes'ına çevir.
+///
+/// Production encoding'i test katmanında yeniden uygulamak yerine, canonical struct'ı
+/// deterministik byte dizisine serialize eder (sorted node/edge identity zaten try_new'de
+/// enforced). `serde_json::to_vec` BTreeMap-backed (sorted key) + zaten-sorted vec'ler.
+fn serialize_canonical_structural_delta(
+    delta: &osp_core::authorization::CanonicalStructuralDelta,
+) -> Vec<u8> {
+    // CanonicalStructuralDelta serialize edilir; new_nodes/new_edges/removed_edges zaten
+    // try_new'de sorted. serde JSON canonical (BTreeMap-backed) → deterministic.
+    serde_json::to_vec(delta).expect("CanonicalStructuralDelta serialize (sorted by try_new)")
+}
+
+/// Measured-subject digest BLAKE3 hex (64 lowercase hex chars).
+///
+/// Fallible — exact-one predicate guard / Module scope / production canonicalization
+/// hatalarını yayar. Bootstrap bu fonksiyonu çağırıp manifest `measured_subject_digest_blake3`
+/// alanını günceller.
+pub fn compute_measured_subject_digest(
+    case: &CharacterizationCase,
+) -> Result<Vec<u8>, SubjectDigestError> {
+    let bytes = serialize_measured_subject_bytes(case)?;
+    Ok(blake3_raw(&bytes).to_vec())
+}
+
+/// BLAKE3 raw 32-byte hash (hex değil). `blake3_hex` hex string döner; bu raw bytes.
+fn blake3_raw(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
 }
 
 /// Bir case'in deterministik serialize-bytes'ı (digest için).
@@ -810,8 +1074,341 @@ fn delta_introduced_subject_policy_001() -> CharacterizationCase {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Stage-aware observation model (P2-0B.4, plan Tur 5 P1-2)
+// Faz 8-P2 #88 — DirectPerAxisAuthority family (MD-2 pozitif-matching kontrolü)
 // ═══════════════════════════════════════════════════════════════════════════════
+//
+// Coupling axis, Node(1) scope. V1 legacy projected coupling source = Scip (uniform
+// provenanced_from_raw override); V2 measured coupling source = TreeSitter (engine
+// topology_source). 5-case required_source matrisi (PR #85 inline matrix frozen corpus'a
+// taşınır — assertion-equivalence map commit message'da).
+//
+// **P1-1 affected_nodes:[1]:** compute_raw_from_delta `affected_nodes`'u ölçüm kümesi
+// olarak kullanır (engine.rs:2291, mass-weighted centroid). affected_nodes:[1] → V1
+// measurement selector = Node(1) = V2 subject scope → V1/V2 numeric equality (coupling
+// 0.5). Node(2) pre-state'te (fiziksel endpoint bütünlüğü) ama ölçüme dahil değil.
+//
+// **P2-2 threshold Le 0.5:** eski inline fixture exact. Coupling after = 0.5 (binary
+// exact temsil) → floating-point fragility yok. Imports 1→2 → Node(1) out-degree=1 →
+// coupling = 1/(1+1) = 0.5.
+
+/// DirectPerAxisAuthority canonical subject — Coupling axis, Node(1) scope.
+///
+/// Node(1) ve Node(2) her ikisi pre-state'te (Imports 1→2 edge endpoint bütünlüğü).
+/// `affected_nodes:[1]` — V1 legacy measurement selector (Node(1) = V2 subject scope).
+fn direct_coupling_subject_base() -> CharacterizationCase {
+    use osp_core::agent::DeltaProposal;
+    use osp_core::space::{Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: iki node (edge endpoint bütünlüğü).
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+    space.insert_node(Node {
+        id: 2,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    // Predicate: Coupling axis, Node(1) scope (V2 task-authoritative subject).
+    // required_source caller tarafından set edilir (case builder'lar).
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5, // exact eski fixture; coupling after = 0.5 (binary exact).
+        scope: PredicateScope::Node(1),
+        required_source: None, // override by caller
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 42,
+        milestone_id: 0,
+        label: "direct-coupling-base".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    let proposal = DeltaProposal {
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1], // V1 measurement selector = Node(1) = V2 subject scope.
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "direct-coupling-base".to_string(), // overridden by case builders
+        class: CaseClass::DirectPerAxisAuthority,
+        source: CaseSource::SyntheticAdversarial,
+        description: String::new(), // overridden
+        space,
+        task,
+        proposal,
+    }
+}
+
+/// `direct_coupling_subject_base`'i alıp required_source + case identity set eder.
+fn direct_coupling_case(
+    required_source: Option<osp_core::coords::MetricSource>,
+    id: &str,
+    description: &str,
+) -> CharacterizationCase {
+    let mut case = direct_coupling_subject_base();
+    case.id = id.to_string();
+    case.description = description.to_string();
+    case.task.label = id.to_string();
+    case.task.target_predicate_set.predicates[0]
+        .predicate
+        .required_source = required_source;
+    case
+}
+
+fn direct_coupling_required_none_001() -> CharacterizationCase {
+    direct_coupling_case(
+        None,
+        "direct-coupling-required-none-001",
+        "DirectPerAxisAuthority: required_source=None. V1 legacy projected coupling = Scip \
+         (Completed — source constraint yok); V2 measured coupling = TreeSitter (Completed). \
+         Numeric parity: coupling after = 0.5 (Imports 1→2, Node(1) out-degree=1). Provenance \
+         divergence yok (None → source authority constraint yok).",
+    )
+}
+
+fn direct_coupling_required_scip_001() -> CharacterizationCase {
+    direct_coupling_case(
+        Some(osp_core::coords::MetricSource::Scip),
+        "direct-coupling-required-scip-001",
+        "DirectPerAxisAuthority: required_source=Some(Scip). V1 legacy projected = Scip → \
+         Completed (match); V2 measured = TreeSitter → SourceInsufficient (mismatch). \
+         MD-2 divergence: V1 eşleşir, V2 eşleşmez.",
+    )
+}
+
+fn direct_coupling_required_tree_sitter_001() -> CharacterizationCase {
+    direct_coupling_case(
+        Some(osp_core::coords::MetricSource::TreeSitter),
+        "direct-coupling-required-tree-sitter-001",
+        "DirectPerAxisAuthority: required_source=Some(TreeSitter). V1 legacy projected = Scip → \
+         SourceInsufficient (mismatch); V2 measured = TreeSitter → Completed (match). \
+         Pozitif-matching kontrolü: concrete V2 source required source ile eşleşince \
+         predicate completion Completed. MixedPerAxisSources'ta bu dal kaybolur (Mixed hiçbir \
+         concrete'a eşit değil).",
+    )
+}
+
+fn direct_coupling_required_placeholder_001() -> CharacterizationCase {
+    direct_coupling_case(
+        Some(osp_core::coords::MetricSource::Placeholder),
+        "direct-coupling-required-placeholder-001",
+        "DirectPerAxisAuthority: required_source=Some(Placeholder). V1 legacy = Scip → \
+         SourceInsufficient; V2 measured = TreeSitter → SourceInsufficient. Declaration-valid \
+         source token under current validator; unmet by both V1 and V2. Normative authority \
+         status is out of MD-2 scope.",
+    )
+}
+
+fn direct_coupling_required_heuristic_001() -> CharacterizationCase {
+    direct_coupling_case(
+        Some(osp_core::coords::MetricSource::Heuristic),
+        "direct-coupling-required-heuristic-001",
+        "DirectPerAxisAuthority: required_source=Some(Heuristic). V1 legacy = Scip → \
+         SourceInsufficient; V2 measured = TreeSitter → SourceInsufficient.",
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Faz 8-P2 #88 — MixedPerAxisSources family (MD-2 fail-closed + declaration-validation)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Cohesion axis, Subgraph[1,2] scope. Node(1) cohesion=Some(0.6) → V2 source Scip;
+// Node(2) cohesion=None → V2 source Placeholder (effective fallback). Aggregate → Mixed
+// (coords.rs aggregate_source). V1 legacy projected = uniform Scip.
+//
+// **Mixed gerçek aggregation hattından doğar** (elle enjekte edilmez): measure_task_delta
+// Subgraph[1,2] centroid → aggregate_source([Scip, Placeholder]) = Mixed.
+//
+// **DependsOn delta:** coupling/instability sadece Imports okur (axes.rs:64, 258-259);
+// cohesion edge-bağımsız (axes.rs:412-425). DependsOn 5 axis nötr → Q5/trajectory loss/
+// regression metric değişiminden etkilenmez (metric isolation).
+//
+// **Predicate Ge 0.50:** measured cohesion = (0.6+0.5)/2 = 0.55 (eşit mass centroid).
+// 0.05 marjın — floating-point aggregation fragility'sine karşı dayanıklı.
+
+/// MixedPerAxisSources canonical subject — Cohesion axis, Subgraph[1,2] scope.
+fn mixed_cohesion_subject_base() -> CharacterizationCase {
+    use osp_core::agent::DeltaProposal;
+    use osp_core::space::{Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: Node(1) cohesion=Some(0.6), Node(2) cohesion=None.
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        cohesion: Some(0.6), // → V2 cohesion source = Scip (observed_source)
+        ..Default::default()
+    });
+    space.insert_node(Node {
+        id: 2,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        cohesion: None, // → V2 cohesion source = Placeholder (effective fallback 0.5)
+        ..Default::default()
+    });
+
+    // Predicate: Cohesion axis, Subgraph[1,2] scope.
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Cohesion,
+        operator: ComparisonOp::Ge,
+        threshold: 0.50, // measured 0.55 (0.05 marjın).
+        scope: PredicateScope::Subgraph(vec![1, 2]),
+        required_source: None, // override by caller
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 43, // direct family'den farklı task id.
+        milestone_id: 0,
+        label: "mixed-cohesion-base".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Delta: DependsOn (5 axis nötr — metric isolation).
+    let proposal = DeltaProposal {
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::DependsOn,
+        }],
+        affected_nodes: vec![1, 2],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "mixed-cohesion-base".to_string(), // overridden
+        class: CaseClass::MixedPerAxisSources,
+        source: CaseSource::SyntheticAdversarial,
+        description: String::new(), // overridden
+        space,
+        task,
+        proposal,
+    }
+}
+
+/// `mixed_cohesion_subject_base`'i alıp required_source + case identity set eder.
+fn mixed_cohesion_case(
+    required_source: Option<osp_core::coords::MetricSource>,
+    id: &str,
+    description: &str,
+) -> CharacterizationCase {
+    let mut case = mixed_cohesion_subject_base();
+    case.id = id.to_string();
+    case.description = description.to_string();
+    case.task.label = id.to_string();
+    case.task.target_predicate_set.predicates[0]
+        .predicate
+        .required_source = required_source;
+    case
+}
+
+fn mixed_cohesion_required_none_001() -> CharacterizationCase {
+    mixed_cohesion_case(
+        None,
+        "mixed-cohesion-required-none-001",
+        "MixedPerAxisSources: required_source=None. V1 legacy projected = Scip (Completed); \
+         V2 measured aggregate = Mixed (Completed). Mixed numeric değerlendirmeye katılır \
+         (source authority constraint yok). Cohesion after = 0.55.",
+    )
+}
+
+fn mixed_cohesion_required_scip_001() -> CharacterizationCase {
+    mixed_cohesion_case(
+        Some(osp_core::coords::MetricSource::Scip),
+        "mixed-cohesion-required-scip-001",
+        "MixedPerAxisSources: required_source=Some(Scip). V1 legacy projected = Scip (Completed — \
+         match); V2 measured = Mixed → SourceInsufficient (fail-closed — Mixed concrete authority \
+         şartını karşılamaz). MD-2 divergence: V1 eşleşir, V2 eşleşmez.",
+    )
+}
+
+fn mixed_cohesion_required_tree_sitter_001() -> CharacterizationCase {
+    mixed_cohesion_case(
+        Some(osp_core::coords::MetricSource::TreeSitter),
+        "mixed-cohesion-required-tree-sitter-001",
+        "MixedPerAxisSources: required_source=Some(TreeSitter). V1 legacy = Scip → \
+         SourceInsufficient; V2 measured = Mixed → SourceInsufficient (fail-closed). \
+         V1/V2 agreement (ikisi de karşılamaz).",
+    )
+}
+
+fn mixed_cohesion_required_heuristic_001() -> CharacterizationCase {
+    mixed_cohesion_case(
+        Some(osp_core::coords::MetricSource::Heuristic),
+        "mixed-cohesion-required-heuristic-001",
+        "MixedPerAxisSources: required_source=Some(Heuristic). V1 legacy = Scip → \
+         SourceInsufficient; V2 measured = Mixed → SourceInsufficient.",
+    )
+}
+
+fn mixed_cohesion_required_placeholder_001() -> CharacterizationCase {
+    mixed_cohesion_case(
+        Some(osp_core::coords::MetricSource::Placeholder),
+        "mixed-cohesion-required-placeholder-001",
+        "MixedPerAxisSources: required_source=Some(Placeholder). V1 legacy = Scip → \
+         SourceInsufficient; V2 measured = Mixed → SourceInsufficient. Declaration-valid \
+         source token under current validator; unmet by both V1 and V2. Normative authority \
+         status is out of MD-2 scope.",
+    )
+}
+
+fn mixed_cohesion_required_mixed_invalid_001() -> CharacterizationCase {
+    mixed_cohesion_case(
+        Some(osp_core::coords::MetricSource::Mixed),
+        "mixed-cohesion-required-mixed-invalid-001",
+        "MixedPerAxisSources: required_source=Some(Mixed) → declaration validation reject. \
+         Mixed epistemik bir talep değildir — yalnız heterojen aggregation çıktısıdır. \
+         commit_task_claim validate_for_commit (engine.rs:1416) → InvalidRequiredMetricSource \
+         (trajectory.rs:822-828) → EngineCommitError::TaskValidation. Measurement'dan ÖNCE \
+         terminal reject. Standalone probe Mixed üretebildi (cohesion aggregation), ama commit \
+         pipeline measurement'a ulaşmadan durdu (probe vs pipeline ayrımı).",
+    )
+}
 
 /// Bir V1 veya V2-candidate evaluation'ın tam gözlemi.
 ///
