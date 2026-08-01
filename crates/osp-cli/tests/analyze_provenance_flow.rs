@@ -24,7 +24,13 @@ fn fixture_repo() -> tempfile::TempDir {
         .status()
         .expect("git init");
     Command::new("git")
-        .args(["-C", repo.to_str().unwrap(), "config", "user.email", "t@t.com"])
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "config",
+            "user.email",
+            "t@t.com",
+        ])
         .status()
         .expect("git config email");
     Command::new("git")
@@ -103,9 +109,7 @@ fn analyze_json_emits_provenance_envelope() {
     );
 
     // Nodes: NodeId ascending, each carries path + snake_case kind + per-axis provenance.
-    let nodes = envelope["nodes"]
-        .as_array()
-        .expect("nodes is array");
+    let nodes = envelope["nodes"].as_array().expect("nodes is array");
     assert!(!nodes.is_empty(), "at least one node");
     let mut prev_id: i64 = -1;
     for n in nodes {
@@ -184,7 +188,8 @@ fn analyze_out_flag_writes_envelope_file() {
     let envelope: serde_json::Value = serde_json::from_str(&written).expect("written file is JSON");
     assert_eq!(envelope["schema_version"], 1);
     assert_eq!(
-        envelope["analysis"]["provenance_model"], "analyzer_axis_specific"
+        envelope["analysis"]["provenance_model"],
+        "analyzer_axis_specific"
     );
 }
 
@@ -265,8 +270,7 @@ fn analyze_generic_accepts_dirty_worktree() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).expect("utf8");
-    let envelope: serde_json::Value =
-        serde_json::from_str(&stdout).expect("stdout JSON envelope");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout).expect("stdout JSON envelope");
     assert_eq!(
         envelope["repository"]["binding"], "observed_worktree_unbound",
         "generic dirty = observed (unbound)"
@@ -314,8 +318,7 @@ fn analyze_require_clean_clean_worktree_binds() {
         String::from_utf8_lossy(&output.stderr)
     );
     let envelope: serde_json::Value =
-        serde_json::from_str(&String::from_utf8_lossy(&output.stdout))
-            .expect("stdout JSON");
+        serde_json::from_str(&String::from_utf8_lossy(&output.stdout)).expect("stdout JSON");
     assert_eq!(
         envelope["repository"]["binding"], "clean_pre_post_equal",
         "require-clean + clean = bound"

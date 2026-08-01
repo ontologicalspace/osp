@@ -262,7 +262,8 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
     let binding = if args.require_clean_snapshot {
         // Harness-bound: clean worktree + pre/post drift fence + analyzed-path⊆tracked.
-        repo_snapshot::ensure_snapshot_eligible(&snapshot_before).map_err(|e| anyhow::anyhow!(e))?;
+        repo_snapshot::ensure_snapshot_eligible(&snapshot_before)
+            .map_err(|e| anyhow::anyhow!(e))?;
         if snapshot_before != snapshot_after {
             anyhow::bail!(
                 "repository changed during analysis (head/tracked/clean drift) — \
@@ -294,7 +295,10 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
     node_ids.sort_unstable();
     for node_id in &node_ids {
         let node = &result.space.nodes[node_id];
-        let path = result.node_paths.get(node_id).expect("key-set validated above");
+        let path = result
+            .node_paths
+            .get(node_id)
+            .expect("key-set validated above");
         let metrics = result
             .module_metrics
             .get(node_id)
@@ -370,23 +374,35 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
         (CliOutputFormat::Json, Some(path)) => {
             std::fs::write(path, &json)?;
             eprintln!("✓ Space snapshot written to {}", path.display());
-            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+            stderr_diagnostics(
+                result.semantic_coverage.stale,
+                result.semantic_coverage.coverage_ratio,
+            );
         }
         // json + no-out → JSON only to stdout, diagnostics stderr (stdout JSON-only).
         (CliOutputFormat::Json, None) => {
-            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+            stderr_diagnostics(
+                result.semantic_coverage.stale,
+                result.semantic_coverage.coverage_ratio,
+            );
             println!("{json}");
         }
         // human + out → JSON to file + confirmation stdout (backward-compat) + diagnostics stderr.
         (CliOutputFormat::Human, Some(path)) => {
             std::fs::write(path, &json)?;
             println!("✓ Space snapshot written to {}", path.display());
-            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+            stderr_diagnostics(
+                result.semantic_coverage.stale,
+                result.semantic_coverage.coverage_ratio,
+            );
         }
         // human + no-out → JSON to stdout + diagnostics stderr (backward-compat).
         (CliOutputFormat::Human, None) => {
             println!("{json}");
-            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+            stderr_diagnostics(
+                result.semantic_coverage.stale,
+                result.semantic_coverage.coverage_ratio,
+            );
         }
     }
     Ok(())
@@ -439,11 +455,11 @@ fn resolve_state_dir(
     };
     // Harness invariant: state-dir must be outside the analyzed repo.
     if execution == CliExecutionMode::Harness {
-        let canon_repo = repo
-            .canonicalize()
-            .unwrap_or_else(|_| repo.to_path_buf());
+        let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
         let canon_state = if state_dir.exists() {
-            state_dir.canonicalize().unwrap_or_else(|_| state_dir.clone())
+            state_dir
+                .canonicalize()
+                .unwrap_or_else(|_| state_dir.clone())
         } else {
             // Resolve via parent if the dir doesn't exist yet (caller may pre-create).
             match state_dir.parent().and_then(|p| p.canonicalize().ok()) {
@@ -805,14 +821,20 @@ fn print_human_result(
 ) -> anyhow::Result<()> {
     use osp_core::navigator::NavigatorResult;
     match result {
-        NavigatorResult::Completed { attempts, total_tokens } => {
+        NavigatorResult::Completed {
+            attempts,
+            total_tokens,
+        } => {
             println!("✓ Task completed in {attempts} attempts");
             println!("  Total tokens: {}", total_tokens.total_tokens);
         }
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             println!("✗ Maneuver limit exceeded after {attempts} attempts");
         }
-        NavigatorResult::AwaitingWitnesses { pending, persistence } => {
+        NavigatorResult::AwaitingWitnesses {
+            pending,
+            persistence,
+        } => {
             println!(
                 "⏸ Awaiting witnesses (INV-T9) — task {}, claim {}",
                 pending.task_id, pending.claim_id
@@ -867,10 +889,7 @@ fn print_human_result(
 }
 
 /// Map navigator result → CLI exit code (INV-T9 contract).
-fn navigator_exit_code(
-    result: &osp_core::navigator::NavigatorResult,
-    _task_id: u64,
-) -> i32 {
+fn navigator_exit_code(result: &osp_core::navigator::NavigatorResult, _task_id: u64) -> i32 {
     use osp_core::navigator::NavigatorResult;
     match result {
         NavigatorResult::Completed { .. } => exit_codes::COMPLETED,
@@ -967,9 +986,12 @@ mod mode_matrix_tests {
     fn production_without_task_file_falls_back_to_legacy() {
         let snap = snapshot_fixture();
         let node_paths = HashMap::new();
-        let task =
-            resolve_task(&args(CliExecutionMode::Production, None), &snap, &node_paths)
-                .expect("production without --task falls back to legacy");
+        let task = resolve_task(
+            &args(CliExecutionMode::Production, None),
+            &snap,
+            &node_paths,
+        )
+        .expect("production without --task falls back to legacy");
         assert_eq!(task.id, 7);
         assert_eq!(
             task.allowed_operations,

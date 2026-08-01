@@ -8,7 +8,10 @@
 //! drift-detected consistent analysis sağlar. Transient ABA (clean A → B → clean A)
 //! yakalanmayabilir; controlled temp fixture'da eşzamanlı yazıcı olmadığı için yeterli.
 
-#![allow(dead_code, reason = "Faz 8 test-project: wired incrementally across commits")]
+#![allow(
+    dead_code,
+    reason = "Faz 8 test-project: wired incrementally across commits"
+)]
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -83,7 +86,10 @@ pub enum RepoSnapshotError {
     #[error("invalid repository HEAD (expected full 40-char hex SHA): {value:?}")]
     InvalidRepositoryHead { value: String },
     #[error("git command failed ({command}): {detail}")]
-    GitCommandFailed { command: &'static str, detail: String },
+    GitCommandFailed {
+        command: &'static str,
+        detail: String,
+    },
 }
 
 fn run_git(repo: &Path, args: &[&str], command: &'static str) -> Result<String, RepoSnapshotError> {
@@ -117,7 +123,11 @@ fn capture_head(repo: &Path) -> Result<GitCommitId, RepoSnapshotError> {
 
 fn capture_tracked_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
     let output = run_git(repo, &["ls-tree", "-r", "--name-only", "HEAD"], "ls-tree")?;
-    Ok(output.lines().filter(|l| !l.is_empty()).map(String::from).collect())
+    Ok(output
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 fn capture_clean(repo: &Path) -> Result<bool, RepoSnapshotError> {

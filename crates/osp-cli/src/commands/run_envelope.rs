@@ -12,7 +12,10 @@
 //! o migration sırasında ayrıca değerlendirilir. Analyze envelope'taki
 //! `analyzer_axis_specific` provenance'dan ayrıdır.
 
-#![allow(dead_code, reason = "Faz 8 test-project: wired incrementally across commits")]
+#![allow(
+    dead_code,
+    reason = "Faz 8 test-project: wired incrementally across commits"
+)]
 
 use osp_core::navigator::NavigatorResult;
 use osp_core::trajectory::{MutationDecision, TrajectoryEvidence};
@@ -58,10 +61,9 @@ impl CliRunResult {
             NavigatorResult::WitnessEvaluationError(_) => {
                 (CliRunResultKind::WitnessEvaluationError, 0)
             }
-            NavigatorResult::PendingAuthorizationPersistenceFailure { .. } => (
-                CliRunResultKind::PendingAuthorizationPersistenceFailure,
-                0,
-            ),
+            NavigatorResult::PendingAuthorizationPersistenceFailure { .. } => {
+                (CliRunResultKind::PendingAuthorizationPersistenceFailure, 0)
+            }
             NavigatorResult::SystemFailure(_) => (CliRunResultKind::SystemFailure, 0),
             NavigatorResult::LlmError(_) => (CliRunResultKind::LlmError, 0),
         };
@@ -186,7 +188,11 @@ mod tests {
         GateDecision, MutationDecision, PredicateCompletion, TokenCost, TrajectoryEvidence,
     };
 
-    fn fake_evidence(before_x: f64, after_x: f64, mutation: MutationDecision) -> TrajectoryEvidence {
+    fn fake_evidence(
+        before_x: f64,
+        after_x: f64,
+        mutation: MutationDecision,
+    ) -> TrajectoryEvidence {
         TrajectoryEvidence {
             trajectory_id: 1,
             milestone_id: 1,
@@ -223,7 +229,12 @@ mod tests {
         ];
         let serialized: Vec<String> = kinds
             .iter()
-            .map(|k| serde_json::to_string(k).unwrap().trim_matches('"').to_string())
+            .map(|k| {
+                serde_json::to_string(k)
+                    .unwrap()
+                    .trim_matches('"')
+                    .to_string()
+            })
             .collect();
         assert_eq!(
             serialized,
@@ -248,7 +259,11 @@ mod tests {
             attempts: 1,
             total_tokens: TokenCost::default(),
         };
-        let evidence = vec![fake_evidence(0.667, 0.5, MutationDecision::AcceptAsCompleted)];
+        let evidence = vec![fake_evidence(
+            0.667,
+            0.5,
+            MutationDecision::AcceptAsCompleted,
+        )];
         let envelope = build_run_envelope_v1(
             &result,
             &evidence,
@@ -263,7 +278,10 @@ mod tests {
         assert_eq!(v["run"]["execution_mode"], "harness");
         assert_eq!(v["run"]["witness_mode"], "harness_auto_approve");
         assert_eq!(v["run"]["task_source"], "harness_task_file");
-        assert_eq!(v["execution_measurement"]["authority"], "legacy_projected_v1");
+        assert_eq!(
+            v["execution_measurement"]["authority"],
+            "legacy_projected_v1"
+        );
         assert_eq!(v["execution_measurement"]["provenance_native"], false);
         assert_eq!(v["result"]["kind"], "completed");
         assert_eq!(v["result"]["attempts"], 1);

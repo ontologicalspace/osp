@@ -11,7 +11,10 @@
 //! `legacy_projected` execution authority'si (B-3 run envelope'una ait) analyze çıktısında
 //! DEĞİL — o navigator'ın runtime measurement projection özelliğidir.
 
-#![allow(dead_code, reason = "Faz 8 test-project: wired incrementally across commits")]
+#![allow(
+    dead_code,
+    reason = "Faz 8 test-project: wired incrementally across commits"
+)]
 
 use osp_core::coords::MetricSource;
 use osp_core::space::{NodeClassification, NodeKind, NodeRole};
@@ -319,7 +322,12 @@ mod tests {
             CliMetricSource::Mixed,
         ]
         .iter()
-        .map(|s| serde_json::to_string(s).unwrap().trim_matches('"').to_string())
+        .map(|s| {
+            serde_json::to_string(s)
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        })
         .collect();
         assert_eq!(
             serialized,
@@ -341,19 +349,17 @@ mod tests {
             CliNodeKind::Witness,
         ]
         .iter()
-        .map(|s| serde_json::to_string(s).unwrap().trim_matches('"').to_string())
+        .map(|s| {
+            serde_json::to_string(s)
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        })
         .collect();
         assert_eq!(
             serialized,
             [
-                "module",
-                "concept",
-                "feature",
-                "bug",
-                "rule",
-                "agent",
-                "intent",
-                "claim",
+                "module", "concept", "feature", "bug", "rule", "agent", "intent", "claim",
                 "witness"
             ]
         );
@@ -373,7 +379,12 @@ mod tests {
             CliNodeClassification::Unknown,
         ]
         .iter()
-        .map(|s| serde_json::to_string(s).unwrap().trim_matches('"').to_string())
+        .map(|s| {
+            serde_json::to_string(s)
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        })
         .collect();
         assert_eq!(
             serialized,
@@ -402,11 +413,23 @@ mod tests {
             CliNodeRole::Support,
         ]
         .iter()
-        .map(|s| serde_json::to_string(s).unwrap().trim_matches('"').to_string())
+        .map(|s| {
+            serde_json::to_string(s)
+                .unwrap()
+                .trim_matches('"')
+                .to_string()
+        })
         .collect();
         assert_eq!(
             serialized,
-            ["type_surface", "core", "adapter", "utility", "runtime", "support"]
+            [
+                "type_surface",
+                "core",
+                "adapter",
+                "utility",
+                "runtime",
+                "support"
+            ]
         );
     }
 
@@ -541,7 +564,10 @@ mod tests {
     // ── Path bijection + validity (review P1-3) ───────────────────────────────────
 
     fn np(entries: &[(u64, &str)]) -> std::collections::HashMap<u64, String> {
-        entries.iter().map(|(k, v)| (*k, (*v).to_string())).collect()
+        entries
+            .iter()
+            .map(|(k, v)| (*k, (*v).to_string()))
+            .collect()
     }
 
     #[test]
@@ -555,7 +581,11 @@ mod tests {
         let map = np(&[(1, "src/a.rs"), (2, "src/a.rs")]);
         assert!(matches!(
             validate_node_paths_bijection(&map).unwrap_err(),
-            AnalyzeEnvelopeError::DuplicatePathBinding { node_a: 1, node_b: 2, .. }
+            AnalyzeEnvelopeError::DuplicatePathBinding {
+                node_a: 1,
+                node_b: 2,
+                ..
+            }
         ));
     }
 
@@ -626,8 +656,14 @@ mod tests {
             },
             diagnostics: vec![],
         };
-        result.space.nodes.insert(2, osp_core::space::Node::default());
-        result.space.nodes.insert(1, osp_core::space::Node::default());
+        result
+            .space
+            .nodes
+            .insert(2, osp_core::space::Node::default());
+        result
+            .space
+            .nodes
+            .insert(1, osp_core::space::Node::default());
         result.node_paths.insert(1, "a.rs".into());
         // node_paths missing node 2 → mismatch; reported sorted.
         let err = validate_node_key_sets(&result).unwrap_err();
