@@ -81,6 +81,39 @@ fn every_case_builder_digest_matches_manifest() {
              builder güncellendikten sonra manifest description'ı da güncelle",
             manifest_case.id
         );
+
+        // **Faz 8-P2 #88 P0 fix (review):** measured-subject digest manifest doğrulaması.
+        // DirectPerAxisAuthority/MixedPerAxisSources family'leri için manifest değeri
+        // builder'dan yeniden hesaplanan digest ile karşılaştırılır. Diğer family'ler
+        // (matching_scope/wide_affected_scope/removed_edge_external_source/
+        // delta_introduced_subject) measured-subject digest taşımaz (None).
+        match built.class {
+            common::CaseClass::DirectPerAxisAuthority | common::CaseClass::MixedPerAxisSources => {
+                let actual = common::compute_measured_subject_digest(built).unwrap_or_else(|e| {
+                    panic!(
+                        "case {} measured-subject digest hesaplanamadı: {e:?}",
+                        manifest_case.id
+                    )
+                });
+                let actual_hex = hex::encode(actual);
+                assert_eq!(
+                    manifest_case.measured_subject_digest_blake3.as_deref(),
+                    Some(actual_hex.as_str()),
+                    "case {} measured-subject digest mismatch — manifest değeri builder \
+                     digest ile eşit olmalı (double-hash hatası düzeltildi); bootstrap \
+                     helper'ı ile manifest'i güncelle",
+                    manifest_case.id
+                );
+            }
+            _ => {
+                assert!(
+                    manifest_case.measured_subject_digest_blake3.is_none(),
+                    "case {} eski family measured-subject digest taşımamalı (None), got {:?}",
+                    manifest_case.id,
+                    manifest_case.measured_subject_digest_blake3
+                );
+            }
+        }
     }
 
     // Ters yönde: builder'da olup manifest'te olmayan case (unpinned) uyar.

@@ -316,13 +316,17 @@ pub fn compute_case_digests() -> Vec<(String, String)> {
 /// `compute_case_digests`'ten ayrı çünkü measured-subject digest fallible (exact-one
 /// predicate guard, Module scope unsupported). Bootstrap bu helper'ı çağırıp
 /// `measured_subject_digest_blake3` alanını günceller.
+///
+/// **P0 fix (review):** `compute_measured_subject_digest` zaten raw BLAKE3 32-byte hash
+/// döndürür (`H(canonical_subject)`). Önceki kod `blake3_hex` çağırıyordu — bu tekrar
+/// hash'leyip `H(H(canonical_subject))` üretiyordu. Doğru davranış: raw bytes'ı hex-encode.
 pub fn compute_case_measured_subject_digests() -> Vec<(String, Result<String, SubjectDigestError>)>
 {
     build_all_cases()
         .into_iter()
         .map(|case| {
             let digest = compute_measured_subject_digest(&case);
-            (case.id, digest.map(|bytes| blake3_hex(&bytes)))
+            (case.id, digest.map(|bytes| hex::encode(bytes)))
         })
         .collect()
 }
@@ -398,8 +402,9 @@ pub fn serialize_measured_subject_bytes(
     case: &CharacterizationCase,
 ) -> Result<Vec<u8>, SubjectDigestError> {
     use osp_core::authorization::{
-        CanonicalEdge, CanonicalEdgeIdentity, CanonicalEdgeKind, CanonicalPredicateScope,
-        CanonicalStructuralDelta, CanonicalSubgraphScope, SpaceDigest,
+        CanonicalEdge, CanonicalEdgeIdentity, CanonicalEdgeKind, CanonicalNodeClassification,
+        CanonicalNodeKind, CanonicalNodeRole, CanonicalPredicateScope, CanonicalStructuralDelta,
+        CanonicalSubgraphScope, SpaceDigest,
     };
     use osp_core::canonical_tags::PredicateAxisTag;
     use osp_core::measurement::CanonicalSubjectScope;
@@ -466,7 +471,35 @@ pub fn serialize_measured_subject_bytes(
     // 5. Structural delta (production CanonicalStructuralDelta::try_new — tek canonicalization).
     //    Raw DeltaProposal → CanonicalNode/Edge/Identity (production tipleriyle), sonra try_new
     //    (sort + duplicate node id reject + duplicate edge identity reject + cross-list conflict).
-    let new_nodes: Vec<osp_core::authorization::CanonicalNode> = vec![]; // characterization case'leri delta_nodes kullanmaz.
+    // 5. Structural delta (production CanonicalStructuralDelta::try_new — tek canonicalization).
+    //    Raw DeltaProposal → CanonicalNode/Edge/Identity (production tipleriyle), sonra try_new
+    //    (sort + duplicate node id reject + duplicate edge identity reject + cross-list conflict).
+    //
+    //    **P2 fix (review):** new_nodes (NewNodeSpec) artık CanonicalNode listesine çevrilir.
+    //    Önceki kod `vec![]` kullanıp delta node'ları sessizce yok sayıyordu — generic helper
+    //    contract ihlali (delta_introduced_subject case'leri new_nodes kullanır). node_from_spec
+    //    identity logic'i (navigator.rs:312): id = 10000 + index.
+    let new_nodes: Vec<osp_core::authorization::CanonicalNode> = case
+        .proposal
+        .new_nodes
+        .iter()
+        .enumerate()
+        .map(|(index, spec)| {
+            Ok(osp_core::authorization::CanonicalNode {
+                id: (10_000 + index as u64),
+                kind: CanonicalNodeKind::try_from(&spec.kind)
+                    .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
+                mass: spec.initial_mass,
+                cohesion: None,
+                classification: CanonicalNodeClassification::try_from(
+                    &osp_core::space::NodeClassification::default(),
+                )
+                .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
+                role: CanonicalNodeRole::try_from(&osp_core::space::NodeRole::default())
+                    .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
+            })
+        })
+        .collect::<Result<Vec<_>, SubjectDigestError>>()?;
     let new_edges: Vec<CanonicalEdge> = case
         .proposal
         .new_edges

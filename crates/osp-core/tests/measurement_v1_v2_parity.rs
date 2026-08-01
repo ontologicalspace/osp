@@ -1672,6 +1672,42 @@ fn direct_per_axis_required_source_matrix_accepts_matching_v2_predicate_authorit
             case.id
         );
 
+        // **P1-4 fix (review):** before coupling = 0.0 pin (izole Node(1), out-degree=0
+        // pre-delta). Imports 1→2 delta coupling'i 0.0 → 0.5 değiştirir (intentional
+        // measureability — Direct family metric-neutral DEĞİL). before/after farkı
+        // provenance divergence değil gerçek structural delta.
+        let baseline_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V1 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let baseline_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V2 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let v1_before_bits = match &baseline_v1 {
+            common::BaselineObservation::LegacyComputed { values_bits, .. } => values_bits[0],
+            other => panic!(
+                "V1 {} LegacyComputed baseline olmalı; got {other:?}",
+                case.id
+            ),
+        };
+        let v2_before_bits = match &baseline_v2 {
+            common::BaselineObservation::Available { values_bits, .. } => values_bits[0],
+            other => panic!("V2 {} Available baseline olmalı; got {other:?}", case.id),
+        };
+        let before_coupling_v1 = f64::from_bits(v1_before_bits);
+        let before_coupling_v2 = f64::from_bits(v2_before_bits);
+        assert!(
+            (before_coupling_v1 - 0.0).abs() <= 1e-12,
+            "{} V1 before coupling 0.0 olmalı (izole Node(1)); got {before_coupling_v1}",
+            case.id
+        );
+        assert!(
+            (before_coupling_v2 - 0.0).abs() <= 1e-12,
+            "{} V2 before coupling 0.0 olmalı (izole Node(1)); got {before_coupling_v2}",
+            case.id
+        );
+
         // Source matrix: V1 legacy projected = Scip, V2 measured = TreeSitter.
         assert_eq!(
             measured_v1.coupling.source,
@@ -1829,6 +1865,45 @@ fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
             case.id
         );
 
+        // **P1-4 fix (review):** DependsOn delta 5 measured axis'te no-op — before (baseline)
+        // ile after (measured) value bits eşit. coupling/instability sadece Imports okur,
+        // cohesion edge-bağımsız, entropy/witness_depth edge'den bağımsız. DependsOn bunların
+        // hiçbirini etkilemez → metric isolation. Bu kanıtlanmazsa ileride DependsOn coupling'i
+        // etkilemeye başlarsa cohesion predicate sonuçları aynı kaldığı sürece testler yeşil kalır.
+        let baseline_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V1 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let baseline_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V2 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let after_bits_v1 = common::axis_value_bits(&measured_v1);
+        let after_bits_v2 = common::axis_value_bits(&measured_v2);
+        // V1 baseline (LegacyComputed) ile after — 5 axis bits eşit.
+        let before_bits_v1 = match &baseline_v1 {
+            common::BaselineObservation::LegacyComputed { values_bits, .. } => *values_bits,
+            other => panic!(
+                "V1 {} LegacyComputed baseline olmalı; got {other:?}",
+                case.id
+            ),
+        };
+        assert_eq!(
+            before_bits_v1, after_bits_v1,
+            "{} V1 DependsOn delta 5 axis no-op olmalı (before==after bits)",
+            case.id
+        );
+        // V2 baseline (Available) ile after — 5 axis bits eşit.
+        let before_bits_v2 = match &baseline_v2 {
+            common::BaselineObservation::Available { values_bits, .. } => *values_bits,
+            other => panic!("V2 {} Available baseline olmalı; got {other:?}", case.id),
+        };
+        assert_eq!(
+            before_bits_v2, after_bits_v2,
+            "{} V2 DependsOn delta 5 axis no-op olmalı (before==after bits)",
+            case.id
+        );
+
         // Predicate completion — gerçek PredicateSet::evaluate_completion.
         let ps = &case.task.target_predicate_set;
         let v1_result = ps.evaluate_completion(&measured_v1);
@@ -1878,10 +1953,12 @@ fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
     let mut engine_v1 = common::engine_with_case_space(invalid_case);
     let mut engine_v2 = common::engine_with_case_space(invalid_case);
 
-    // No-mutation snapshot probe'dan ÖNCE (P2-2): tek assertion hem probe saflığını hem
-    // commit non-mutating'i kanıtlar.
-    let space_node_count_before = engine_v1.space().nodes.len();
-    let space_edge_count_before = engine_v1.space().edges.len();
+    // **P1-3 fix (review):** No-mutation snapshot her engine için AYRI alınır (önce V1
+    // snapshot engine_v1'den, V2 snapshot engine_v2'den). Önceki kod before'ı engine_v1'den
+    // alıp after'ı engine_v1 ile karşılaştırıyordu — V2 probe/commit engine_v2'de çalıştığı
+    // için V2 mutasyonu görünmüyordu. Snapshot SpaceDigest + revision + node/edge count.
+    let v1_before = engine_snapshot(&engine_v1);
+    let v2_before = engine_snapshot(&engine_v2);
 
     // Standalone probe (V2) — Mixed üretir (commit pipeline'dan ayrı).
     let obs_v2_probe = common::evaluate_v2_candidate_case(&mut engine_v2, invalid_case);
@@ -1961,42 +2038,123 @@ fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
         invalid_case.id
     );
 
-    // No-mutation: probe + commit state'i değiştirmedi (P2-2).
+    // **P1-3 fix:** No-mutation her engine için AYRI doğrulanır. Snapshot SpaceDigest +
+    // revision + node/edge count içerir — tek sayı korunup içerik/revision değişirse yakalar.
     assert_eq!(
-        engine_v1.space().nodes.len(),
-        space_node_count_before,
-        "{} probe + commit space node count değiştirmemeli",
+        engine_snapshot(&engine_v1),
+        v1_before,
+        "{} V1 probe + commit engine state'i değiştirmemeli (SpaceDigest/revision/count)",
         invalid_case.id
     );
     assert_eq!(
-        engine_v1.space().edges.len(),
-        space_edge_count_before,
-        "{} probe + commit space edge count değiştirmemeli",
-        invalid_case.id
-    );
-
-    // Exact error chain (P2-5): InvalidRequiredMetricSource { required_source: Mixed }.
-    // V2 commit_task_claim'i doğrudan çağırıp error chain'i teyit et.
-    let invalid_req = invalid_case.task.target_predicate_set.predicates[0]
-        .predicate
-        .required_source;
-    assert_eq!(
-        invalid_req,
-        Some(MetricSource::Mixed),
-        "{} required_source Some(Mixed) olmalı",
+        engine_snapshot(&engine_v2),
+        v2_before,
+        "{} V2 probe + commit engine state'i değiştirmemeli (SpaceDigest/revision/count)",
         invalid_case.id
     );
 
     let _ = v2_measured; // probe measured (Mixed source) — kanıtlandı.
 
-    // TaskValidationError::InvalidRequiredMetricSource production validator'da.
-    // (commit_task_claim EngineCommitError::TaskValidation döner — harness pipeline
-    // observation üzerinden zaten pinlendi. Burada required_source değerini pinliyoruz.)
-    let _ = TaskValidationError::InvalidRequiredMetricSource {
-        task_id: 0,
-        predicate_index: 0,
-        required_source: MetricSource::Mixed,
-    };
+    // **P1-2 fix (review):** Exact error chain — gerçek commit_task_claim result'ından.
+    // Önceki kod enum varyantını construct ediyordu (task_id: 0 yanlış) ama gerçek result'la
+    // karşılaştırmıyordu. Şimdi commit_task_claim doğrudan çağrılıp EngineCommitError::
+    // TaskValidation(TaskValidationError::InvalidRequiredMetricSource{...}) exact pinleniyor.
+    let commit_err = commit_invalid_mixed_case(invalid_case);
+    let task_id = invalid_case.task.id;
+    assert!(
+        matches!(
+            &commit_err,
+            Some(osp_core::engine::EngineCommitError::TaskValidation(
+                TaskValidationError::InvalidRequiredMetricSource {
+                    task_id: err_task_id,
+                    predicate_index: 0,
+                    required_source: MetricSource::Mixed,
+                }
+            )) if *err_task_id == task_id
+        ),
+        "{} exact error chain InvalidRequiredMetricSource{{task_id:{}, predicate_index:0, \
+         required_source:Mixed}} olmalı; got {:?}",
+        invalid_case.id,
+        task_id,
+        commit_err
+    );
+}
+
+/// Engine state snapshot — no-mutation doğrulaması için (P1-3).
+///
+/// SpaceDigest (canonical node/edge content) + SpaceViewRevision (t_c) + node/edge count.
+/// Tek sayı korunup içerik/revision değişirse yakalar. Checkpoint/mainline/audit yüzeyleri
+/// engine public API'den erişilemediği için bu snapshot'a dahil DEĞİL — PR/doküman bu
+/// yüzeylerin doğrulandığını iddia etmemeli.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineSnapshot {
+    space_digest_hex: String,
+    revision_hex: String,
+    node_count: usize,
+    edge_count: usize,
+}
+
+fn engine_snapshot(engine: &osp_core::engine::SpaceEngine) -> EngineSnapshot {
+    let space_digest = osp_core::authorization::SpaceDigest::compute(engine.space())
+        .expect("SpaceDigest compute başarılı olmalı");
+    let revision = engine
+        .current_space_view_revision()
+        .expect("revision computation başarılı");
+    EngineSnapshot {
+        space_digest_hex: hex::encode(space_digest.as_bytes()),
+        revision_hex: hex::encode(revision.content_digest.as_bytes()),
+        node_count: engine.space().nodes.len(),
+        edge_count: engine.space().edges.len(),
+    }
+}
+
+/// `commit_task_claim`'i invalid Mixed case ile çağırıp EngineCommitError döndürür (P1-2).
+///
+/// Exact error chain assertion için gerçek commit_task_claim result'ını yakalar — enum
+/// varyantı construct etmek yerine production validation'ın gerçek çıktısını kullanır.
+fn commit_invalid_mixed_case(
+    case: &common::CharacterizationCase,
+) -> Option<osp_core::engine::EngineCommitError> {
+    use osp_core::coords::MetricSource;
+    use osp_core::navigator::build_claim_from_proposal;
+    use osp_core::trajectory::{InMemoryTaskRegistry, TaskResolver};
+    use osp_core::witness::WitnessSet;
+
+    let mut engine = common::engine_with_case_space(case);
+    let probe_claim = build_claim_from_proposal(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .expect("probe claim build başarılı olmalı");
+
+    let target = case
+        .task
+        .target_predicate_set
+        .preferred_vector
+        .unwrap_or_default();
+    let measured =
+        osp_core::navigator::provenanced_from_raw(probe_claim.computed_raw, MetricSource::Scip);
+
+    let mut registry = InMemoryTaskRegistry::new();
+    registry.insert(case.task.clone());
+    let omega = WitnessSet::new(vec![]);
+
+    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
+        claim: &probe_claim,
+        omega: &omega,
+        task_resolver: &registry as &dyn TaskResolver,
+        target,
+        loss_before: osp_core::trajectory::trajectory_loss(&measured, &target),
+        measured,
+    });
+
+    match result {
+        Err(e) => Some(e),
+        Ok(_) => None,
+    }
 }
 
 /// Tek node'un cohesion ölçümünü production path üzerinden üretir (P1-4 pre-aggregation).
@@ -2218,31 +2376,43 @@ fn measured_subject_digest_v1_subgraph_scope_is_order_insensitive() {
 /// Metamorphic digest testi: required_source measured-subject digest'i DEĞİŞTİRMEZ,
 /// full-case digest'i DEĞİŞTİRİR.
 ///
-/// Bu, iki digest'ın görev ayrımını tek testte pinler:
-/// - measured-subject digest: ontolojik measurement subject (farklı declaration, aynı subject)
-/// - full-case digest: tam case (declaration dahil)
-///
-/// Ayrıca `SubjectDigestError`'a düşmeden bu ayrımın çalıştığını da doğrular.
+/// **P1-1 fix (review):** Önceki test iki farklı frozen case kullanıyordu (id/description/
+/// label da farklı) — `assert_ne!(full_digest)` required_source'tan bağımsız geçerdi.
+/// Düzeltme: tek case clone edilir, yalnızca required_source değiştirilir. Böylece iki
+/// digest katmanının görev ayrımı gerçekten kanıtlanır:
+/// - measured-subject digest: required_source digest girdisi değil → aynı kalır
+/// - full-case digest: required_source full-case identity parçası → değişir
 #[test]
 fn required_source_changes_full_case_digest_not_measured_subject_digest() {
     use common::{
         blake3_hex, compute_measured_subject_digest, load_cases_by_class, serialize_case_bytes,
     };
+    use osp_core::coords::MetricSource;
 
     let cases = load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
     let none_case = cases
         .iter()
         .find(|c| c.id == "direct-coupling-required-none-001")
         .expect("none case olmalı");
-    let scip_case = cases
-        .iter()
-        .find(|c| c.id == "direct-coupling-required-scip-001")
-        .expect("scip case olmalı");
+
+    // Clone + yalnızca required_source değişir. id/description/label/space/proposal aynı.
+    let mut scip_case = none_case.clone();
+    scip_case.task.target_predicate_set.predicates[0]
+        .predicate
+        .required_source = Some(MetricSource::Scip);
+    assert_eq!(
+        none_case.id, scip_case.id,
+        "id aynı kalmalı (yalnızca required_source değişir)"
+    );
+    assert_eq!(
+        none_case.description, scip_case.description,
+        "description aynı kalmalı"
+    );
 
     // Measured-subject digest: aynı (required_source digest girdisi değil).
     let none_subject = compute_measured_subject_digest(none_case)
         .expect("none measured-subject digest üretilebilmeli");
-    let scip_subject = compute_measured_subject_digest(scip_case)
+    let scip_subject = compute_measured_subject_digest(&scip_case)
         .expect("scip measured-subject digest üretilebilmeli");
     assert_eq!(
         hex::encode(&none_subject),
@@ -2252,10 +2422,11 @@ fn required_source_changes_full_case_digest_not_measured_subject_digest() {
 
     // Full-case digest: farklı (required_source full-case digest girdisi).
     let none_full = blake3_hex(&serialize_case_bytes(none_case));
-    let scip_full = blake3_hex(&serialize_case_bytes(scip_case));
+    let scip_full = blake3_hex(&serialize_case_bytes(&scip_case));
     assert_ne!(
         none_full, scip_full,
-        "required_source full-case digest'i değiştirmeli (declaration full-case identity parçası)"
+        "required_source full-case digest'i değiştirmeli (declaration full-case identity parçası); \
+         id/description/label aynı olduğundan fark yalnızca required_source'tan gelmeli"
     );
 }
 
