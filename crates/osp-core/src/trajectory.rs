@@ -743,6 +743,16 @@ impl Task {
     /// free function'a extract edildi — restore path (canonical evidence → PredicateSet)
     /// aynı validator'ı kullanır. Policy validation bu metodda kalır (TaskPolicy restore
     /// path ayrı).
+    /// **Public declaration validation boundary (Faz 8 test-project review P0-1).**
+    ///
+    /// Tek truth source `validate_for_commit`; CLI/MCP/harness loader aynı semantiği kullanır.
+    /// Task declaration authority'yi ikiye bölmek (core validator + CLI-side kopya) drift
+    /// riski doğurur — bu façade core-owned canonical validation'ı external crate'lere açar.
+    /// CLI'da yalnız harness'e özgü ek doğrulamalar (snapshot binding, scope equality) kalır.
+    pub fn validate(&self) -> Result<(), TaskValidationError> {
+        self.validate_for_commit()
+    }
+
     pub(crate) fn validate_for_commit(&self) -> Result<(), TaskValidationError> {
         // **INV-T9 #70 Faz 5 Adım 6 (P0-1):** Shared predicate-goal validator.
         validate_predicate_goal_for_commit(self.id, &self.target_predicate_set)?;

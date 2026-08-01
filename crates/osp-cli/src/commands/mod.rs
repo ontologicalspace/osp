@@ -3,6 +3,9 @@
 //! Pattern: osp-desktop cmd_simulate_claim (lib.rs:257-278) reuse —
 //! analyze_repo_with_config → CoordinateSystem::default_raw_five → SpaceEngine.
 
+pub mod harness_task;
+pub mod repo_snapshot;
+
 use std::path::PathBuf;
 
 use clap::{Args, ValueEnum};
@@ -273,10 +276,22 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     use osp_core::engine::{EngineConfig, SpaceEngine};
     use osp_core::vision::VisionVector;
 
+    // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
+    // Pre-capture repository snapshot (HEAD + tracked paths + clean state).
+    let snapshot_before =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+    // P0-3: harness requires clean worktree (drift fence prerequisite).
+    repo_snapshot::ensure_snapshot_eligible(&snapshot_before).map_err(|e| anyhow::anyhow!(e))?;
+
     // 1. Analyze -> space.
     let registry = AdapterRegistry::default_all();
     let config = AnalysisConfig::default();
     let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
+
+    // P1-2: analyzed path ⊆ HEAD tracked-path invariant (fail-closed for untracked files).
+    repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     // 2. Engine (D2 gerçek measure).
     let cs = CoordinateSystem::default_raw_five(
         // INV-T9 #70: production preset — graph topology TreeSitter, observed cohesion Scip.
@@ -298,12 +313,16 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         vision,
         EngineConfig::default_calibrated(),
     )?;
-    // 3. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
+
+    // 3. Task resolution: harness task file (snapshot-bound) or hardcoded legacy fallback.
+    let task = resolve_task(&args, &snapshot_before, &result.node_paths)?;
+
+    // 4. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
     match args.llm.as_str() {
         "real" => {
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
-            run_navigator(&llm, &mut engine, &args)?;
+            run_navigator(&llm, &mut engine, &args, task)?;
         }
         _ => {
             // mock (default)
@@ -315,10 +334,108 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
             let proposals: Vec<osp_core::agent::DeltaProposal> =
                 serde_json::from_str(&proposals_json)?;
             let llm = crate::mock_llm::FileMockLlm::new(proposals);
-            run_navigator(&llm, &mut engine, &args)?;
+            run_navigator(&llm, &mut engine, &args, task)?;
         }
     }
+
+    // 5. Post-capture drift fence: repository must be unchanged during analysis+run
+    //    (review P0-3). Equal snapshots ⇒ no transient mutation crossed the boundary.
+    let snapshot_after =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+    if snapshot_before != snapshot_after {
+        anyhow::bail!(
+            "repository changed during trajectory attempt (head/tracked/clean drift) — \
+             analysis-run consistency violated"
+        );
+    }
     Ok(())
+}
+
+/// Resolve task: harness file (`--task`) or hardcoded legacy fallback (backward-compat).
+///
+/// Mode matrix (review P0-2 — no legacy fallback bypass):
+/// - `(Harness, Some(path))` → snapshot-bound harness task (HEAD + scope binding + Node-only V1)
+/// - `(Harness, None)`       → `Err` — harness REQUIRES snapshot-bound task file; legacy fallback
+///                              tüm harness garantilerini bypass eder.
+/// - `(Production, Some)`    → snapshot-bound task, witness policy Production (trusted operator)
+/// - `(Production, None)`    → legacy hardcoded coupling ≤ 0.55 (D1 backward-compat)
+fn resolve_task(
+    args: &TrajectoryAttemptArgs,
+    snapshot: &repo_snapshot::RepositorySnapshot,
+    node_paths: &std::collections::HashMap<u64, String>,
+) -> anyhow::Result<osp_core::trajectory::Task> {
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, OpKind, PredicateAxis, PredicateFailurePolicy,
+        PredicateMode, PredicateScope, PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+    match (args.execution_mode, args.task.as_ref()) {
+        (CliExecutionMode::Harness, Some(task_path)) => {
+            let task = harness_task::load_and_validate_harness_task(
+                task_path,
+                args.task_id,
+                snapshot,
+                node_paths,
+                args.maneuver_limit,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(task)
+        }
+        (CliExecutionMode::Harness, None) => {
+            // P0-2: harness REQUIRES snapshot-bound task file — legacy fallback bypass edemez.
+            anyhow::bail!(
+                "--execution-mode harness requires --task <path> (snapshot-bound task file); \
+                 legacy fallback disables all harness guarantees (Paper 2 scoped relaxation)"
+            );
+        }
+        (CliExecutionMode::Production, Some(task_path)) => {
+            // Production + task file: snapshot-bound task, witness Production (trusted operator).
+            let task = harness_task::load_and_validate_harness_task(
+                task_path,
+                args.task_id,
+                snapshot,
+                node_paths,
+                args.maneuver_limit,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(task)
+        }
+        (CliExecutionMode::Production, None) => {
+            // Legacy hardcoded fallback (Node(0), coupling ≤ 0.55). D1 backward-compat.
+            let mut policy = TaskPolicy::default();
+            policy.maneuver_limit = args.maneuver_limit.unwrap_or(5);
+            policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+            Ok(osp_core::trajectory::Task {
+                id: args.task_id,
+                milestone_id: 1,
+                label: "CLI trajectory attempt".into(),
+                target_predicate_set: PredicateSet {
+                    mode: PredicateMode::All,
+                    predicates: vec![WeightedPredicate {
+                        predicate: MetricPredicate {
+                            metric: PredicateAxis::Coupling,
+                            operator: ComparisonOp::Le,
+                            threshold: 0.55,
+                            scope: PredicateScope::Node(0),
+                            required_source: Some(osp_core::coords::MetricSource::Scip),
+                            tolerance: 0.0,
+                        },
+                        weight: None,
+                    }],
+                    preferred_vector: Some(osp_core::coords::RawPosition {
+                        x: 0.55,
+                        y: 0.6,
+                        z: 0.4,
+                        w: 0.5,
+                        v: 0.3,
+                    }),
+                },
+                policy,
+                allowed_operations: vec![OpKind::RemoveImport],
+                constraints: vec![],
+                status: TaskStatus::Pending,
+            })
+        }
+    }
 }
 
 /// Navigator çalıştır (generic LlmClient — mock veya real).
@@ -326,49 +443,15 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     llm: &L,
     engine: &mut osp_core::engine::SpaceEngine,
     args: &TrajectoryAttemptArgs,
+    task: osp_core::trajectory::Task,
 ) -> anyhow::Result<()> {
     use osp_core::navigator::{AgentNavigator, NavigatorResult};
     use osp_core::trajectory::{
-        InMemoryTaskRegistry, MilestoneId, OperatorCapability, PredicateFailurePolicy, Task,
-        TaskPolicy, TaskStatus, TrajectoryId,
+        InMemoryTaskRegistry, MilestoneId, OperatorCapability, TrajectoryId,
     };
-    // 4. Task registry (basit — coupling <= 0.55 predicate).
     // CLI = operator mode (INV-T2) — trusted-boundary API (PR35 hardening).
     let _cap = OperatorCapability::issue_for_operator_session();
     let mut task_registry = InMemoryTaskRegistry::new();
-    let mut policy = TaskPolicy::default();
-    policy.maneuver_limit = args.maneuver_limit.unwrap_or(5);
-    policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
-    let task = Task {
-        id: args.task_id,
-        milestone_id: 1,
-        label: "CLI trajectory attempt".into(),
-        target_predicate_set: osp_core::trajectory::PredicateSet {
-            mode: osp_core::trajectory::PredicateMode::All,
-            predicates: vec![osp_core::trajectory::WeightedPredicate {
-                predicate: osp_core::trajectory::MetricPredicate {
-                    metric: osp_core::trajectory::PredicateAxis::Coupling,
-                    operator: osp_core::trajectory::ComparisonOp::Le,
-                    threshold: 0.55,
-                    scope: osp_core::trajectory::PredicateScope::Node(0),
-                    required_source: Some(osp_core::coords::MetricSource::Scip),
-                    tolerance: 0.0,
-                },
-                weight: None,
-            }],
-            preferred_vector: Some(osp_core::coords::RawPosition {
-                x: 0.55,
-                y: 0.6,
-                z: 0.4,
-                w: 0.5,
-                v: 0.3,
-            }),
-        },
-        policy,
-        allowed_operations: vec![osp_core::trajectory::OpKind::RemoveImport],
-        constraints: vec![],
-        status: TaskStatus::Pending,
-    };
     task_registry.insert(task);
     // 5. Navigator.
     let current_measured = osp_core::navigator::provenanced_from_raw(
@@ -524,4 +607,63 @@ pub fn run_evidence_export(args: EvidenceArgs) -> anyhow::Result<()> {
         println!("No evidence input provided. Run `osp trajectory attempt` first.");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod mode_matrix_tests {
+    //! Review P0-2 — harness execution mode requires --task (no legacy fallback bypass).
+    use super::*;
+    use std::collections::HashMap;
+
+    fn snapshot_fixture() -> repo_snapshot::RepositorySnapshot {
+        repo_snapshot::RepositorySnapshot {
+            head: "0123456789abcdef0123456789abcdef01234567"
+                .to_string()
+                .try_into()
+                .unwrap(),
+            tracked_paths: std::collections::BTreeSet::from(["src/a.rs".to_string()]),
+            clean: true,
+        }
+    }
+
+    fn args(mode: CliExecutionMode, task: Option<PathBuf>) -> TrajectoryAttemptArgs {
+        TrajectoryAttemptArgs {
+            task_id: 7,
+            repo: PathBuf::from("."),
+            proposals: None,
+            llm: "mock".into(),
+            maneuver_limit: None,
+            task,
+            execution_mode: mode,
+            witness: CliWitnessMode::default(),
+            format: "human".into(),
+        }
+    }
+
+    #[test]
+    fn harness_without_task_file_is_rejected() {
+        let snap = snapshot_fixture();
+        let node_paths = HashMap::new();
+        let err = resolve_task(&args(CliExecutionMode::Harness, None), &snap, &node_paths)
+            .expect_err("harness without --task must be rejected");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--execution-mode harness requires --task"),
+            "expected harness-requires-task message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn production_without_task_file_falls_back_to_legacy() {
+        let snap = snapshot_fixture();
+        let node_paths = HashMap::new();
+        let task =
+            resolve_task(&args(CliExecutionMode::Production, None), &snap, &node_paths)
+                .expect("production without --task falls back to legacy");
+        assert_eq!(task.id, 7);
+        assert_eq!(
+            task.allowed_operations,
+            vec![osp_core::trajectory::OpKind::RemoveImport]
+        );
+    }
 }
