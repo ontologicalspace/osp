@@ -1566,173 +1566,1082 @@ fn sorted(v: &[u64]) -> Vec<u64> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// required_source decision matrix (review P0-2 — INV-T4 provenance-authority)
+// Faz 8-P2 #88 — DirectPerAxisAuthority behavioral matrix (MD-2 pozitif-matching)
 // ═══════════════════════════════════════════════════════════════════════════════
+//
+// Concrete V2 per-axis source required_source ile eşleşince predicate completion
+// Completed; legacy V1 projection (uniform Scip) eşleşmeyince SourceInsufficient.
+// Coupling axis, Node(1) scope. PR #85 inline matrix frozen corpus'a taşındı
+// (assertion-equivalence map: her eski dal bir frozen case'de karşılandı).
+//
+// **Evidence level:** predicate completion (PredicateSet::evaluate_completion) —
+// task/mainline/witness completion iddiası DEĞİL.
+//
+// **P1-1 affected_nodes:[1]:** compute_raw_from_delta affected_nodes'u ölçüm kümesi
+// olarak kullanır → V1 measurement selector = Node(1) = V2 subject scope → V1/V2
+// numeric equality (coupling 0.5). Threshold Le 0.5 (exact eski fixture, binary exact).
 
-/// **Review tur 2 P0-2 + tur 3 P0-1 fix: required_source decision matrix.**
-///
-/// Matching scope'ta BİLE V1 coupling source = Scip (provenanced_from_raw override),
-/// V2 coupling source = TreeSitter (engine axis default). Bu, subject-authority'den
-/// **bağımsız** bir provenance-authority divergence'ı.
-///
-/// **Tur 3 P0-1 fix:** Önceki test sadece lokal `bool` karşılaştırması yapıyordu
-/// (`Scip != TreeSitter` kanıtı). Artık gerçek `PredicateSet::evaluate_completion`
-/// çağrılıp `PredicateSetResult` (Completed/SourceInsufficient/NotCompleted) exact
-/// pinleniyor. Bu, **PredicateSet-level** decision divergence'ı gerçek evaluation ile
-/// kanıtlar (PredicateGate/pipeline-level DEĞİL — review tur 6 terminoloji).
 #[test]
-fn required_source_matrix_shows_provenance_authority_divergence() {
+fn direct_per_axis_required_source_matrix_accepts_matching_v2_predicate_authority() {
     use osp_core::coords::MetricSource;
-    use osp_core::space::{Node, NodeKind};
-    use osp_core::trajectory::{
-        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
-        PredicateSetResult, TaskPolicy, TaskStatus, WeightedPredicate,
+    use osp_core::trajectory::PredicateSetResult;
+
+    // Frozen corpus'tan DirectPerAxisAuthority family'yi yükle.
+    let cases = common::load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
+    assert_eq!(
+        cases.len(),
+        5,
+        "DirectPerAxisAuthority family exact 5 case içermeli"
+    );
+
+    // Executable expected table — PR #85 inline matrix assertion-equivalence map.
+    // (case_id, V1_predicate_result, V2_predicate_result)
+    let expected: [(&str, PredicateSetResult, PredicateSetResult); 5] = [
+        (
+            "direct-coupling-required-none-001",
+            PredicateSetResult::Completed,
+            PredicateSetResult::Completed,
+        ),
+        (
+            "direct-coupling-required-scip-001",
+            PredicateSetResult::Completed,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        // Pozitif-matching kontrolü: concrete V2 source eşleşince V2 Completed.
+        (
+            "direct-coupling-required-tree-sitter-001",
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::Completed,
+        ),
+        (
+            "direct-coupling-required-placeholder-001",
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        (
+            "direct-coupling-required-heuristic-001",
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
+    ];
+
+    for case in &cases {
+        let exp = expected
+            .iter()
+            .find(|(id, _, _)| *id == case.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "DirectPerAxisAuthority case {} expected table'da yok",
+                    case.id
+                )
+            });
+
+        // Fresh engine per case — önceki case'in mutation'ı sızıntı yapmaz.
+        let mut engine_v1 = common::engine_with_case_space(case);
+        let mut engine_v2 = common::engine_with_case_space(case);
+        let obs_v1 = common::evaluate_v1_case(&mut engine_v1, case);
+        let obs_v2 = common::evaluate_v2_candidate_case(&mut engine_v2, case);
+
+        // Standalone measurement probe Produced — her iki harness'da.
+        let measured_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
+            other => panic!("V1 {} measurement Produced olmalı; got {other:?}", case.id),
+        };
+        let measured_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
+            other => panic!("V2 {} measurement Produced olmalı; got {other:?}", case.id),
+        };
+
+        // Numeric contract — coupling after = 0.5 (Imports 1→2, Node(1) out-degree=1).
+        // V1/V2 numeric equality: divergence yalnızca provenance authority'den.
+        let v1_coupling = measured_v1.coupling.value;
+        let v2_coupling = measured_v2.coupling.value;
+        assert!(
+            (v1_coupling - 0.5).abs() <= 1e-12,
+            "{} V1 coupling after 0.5'e tolerance içinde olmalı; got {v1_coupling}",
+            case.id
+        );
+        assert!(
+            (v2_coupling - 0.5).abs() <= 1e-12,
+            "{} V2 coupling after 0.5'e tolerance içinde olmalı; got {v2_coupling}",
+            case.id
+        );
+        assert!(
+            (v1_coupling - v2_coupling).abs() <= 1e-12,
+            "{} V1/V2 coupling numeric equality — divergence yalnızca provenance'dan",
+            case.id
+        );
+
+        // **P1-4 fix (review):** before coupling = 0.0 pin (izole Node(1), out-degree=0
+        // pre-delta). Imports 1→2 delta coupling'i 0.0 → 0.5 değiştirir (intentional
+        // measureability — Direct family metric-neutral DEĞİL). before/after farkı
+        // provenance divergence değil gerçek structural delta.
+        let baseline_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V1 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let baseline_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V2 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let v1_before_bits = match &baseline_v1 {
+            common::BaselineObservation::LegacyComputed { values_bits, .. } => values_bits[0],
+            other => panic!(
+                "V1 {} LegacyComputed baseline olmalı; got {other:?}",
+                case.id
+            ),
+        };
+        let v2_before_bits = match &baseline_v2 {
+            common::BaselineObservation::Available { values_bits, .. } => values_bits[0],
+            other => panic!("V2 {} Available baseline olmalı; got {other:?}", case.id),
+        };
+        let before_coupling_v1 = f64::from_bits(v1_before_bits);
+        let before_coupling_v2 = f64::from_bits(v2_before_bits);
+        assert!(
+            (before_coupling_v1 - 0.0).abs() <= 1e-12,
+            "{} V1 before coupling 0.0 olmalı (izole Node(1)); got {before_coupling_v1}",
+            case.id
+        );
+        assert!(
+            (before_coupling_v2 - 0.0).abs() <= 1e-12,
+            "{} V2 before coupling 0.0 olmalı (izole Node(1)); got {before_coupling_v2}",
+            case.id
+        );
+
+        // Source matrix: V1 legacy projected = Scip, V2 measured = TreeSitter.
+        assert_eq!(
+            measured_v1.coupling.source,
+            MetricSource::Scip,
+            "{} V1 coupling source legacy projected Scip olmalı",
+            case.id
+        );
+        assert_eq!(
+            measured_v2.coupling.source,
+            MetricSource::TreeSitter,
+            "{} V2 coupling source measured TreeSitter olmalı (engine topology_source)",
+            case.id
+        );
+
+        // Predicate completion — gerçek PredicateSet::evaluate_completion çağrısı.
+        let ps = &case.task.target_predicate_set;
+        let v1_result = ps.evaluate_completion(&measured_v1);
+        let v2_result = ps.evaluate_completion(&measured_v2);
+        assert_eq!(
+            v1_result, exp.1,
+            "{} V1 predicate result mismatch (expected {:?})",
+            case.id, exp.1
+        );
+        assert_eq!(
+            v2_result, exp.2,
+            "{} V2 predicate result mismatch (expected {:?})",
+            case.id, exp.2
+        );
+
+        // MD-2 divergence kanıtı: Scip/TreeSitter için V1/V2 farklı predicate result.
+        if case.id == "direct-coupling-required-scip-001"
+            || case.id == "direct-coupling-required-tree-sitter-001"
+        {
+            assert_ne!(
+                v1_result, v2_result,
+                "{} MD-2 provenance-authority divergence: V1 {:?} ≠ V2 {:?}",
+                case.id, v1_result, v2_result
+            );
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Faz 8-P2 #88 — MixedPerAxisSources behavioral matrix (MD-2 fail-closed + decl-validation)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Mixed aggregate measured source — concrete authority şartını karşılamaz, declaration
+// requirement olarak talep edilemez. Cohesion axis, Subgraph[1,2] scope.
+//
+// 5 predicate evaluation case (None/Scip/TreeSitter/Heuristic/Placeholder): Mixed hiçbir
+// non-Mixed required-source token'ını karşılayamaz → SourceInsufficient (fail-closed).
+// required_source=None → Completed (Mixed numeric değerlendirmeye katılır).
+//
+// 1 declaration-validation case (Mixed): commit_task_claim validate_for_commit →
+// InvalidRequiredMetricSource → EngineCommitError::TaskValidation. Measurement'dan ÖNCE
+// terminal reject. Standalone probe Mixed üretir, commit pipeline durur (probe vs pipeline).
+
+#[test]
+fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
+    use osp_core::coords::MetricSource;
+    use osp_core::trajectory::{PredicateSetResult, TaskValidationError};
+
+    let cases = common::load_cases_by_class(common::CaseClass::MixedPerAxisSources);
+    assert_eq!(
+        cases.len(),
+        6,
+        "MixedPerAxisSources family exact 6 case içermeli"
+    );
+
+    // 5 predicate evaluation case için expected matrix.
+    // (case_id, V1_predicate_result, V2_predicate_result)
+    let predicate_expected: [(&str, PredicateSetResult, PredicateSetResult); 5] = [
+        (
+            "mixed-cohesion-required-none-001",
+            PredicateSetResult::Completed,
+            PredicateSetResult::Completed,
+        ),
+        (
+            "mixed-cohesion-required-scip-001",
+            PredicateSetResult::Completed,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        (
+            "mixed-cohesion-required-tree-sitter-001",
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        (
+            "mixed-cohesion-required-heuristic-001",
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
+        (
+            "mixed-cohesion-required-placeholder-001",
+            PredicateSetResult::SourceInsufficient,
+            PredicateSetResult::SourceInsufficient,
+        ),
+    ];
+
+    for case in &cases {
+        if case.id == "mixed-cohesion-required-mixed-invalid-001" {
+            // Declaration-validation case — ayrı blokta ele alınır.
+            continue;
+        }
+
+        let exp = predicate_expected
+            .iter()
+            .find(|(id, _, _)| *id == case.id)
+            .unwrap_or_else(|| {
+                panic!(
+                    "MixedPerAxisSources predicate case {} expected table'da yok",
+                    case.id
+                )
+            });
+
+        let mut engine_v1 = common::engine_with_case_space(case);
+        let mut engine_v2 = common::engine_with_case_space(case);
+        let obs_v1 = common::evaluate_v1_case(&mut engine_v1, case);
+        let obs_v2 = common::evaluate_v2_candidate_case(&mut engine_v2, case);
+
+        let measured_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
+            other => panic!("V1 {} measurement Produced olmalı; got {other:?}", case.id),
+        };
+        let measured_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
+            other => panic!("V2 {} measurement Produced olmalı; got {other:?}", case.id),
+        };
+
+        // Cohesion source matrix: V1 legacy projected = Scip, V2 measured = Mixed.
+        assert_eq!(
+            measured_v1.cohesion.source,
+            MetricSource::Scip,
+            "{} V1 cohesion source legacy projected Scip olmalı",
+            case.id
+        );
+        assert_eq!(
+            measured_v2.cohesion.source,
+            MetricSource::Mixed,
+            "{} V2 cohesion source measured Mixed olmalı (aggregation [Scip, Placeholder])",
+            case.id
+        );
+
+        // Numeric equality — V1/V2 cohesion value tolerance içinde eşit (0.55).
+        let v1_cohesion = measured_v1.cohesion.value;
+        let v2_cohesion = measured_v2.cohesion.value;
+        assert!(
+            (v1_cohesion - v2_cohesion).abs() <= 1e-12,
+            "{} V1/V2 cohesion numeric equality — divergence yalnızca provenance'dan; v1={v1_cohesion}, v2={v2_cohesion}",
+            case.id
+        );
+        assert!(
+            (v1_cohesion - 0.55).abs() <= 1e-12,
+            "{} cohesion value 0.55'e tolerance içinde olmalı (eşit mass centroid (0.6+0.5)/2); got {v1_cohesion}",
+            case.id
+        );
+
+        // **P1-4 fix (review):** DependsOn delta 5 measured axis'te no-op — before (baseline)
+        // ile after (measured) value bits eşit. coupling/instability sadece Imports okur,
+        // cohesion edge-bağımsız, entropy/witness_depth edge'den bağımsız. DependsOn bunların
+        // hiçbirini etkilemez → metric isolation. Bu kanıtlanmazsa ileride DependsOn coupling'i
+        // etkilemeye başlarsa cohesion predicate sonuçları aynı kaldığı sürece testler yeşil kalır.
+        let baseline_v1 = match &obs_v1.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V1 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let baseline_v2 = match &obs_v2.measurement {
+            MeasurementObservation::Produced { baseline, .. } => baseline.clone(),
+            other => panic!("V2 {} baseline olmalı; got {other:?}", case.id),
+        };
+        let after_bits_v1 = common::axis_value_bits(&measured_v1);
+        let after_bits_v2 = common::axis_value_bits(&measured_v2);
+        // V1 baseline (LegacyComputed) ile after — 5 axis bits eşit.
+        let before_bits_v1 = match &baseline_v1 {
+            common::BaselineObservation::LegacyComputed { values_bits, .. } => *values_bits,
+            other => panic!(
+                "V1 {} LegacyComputed baseline olmalı; got {other:?}",
+                case.id
+            ),
+        };
+        assert_eq!(
+            before_bits_v1, after_bits_v1,
+            "{} V1 DependsOn delta 5 axis no-op olmalı (before==after bits)",
+            case.id
+        );
+        // V2 baseline (Available) ile after — 5 axis bits eşit.
+        let before_bits_v2 = match &baseline_v2 {
+            common::BaselineObservation::Available { values_bits, .. } => *values_bits,
+            other => panic!("V2 {} Available baseline olmalı; got {other:?}", case.id),
+        };
+        assert_eq!(
+            before_bits_v2, after_bits_v2,
+            "{} V2 DependsOn delta 5 axis no-op olmalı (before==after bits)",
+            case.id
+        );
+
+        // **P2-2 fix (review):** DependsOn delta source-neutrality — before (baseline) ile
+        // after (measured) 5-axis sources eşit. PR'ın konusu provenance authority olduğu için
+        // izolasyonun source tarafı da pinlenmeli; ileride DependsOn numeric değeri değiştirmeyip
+        // yalnız provenance üretimini değiştirirse fixture bunu yakalar.
+        let before_sources_v1 = match &baseline_v1 {
+            common::BaselineObservation::LegacyComputed { sources, .. } => *sources,
+            other => panic!(
+                "V1 {} LegacyComputed baseline olmalı; got {other:?}",
+                case.id
+            ),
+        };
+        let before_sources_v2 = match &baseline_v2 {
+            common::BaselineObservation::Available { sources, .. } => *sources,
+            other => panic!("V2 {} Available baseline olmalı; got {other:?}", case.id),
+        };
+        assert_eq!(
+            before_sources_v1,
+            common::axis_sources(&measured_v1),
+            "{} V1 DependsOn delta 5 axis source no-op olmalı (before==after sources)",
+            case.id
+        );
+        assert_eq!(
+            before_sources_v2,
+            common::axis_sources(&measured_v2),
+            "{} V2 DependsOn delta 5 axis source no-op olmalı (before==after sources)",
+            case.id
+        );
+
+        // Predicate completion — gerçek PredicateSet::evaluate_completion.
+        let ps = &case.task.target_predicate_set;
+        let v1_result = ps.evaluate_completion(&measured_v1);
+        let v2_result = ps.evaluate_completion(&measured_v2);
+        assert_eq!(
+            v1_result, exp.1,
+            "{} V1 predicate result mismatch (expected {:?})",
+            case.id, exp.1
+        );
+        assert_eq!(
+            v2_result, exp.2,
+            "{} V2 predicate result mismatch (expected {:?})",
+            case.id, exp.2
+        );
+
+        // MD-2 fail-closed divergence: Scip için V1 Completed, V2 SourceInsufficient.
+        if case.id == "mixed-cohesion-required-scip-001" {
+            assert_ne!(
+                v1_result, v2_result,
+                "{} MD-2 fail-closed: Mixed Scip şartını karşılamaz → V2 SourceInsufficient",
+                case.id
+            );
+        }
+    }
+
+    // --- 6. case: declaration-validation reject (required_source=Some(Mixed)) ---
+    let invalid_case = cases
+        .iter()
+        .find(|c| c.id == "mixed-cohesion-required-mixed-invalid-001")
+        .expect("mixed-cohesion-required-mixed-invalid-001 olmalı");
+
+    // Pre-aggregation production-path (P1-4): Node(1) → Scip, Node(2) → Placeholder,
+    // Subgraph[1,2] → Mixed. Mixed gerçek aggregation hattından doğar.
+    let node1_cohesion = measure_single_node_cohesion(invalid_case, 1);
+    let node2_cohesion = measure_single_node_cohesion(invalid_case, 2);
+    assert_eq!(
+        node1_cohesion.source,
+        MetricSource::Scip,
+        "Node(1) cohesion source Scip olmalı (cohesion=Some → observed_source)"
+    );
+    assert_eq!(
+        node2_cohesion.source,
+        MetricSource::Placeholder,
+        "Node(2) cohesion source Placeholder olmalı (cohesion=None → effective fallback)"
+    );
+
+    let mut engine_v1 = common::engine_with_case_space(invalid_case);
+    let mut engine_v2 = common::engine_with_case_space(invalid_case);
+
+    // **P1-3 fix (review):** No-mutation snapshot her engine için AYRI alınır (önce V1
+    // snapshot engine_v1'den, V2 snapshot engine_v2'den). Önceki kod before'ı engine_v1'den
+    // alıp after'ı engine_v1 ile karşılaştırıyordu — V2 probe/commit engine_v2'de çalıştığı
+    // için V2 mutasyonu görünmüyordu. Snapshot SpaceDigest + revision + node/edge count.
+    let v1_before = engine_snapshot(&engine_v1);
+    let v2_before = engine_snapshot(&engine_v2);
+
+    // Standalone probe (V2) — Mixed üretir (commit pipeline'dan ayrı).
+    let obs_v2_probe = common::evaluate_v2_candidate_case(&mut engine_v2, invalid_case);
+    let v2_measured = match &obs_v2_probe.measurement {
+        MeasurementObservation::Produced {
+            sources,
+            measured_after,
+            ..
+        } => {
+            // Mixed gerçekten aggregation'dan geldi — cohesion axis Mixed.
+            assert_eq!(
+                sources[1],
+                MetricSource::Mixed,
+                "V2 {} probe cohesion source Mixed olmalı",
+                invalid_case.id
+            );
+            assert_eq!(
+                measured_after.cohesion.source,
+                MetricSource::Mixed,
+                "V2 {} probe measured_after cohesion source Mixed olmalı",
+                invalid_case.id
+            );
+            measured_after.clone()
+        }
+        other => panic!(
+            "V2 {} standalone probe Mixed üretmeli (commit'den ayrı); got {other:?}",
+            invalid_case.id
+        ),
     };
 
-    // Inline matching case: node 1 space'te, task Node(1) scope, affected=[1].
-    let mut space = osp_core::space::Space::new();
+    // Commit pipeline — TaskValidation reject. Probe zaten üretti ama commit tüketmedi.
+    let obs_v1 = common::evaluate_v1_case(&mut engine_v1, invalid_case);
+    // V1: validate_for_commit measurement'dan önce → commit Err, ama V1 harness
+    // compute_raw_from_delta standalone (infallible) üretir → measurement Produced.
+    match &obs_v1.measurement {
+        MeasurementObservation::Produced { .. } => {}
+        other => panic!(
+            "V1 {} standalone probe Produced olmalı (commit reject ayrı); got {other:?}",
+            invalid_case.id
+        ),
+    }
+    // V1 pipeline: StoppedBeforeCommit { TaskValidation } — decision surface'e ulaşmadı.
+    assert!(
+        matches!(
+            &obs_v1.pipeline,
+            common::PipelineObservation::StoppedBeforeCommit {
+                stage: common::PipelineStage::TaskValidation,
+                ..
+            }
+        ),
+        "{} V1 pipeline StoppedBeforeCommit(TaskValidation) olmalı; got {:?}",
+        invalid_case.id,
+        obs_v1.pipeline
+    );
+    assert!(
+        obs_v1.decision_input.is_none(),
+        "{} V1 decision_input None olmalı (decision surface'e ulaşmadı)",
+        invalid_case.id
+    );
+
+    // V2 pipeline: aynı TaskValidation reject.
+    assert!(
+        matches!(
+            &obs_v2_probe.pipeline,
+            common::PipelineObservation::StoppedBeforeCommit {
+                stage: common::PipelineStage::TaskValidation,
+                ..
+            }
+        ),
+        "{} V2 pipeline StoppedBeforeCommit(TaskValidation) olmalı; got {:?}",
+        invalid_case.id,
+        obs_v2_probe.pipeline
+    );
+    assert!(
+        obs_v2_probe.decision_input.is_none(),
+        "{} V2 decision_input None olmalı (decision surface'e ulaşmadı)",
+        invalid_case.id
+    );
+
+    // **P1-3 fix:** No-mutation her engine için AYRI doğrulanır. Snapshot SpaceDigest +
+    // revision + node/edge count içerir — tek sayı korunup içerik/revision değişirse yakalar.
+    assert_eq!(
+        engine_snapshot(&engine_v1),
+        v1_before,
+        "{} V1 probe + commit engine state'i değiştirmemeli (SpaceDigest/revision/count)",
+        invalid_case.id
+    );
+    assert_eq!(
+        engine_snapshot(&engine_v2),
+        v2_before,
+        "{} V2 probe + commit engine state'i değiştirmemeli (SpaceDigest/revision/count)",
+        invalid_case.id
+    );
+
+    let _ = v2_measured; // probe measured (Mixed source) — kanıtlandı.
+
+    // **P1-2 fix (review):** Exact error chain — gerçek commit_task_claim result'ından.
+    // Önceki kod enum varyantını construct ediyordu (task_id: 0 yanlış) ama gerçek result'la
+    // karşılaştırmıyordu. Şimdi commit_task_claim doğrudan çağrılıp EngineCommitError::
+    // TaskValidation(TaskValidationError::InvalidRequiredMetricSource{...}) exact pinleniyor.
+    let commit_err = commit_invalid_mixed_case(invalid_case);
+    let task_id = invalid_case.task.id;
+    assert!(
+        matches!(
+            &commit_err,
+            Some(osp_core::engine::EngineCommitError::TaskValidation(
+                TaskValidationError::InvalidRequiredMetricSource {
+                    task_id: err_task_id,
+                    predicate_index: 0,
+                    required_source: MetricSource::Mixed,
+                }
+            )) if *err_task_id == task_id
+        ),
+        "{} exact error chain InvalidRequiredMetricSource{{task_id:{}, predicate_index:0, \
+         required_source:Mixed}} olmalı; got {:?}",
+        invalid_case.id,
+        task_id,
+        commit_err
+    );
+}
+
+/// Engine state snapshot — no-mutation doğrulaması için (P1-3).
+///
+/// **P1-2 fix (review):** `revision.content_digest` zaten `SpaceDigest::compute(&self.space)`
+/// ile aynı değerdir (engine.rs:2213) — `space_digest_hex` ile duplicate. Gerçek revision
+/// hareketi `sequence: t_c` ve `view_id: Ephemeral(t_c)` alanlarında taşınır. Bu yüzden
+/// snapshot'a `revision_sequence` (revision.sequence) ve `engine_t_c` (engine.t_c()) eklenir;
+/// rejected commit'in space içeriğini değiştirmeden yalnızca t_c/sequence ilerlettiği
+/// varsayımsal bir regresyon yakalanır. Checkpoint/mainline/audit engine public API'den
+/// erişilemediği için snapshot'a dahil DEĞİL — iddia edilmez.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EngineSnapshot {
+    space_digest_hex: String,
+    revision_sequence: u64,
+    engine_t_c: u64,
+    node_count: usize,
+    edge_count: usize,
+}
+
+fn engine_snapshot(engine: &osp_core::engine::SpaceEngine) -> EngineSnapshot {
+    let space_digest = osp_core::authorization::SpaceDigest::compute(engine.space())
+        .expect("SpaceDigest compute başarılı olmalı");
+    let revision = engine
+        .current_space_view_revision()
+        .expect("revision computation başarılı");
+    EngineSnapshot {
+        space_digest_hex: hex::encode(space_digest.as_bytes()),
+        revision_sequence: revision.sequence,
+        engine_t_c: engine.t_c(),
+        node_count: engine.space().nodes.len(),
+        edge_count: engine.space().edges.len(),
+    }
+}
+
+/// `commit_task_claim`'i invalid Mixed case ile çağırıp EngineCommitError döndürür (P1-2).
+///
+/// Exact error chain assertion için gerçek commit_task_claim result'ını yakalar — enum
+/// varyantı construct etmek yerine production validation'ın gerçek çıktısını kullanır.
+fn commit_invalid_mixed_case(
+    case: &common::CharacterizationCase,
+) -> Option<osp_core::engine::EngineCommitError> {
+    use osp_core::coords::MetricSource;
+    use osp_core::navigator::build_claim_from_proposal;
+    use osp_core::trajectory::{InMemoryTaskRegistry, TaskResolver};
+    use osp_core::witness::WitnessSet;
+
+    let mut engine = common::engine_with_case_space(case);
+    let probe_claim = build_claim_from_proposal(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .expect("probe claim build başarılı olmalı");
+
+    let target = case
+        .task
+        .target_predicate_set
+        .preferred_vector
+        .unwrap_or_default();
+    let measured =
+        osp_core::navigator::provenanced_from_raw(probe_claim.computed_raw, MetricSource::Scip);
+
+    let mut registry = InMemoryTaskRegistry::new();
+    registry.insert(case.task.clone());
+    let omega = WitnessSet::new(vec![]);
+
+    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
+        claim: &probe_claim,
+        omega: &omega,
+        task_resolver: &registry as &dyn TaskResolver,
+        target,
+        loss_before: osp_core::trajectory::trajectory_loss(&measured, &target),
+        measured,
+    });
+
+    match result {
+        Err(e) => Some(e),
+        Ok(_) => None,
+    }
+}
+
+/// Tek node'un cohesion ölçümünü production path üzerinden üretir (P1-4 pre-aggregation).
+///
+/// `measure_task_delta` Node(id) scope ile çağrılır → cohesion source. Bu, Mixed'in
+/// gerçek aggregation hattından geldiğini kanıtlar: Node(1)=Scip, Node(2)=Placeholder,
+/// Subgraph[1,2]=Mixed (aggregate_source).
+fn measure_single_node_cohesion(
+    case: &common::CharacterizationCase,
+    node_id: u64,
+) -> osp_core::coords::AxisMeasurement {
+    use osp_core::navigator::build_claim_from_proposal;
+    use osp_core::space::NodeId;
+    use osp_core::trajectory::{
+        MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        WeightedPredicate,
+    };
+
+    // Tek-node scope ile task üret (case'in task'ını geçici olarak değiştir).
+    let mut single_task = case.task.clone();
+    single_task.target_predicate_set = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate: MetricPredicate {
+                metric: PredicateAxis::Cohesion,
+                operator: case.task.target_predicate_set.predicates[0]
+                    .predicate
+                    .operator,
+                threshold: case.task.target_predicate_set.predicates[0]
+                    .predicate
+                    .threshold,
+                scope: PredicateScope::Node(node_id),
+                required_source: None,
+                tolerance: 0.0,
+            },
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+
+    let probe_claim = build_claim_from_proposal(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        single_task.id,
+        100,
+        1,
+    )
+    .expect("probe claim build başarılı olmalı");
+    let probe_bound = osp_core::trajectory::TaskBoundClaim {
+        claim: &probe_claim,
+        task: &single_task,
+    };
+
+    let engine = common::engine_with_case_space(case);
+    let revision = engine
+        .current_space_view_revision()
+        .expect("revision computation başarılı");
+    let token = engine
+        .measure_task_delta(&probe_bound, &revision, Some(&[node_id as NodeId][..]))
+        .expect("single-node measurement başarılı olmalı");
+
+    token.after().cohesion
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Faz 8-P2 #88 — Measured-subject digest V1 contract (negatif + metamorphic)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Exact-one predicate guard, Module scope unsupported, scope varyant ayrımı (Node≠Subgraph),
+// scope order-insensitivity, error propagation ve metamorphic digest ayrımı (required_source
+// measured-subject digest'i değiştirmez ama full-case digest'i değiştirir).
+
+/// Zero-predicate digest girişi fail-closed reddedilir (exact-one invariant).
+#[test]
+fn measured_subject_digest_v1_rejects_zero_predicates() {
+    use common::{compute_measured_subject_digest, load_cases_by_class, SubjectDigestError};
+
+    let mut cases = load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
+    let case = cases
+        .first_mut()
+        .expect("DirectPerAxisAuthority case olmalı");
+    case.task.target_predicate_set.predicates.clear();
+
+    let result = serialize_digest(case);
+    assert!(
+        matches!(
+            result,
+            Err(SubjectDigestError::ExpectedExactlyOnePredicate { actual: 0 })
+        ),
+        "zero-predicate digest ExpectedExactlyOnePredicate{{actual:0}} ile reddedilmeli; got {result:?}"
+    );
+    // Üst fonksiyon hatayı yutmaz (error propagation).
+    let digest_result = compute_measured_subject_digest(case);
+    assert!(
+        matches!(
+            digest_result,
+            Err(SubjectDigestError::ExpectedExactlyOnePredicate { .. })
+        ),
+        "compute_measured_subject_digest zero-predicate hatayı yutmamalı; got {digest_result:?}"
+    );
+}
+
+/// Multi-predicate digest girişi fail-closed reddedilir (exact-one invariant).
+#[test]
+fn measured_subject_digest_v1_rejects_multiple_predicates() {
+    use common::{compute_measured_subject_digest, load_cases_by_class, SubjectDigestError};
+
+    let mut cases = load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
+    let case = cases
+        .first_mut()
+        .expect("DirectPerAxisAuthority case olmalı");
+    let second = case.task.target_predicate_set.predicates[0].clone();
+    case.task.target_predicate_set.predicates.push(second);
+
+    let result = serialize_digest(case);
+    assert!(
+        matches!(
+            result,
+            Err(SubjectDigestError::ExpectedExactlyOnePredicate { actual: 2 })
+        ),
+        "multi-predicate digest ExpectedExactlyOnePredicate{{actual:2}} ile reddedilmeli; got {result:?}"
+    );
+    let digest_result = compute_measured_subject_digest(case);
+    assert!(
+        matches!(
+            digest_result,
+            Err(SubjectDigestError::ExpectedExactlyOnePredicate { .. })
+        ),
+        "compute_measured_subject_digest multi-predicate hatayı yutmamalı; got {digest_result:?}"
+    );
+}
+
+/// Module scope V1 evidence schema'da desteklenmez — UnsupportedScope reject.
+#[test]
+fn measured_subject_digest_v1_rejects_module_scope() {
+    use common::{load_cases_by_class, SubjectDigestError};
+    use osp_core::trajectory::PredicateScope;
+
+    let mut cases = load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
+    let case = cases
+        .first_mut()
+        .expect("DirectPerAxisAuthority case olmalı");
+    case.task.target_predicate_set.predicates[0].predicate.scope =
+        PredicateScope::Module("core".into());
+
+    let result = serialize_digest(case);
+    assert!(
+        matches!(result, Err(SubjectDigestError::UnsupportedScope { .. })),
+        "Module scope UnsupportedScope ile reddedilmeli; got {result:?}"
+    );
+}
+
+/// Node(1) ve Subgraph([1]) farklı ontolojik scope'lar — farklı digest (scope_tag ayrımı).
+///
+/// Production `CanonicalPredicateScope.scope_tag()`: Node=0, Subgraph=2. Bu tag ayrımı
+/// olmadan iki scope aynı digest üretirdi. Production canonical tip kullanıldığı için
+/// ayrım otomatik korunur.
+#[test]
+fn measured_subject_digest_v1_node_scope_differs_from_subgraph_singleton() {
+    use common::load_cases_by_class;
+    use osp_core::trajectory::PredicateScope;
+
+    // Node(1) scope — direct family'den al.
+    let mut node_cases = load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
+    let node_case = node_cases.first_mut().expect("direct case olmalı");
+
+    // Subgraph([1]) scope — mixed family'nin scope'unu değiştir.
+    let mut sub_cases = load_cases_by_class(common::CaseClass::MixedPerAxisSources);
+    let sub_case = sub_cases.first_mut().expect("mixed case olmalı");
+    sub_case.task.target_predicate_set.predicates[0]
+        .predicate
+        .scope = PredicateScope::Subgraph(vec![1]);
+
+    // Space'i de node_case ile eşitle ki sadece scope farkı olsun (axis de cohesion →
+    // direct case'in axis'ini cohesion'a çek). Önce node_case'in axis'ini cohesion yap.
+    node_case.task.target_predicate_set.predicates[0]
+        .predicate
+        .metric = osp_core::trajectory::PredicateAxis::Cohesion;
+    // Space ve proposal'ı da eşitle — sub_case'in space'ini kullan.
+    node_case.space = sub_case.space.clone();
+    node_case.proposal = sub_case.proposal.clone();
+
+    let node_digest = serialize_digest(node_case).expect("Node(1) digest üretilebilmeli");
+    let sub_digest = serialize_digest(sub_case).expect("Subgraph([1]) digest üretilebilmeli");
+
+    assert_ne!(
+        node_digest, sub_digest,
+        "Node(1) ve Subgraph([1]) farklı ontolojik scope'lar — production scope_tag ayrımı farklı digest üretmeli (Node=0, Subgraph=2)"
+    );
+}
+
+/// Subgraph scope order-insensitive: [1,2] ve [2,1] aynı digest.
+///
+/// Production `CanonicalSubgraphScope::try_new` sort_unstable yaptığı için member order
+/// digest'i etkilemez. Bu, characterization case'lerde member sırasının donmuş digest'i
+/// bozmasını engeller.
+#[test]
+fn measured_subject_digest_v1_subgraph_scope_is_order_insensitive() {
+    use common::load_cases_by_class;
+    use osp_core::trajectory::PredicateScope;
+
+    let mut cases = load_cases_by_class(common::CaseClass::MixedPerAxisSources);
+    let case = cases.first_mut().expect("mixed case olmalı");
+
+    // Orijinal scope [1,2].
+    let digest_12 = serialize_digest(case).expect("[1,2] digest üretilebilmeli");
+
+    // Ters sıra [2,1].
+    case.task.target_predicate_set.predicates[0].predicate.scope =
+        PredicateScope::Subgraph(vec![2, 1]);
+    let digest_21 = serialize_digest(case).expect("[2,1] digest üretilebilmeli");
+
+    assert_eq!(
+        digest_12, digest_21,
+        "Subgraph([1,2]) ve Subgraph([2,1]) aynı digest üretmeli (CanonicalSubgraphScope sort)"
+    );
+}
+
+/// Metamorphic digest testi: required_source measured-subject digest'i DEĞİŞTİRMEZ,
+/// full-case digest'i DEĞİŞTİRİR.
+///
+/// **P1-1 fix (review):** Önceki test iki farklı frozen case kullanıyordu (id/description/
+/// label da farklı) — `assert_ne!(full_digest)` required_source'tan bağımsız geçerdi.
+/// Düzeltme: tek case clone edilir, yalnızca required_source değiştirilir. Böylece iki
+/// digest katmanının görev ayrımı gerçekten kanıtlanır:
+/// - measured-subject digest: required_source digest girdisi değil → aynı kalır
+/// - full-case digest: required_source full-case identity parçası → değişir
+#[test]
+fn required_source_changes_full_case_digest_not_measured_subject_digest() {
+    use common::{
+        blake3_hex, compute_measured_subject_digest, load_cases_by_class, serialize_case_bytes,
+    };
+    use osp_core::coords::MetricSource;
+
+    let cases = load_cases_by_class(common::CaseClass::DirectPerAxisAuthority);
+    let none_case = cases
+        .iter()
+        .find(|c| c.id == "direct-coupling-required-none-001")
+        .expect("none case olmalı");
+
+    // Clone + yalnızca required_source değişir. id/description/label/space/proposal aynı.
+    let mut scip_case = none_case.clone();
+    scip_case.task.target_predicate_set.predicates[0]
+        .predicate
+        .required_source = Some(MetricSource::Scip);
+    assert_eq!(
+        none_case.id, scip_case.id,
+        "id aynı kalmalı (yalnızca required_source değişir)"
+    );
+    assert_eq!(
+        none_case.description, scip_case.description,
+        "description aynı kalmalı"
+    );
+
+    // Measured-subject digest: aynı (required_source digest girdisi değil).
+    let none_subject = compute_measured_subject_digest(none_case)
+        .expect("none measured-subject digest üretilebilmeli");
+    let scip_subject = compute_measured_subject_digest(&scip_case)
+        .expect("scip measured-subject digest üretilebilmeli");
+    assert_eq!(
+        hex::encode(&none_subject),
+        hex::encode(&scip_subject),
+        "required_source measured-subject digest'i değiştirmemeli (farklı declaration, aynı subject)"
+    );
+
+    // Full-case digest: farklı (required_source full-case digest girdisi).
+    let none_full = blake3_hex(&serialize_case_bytes(none_case));
+    let scip_full = blake3_hex(&serialize_case_bytes(&scip_case));
+    assert_ne!(
+        none_full, scip_full,
+        "required_source full-case digest'i değiştirmeli (declaration full-case identity parçası); \
+         id/description/label aynı olduğundan fark yalnızca required_source'tan gelmeli"
+    );
+}
+
+/// `serialize_measured_subject_bytes` helper — negatif testlerde tekrar tekrar çağırmamak için.
+fn serialize_digest(
+    case: &common::CharacterizationCase,
+) -> Result<Vec<u8>, common::SubjectDigestError> {
+    common::serialize_measured_subject_bytes(case)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Faz 8-P2 #88 — Production-effective digest closure regression testleri (P2, non-blocking)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Review (APPROVE turu): manifest digest taşıyan Direct/Mixed family'leri new_nodes/
+// connected_to/removed_edges kullanmıyor — bu closure yolları compilation + code
+// inspection ile doğrulanıyor ama doğrudan metamorphic regression testiyle pinlenmiyor.
+// Bu iki test, P1-1 fixup'ın gelecekte geri kaymasını yakalar.
+
+/// `NewNodeSpec.connected_to` edge'leri structural digest'i değiştiriyor (P1-1 regression).
+///
+/// Production `build_claim_from_proposal` connected_to edge'lerini delta_edges'e ekler.
+/// Serializer production claim üzerinden structural delta kurduğu için connected_to dolaylı
+/// olarak digest'e girer. Bu test, connected_to değişince measured-subject digest'in
+/// değiştiğini doğrudan pinler — ileride serializer raw proposal.new_edges'e geri dönerse
+/// (connected_to düşer) test kırılır.
+#[test]
+fn connected_to_changes_measured_subject_digest() {
+    use osp_core::agent::{DeltaProposal, NewNodeSpec};
+    use osp_core::space::EdgeKind;
+
+    let base = direct_coupling_base_for_regression();
+
+    // Variant A: new_nodes boş (connected_to yok), tek new_edge. affected_nodes dolu ki
+    // effective selector non-empty olsun (CanonicalSubjectScope empty reject eder).
+    let mut without = base.clone();
+    without.proposal = DeltaProposal {
+        new_nodes: vec![],
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    // Variant B: new_nodes + connected_to edge. Production claim delta_edges'e ekler.
+    // new_nodes boş olmadığı için build_claim_from_proposal empty reject etmez.
+    let mut with = base.clone();
+    with.proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: osp_core::space::NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![(10, EdgeKind::Imports)],
+        }],
+        new_edges: vec![],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    let digest_without = serialize_digest(&without).expect("without digest üretilebilmeli");
+    let digest_with = serialize_digest(&with).expect("with digest üretilebilmeli");
+
+    assert_ne!(
+        digest_without, digest_with,
+        "connected_to edge structural digest'i değiştirmeli — production claim transformation \
+         (build_claim_from_proposal connected_to → delta_edges) digest'e taşınmalı"
+    );
+}
+
+/// `removed_edges.from` effective legacy selector'a dahil (P1-1 regression).
+///
+/// V1 characterization yolu affected_nodes ∪ removed_edges.from ölçer. Serializer
+/// effective selector olarak bu birleşimi kullanır. Bu test, removed_edges.from içeren
+/// case'in farklı measured-subject digest ürettiğini pinler — ileride serializer raw
+/// affected_nodes'a geri dönerse (removed_edges.from düşer) test kırılır.
+#[test]
+fn removed_edge_source_is_part_of_effective_legacy_selector() {
+    use osp_core::agent::{DeltaProposal, EdgeRef};
+
+    let base = direct_coupling_base_for_regression();
+
+    // Variant A: removed_edges boş → effective selector = affected_nodes = [1].
+    let mut without_removed = base.clone();
+    without_removed.proposal = DeltaProposal {
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        removed_edges: vec![],
+        ..Default::default()
+    };
+
+    // Variant B: removed_edges [9→1] → effective selector = {1} ∪ {9} = [1,9].
+    let mut with_removed = base.clone();
+    with_removed.proposal = DeltaProposal {
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        removed_edges: vec![EdgeRef {
+            from: 9,
+            to: 1,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        ..Default::default()
+    };
+
+    let digest_without = serialize_digest(&without_removed).expect("without-removed digest");
+    let digest_with = serialize_digest(&with_removed).expect("with-removed digest");
+
+    assert_ne!(
+        digest_without, digest_with,
+        "removed_edges.from effective legacy selector'a dahil olmalı — V1 ölçüm subject'i \
+         affected_nodes ∪ removed_edges.from, serializer bu birleşimi kullanmalı"
+    );
+}
+
+/// Regression test'leri için minimal direct-coupling taban case (manifest'e dahil DEĞİL).
+///
+/// Sadece serialize_measured_subject_bytes'in production-effective closure yollarını
+/// test etmek için — space/task/proposal minimal ve tutarlı.
+fn direct_coupling_base_for_regression() -> common::CharacterizationCase {
+    use osp_core::space::{Node, NodeKind, Space};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    let mut space = Space::new();
     space.insert_node(Node {
         id: 1,
         kind: NodeKind::Module,
         mass: 1.0,
         ..Default::default()
     });
+    space.insert_node(Node {
+        id: 2,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
 
-    // V1 coupling source = Scip, V2 = TreeSitter (sabit — engine axis defaults).
-    let v1_coupling_source = MetricSource::Scip;
-    let v2_coupling_source = MetricSource::TreeSitter;
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = osp_core::trajectory::Task {
+        id: 99,
+        milestone_id: 0,
+        label: "direct-coupling-regression-base".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
 
-    // Her required_source için beklenen PredicateSetResult exact matrix (tur 3 P0-1).
-    // Predicate: Coupling ≤ 0.5 (coupling axis threshold; gerçek measured coupling 0.5
-    // veya altında olduğu sürece completion source-driven olur).
-    use osp_core::agent::{DeltaProposal, NewEdgeSpec};
-    use osp_core::space::EdgeKind;
-    let space_for_case = space.clone();
-
-    let cases: [(Option<MetricSource>, PredicateSetResult, PredicateSetResult); 5] = [
-        // (required_source, V1_expected, V2_expected)
-        (
-            None,
-            PredicateSetResult::Completed,
-            PredicateSetResult::Completed,
-        ),
-        (
-            Some(MetricSource::Scip),
-            PredicateSetResult::Completed,
-            PredicateSetResult::SourceInsufficient,
-        ),
-        (
-            Some(MetricSource::TreeSitter),
-            PredicateSetResult::SourceInsufficient,
-            PredicateSetResult::Completed,
-        ),
-        (
-            Some(MetricSource::Placeholder),
-            PredicateSetResult::SourceInsufficient,
-            PredicateSetResult::SourceInsufficient,
-        ),
-        (
-            Some(MetricSource::Heuristic),
-            PredicateSetResult::SourceInsufficient,
-            PredicateSetResult::SourceInsufficient,
-        ),
-    ];
-
-    for (req_source, expected_v1, expected_v2) in cases {
-        let predicate = MetricPredicate {
-            metric: PredicateAxis::Coupling,
-            operator: ComparisonOp::Le,
-            threshold: 0.5,
-            scope: PredicateScope::Node(1),
-            required_source: req_source,
-            tolerance: 0.0,
-        };
-        let ps = PredicateSet {
-            mode: PredicateMode::All,
-            predicates: vec![WeightedPredicate {
-                predicate,
-                weight: None,
-            }],
-            preferred_vector: None,
-        };
-        let task = osp_core::trajectory::Task {
-            id: 42,
-            milestone_id: 0,
-            label: format!("required-source-{:?}-inline", req_source),
-            target_predicate_set: ps.clone(),
-            policy: TaskPolicy::default(),
-            allowed_operations: vec![],
-            constraints: vec![],
-            status: TaskStatus::Pending,
-        };
-        let proposal = DeltaProposal {
-            new_edges: vec![NewEdgeSpec {
-                from: 1,
-                to: 2,
-                kind: EdgeKind::Imports,
-            }],
-            affected_nodes: vec![1],
-            ..Default::default()
-        };
-        let case = common::CharacterizationCase {
-            id: format!("required-source-{:?}-inline", req_source),
-            class: common::CaseClass::MatchingScope,
-            source: common::CaseSource::SyntheticAdversarial,
-            description: "inline required_source matrix case".to_string(),
-            space: space_for_case.clone(),
-            task: task.clone(),
-            proposal,
-        };
-
-        let mut engine_v1 = common::engine_with_case_space(&case);
-        let mut engine_v2 = common::engine_with_case_space(&case);
-        let obs_v1 = common::evaluate_v1_case(&mut engine_v1, &case);
-        let obs_v2 = common::evaluate_v2_candidate_case(&mut engine_v2, &case);
-
-        // V1/V2 measured_after'ı çek.
-        let measured_v1 = match &obs_v1.measurement {
-            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
-            other => panic!("V1 Produced olmalı; req_source={req_source:?} got {other:?}"),
-        };
-        let measured_v2 = match &obs_v2.measurement {
-            MeasurementObservation::Produced { measured_after, .. } => measured_after.clone(),
-            other => panic!("V2 Produced olmalı; req_source={req_source:?} got {other:?}"),
-        };
-
-        // **Tur 3 P0-1 fix:** GERÇEK PredicateSet::evaluate_completion çağrısı.
-        let v1_result = ps.evaluate_completion(&measured_v1);
-        let v2_result = ps.evaluate_completion(&measured_v2);
-
-        eprintln!(
-            "  required_source={:?}: V1 coupling src={:?} result={:?} (expected {:?}), \
-             V2 coupling src={:?} result={:?} (expected {:?})",
-            req_source,
-            v1_coupling_source,
-            v1_result,
-            expected_v1,
-            v2_coupling_source,
-            v2_result,
-            expected_v2
-        );
-
-        // Exact PredicateSetResult pin.
-        assert_eq!(
-            v1_result, expected_v1,
-            "V1 PredicateSetResult mismatch; required_source={req_source:?}"
-        );
-        assert_eq!(
-            v2_result, expected_v2,
-            "V2 PredicateSetResult mismatch; required_source={req_source:?}"
-        );
-
-        // Decision divergence kanıtı: Scip/TreeSitter için V1/V2 farklı karar.
-        if req_source == Some(MetricSource::Scip) || req_source == Some(MetricSource::TreeSitter) {
-            assert_ne!(
-                v1_result, v2_result,
-                "INV-T4 PROVENANCE-AUTHORITY DECISION DIVERGENCE: required_source={:?} \
-                 için V1 {:?} ≠ V2 {:?} — PredicateSet::evaluate_completion farklı sonuç",
-                req_source, v1_result, v2_result
-            );
-        }
+    common::CharacterizationCase {
+        id: "direct-coupling-regression-base".to_string(),
+        class: common::CaseClass::DirectPerAxisAuthority,
+        source: common::CaseSource::SyntheticAdversarial,
+        description: "regression test base (manifest'e dahil değil)".to_string(),
+        space,
+        task,
+        proposal: osp_core::agent::DeltaProposal::default(),
     }
 }
