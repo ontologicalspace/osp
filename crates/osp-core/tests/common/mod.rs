@@ -322,8 +322,18 @@ pub fn compute_case_digests() -> Vec<(String, String)> {
 /// hash'leyip `H(H(canonical_subject))` üretiyordu. Doğru davranış: raw bytes'ı hex-encode.
 pub fn compute_case_measured_subject_digests() -> Vec<(String, Result<String, SubjectDigestError>)>
 {
+    // **P2-1 fix (review):** Yalnız DirectPerAxisAuthority + MixedPerAxisSources family'leri
+    // measured-subject digest taşır. Eski family'ler (matching_scope/wide_affected_scope/
+    // removed_edge_external_source/delta_introduced_subject) guard tarafından None zorunlu —
+    // bootstrap eski case digest yazdırırsa manifest'e kopyalandığında guard reddeder.
     build_all_cases()
         .into_iter()
+        .filter(|case| {
+            matches!(
+                case.class,
+                CaseClass::DirectPerAxisAuthority | CaseClass::MixedPerAxisSources
+            )
+        })
         .map(|case| {
             let digest = compute_measured_subject_digest(&case);
             (case.id, digest.map(|bytes| hex::encode(bytes)))
@@ -455,10 +465,18 @@ pub fn serialize_measured_subject_bytes(
     append_segment(&mut bytes, &[canonical_scope.scope_tag()]);
     append_segment(&mut bytes, &canonical_scope.identity_bytes());
 
-    // 4. Legacy measurement selector (V1 affected_nodes — ayrı segment, structural delta DEĞİL).
-    //    affected_nodes boşsa delta_nodes'dan türetilmediği için empty → empty subject reject.
-    let selector_ids = case.proposal.affected_nodes.clone();
-    let canonical_selector = CanonicalSubjectScope::try_new(selector_ids)
+    // 4. Legacy measurement selector — V1 effective ölçüm kümesi (P1-1 fix review).
+    //    V1 characterization yolu (evaluate_v1_case, mod.rs:1289-1294) affected_nodes ∪
+    //    removed_edges.from kümesini ölçer. Önceki kod yalnız raw affected_nodes kullanıyordu —
+    //    removed_edges.from içeren case'lerde gerçek V1 subject'i temsil etmiyordu.
+    //    Production-effective: affected_nodes ∪ removed_edges.from.
+    let mut effective_selector: Vec<u64> = case.proposal.affected_nodes.clone();
+    for er in &case.proposal.removed_edges {
+        if !effective_selector.contains(&er.from) {
+            effective_selector.push(er.from);
+        }
+    }
+    let canonical_selector = CanonicalSubjectScope::try_new(effective_selector)
         .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
     append_segment(&mut bytes, b"legacy-selector:v1");
     let selector_bytes: Vec<u8> = canonical_selector
@@ -468,54 +486,53 @@ pub fn serialize_measured_subject_bytes(
         .collect();
     append_segment(&mut bytes, &selector_bytes);
 
-    // 5. Structural delta (production CanonicalStructuralDelta::try_new — tek canonicalization).
-    //    Raw DeltaProposal → CanonicalNode/Edge/Identity (production tipleriyle), sonra try_new
-    //    (sort + duplicate node id reject + duplicate edge identity reject + cross-list conflict).
-    // 5. Structural delta (production CanonicalStructuralDelta::try_new — tek canonicalization).
-    //    Raw DeltaProposal → CanonicalNode/Edge/Identity (production tipleriyle), sonra try_new
-    //    (sort + duplicate node id reject + duplicate edge identity reject + cross-list conflict).
-    //
-    //    **P2 fix (review):** new_nodes (NewNodeSpec) artık CanonicalNode listesine çevrilir.
-    //    Önceki kod `vec![]` kullanıp delta node'ları sessizce yok sayıyordu — generic helper
-    //    contract ihlali (delta_introduced_subject case'leri new_nodes kullanır). node_from_spec
-    //    identity logic'i (navigator.rs:312): id = 10000 + index.
-    let new_nodes: Vec<osp_core::authorization::CanonicalNode> = case
-        .proposal
-        .new_nodes
+    // 5. Structural delta — production-effective claim üzerinden (P1-1 fix review).
+    //    Önceki kod raw DeltaProposal field'larını manuel çeviriyordu — NewNodeSpec.connected_to
+    //    edge'leri düşüyordu (build_claim_from_proposal onları delta_edges'e ekler). Düzeltme:
+    //    DeltaProposal → build_claim_from_proposal → gerçek claim.delta_nodes/delta_edges/
+    //    removed_edges → CanonicalNode/Edge/Identity → try_new. Bu, production claim
+    //    transformation'ının tamamını (connected_to dahil) digest'e taşır.
+    use osp_core::navigator::build_claim_from_proposal;
+    use osp_core::space::{NodeClassification, NodeRole};
+    let probe_claim = build_claim_from_proposal(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+    let new_nodes: Vec<osp_core::authorization::CanonicalNode> = probe_claim
+        .delta_nodes
         .iter()
-        .enumerate()
-        .map(|(index, spec)| {
+        .map(|node| {
             Ok(osp_core::authorization::CanonicalNode {
-                id: (10_000 + index as u64),
-                kind: CanonicalNodeKind::try_from(&spec.kind)
+                id: node.id,
+                kind: CanonicalNodeKind::try_from(&node.kind)
                     .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
-                mass: spec.initial_mass,
-                cohesion: None,
-                classification: CanonicalNodeClassification::try_from(
-                    &osp_core::space::NodeClassification::default(),
-                )
-                .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
-                role: CanonicalNodeRole::try_from(&osp_core::space::NodeRole::default())
+                mass: node.mass,
+                cohesion: node.cohesion,
+                classification: CanonicalNodeClassification::try_from(&node.classification)
+                    .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
+                role: CanonicalNodeRole::try_from(&node.role)
                     .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
             })
         })
         .collect::<Result<Vec<_>, SubjectDigestError>>()?;
-    let new_edges: Vec<CanonicalEdge> = case
-        .proposal
-        .new_edges
+    let new_edges: Vec<CanonicalEdge> = probe_claim
+        .delta_edges
         .iter()
-        .map(|spec| {
+        .map(|edge| {
             Ok(CanonicalEdge {
-                from: spec.from,
-                to: spec.to,
-                kind: CanonicalEdgeKind::try_from(&spec.kind)
+                from: edge.from,
+                to: edge.to,
+                kind: CanonicalEdgeKind::try_from(&edge.kind)
                     .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?,
-                is_type_only: false,
+                is_type_only: edge.is_type_only,
             })
         })
         .collect::<Result<Vec<_>, SubjectDigestError>>()?;
-    let removed_edges: Vec<CanonicalEdgeIdentity> = case
-        .proposal
+    let removed_edges: Vec<CanonicalEdgeIdentity> = probe_claim
         .removed_edges
         .iter()
         .map(|er| {
@@ -529,26 +546,18 @@ pub fn serialize_measured_subject_bytes(
         .collect::<Result<Vec<_>, SubjectDigestError>>()?;
     let structural = CanonicalStructuralDelta::try_new(new_nodes, new_edges, removed_edges)
         .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
+    let _ = (NodeClassification::default, NodeRole::default); // node field'ları claim'den geliyor.
+                                                              // **P1-1 fix (review):** Structural delta segment'i production encoder kullanır.
+                                                              // Önceki kod serde_json::to_vec kullanıyordu — production structural digest'inden farklı.
+                                                              // MeasurementDeltaDigest::compute_from_canonical production canonical encoding (defensive
+                                                              // validate + canonical node/edge/identity encode). Tek structural-delta authority.
+    let structural_digest =
+        osp_core::measurement::MeasurementDeltaDigest::compute_from_canonical(&structural)
+            .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
     append_segment(&mut bytes, b"structural-delta:v1");
-    append_segment(
-        &mut bytes,
-        &serialize_canonical_structural_delta(&structural),
-    );
+    append_segment(&mut bytes, structural_digest.as_bytes());
 
     Ok(bytes)
-}
-
-/// `CanonicalStructuralDelta`'yı digest segment bytes'ına çevir.
-///
-/// Production encoding'i test katmanında yeniden uygulamak yerine, canonical struct'ı
-/// deterministik byte dizisine serialize eder (sorted node/edge identity zaten try_new'de
-/// enforced). `serde_json::to_vec` BTreeMap-backed (sorted key) + zaten-sorted vec'ler.
-fn serialize_canonical_structural_delta(
-    delta: &osp_core::authorization::CanonicalStructuralDelta,
-) -> Vec<u8> {
-    // CanonicalStructuralDelta serialize edilir; new_nodes/new_edges/removed_edges zaten
-    // try_new'de sorted. serde JSON canonical (BTreeMap-backed) → deterministic.
-    serde_json::to_vec(delta).expect("CanonicalStructuralDelta serialize (sorted by try_new)")
 }
 
 /// Measured-subject digest BLAKE3 hex (64 lowercase hex chars).

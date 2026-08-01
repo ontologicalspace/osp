@@ -1904,6 +1904,34 @@ fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
             case.id
         );
 
+        // **P2-2 fix (review):** DependsOn delta source-neutrality — before (baseline) ile
+        // after (measured) 5-axis sources eşit. PR'ın konusu provenance authority olduğu için
+        // izolasyonun source tarafı da pinlenmeli; ileride DependsOn numeric değeri değiştirmeyip
+        // yalnız provenance üretimini değiştirirse fixture bunu yakalar.
+        let before_sources_v1 = match &baseline_v1 {
+            common::BaselineObservation::LegacyComputed { sources, .. } => *sources,
+            other => panic!(
+                "V1 {} LegacyComputed baseline olmalı; got {other:?}",
+                case.id
+            ),
+        };
+        let before_sources_v2 = match &baseline_v2 {
+            common::BaselineObservation::Available { sources, .. } => *sources,
+            other => panic!("V2 {} Available baseline olmalı; got {other:?}", case.id),
+        };
+        assert_eq!(
+            before_sources_v1,
+            common::axis_sources(&measured_v1),
+            "{} V1 DependsOn delta 5 axis source no-op olmalı (before==after sources)",
+            case.id
+        );
+        assert_eq!(
+            before_sources_v2,
+            common::axis_sources(&measured_v2),
+            "{} V2 DependsOn delta 5 axis source no-op olmalı (before==after sources)",
+            case.id
+        );
+
         // Predicate completion — gerçek PredicateSet::evaluate_completion.
         let ps = &case.task.target_predicate_set;
         let v1_result = ps.evaluate_completion(&measured_v1);
@@ -2082,14 +2110,18 @@ fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
 
 /// Engine state snapshot — no-mutation doğrulaması için (P1-3).
 ///
-/// SpaceDigest (canonical node/edge content) + SpaceViewRevision (t_c) + node/edge count.
-/// Tek sayı korunup içerik/revision değişirse yakalar. Checkpoint/mainline/audit yüzeyleri
-/// engine public API'den erişilemediği için bu snapshot'a dahil DEĞİL — PR/doküman bu
-/// yüzeylerin doğrulandığını iddia etmemeli.
+/// **P1-2 fix (review):** `revision.content_digest` zaten `SpaceDigest::compute(&self.space)`
+/// ile aynı değerdir (engine.rs:2213) — `space_digest_hex` ile duplicate. Gerçek revision
+/// hareketi `sequence: t_c` ve `view_id: Ephemeral(t_c)` alanlarında taşınır. Bu yüzden
+/// snapshot'a `revision_sequence` (revision.sequence) ve `engine_t_c` (engine.t_c()) eklenir;
+/// rejected commit'in space içeriğini değiştirmeden yalnızca t_c/sequence ilerlettiği
+/// varsayımsal bir regresyon yakalanır. Checkpoint/mainline/audit engine public API'den
+/// erişilemediği için snapshot'a dahil DEĞİL — iddia edilmez.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct EngineSnapshot {
     space_digest_hex: String,
-    revision_hex: String,
+    revision_sequence: u64,
+    engine_t_c: u64,
     node_count: usize,
     edge_count: usize,
 }
@@ -2102,7 +2134,8 @@ fn engine_snapshot(engine: &osp_core::engine::SpaceEngine) -> EngineSnapshot {
         .expect("revision computation başarılı");
     EngineSnapshot {
         space_digest_hex: hex::encode(space_digest.as_bytes()),
-        revision_hex: hex::encode(revision.content_digest.as_bytes()),
+        revision_sequence: revision.sequence,
+        engine_t_c: engine.t_c(),
         node_count: engine.space().nodes.len(),
         edge_count: engine.space().edges.len(),
     }
