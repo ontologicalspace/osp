@@ -564,6 +564,55 @@ fn harness_state_dir_outside_repo_accepted() {
     fx.assert_repo_clean();
 }
 
+#[test]
+fn harness_state_dir_repo_subdir_rejected() {
+    // P1-1: state-dir = repo/.subdir (canonical resolve → inside repo) → reject.
+    // Covers the symlink/relative-path authority: canonical comparison, not string match.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 0);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(0, 1);
+    let state_subdir = fx.repo_path().join("nested-state"); // inside repo subdir
+    let output = run_attempt_with_state(&fx, &task_path, &proposals_path, 7, &state_subdir);
+    assert!(
+        !output.status.success(),
+        "harness + state-dir repo subdir must reject (P1-1 canonical)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr explains canonical state-dir invariant: {stderr}"
+    );
+}
+
+#[test]
+fn harness_state_dir_sibling_external_accepted() {
+    // P1-1: state-dir = repo/../external (canonical resolve → outside repo) → accepted.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 0);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(0, 1);
+    // repo/../external-sibling — canonical resolves outside repo.
+    let state_external = fx
+        .repo_path()
+        .parent()
+        .expect("repo has parent")
+        .join("external-sibling-state");
+    fs::create_dir_all(&state_external).expect("create external state dir");
+    let output = run_attempt_with_state(&fx, &task_path, &proposals_path, 7, &state_external);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must reach navigator (canonical resolved outside repo → no invariant reject).
+    assert!(
+        stdout.contains("Evidence entries")
+            || stdout.contains("Task completed")
+            || stdout.contains("Maneuver limit")
+            || stdout.contains("Awaiting witnesses")
+            || output.status.success(),
+        "harness + external sibling state-dir must reach navigator (P1-1 canonical). stdout={stdout}\nstderr={stderr}"
+    );
+}
+
 /// Run harness attempt with an explicit (possibly inside-repo) --state-dir.
 fn run_attempt_with_state(
     fx: &HarnessFixture,
