@@ -2469,3 +2469,179 @@ fn serialize_digest(
 ) -> Result<Vec<u8>, common::SubjectDigestError> {
     common::serialize_measured_subject_bytes(case)
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Faz 8-P2 #88 — Production-effective digest closure regression testleri (P2, non-blocking)
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+// Review (APPROVE turu): manifest digest taşıyan Direct/Mixed family'leri new_nodes/
+// connected_to/removed_edges kullanmıyor — bu closure yolları compilation + code
+// inspection ile doğrulanıyor ama doğrudan metamorphic regression testiyle pinlenmiyor.
+// Bu iki test, P1-1 fixup'ın gelecekte geri kaymasını yakalar.
+
+/// `NewNodeSpec.connected_to` edge'leri structural digest'i değiştiriyor (P1-1 regression).
+///
+/// Production `build_claim_from_proposal` connected_to edge'lerini delta_edges'e ekler.
+/// Serializer production claim üzerinden structural delta kurduğu için connected_to dolaylı
+/// olarak digest'e girer. Bu test, connected_to değişince measured-subject digest'in
+/// değiştiğini doğrudan pinler — ileride serializer raw proposal.new_edges'e geri dönerse
+/// (connected_to düşer) test kırılır.
+#[test]
+fn connected_to_changes_measured_subject_digest() {
+    use osp_core::agent::{DeltaProposal, NewNodeSpec};
+    use osp_core::space::EdgeKind;
+
+    let base = direct_coupling_base_for_regression();
+
+    // Variant A: new_nodes boş (connected_to yok), tek new_edge. affected_nodes dolu ki
+    // effective selector non-empty olsun (CanonicalSubjectScope empty reject eder).
+    let mut without = base.clone();
+    without.proposal = DeltaProposal {
+        new_nodes: vec![],
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    // Variant B: new_nodes + connected_to edge. Production claim delta_edges'e ekler.
+    // new_nodes boş olmadığı için build_claim_from_proposal empty reject etmez.
+    let mut with = base.clone();
+    with.proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: osp_core::space::NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![(10, EdgeKind::Imports)],
+        }],
+        new_edges: vec![],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    let digest_without = serialize_digest(&without).expect("without digest üretilebilmeli");
+    let digest_with = serialize_digest(&with).expect("with digest üretilebilmeli");
+
+    assert_ne!(
+        digest_without, digest_with,
+        "connected_to edge structural digest'i değiştirmeli — production claim transformation \
+         (build_claim_from_proposal connected_to → delta_edges) digest'e taşınmalı"
+    );
+}
+
+/// `removed_edges.from` effective legacy selector'a dahil (P1-1 regression).
+///
+/// V1 characterization yolu affected_nodes ∪ removed_edges.from ölçer. Serializer
+/// effective selector olarak bu birleşimi kullanır. Bu test, removed_edges.from içeren
+/// case'in farklı measured-subject digest ürettiğini pinler — ileride serializer raw
+/// affected_nodes'a geri dönerse (removed_edges.from düşer) test kırılır.
+#[test]
+fn removed_edge_source_is_part_of_effective_legacy_selector() {
+    use osp_core::agent::{DeltaProposal, EdgeRef};
+
+    let base = direct_coupling_base_for_regression();
+
+    // Variant A: removed_edges boş → effective selector = affected_nodes = [1].
+    let mut without_removed = base.clone();
+    without_removed.proposal = DeltaProposal {
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        removed_edges: vec![],
+        ..Default::default()
+    };
+
+    // Variant B: removed_edges [9→1] → effective selector = {1} ∪ {9} = [1,9].
+    let mut with_removed = base.clone();
+    with_removed.proposal = DeltaProposal {
+        new_edges: vec![osp_core::agent::NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        removed_edges: vec![EdgeRef {
+            from: 9,
+            to: 1,
+            kind: osp_core::space::EdgeKind::Imports,
+        }],
+        ..Default::default()
+    };
+
+    let digest_without = serialize_digest(&without_removed).expect("without-removed digest");
+    let digest_with = serialize_digest(&with_removed).expect("with-removed digest");
+
+    assert_ne!(
+        digest_without, digest_with,
+        "removed_edges.from effective legacy selector'a dahil olmalı — V1 ölçüm subject'i \
+         affected_nodes ∪ removed_edges.from, serializer bu birleşimi kullanmalı"
+    );
+}
+
+/// Regression test'leri için minimal direct-coupling taban case (manifest'e dahil DEĞİL).
+///
+/// Sadece serialize_measured_subject_bytes'in production-effective closure yollarını
+/// test etmek için — space/task/proposal minimal ve tutarlı.
+fn direct_coupling_base_for_regression() -> common::CharacterizationCase {
+    use osp_core::space::{Node, NodeKind, Space};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+    space.insert_node(Node {
+        id: 2,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = osp_core::trajectory::Task {
+        id: 99,
+        milestone_id: 0,
+        label: "direct-coupling-regression-base".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    common::CharacterizationCase {
+        id: "direct-coupling-regression-base".to_string(),
+        class: common::CaseClass::DirectPerAxisAuthority,
+        source: common::CaseSource::SyntheticAdversarial,
+        description: "regression test base (manifest'e dahil değil)".to_string(),
+        space,
+        task,
+        proposal: osp_core::agent::DeltaProposal::default(),
+    }
+}

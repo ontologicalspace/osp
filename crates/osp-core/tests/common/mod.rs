@@ -493,7 +493,6 @@ pub fn serialize_measured_subject_bytes(
     //    removed_edges → CanonicalNode/Edge/Identity → try_new. Bu, production claim
     //    transformation'ının tamamını (connected_to dahil) digest'e taşır.
     use osp_core::navigator::build_claim_from_proposal;
-    use osp_core::space::{NodeClassification, NodeRole};
     let probe_claim = build_claim_from_proposal(
         &case.proposal,
         osp_core::coords::RawPosition::default(),
@@ -546,11 +545,10 @@ pub fn serialize_measured_subject_bytes(
         .collect::<Result<Vec<_>, SubjectDigestError>>()?;
     let structural = CanonicalStructuralDelta::try_new(new_nodes, new_edges, removed_edges)
         .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
-    let _ = (NodeClassification::default, NodeRole::default); // node field'ları claim'den geliyor.
-                                                              // **P1-1 fix (review):** Structural delta segment'i production encoder kullanır.
-                                                              // Önceki kod serde_json::to_vec kullanıyordu — production structural digest'inden farklı.
-                                                              // MeasurementDeltaDigest::compute_from_canonical production canonical encoding (defensive
-                                                              // validate + canonical node/edge/identity encode). Tek structural-delta authority.
+    // **P1-1 fix (review):** Structural delta segment'i production encoder kullanır.
+    // Önceki kod serde_json::to_vec kullanıyordu — production structural digest'inden farklı.
+    // MeasurementDeltaDigest::compute_from_canonical production canonical encoding (defensive
+    // validate + canonical node/edge/identity encode). Tek structural-delta authority.
     let structural_digest =
         osp_core::measurement::MeasurementDeltaDigest::compute_from_canonical(&structural)
             .map_err(|e| SubjectDigestError::ProductionCanonicalization(e.to_string()))?;
