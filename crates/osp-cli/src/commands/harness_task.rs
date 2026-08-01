@@ -9,15 +9,16 @@
 //! Task doğrudan yüklenir; agent `affected_nodes` authority üretmez. Scope binding
 //! NodeId→path analyze çıktısıyla doğrulanır → subject drift fail-closed.
 
-#![allow(dead_code, reason = "Faz 8 test-project: wired incrementally across commits")]
+#![allow(
+    dead_code,
+    reason = "Faz 8 test-project: wired incrementally across commits"
+)]
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use osp_core::space::NodeId;
-use osp_core::trajectory::{
-    PredicateScope, Task, TaskId, TaskStatus, TaskValidationError,
-};
+use osp_core::trajectory::{PredicateScope, Task, TaskId, TaskStatus, TaskValidationError};
 
 use crate::commands::repo_snapshot::{RepoSnapshotError, RepositorySnapshot};
 
@@ -200,9 +201,7 @@ fn validate_scope_bindings(
         }
         match node_paths.get(&b.node_id) {
             None => {
-                return Err(HarnessTaskError::UnknownScopeBindingNode {
-                    node_id: b.node_id,
-                });
+                return Err(HarnessTaskError::UnknownScopeBindingNode { node_id: b.node_id });
             }
             Some(analyzed) if analyzed == &b.expected_path => {}
             Some(analyzed) => {
@@ -308,11 +307,11 @@ pub fn validate_harness_scope(task: &Task) -> Result<NodeId, HarnessTaskError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osp_core::trajectory::{
-        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
-        TaskPolicy, TaskStatus, WeightedPredicate,
-    };
     use osp_core::coords::{MetricSource, RawPosition};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, TaskPolicy,
+        TaskStatus, WeightedPredicate,
+    };
     use osp_core::trajectory::{OpKind, PredicateSet, Task};
 
     fn snap(head: &str) -> RepositorySnapshot {
@@ -387,17 +386,19 @@ mod tests {
     #[test]
     fn validate_harness_scope_rejects_heterogeneous_nodes() {
         let mut task = task_at(1, TaskStatus::Pending);
-        task.target_predicate_set.predicates.push(WeightedPredicate {
-            predicate: MetricPredicate {
-                metric: PredicateAxis::Coupling,
-                operator: ComparisonOp::Le,
-                threshold: 0.4,
-                scope: PredicateScope::Node(2),
-                required_source: None,
-                tolerance: 0.0,
-            },
-            weight: None,
-        });
+        task.target_predicate_set
+            .predicates
+            .push(WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 0.4,
+                    scope: PredicateScope::Node(2),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            });
         assert!(matches!(
             validate_harness_scope(&task).unwrap_err(),
             HarnessTaskError::HeterogeneousHarnessScope
@@ -473,7 +474,10 @@ mod tests {
         // the load path steps that run AFTER deserialize (schema/HEAD/scope/id all valid here).
         let mut task = task_at(1, TaskStatus::Pending);
         task.target_predicate_set.predicates[0].predicate.threshold = f64::NAN;
-        assert!(task.validate().is_err(), "sanity: core rejects NaN threshold");
+        assert!(
+            task.validate().is_err(),
+            "sanity: core rejects NaN threshold"
+        );
         let node_paths = node_paths_with(1, "src/a.rs");
         let bindings = vec![CliScopeBinding {
             node_id: 1,
@@ -570,17 +574,19 @@ mod tests {
     fn set_equality_rejects_heterogeneous_via_predicate() {
         // Two predicates targeting different Nodes → HeterogeneousHarnessScope.
         let mut task = task_at(1, TaskStatus::Pending);
-        task.target_predicate_set.predicates.push(WeightedPredicate {
-            predicate: MetricPredicate {
-                metric: PredicateAxis::Coupling,
-                operator: ComparisonOp::Le,
-                threshold: 0.4,
-                scope: PredicateScope::Node(2),
-                required_source: None,
-                tolerance: 0.0,
-            },
-            weight: None,
-        });
+        task.target_predicate_set
+            .predicates
+            .push(WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 0.4,
+                    scope: PredicateScope::Node(2),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            });
         let bindings = vec![
             CliScopeBinding {
                 node_id: 1,
@@ -680,10 +686,7 @@ mod tests {
         assert_eq!(file.task.id, 7);
         let head: crate::commands::repo_snapshot::GitCommitId =
             file.repository_head.clone().try_into().unwrap();
-        assert_eq!(
-            head.as_str(),
-            "0123456789abcdef0123456789abcdef01234567"
-        );
+        assert_eq!(head.as_str(), "0123456789abcdef0123456789abcdef01234567");
     }
 
     // `snap` + `node_paths_with` used via load path indirectly above; keep parse helper

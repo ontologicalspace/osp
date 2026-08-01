@@ -202,7 +202,9 @@ impl HarnessFixture {
     {
         let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = Command::cargo_bin("osp").expect("osp binary");
-        cmd.current_dir(self.work_path()).arg("trajectory").arg("attempt");
+        cmd.current_dir(self.work_path())
+            .arg("trajectory")
+            .arg("attempt");
         build(&mut cmd);
         cmd.output().expect("run osp")
     }
@@ -275,7 +277,10 @@ fn harness_without_task_rejected() {
             .arg("--proposals")
             .arg("/dev/null")
     });
-    assert!(!output.status.success(), "harness without --task must fail (P0-2)");
+    assert!(
+        !output.status.success(),
+        "harness without --task must fail (P0-2)"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--execution-mode harness requires --task"),
@@ -385,7 +390,10 @@ fn harness_task_subgraph_scope_rejected() {
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "subgraph scope must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unsupported harness scope"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("unsupported harness scope"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -396,7 +404,10 @@ fn harness_task_missing_preferred_vector_rejected() {
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
-    assert!(!output.status.success(), "missing preferred_vector must fail");
+    assert!(
+        !output.status.success(),
+        "missing preferred_vector must fail"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("preferred_vector"), "stderr: {stderr}");
 }
@@ -409,7 +420,10 @@ fn harness_task_terminal_status_rejected() {
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
-    assert!(!output.status.success(), "terminal initial status must fail");
+    assert!(
+        !output.status.success(),
+        "terminal initial status must fail"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("status"), "stderr: {stderr}");
 }
@@ -492,7 +506,10 @@ fn harness_dirty_worktree_rejected() {
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
-    assert!(!output.status.success(), "dirty worktree must fail pre-flight");
+    assert!(
+        !output.status.success(),
+        "dirty worktree must fail pre-flight"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("dirty") || stderr.contains("clean"),
@@ -722,20 +739,17 @@ fn completed_loop_exact_pin_via_json_envelope() {
     assert_eq!(envelope["run"]["witness_mode"], "harness_auto_approve");
     assert_eq!(envelope["run"]["task_source"], "harness_task_file");
     assert_eq!(
-        envelope["run"]["repository_head"],
-        fx.head,
+        envelope["run"]["repository_head"], fx.head,
         "envelope repository_head == fixture HEAD"
     );
 
     // V1 honest execution-measurement metadata.
     assert_eq!(
-        envelope["execution_measurement"]["authority"],
-        "legacy_projected_v1",
+        envelope["execution_measurement"]["authority"], "legacy_projected_v1",
         "V1 honest authority (review P0)"
     );
     assert_eq!(
-        envelope["execution_measurement"]["provenance_native"],
-        false,
+        envelope["execution_measurement"]["provenance_native"], false,
         "provenance_native=false (MD-2 deferred)"
     );
 
@@ -753,10 +767,12 @@ fn completed_loop_exact_pin_via_json_envelope() {
     );
 
     // Evidence — exact state-transition pin.
-    let evidence = envelope["evidence"]
-        .as_array()
-        .expect("evidence array");
-    assert_eq!(evidence.len(), 1, "exactly one evidence entry (single attempt)");
+    let evidence = envelope["evidence"].as_array().expect("evidence array");
+    assert_eq!(
+        evidence.len(),
+        1,
+        "exactly one evidence entry (single attempt)"
+    );
     let entry = &evidence[0];
     assert_eq!(entry["gate_decision"], "PassedAll", "gate_decision");
     assert_eq!(
@@ -785,5 +801,3 @@ fn completed_loop_exact_pin_via_json_envelope() {
         "before coupling > threshold (was unsatisfied): before={before_coupling}"
     );
 }
-
-
