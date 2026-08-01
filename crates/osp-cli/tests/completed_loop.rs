@@ -55,10 +55,21 @@ impl HarnessFixture {
             .arg(r)
             .status()
             .expect("git init");
-        git(&["config", "user.email", "t@t.com"]);
-        git(&["config", "user.name", "t"]);
+        git(&["config", "user.email", "osp-test@example.invalid"]);
+        git(&["config", "user.name", "OSP Test"]);
         git(&["config", "core.autocrlf", "false"]);
         git(&["config", "core.eol", "lf"]);
+        // Deterministic commit (review P1-5): fixed author/committer dates → stable SHA
+        // across machines/clocks.
+        let commit = |args: &[&str]| {
+            Command::new("git")
+                .args(["-C", r.to_str().unwrap()])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .status()
+                .expect("git")
+        };
         // main.rs imports a + b → 2 outgoing value imports → coupling 2/3 = 0.667.
         fs::write(
             r.join("main.rs"),
@@ -68,7 +79,7 @@ impl HarnessFixture {
         fs::write(r.join("a.rs"), "pub fn a() {}\n").expect("write a.rs");
         fs::write(r.join("b.rs"), "pub fn b() {}\n").expect("write b.rs");
         git(&["add", "-A"]);
-        git(&["commit", "-qm", "init"]);
+        commit(&["commit", "-qm", "init"]);
         let head = String::from_utf8(
             Command::new("git")
                 .args(["-C", r.to_str().unwrap(), "rev-parse", "HEAD"])
@@ -122,7 +133,8 @@ impl HarnessFixture {
     }
 
     /// Run `osp trajectory attempt` with harness mode + task file. Returns the output.
-    /// CWD = work tempdir (outside repo → git status clean, .osp/ isolated).
+    /// CWD + --state-dir = work tempdir (outside repo → git status clean, .osp/ isolated,
+    /// harness state-dir invariant satisfied — review B-3 P0).
     fn run_attempt(
         &self,
         task_path: &std::path::Path,
@@ -148,8 +160,35 @@ impl HarnessFixture {
             .arg(proposals_path)
             .arg("--task")
             .arg(task_path)
+            .arg("--state-dir")
+            .arg(self.work_path()) // harness invariant: state-dir outside repo (P0)
             .output()
             .expect("run osp")
+    }
+
+    /// Assert the analyzed repo has no `.osp/` state (no side-effects leaked into repo).
+    /// Review P1-2 — fail-closed must leave the repo untouched.
+    fn assert_repo_clean(&self) {
+        // git status --porcelain must be empty (no .osp/, no held artifacts).
+        let status = Command::new("git")
+            .args([
+                "-C",
+                self.repo_path().to_str().unwrap(),
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ])
+            .output()
+            .expect("git status");
+        let porcelain = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            porcelain.trim().is_empty(),
+            "analyzed repo must be clean after attempt (review P1-2), but git status:\n{porcelain}"
+        );
+        assert!(
+            !self.repo_path().join(".osp").exists(),
+            "no .osp/ state should leak into analyzed repo (review P1-2)"
+        );
     }
 
     /// Run an arbitrary `osp trajectory attempt` (no task file) — serialized.
@@ -456,3 +495,194 @@ fn harness_dirty_worktree_rejected() {
         "stderr explains clean-worktree requirement: {stderr}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Review P0 — state-dir invariant (harness mode requires state-dir outside repo)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn harness_state_dir_inside_repo_rejected() {
+    // P0: harness mode + state-dir inside analyzed repo → preflight reject.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 0);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(0, 1);
+    let state_inside = fx.repo_path().join(".osp-state"); // inside repo!
+    let output = run_attempt_with_state(&fx, &task_path, &proposals_path, 7, &state_inside);
+    assert!(
+        !output.status.success(),
+        "harness + state-dir inside repo must reject (P0)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr explains state-dir-invariant: {stderr}"
+    );
+}
+
+#[test]
+fn harness_state_dir_outside_repo_accepted() {
+    // P0: harness mode + state-dir outside repo → reaches navigator (no state-dir reject).
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 0);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(0, 1);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7); // state-dir = work (outside)
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must reach navigator (not fail on state-dir invariant).
+    assert!(
+        stdout.contains("Evidence entries")
+            || stdout.contains("Task completed")
+            || stdout.contains("Maneuver limit")
+            || stdout.contains("Awaiting witnesses")
+            || output.status.success(),
+        "harness + external state-dir must reach navigator. stdout={stdout}\nstderr={stderr}"
+    );
+    // P1-2: repo stays clean (no .osp/ leak, no held artifacts).
+    fx.assert_repo_clean();
+}
+
+/// Run harness attempt with an explicit (possibly inside-repo) --state-dir.
+fn run_attempt_with_state(
+    fx: &HarnessFixture,
+    task_path: &std::path::Path,
+    proposals_path: &std::path::Path,
+    positional_task_id: u64,
+    state_dir: &std::path::Path,
+) -> std::process::Output {
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg(positional_task_id.to_string())
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("harness")
+        .arg("--witness")
+        .arg("harness-auto-approve")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(proposals_path)
+        .arg("--task")
+        .arg(task_path)
+        .arg("--state-dir")
+        .arg(state_dir)
+        .output()
+        .expect("run osp")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Review P1-2 — fail-closed leaves no side-effects (no .osp/, repo clean)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn fail_closed_leaves_no_side_effects() {
+    // Representative fail-closed (HEAD mismatch): navigator must never run → no .osp/,
+    // repo untouched. P1-2: fail-closed = authority pipeline'a hiç girilmemesi.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&"f".repeat(40), 0); // wrong HEAD → fail-closed
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(0, 1);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    assert!(!output.status.success(), "HEAD mismatch must fail");
+    // No side-effects: repo clean, no .osp/ in repo.
+    fx.assert_repo_clean();
+    // No .osp/ in work state-dir either (navigator never reached Held).
+    // (HarnessAutoApprove would skip Held anyway, but fail-closed happens before that.)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Review P1-4 — mode matrix exact coverage
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn production_production_no_task_uses_legacy_path() {
+    // (Production, Production, no task) → legacy hardcoded task path (backward-compat).
+    // This reaches the navigator (legacy task); not a pre-flight reject.
+    let fx = HarnessFixture::new();
+    let proposals_path = fx.write_proposals(0, 1);
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("production")
+        .arg("--witness")
+        .arg("production")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .output()
+        .expect("run osp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Legacy path reaches navigator (production witness → AwaitingWitnesses expected,
+    // since no real witnesses). The key assertion: no "harness requires --task" error.
+    assert!(
+        !stderr.contains("requires --task"),
+        "production+no-task must NOT require --task (legacy backward-compat): {stderr}"
+    );
+    assert!(
+        stdout.contains("Evidence entries")
+            || stdout.contains("Awaiting witnesses")
+            || stdout.contains("Maneuver limit")
+            || stdout.contains("Task completed"),
+        "production legacy path reaches navigator. stdout={stdout}\nstderr={stderr}"
+    );
+}
+
+#[test]
+fn harness_production_witness_reaches_navigator() {
+    // (Harness, Production witness, task) → allowed (task file present, witness production).
+    // Harness execution with production witness is valid — just needs authorization.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 0);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(0, 1);
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("harness")
+        .arg("--witness")
+        .arg("production")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Must reach navigator (no mode-guard reject). Production witness → likely
+    // AwaitingWitnesses (no real approvers), but the point is it runs.
+    assert!(
+        stdout.contains("Evidence entries")
+            || stdout.contains("Awaiting witnesses")
+            || stdout.contains("Maneuver limit")
+            || stdout.contains("Task completed"),
+        "harness+production-witness+task must reach navigator. stdout={stdout}\nstderr={stderr}"
+    );
+}
+

@@ -193,6 +193,12 @@ pub struct TrajectoryAttemptArgs {
     /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
     #[arg(long, default_value = "human")]
     pub format: String,
+    /// Runtime state directory for pending-authorizations (`.osp/` artifacts). Default = CWD.
+    /// Harness mode invariant (review B-3 P0): must be OUTSIDE the analyzed repo, otherwise
+    /// Held artifacts dirty the repo → subsequent snapshot-bound runs rejected. Production
+    /// callers may set this explicitly; harness mode rejects state-dir inside repo.
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
 }
 
 /// `osp task view <task-id>` — AgentTaskView göster.
@@ -414,6 +420,51 @@ fn reject_output_inside_repo(repo: &PathBuf, out: &PathBuf) -> anyhow::Result<()
     Ok(())
 }
 
+/// Resolve runtime state directory for pending-authorizations (review B-3 P0).
+///
+/// Harness mode REQUIRES state-dir outside the analyzed repo: Held artifacts written
+/// into the repo would dirty git status → subsequent snapshot-bound runs rejected.
+/// Production mode allows CWD default (backward-compat) or explicit `--state-dir`.
+///
+/// Returns a canonical state-dir path suitable for `FilesystemPendingAuthorizationStore::new`.
+fn resolve_state_dir(
+    explicit: Option<&std::path::Path>,
+    execution: CliExecutionMode,
+    repo: &std::path::Path,
+) -> anyhow::Result<PathBuf> {
+    let state_dir = match explicit {
+        Some(p) => p.to_path_buf(),
+        None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+    };
+    // Harness invariant: state-dir must be outside the analyzed repo.
+    if execution == CliExecutionMode::Harness {
+        let canon_repo = repo
+            .canonicalize()
+            .unwrap_or_else(|_| repo.to_path_buf());
+        let canon_state = if state_dir.exists() {
+            state_dir.canonicalize().unwrap_or_else(|_| state_dir.clone())
+        } else {
+            // Resolve via parent if the dir doesn't exist yet (caller may pre-create).
+            match state_dir.parent().and_then(|p| p.canonicalize().ok()) {
+                Some(parent) => state_dir
+                    .file_name()
+                    .map(|name| parent.join(name))
+                    .unwrap_or_else(|| state_dir.clone()),
+                None => state_dir.clone(),
+            }
+        };
+        if canon_state.starts_with(&canon_repo) {
+            anyhow::bail!(
+                "--state-dir {} is inside the analyzed repository; harness mode requires \
+                 state-dir outside repo (Held artifacts would dirty git status → subsequent \
+                 snapshot-bound runs rejected). Set --state-dir to an external path.",
+                state_dir.display()
+            );
+        }
+    }
+    Ok(state_dir)
+}
+
 /// `osp trajectory init` — SpaceEngine kur (analyze + coord system + vision).
 pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
@@ -462,6 +513,11 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     use osp_core::engine::{EngineConfig, SpaceEngine};
     use osp_core::vision::VisionVector;
 
+    // Faz 8 B-3 review P0: runtime state directory resolution + harness invariant.
+    // Harness mode REQUIRES state-dir outside analyzed repo (Held artifacts must not dirty
+    // repo → subsequent snapshot-bound runs rejected). Production allows CWD default.
+    let state_dir = resolve_state_dir(args.state_dir.as_deref(), args.execution_mode, &args.repo)?;
+
     // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
     // Pre-capture repository snapshot (HEAD + tracked paths + clean state).
     let snapshot_before =
@@ -508,7 +564,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         "real" => {
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
-            run_navigator(&llm, &mut engine, &args, task)?;
+            run_navigator(&llm, &mut engine, &args, task, &state_dir)?;
         }
         _ => {
             // mock (default)
@@ -520,7 +576,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
             let proposals: Vec<osp_core::agent::DeltaProposal> =
                 serde_json::from_str(&proposals_json)?;
             let llm = crate::mock_llm::FileMockLlm::new(proposals);
-            run_navigator(&llm, &mut engine, &args, task)?;
+            run_navigator(&llm, &mut engine, &args, task, &state_dir)?;
         }
     }
 
@@ -630,6 +686,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     engine: &mut osp_core::engine::SpaceEngine,
     args: &TrajectoryAttemptArgs,
     task: osp_core::trajectory::Task,
+    state_dir: &PathBuf,
 ) -> anyhow::Result<()> {
     use osp_core::navigator::{AgentNavigator, NavigatorResult};
     use osp_core::trajectory::{
@@ -675,9 +732,11 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
                 osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove
             }
         },
-        // INV-T9: production filesystem store — cwd altında .osp/pending-authorizations/.
+        // INV-T9: filesystem store — state_dir altında .osp/pending-authorizations/.
+        // review B-3 P0: harness mode resolves state_dir outside repo ( Held artifacts
+        // must not dirty analyzed repo). Production allows caller-specified or CWD default.
         pending_authorization_store: Box::new(
-            osp_core::authorization::FilesystemPendingAuthorizationStore::new("."),
+            osp_core::authorization::FilesystemPendingAuthorizationStore::new(state_dir),
         ),
         clock: Box::new(osp_core::authorization::SystemClock),
     };
@@ -823,6 +882,7 @@ mod mode_matrix_tests {
             execution_mode: mode,
             witness: CliWitnessMode::default(),
             format: "human".into(),
+            state_dir: None,
         }
     }
 
