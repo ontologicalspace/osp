@@ -6,6 +6,7 @@
 pub mod analyze_provenance;
 pub mod harness_task;
 pub mod repo_snapshot;
+pub mod run_envelope;
 
 use std::path::PathBuf;
 
@@ -511,7 +512,6 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
     use osp_core::coords::{CoordinateSystem, MetricSource};
     use osp_core::engine::{EngineConfig, SpaceEngine};
-    use osp_core::vision::VisionVector;
 
     // Faz 8 B-3 review P0: runtime state directory resolution + harness invariant.
     // Harness mode REQUIRES state-dir outside analyzed repo (Held artifacts must not dirty
@@ -542,13 +542,18 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
     )?;
-    let vision = VisionVector::new(osp_core::coords::RawPosition {
-        x: 0.4,
-        y: 0.6,
-        z: 0.5,
-        w: 0.5,
-        v: 0.5,
-    });
+    let vision = osp_core::vision::VisionVector::with_source(
+        osp_core::coords::RawPosition {
+            x: 0.4,
+            y: 0.6,
+            z: 0.5,
+            w: 0.5,
+            v: 0.5,
+        },
+        // INV-T9 Step 4b: mutation yüzeyinde GlobalDefault authority reject edilir;
+        // user-confirmed (UserLoaded) vision gerekli (navigator commit_task_claim).
+        osp_core::vision::VisionSource::UserLoaded,
+    );
     let mut engine = SpaceEngine::with_default_rules(
         result.space,
         cs,
@@ -557,6 +562,11 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     )?;
 
     // 3. Task resolution: harness task file (snapshot-bound) or hardcoded legacy fallback.
+    let task_source: &'static str = if args.task.is_some() {
+        "harness_task_file"
+    } else {
+        "legacy_hardcoded"
+    };
     let task = resolve_task(&args, &snapshot_before, &result.node_paths)?;
 
     // 4. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
@@ -564,7 +574,15 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         "real" => {
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
-            run_navigator(&llm, &mut engine, &args, task, &state_dir)?;
+            run_navigator(
+                &llm,
+                &mut engine,
+                &args,
+                task,
+                &state_dir,
+                &snapshot_before,
+                task_source,
+            )?;
         }
         _ => {
             // mock (default)
@@ -576,7 +594,15 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
             let proposals: Vec<osp_core::agent::DeltaProposal> =
                 serde_json::from_str(&proposals_json)?;
             let llm = crate::mock_llm::FileMockLlm::new(proposals);
-            run_navigator(&llm, &mut engine, &args, task, &state_dir)?;
+            run_navigator(
+                &llm,
+                &mut engine,
+                &args,
+                task,
+                &state_dir,
+                &snapshot_before,
+                task_source,
+            )?;
         }
     }
 
@@ -687,8 +713,10 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     args: &TrajectoryAttemptArgs,
     task: osp_core::trajectory::Task,
     state_dir: &PathBuf,
+    snapshot: &repo_snapshot::RepositorySnapshot,
+    task_source: &'static str,
 ) -> anyhow::Result<()> {
-    use osp_core::navigator::{AgentNavigator, NavigatorResult};
+    use osp_core::navigator::AgentNavigator;
     use osp_core::trajectory::{
         InMemoryTaskRegistry, MilestoneId, OperatorCapability, TrajectoryId,
     };
@@ -741,25 +769,50 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         clock: Box::new(osp_core::authorization::SystemClock),
     };
     let result = nav.run_task(args.task_id, 1);
-    // 6. Sonuç yazdır + exit code.
-    let exit_code = match result {
-        NavigatorResult::Completed {
-            attempts,
-            total_tokens,
-        } => {
+    // 6. Output — versioned JSON envelope (json) veya human (default).
+    let is_json = args.format.eq_ignore_ascii_case("json");
+    if is_json {
+        let envelope = run_envelope::build_run_envelope_v1(
+            &result,
+            &evidence,
+            args.execution_mode,
+            args.witness,
+            task_source,
+            snapshot.head.as_str(),
+        );
+        let json = serde_json::to_string_pretty(&envelope)?;
+        // Diagnostics stderr'e — stdout JSON-only.
+        eprintln!(
+            "osp trajectory attempt: V1 legacy_projected_v1 execution authority \
+             (provenance_native=false); native 5-axis engine measurement pending MD-2 (#96)"
+        );
+        println!("{json}");
+    } else {
+        print_human_result(&result, args.task_id, &evidence)?;
+    }
+    let exit_code = navigator_exit_code(&result, args.task_id);
+    if exit_code != exit_codes::COMPLETED {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Print human-readable navigator result (non-json mode).
+fn print_human_result(
+    result: &osp_core::navigator::NavigatorResult,
+    task_id: u64,
+    evidence: &[osp_core::trajectory::TrajectoryEvidence],
+) -> anyhow::Result<()> {
+    use osp_core::navigator::NavigatorResult;
+    match result {
+        NavigatorResult::Completed { attempts, total_tokens } => {
             println!("✓ Task completed in {attempts} attempts");
             println!("  Total tokens: {}", total_tokens.total_tokens);
-            exit_codes::COMPLETED
         }
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
             println!("✗ Maneuver limit exceeded after {attempts} attempts");
-            exit_codes::EXCEEDED_MANEUVER_LIMIT
         }
-        NavigatorResult::AwaitingWitnesses {
-            pending,
-            persistence,
-        } => {
-            // **INV-T9** — expected authorization bekleme. Domain outcome, hata DEĞİL.
+        NavigatorResult::AwaitingWitnesses { pending, persistence } => {
             println!(
                 "⏸ Awaiting witnesses (INV-T9) — task {}, claim {}",
                 pending.task_id, pending.claim_id
@@ -775,7 +828,6 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
                 "  Pending artifact: {}",
                 persistence.artifact_path.display()
             );
-            exit_codes::AWAITING_WITNESSES
         }
         NavigatorResult::RequiresRevision(rev) => {
             println!(
@@ -783,45 +835,57 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
                 rev.task_id(),
                 rev.claim_id()
             );
-            exit_codes::REQUIRES_REVISION
         }
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
             println!(
                 "✗ Pending authorization persistence failed — task {}, claim {}: {error}",
                 pending.task_id, pending.claim_id
             );
-            exit_codes::PENDING_AUTHORIZATION_PERSISTENCE_FAILURE
         }
         NavigatorResult::WitnessEvaluationError(msg) => {
             println!("✗ Witness evaluation error: {msg}");
-            exit_codes::WITNESS_EVALUATION_ERROR
         }
         NavigatorResult::SystemFailure(msg) => {
             println!("✗ System failure: {msg}");
-            exit_codes::SYSTEM_FAILURE
         }
         NavigatorResult::TaskNotFound => {
-            println!("✗ Task {} not found", args.task_id);
-            exit_codes::TASK_NOT_FOUND
+            println!("✗ Task {task_id} not found");
         }
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
             println!("⚠ Operator approval required after {attempts} attempts");
-            exit_codes::REQUIRES_OPERATOR_APPROVAL
         }
         NavigatorResult::LlmError(e) => {
             println!("✗ LLM error: {e}");
-            exit_codes::LLM_ERROR
         }
-    };
+    }
     println!("  Evidence entries: {}", evidence.len());
     if !evidence.is_empty() {
-        let json = serde_json::to_string_pretty(&evidence)?;
+        let json = serde_json::to_string_pretty(evidence)?;
         println!("{json}");
     }
-    if exit_code != exit_codes::COMPLETED {
-        std::process::exit(exit_code);
-    }
     Ok(())
+}
+
+/// Map navigator result → CLI exit code (INV-T9 contract).
+fn navigator_exit_code(
+    result: &osp_core::navigator::NavigatorResult,
+    _task_id: u64,
+) -> i32 {
+    use osp_core::navigator::NavigatorResult;
+    match result {
+        NavigatorResult::Completed { .. } => exit_codes::COMPLETED,
+        NavigatorResult::ExceededManeuverLimit { .. } => exit_codes::EXCEEDED_MANEUVER_LIMIT,
+        NavigatorResult::AwaitingWitnesses { .. } => exit_codes::AWAITING_WITNESSES,
+        NavigatorResult::RequiresRevision(_) => exit_codes::REQUIRES_REVISION,
+        NavigatorResult::PendingAuthorizationPersistenceFailure { .. } => {
+            exit_codes::PENDING_AUTHORIZATION_PERSISTENCE_FAILURE
+        }
+        NavigatorResult::WitnessEvaluationError(_) => exit_codes::WITNESS_EVALUATION_ERROR,
+        NavigatorResult::SystemFailure(_) => exit_codes::SYSTEM_FAILURE,
+        NavigatorResult::TaskNotFound => exit_codes::TASK_NOT_FOUND,
+        NavigatorResult::RequiresOperatorApproval { .. } => exit_codes::REQUIRES_OPERATOR_APPROVAL,
+        NavigatorResult::LlmError(_) => exit_codes::LLM_ERROR,
+    }
 }
 
 /// `osp task view` — AgentTaskView göster (INV-T1 — preferred_vector ASLA).

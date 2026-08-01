@@ -135,11 +135,13 @@ impl HarnessFixture {
     /// Run `osp trajectory attempt` with harness mode + task file. Returns the output.
     /// CWD + --state-dir = work tempdir (outside repo → git status clean, .osp/ isolated,
     /// harness state-dir invariant satisfied — review B-3 P0).
+    /// `format` = "human" (default) veya "json" (versioned run envelope).
     fn run_attempt(
         &self,
         task_path: &std::path::Path,
         proposals_path: &std::path::Path,
         positional_task_id: u64,
+        format: &str,
     ) -> std::process::Output {
         let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         Command::cargo_bin("osp")
@@ -162,6 +164,8 @@ impl HarnessFixture {
             .arg(task_path)
             .arg("--state-dir")
             .arg(self.work_path()) // harness invariant: state-dir outside repo (P0)
+            .arg("--format")
+            .arg(format)
             .output()
             .expect("run osp")
     }
@@ -340,7 +344,7 @@ fn harness_task_head_mismatch_rejected() {
     let env = task_envelope(&"f".repeat(40), 0); // wrong HEAD
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "HEAD mismatch must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("mismatch"), "stderr: {stderr}");
@@ -353,7 +357,7 @@ fn harness_task_schema_mismatch_rejected() {
     env["schema_version"] = serde_json::json!(2);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "schema mismatch must fail");
 }
 
@@ -364,7 +368,7 @@ fn harness_task_id_mismatch_rejected() {
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
     // positional task_id = 999 ≠ task.id (7) → fail-closed.
-    let output = fx.run_attempt(&task_path, &proposals_path, 999);
+    let output = fx.run_attempt(&task_path, &proposals_path, 999, "human");
     assert!(!output.status.success(), "task id mismatch must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("mismatch"), "stderr: {stderr}");
@@ -378,7 +382,7 @@ fn harness_task_subgraph_scope_rejected() {
         serde_json::json!({"Subgraph": [0, 1]});
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "subgraph scope must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("unsupported harness scope"), "stderr: {stderr}");
@@ -391,7 +395,7 @@ fn harness_task_missing_preferred_vector_rejected() {
     env["task"]["target_predicate_set"]["preferred_vector"] = serde_json::Value::Null;
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "missing preferred_vector must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("preferred_vector"), "stderr: {stderr}");
@@ -404,7 +408,7 @@ fn harness_task_terminal_status_rejected() {
     env["task"]["status"] = serde_json::json!("Completed");
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "terminal initial status must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("status"), "stderr: {stderr}");
@@ -417,7 +421,7 @@ fn harness_task_scope_binding_path_mismatch_rejected() {
     env["scope_bindings"][0]["expected_path"] = serde_json::json!("src/nonexistent.rs");
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "path mismatch must fail");
 }
 
@@ -426,7 +430,7 @@ fn harness_malformed_json_rejected() {
     let fx = HarnessFixture::new();
     let task_path = fx.write_raw_task("malformed.json", "{ this is not valid json");
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "malformed JSON must fail");
 }
 
@@ -438,7 +442,7 @@ fn harness_core_invalid_maneuver_limit_rejected() {
     env["task"]["policy"]["maneuver_limit"] = serde_json::json!(0);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(
         !output.status.success(),
         "invalid maneuver_limit must fail (core delegation)"
@@ -465,7 +469,7 @@ fn harness_valid_completed_loop_runs() {
     let env = task_envelope(&fx.head, 0);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     // The attempt must reach the navigator (evidence/maneuver output), not fail pre-flight.
@@ -487,7 +491,7 @@ fn harness_dirty_worktree_rejected() {
     let env = task_envelope(&fx.head, 0);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "dirty worktree must fail pre-flight");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -527,7 +531,7 @@ fn harness_state_dir_outside_repo_accepted() {
     let env = task_envelope(&fx.head, 0);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7); // state-dir = work (outside)
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human"); // state-dir = work (outside)
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Must reach navigator (not fail on state-dir invariant).
@@ -588,7 +592,7 @@ fn fail_closed_leaves_no_side_effects() {
     let env = task_envelope(&"f".repeat(40), 0); // wrong HEAD → fail-closed
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
-    let output = fx.run_attempt(&task_path, &proposals_path, 7);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "HEAD mismatch must fail");
     // No side-effects: repo clean, no .osp/ in repo.
     fx.assert_repo_clean();
@@ -685,4 +689,101 @@ fn harness_production_witness_reaches_navigator() {
         "harness+production-witness+task must reach navigator. stdout={stdout}\nstderr={stderr}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Review P0 — Completed-loop exact pin via versioned JSON envelope
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn completed_loop_exact_pin_via_json_envelope() {
+    // Reviewer'ın istediği exact V1 run envelope + state-transition assertion.
+    // main.rs (Node 2) has 2 outgoing imports → coupling 2/3 = 0.667.
+    // RemoveImport 2→1 → coupling 1/2 = 0.5 ≤ 0.55 → Completed.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 2); // Node 2 = main.rs (2 outgoing imports)
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1); // remove main→b
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
+
+    // The attempt must succeed (Completed) and emit a parseable JSON envelope.
+    assert!(
+        output.status.success(),
+        "Completed-loop must exit 0. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout not JSON envelope: {e}\n{stdout}"));
+
+    // V1 envelope schema.
+    assert_eq!(envelope["schema_version"], 1, "schema_version");
+    assert_eq!(envelope["run"]["execution_mode"], "harness");
+    assert_eq!(envelope["run"]["witness_mode"], "harness_auto_approve");
+    assert_eq!(envelope["run"]["task_source"], "harness_task_file");
+    assert_eq!(
+        envelope["run"]["repository_head"],
+        fx.head,
+        "envelope repository_head == fixture HEAD"
+    );
+
+    // V1 honest execution-measurement metadata.
+    assert_eq!(
+        envelope["execution_measurement"]["authority"],
+        "legacy_projected_v1",
+        "V1 honest authority (review P0)"
+    );
+    assert_eq!(
+        envelope["execution_measurement"]["provenance_native"],
+        false,
+        "provenance_native=false (MD-2 deferred)"
+    );
+
+    // Result kind + attempts.
+    assert_eq!(
+        envelope["result"]["kind"], "completed",
+        "Completed-loop result kind"
+    );
+    let attempts = envelope["result"]["attempts"]
+        .as_u64()
+        .expect("attempts is u64");
+    assert_eq!(
+        attempts, 1,
+        "single-attempt Completed (RemoveImport satisfies)"
+    );
+
+    // Evidence — exact state-transition pin.
+    let evidence = envelope["evidence"]
+        .as_array()
+        .expect("evidence array");
+    assert_eq!(evidence.len(), 1, "exactly one evidence entry (single attempt)");
+    let entry = &evidence[0];
+    assert_eq!(entry["gate_decision"], "PassedAll", "gate_decision");
+    assert_eq!(
+        entry["predicate_completion"], "Completed",
+        "predicate completion"
+    );
+    assert_eq!(
+        entry["mutation_decision"], "AcceptAsCompleted",
+        "mutation decision"
+    );
+
+    // before/after coupling: after < before, after ≤ threshold (0.55).
+    let before_coupling = entry["before"]["x"].as_f64().expect("before coupling (x)");
+    let after_coupling = entry["after"]["x"].as_f64().expect("after coupling (x)");
+    assert!(
+        after_coupling < before_coupling,
+        "coupling must decrease: before={before_coupling}, after={after_coupling}"
+    );
+    assert!(
+        after_coupling <= 0.55,
+        "after coupling ≤ threshold (0.55): after={after_coupling}"
+    );
+    // before coupling was 2/3 ≈ 0.667 (2 outgoing imports).
+    assert!(
+        before_coupling > 0.55,
+        "before coupling > threshold (was unsatisfied): before={before_coupling}"
+    );
+}
+
 
