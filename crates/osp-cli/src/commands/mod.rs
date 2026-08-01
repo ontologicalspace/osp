@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use clap::Args;
+use clap::{Args, ValueEnum};
 use osp_analyzer::contract::AnalysisConfig;
 use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
@@ -91,10 +91,55 @@ pub struct TrajectoryInitArgs {
     pub vision: Option<PathBuf>,
 }
 
+/// Execution mode — Paper 2 harness/production ayrımı.
+///
+/// Faz 8 test-project (review v6-v7): `harness-auto-approve` witness policy yalnız
+/// `harness` execution mode ile kullanılabilir (scoped relaxation). Production deployment
+/// Paper 1 witness güven modelini (min_approvers=2) korur.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Default)]
+pub enum CliExecutionMode {
+    /// Production deployment — Paper 1 witness güven modeli, persistence, external evidence.
+    #[default]
+    Production,
+    /// Controlled experiment/harness — test fixture, relaxed witness, deterministic.
+    Harness,
+}
+
+/// Witness policy mode — production quorum vs harness auto-approve.
+///
+/// `HarnessAutoApprove` yalnız `--execution-mode harness` ile (guard). Production
+/// deployment'ta kullanılamaz.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq, Default)]
+pub enum CliWitnessMode {
+    /// Production witness policy — Paper 1 güven modeli (min_approvers=2, quorum=1.5).
+    #[default]
+    Production,
+    /// Harness auto-approve — controlled experiment gevşetmesi (quorum=0).
+    #[value(name = "harness-auto-approve")]
+    HarnessAutoApprove,
+}
+
+/// Faz 8 test-project: witness/execution mode kombinasyon guard'ı (review P0-1).
+///
+/// `harness-auto-approve` yalnız `harness` execution mode ile geçerli. Production'da
+/// kullanımı fail-closed (Paper 2 scoped relaxation ilkesi).
+pub fn validate_execution_witness_combination(
+    execution: CliExecutionMode,
+    witness: CliWitnessMode,
+) -> anyhow::Result<()> {
+    if witness == CliWitnessMode::HarnessAutoApprove && execution != CliExecutionMode::Harness {
+        anyhow::bail!(
+            "--witness harness-auto-approve requires --execution-mode harness \
+             (Paper 2 scoped relaxation — production quorum disabled)"
+        );
+    }
+    Ok(())
+}
+
 /// `osp trajectory attempt <task-id>` — navigator attempt.
 #[derive(Args, Debug)]
 pub struct TrajectoryAttemptArgs {
-    /// Task ID.
+    /// Task ID. `--task` verilirse task dosyasının ID'siyle consistency check.
     pub task_id: u64,
     #[arg(long)]
     pub repo: PathBuf,
@@ -104,9 +149,23 @@ pub struct TrajectoryAttemptArgs {
     /// LLM mode: mock (FileMockLlm, --proposals) or real (RuntimeLlmClient, GPT-4o-mini).
     #[arg(long, default_value = "mock")]
     pub llm: String,
-    /// Maneuver limit (default 5).
-    #[arg(long, default_value = "5")]
-    pub maneuver_limit: u32,
+    /// Maneuver limit override (task policy'de yoksa). Default 5.
+    #[arg(long)]
+    pub maneuver_limit: Option<u32>,
+    /// Harness task dosyası (CliHarnessTaskFileV1 JSON). snapshot-bound: repository HEAD
+    /// + NodeId→path scope binding + Task. Yoksa hardcoded legacy task (backward-compat).
+    #[arg(long)]
+    pub task: Option<PathBuf>,
+    /// Execution mode (review v6): production (default) veya harness (controlled experiment).
+    #[arg(long, value_enum, default_value_t = CliExecutionMode::Production)]
+    pub execution_mode: CliExecutionMode,
+    /// Witness policy (review v6): production (default) veya harness-auto-approve.
+    /// harness-auto-approve yalnız --execution-mode harness ile (guard).
+    #[arg(long, value_enum, default_value_t = CliWitnessMode::Production)]
+    pub witness: CliWitnessMode,
+    /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
+    #[arg(long, default_value = "human")]
+    pub format: String,
 }
 
 /// `osp task view <task-id>` — AgentTaskView göster.
@@ -207,6 +266,8 @@ pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
 
 /// `osp trajectory attempt` — D2 navigator + MockLlmClient/RuntimeLlmClient.
 pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()> {
+    // Faz 8 test-project (review v6 P0-1): execution/witness mode guard.
+    validate_execution_witness_combination(args.execution_mode, args.witness)?;
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
     use osp_core::coords::{CoordinateSystem, MetricSource};
     use osp_core::engine::{EngineConfig, SpaceEngine};
@@ -276,7 +337,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     let _cap = OperatorCapability::issue_for_operator_session();
     let mut task_registry = InMemoryTaskRegistry::new();
     let mut policy = TaskPolicy::default();
-    policy.maneuver_limit = args.maneuver_limit;
+    policy.maneuver_limit = args.maneuver_limit.unwrap_or(5);
     policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
     let task = Task {
         id: args.task_id,
@@ -337,8 +398,14 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         },
         current_measured,
         output_contract: osp_core::agent::OutputContract::strict(),
-        // CLI = production → Production witness (min_approvers=2, Paper 1 güven modeli).
-        witness_policy: osp_core::navigator::NavigatorWitnessPolicy::Production,
+        // Faz 8 test-project (review v6): witness policy args.witness'a göre.
+        // harness-auto-approve → Completed loop (guarded: yalnız execution=harness).
+        witness_policy: match args.witness {
+            CliWitnessMode::Production => osp_core::navigator::NavigatorWitnessPolicy::Production,
+            CliWitnessMode::HarnessAutoApprove => {
+                osp_core::navigator::NavigatorWitnessPolicy::HarnessAutoApprove
+            }
+        },
         // INV-T9: production filesystem store — cwd altında .osp/pending-authorizations/.
         pending_authorization_store: Box::new(
             osp_core::authorization::FilesystemPendingAuthorizationStore::new("."),
