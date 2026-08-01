@@ -3,6 +3,7 @@
 //! Pattern: osp-desktop cmd_simulate_claim (lib.rs:257-278) reuse —
 //! analyze_repo_with_config → CoordinateSystem::default_raw_five → SpaceEngine.
 
+pub mod analyze_provenance;
 pub mod harness_task;
 pub mod repo_snapshot;
 
@@ -65,6 +66,19 @@ impl OutputFormat {
     }
 }
 
+/// CLI output format (Faz 8 analyze) — typed ValueEnum (review P1-4).
+///
+/// Eski `OutputFormat` review komutlarında kullanılıyor (unknown → Text sessiz fallback).
+/// Analyze için typed enum: bilinmeyen değer clap parse error (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum CliOutputFormat {
+    /// Human-readable — envelope JSON + diagnostics birlikte (backward-compat default).
+    #[default]
+    Human,
+    /// Machine-readable — stdout'a yalnız JSON document; diagnostics stderr'e.
+    Json,
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Komut argüman yapıları
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -80,6 +94,16 @@ pub struct AnalyzeArgs {
     /// Çıktı JSON dosyası (default: stdout).
     #[arg(long)]
     pub out: Option<PathBuf>,
+    /// Output format: `human` (default — envelope JSON + diagnostics) veya `json`
+    /// (machine-readable, stdout'a yalnız JSON; diagnostics stderr'e). Unknown value →
+    /// clap parse error (ValueEnum, review P1-4).
+    #[arg(long, value_enum, default_value_t = CliOutputFormat::Human)]
+    pub format: CliOutputFormat,
+    /// Snapshot binding policy (review P0). Generic analyze = observe worktree (dirty OK,
+    /// HEAD yalnız gözlenen metadata). `--require-clean-snapshot` = clean pre/post-equal HEAD
+    /// zorunlu (harness task üretimi için; dirty/drift fail-closed). B-3 harness bu flag'i kullanır.
+    #[arg(long, default_value_t = false)]
+    pub require_clean_snapshot: bool,
 }
 
 /// `osp trajectory init --repo <repo>` — SpaceEngine + Trajectory kur.
@@ -196,34 +220,196 @@ pub struct EvidenceArgs {
 // Komut handler'ları
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// `osp analyze` — repo analiz → space snapshot JSON.
+/// `osp analyze` — repo analiz → space snapshot JSON (per-axis provenance envelope).
+///
+/// Two snapshot-binding contracts (review P0):
+/// - **Generic** (default): observe worktree — dirty OK, HEAD yalnız gözlenen metadata,
+///   `binding: observed_worktree_unbound`. "Şu anda diskte gördüğüm kodu analiz et."
+/// - **Harness-bound** (`--require-clean-snapshot`): clean pre/post-equal HEAD zorunlu,
+///   `binding: clean_pre_post_equal`. "Tam olarak HEAD commit'ine bağlı veri üret."
+///   B-3 harness task üretimi bu flag'i kullanır; task loader yalnız clean-bound kabul eder.
+///
+/// Review fixes: P1-1 (provenance_model), P1-2 (head single source), P1-3 (key-set +
+/// bijection), P1-4 (format/out matrix + out-inside-repo reject in require-clean mode).
 pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
+    // Pre-capture snapshot (binding mode determines eligibility + drift fence).
+    let snapshot_before =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+
+    // P0: harness-bound mode rejects --out inside analyzed repo (would dirty next snapshot step).
+    if args.require_clean_snapshot {
+        if let Some(out) = args.out.as_ref() {
+            reject_output_inside_repo(&args.repo, out)?;
+        }
+    }
+
     let registry = AdapterRegistry::default_all();
     let config = AnalysisConfig {
         scip_index: args.scip.clone(),
         ..Default::default()
     };
     let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
-    let json = serde_json::to_string_pretty(&serde_json::json!({
+
+    // Post-capture snapshot + binding mode resolution (review P0).
+    let snapshot_after =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+    let binding = if args.require_clean_snapshot {
+        // Harness-bound: clean worktree + pre/post drift fence + analyzed-path⊆tracked.
+        repo_snapshot::ensure_snapshot_eligible(&snapshot_before).map_err(|e| anyhow::anyhow!(e))?;
+        if snapshot_before != snapshot_after {
+            anyhow::bail!(
+                "repository changed during analysis (head/tracked/clean drift) — \
+                 --require-clean-snapshot output cannot be bound to a stable HEAD"
+            );
+        }
+        repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_after)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        analyze_provenance::CliRepositoryBinding::CleanPrePostEqual
+    } else {
+        // Generic: observe worktree. HEAD yalnız gözlenen metadata; dirty OK, drift gözetlenir.
+        if snapshot_before != snapshot_after {
+            eprintln!(
+                "osp analyze: note — repository changed during analysis (binding=observed_worktree_unbound)"
+            );
+        }
+        analyze_provenance::CliRepositoryBinding::ObservedWorktreeUnbound
+    };
+
+    // Exact-set node identity + path bijection (review P1-3).
+    analyze_provenance::validate_node_key_sets(&result).map_err(|e| anyhow::anyhow!(e))?;
+    analyze_provenance::validate_node_paths_bijection(&result.node_paths)
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    // Per-node provenance entries (NodeId ascending — deterministic wire order).
+    let mut nodes: Vec<analyze_provenance::CliAnalyzeNode> =
+        Vec::with_capacity(result.space.nodes.len());
+    let mut node_ids: Vec<u64> = result.space.nodes.keys().copied().collect();
+    node_ids.sort_unstable();
+    for node_id in &node_ids {
+        let node = &result.space.nodes[node_id];
+        let path = result.node_paths.get(node_id).expect("key-set validated above");
+        let metrics = result
+            .module_metrics
+            .get(node_id)
+            .expect("key-set validated above");
+        nodes.push(analyze_provenance::CliAnalyzeNode::from_analysis(
+            *node_id,
+            path.clone(),
+            node,
+            metrics,
+        ));
+    }
+
+    // Analyze provenance envelope (review P1-1 — analyzer_axis_specific, not "native").
+    // repository.head tek kaynaktan: snapshot_after.head (review P1-2 — semantic_coverage
+    // kısa SHA taşır, envelope authority'si olamaz).
+    let envelope = serde_json::json!({
+        "schema_version": 1,
+        "analysis": {
+            "metric_representation": "axis_provenanced_v1",
+            "provenance_model": "analyzer_axis_specific",
+            "axis_specific_provenance": true
+        },
+        "repository": {
+            "head": snapshot_after.head.as_str(),
+            "clean": snapshot_after.clean,
+            "binding": binding
+        },
         "node_count": result.space.nodes.len(),
         "edge_count": result.space.edges.len(),
-        "module_metrics_count": result.module_metrics.len(),
+        "nodes": nodes,
         "repo_metrics": {
-            "abstractness": result.repo_metrics.abstractness.value,
-            "main_sequence_distance": result.repo_metrics.main_sequence_distance.value,
+            "abstractness": {
+                "value": result.repo_metrics.abstractness.value,
+                "source": analyze_provenance::CliMetricSource::from(
+                    result.repo_metrics.abstractness.source
+                )
+            },
+            "main_sequence_distance": {
+                "value": result.repo_metrics.main_sequence_distance.value,
+                "source": analyze_provenance::CliMetricSource::from(
+                    result.repo_metrics.main_sequence_distance.source
+                )
+            }
         },
         "semantic_coverage": {
             "files_total": result.semantic_coverage.files_total,
             "files_with_scip": result.semantic_coverage.files_with_scip,
             "coverage_ratio": result.semantic_coverage.coverage_ratio,
-        },
-    }))?;
-    match args.out {
-        Some(path) => {
-            std::fs::write(&path, &json)?;
-            println!("✓ Space snapshot written to {}", path.display());
+            "stale": result.semantic_coverage.stale
         }
-        None => println!("{json}"),
+    });
+    let json = serde_json::to_string_pretty(&envelope)?;
+
+    // Diagnostics to stderr (shared across format/out combinations).
+    let stderr_diagnostics = |stale: bool, coverage_ratio: f64| {
+        if !stale && coverage_ratio < 1.0 {
+            eprintln!(
+                "osp analyze: partial SCIP coverage ({:.0}%) — cohesion placeholder \
+                 fallback for uncovered files",
+                coverage_ratio * 100.0
+            );
+        }
+        if stale {
+            eprintln!(
+                "osp analyze: WARNING — SCIP index stale (index_commit ≠ repo_head); \
+                 cohesion values may not reflect current HEAD"
+            );
+        }
+    };
+
+    match (args.format, args.out.as_ref()) {
+        // json + out → JSON to file, stdout empty, confirmation + diagnostics stderr.
+        (CliOutputFormat::Json, Some(path)) => {
+            std::fs::write(path, &json)?;
+            eprintln!("✓ Space snapshot written to {}", path.display());
+            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+        }
+        // json + no-out → JSON only to stdout, diagnostics stderr (stdout JSON-only).
+        (CliOutputFormat::Json, None) => {
+            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+            println!("{json}");
+        }
+        // human + out → JSON to file + confirmation stdout (backward-compat) + diagnostics stderr.
+        (CliOutputFormat::Human, Some(path)) => {
+            std::fs::write(path, &json)?;
+            println!("✓ Space snapshot written to {}", path.display());
+            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+        }
+        // human + no-out → JSON to stdout + diagnostics stderr (backward-compat).
+        (CliOutputFormat::Human, None) => {
+            println!("{json}");
+            stderr_diagnostics(result.semantic_coverage.stale, result.semantic_coverage.coverage_ratio);
+        }
+    }
+    Ok(())
+}
+
+/// Reject `--out` path inside the analyzed repository in require-clean-snapshot mode
+/// (review P1-4). Writing into the repo would dirty the next snapshot-bound step →
+/// surprising B-3 harness rejection. Generic observed mode allows it.
+fn reject_output_inside_repo(repo: &PathBuf, out: &PathBuf) -> anyhow::Result<()> {
+    // canonicalize the repo (exists). For out, canonicalize the parent if the file
+    // doesn't exist yet (output not yet written), else canonicalize the path itself.
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+    let canon_out = if out.exists() {
+        out.canonicalize().unwrap_or_else(|_| out.clone())
+    } else {
+        // Resolve via parent (which exists) + file_name, then make absolute if needed.
+        match out.parent().and_then(|p| p.canonicalize().ok()) {
+            Some(parent) => out
+                .file_name()
+                .map(|name| parent.join(name))
+                .unwrap_or_else(|| out.clone()),
+            None => out.clone(),
+        }
+    };
+    if canon_out.starts_with(&canon_repo) {
+        anyhow::bail!(
+            "--out path {} is inside the analyzed repository; --require-clean-snapshot \
+             would be dirtied by the output write (place output outside the repo)",
+            out.display()
+        );
     }
     Ok(())
 }
