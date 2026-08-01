@@ -446,3 +446,61 @@ Status: `planned — MD-x accepted, implementation pending`. Production Rust kod
 - **Baseline policy implementation** (MD-3 implementation — AcceptAsColdStart + ColdStartPolicy).
 - **#88** mixed_per_axis_sources matrisi (MD-2 evidence gate).
 - **#92** subject-authority → raw → Q5 theta downstream (MD-1 cutover gate).
+- **#96** MD-2 implementation — navigator native measurement migration + singleton
+  fast-path + digest parity + Completed-loop exact pin (review B-3 P1-3 versioned JSON
+  envelope).
+
+## Faz 8 test-project Completed-loop — V1 compatibility harness deferral
+
+**Status:** Accepted (Faz 8 test-project — V1 compatibility harness, MD-2 ertelendi)
+**Decision date:** 2026-08-01
+**Branch:** `faz8-test-project/completed-loop`
+
+Faz 8 test-project Completed-loop harness (B-1/B-2/B-3) MD-2 **implementation**'ını
+içermez. Navigator native measurement migration + singleton fast-path + digest parity
+bütünüyle **#96'ya (MD-2 implementation)** taşındı.
+
+### Keşif — digest divergence
+
+Navigator native `measure_task_delta` migration'ı denenirken `inv_t9_72_held_production_path_exact`
+(FilesystemStore reload) fail etti: `authorization basis digest mismatch`. NullStore Held
+test geçti → sorun reload/verify zincirinde. Kök neden hipotezi: `TaskCommitInput` (legacy)
+ile `EngineMeasurement` (native) iki authority modeli yarı yolda birleşince persistence wire
+representation divergence üretiyor.
+
+### V1 compatibility harness — ne yapar (B-1/B-2/B-3)
+
+1. Snapshot-bound task loading (HEAD + scope binding + Node-only V1).
+2. Dual snapshot-binding contracts (`--require-clean-snapshot`).
+3. Per-axis provenance envelope (`analyzer_axis_specific`, native değil).
+4. State-dir externalization (`--state-dir` + harness invariant).
+5. Mode-matrix guard + core delegation (`Task::validate()` façade).
+6. Exact-set node identity + path bijection.
+
+### V1 compatibility harness — ne yapmaz (MD-2 deferral)
+
+1. Native 5-axis engine measurement (authorization basis hâlâ legacy `TaskCommitInput`).
+2. Provenance-native execution path (uniform Scip projection).
+3. Versioned trajectory JSON envelope (Completed-loop çıktısı human stdout, P1-3 deferred).
+
+### MD-2 cutover acceptance criteria (#96)
+
+1. **Digest parity**: Native EngineMeasurement → Held → Filesystem persist → reload →
+   exact authorization basis digest parity → exact 5-axis value bits → exact 5-axis source tags.
+2. **Singleton centroid bit-parity**: `measured_centroid_in_session` fast-path →
+   direct `measured_position_of` bit-identical.
+3. **Reload verification**: `inv_t9_72_held_production_path_exact` native migration altında
+   geçmeli (FilesystemStore reload).
+4. **Execution provenance**: trajectory attempt native 5-axis engine measurement
+   kullanır (hardcoded `provenanced_from_raw` değil).
+
+### V1 metadata dürüstlüğü
+
+- **Analyze envelope**: `analysis.provenance_model: analyzer_axis_specific` (gerçek
+  axis-specific analyzer provenance — MD-2 native authority'den ayrı).
+- **Navigator execution** (P1-3 deferred): hedef `execution_measurement.authority:
+  legacy_projected_v1` — navigator'ın legacy V1 projection'ını dürüstçe beyan eder.
+
+Test referansı: `crates/osp-cli/tests/completed_loop.rs` (20-senaryo integration matrix).
+Kullanım rehberi: `docs/notes/test-project-guide.md`.
+
