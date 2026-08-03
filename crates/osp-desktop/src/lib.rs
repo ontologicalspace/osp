@@ -342,11 +342,14 @@ pub fn cmd_simulate_claim(repo_path: &str, scenario: &str) -> Result<PipelineRes
         _ => return Err(format!("Unknown scenario: {scenario}")),
     };
 
-    // Compute position (or use override)
+    // Compute position (or use override).
+    // Demo pipeline: subtractive delta (edge kaldırma) ve affected_nodes yok —
+    // bu nedenle `compute_raw_from_delta`'nin 2 ek argümanı boş. engine.rs doc'una
+    // göre affected_nodes boşsa delta_nodes kullanılır (review 7 #6).
     let computed_raw = computed_raw_override
-        .unwrap_or_else(|| engine.compute_raw_from_delta(&delta_nodes, &delta_edges));
+        .unwrap_or_else(|| engine.compute_raw_from_delta(&delta_nodes, &delta_edges, &[], &[]));
 
-    // Build claim
+    // Build claim — standalone demo claim (INV-T5: task_id=None, G2c-2: removed_edges boş).
     let claim = osp_core::witness::Claim {
         id: 1,
         intent: osp_core::witness::Intent::new(42, osp_core::coords::RawPosition::default()),
@@ -354,6 +357,8 @@ pub fn cmd_simulate_claim(repo_path: &str, scenario: &str) -> Result<PipelineRes
         computed_raw,
         delta_nodes,
         delta_edges,
+        task_id: None,
+        removed_edges: vec![],
     };
 
     // Mock witnesses (2 MergeCommit)
