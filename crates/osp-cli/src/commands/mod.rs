@@ -482,12 +482,31 @@ fn resolve_state_dir(
     Ok(state_dir)
 }
 
+/// INV-T9 Step 4b: trajectory vision authority.
+///
+/// `run_trajectory_init` ve `run_trajectory_attempt` ortak vision vector'u — mutation
+/// yüzeyinde `GlobalDefault` authority reject edilir (commit_task_claim → vision authority
+/// gate). `UserLoaded` (kullanıcı-onaylı) en yüksek authority seviyesi. Bu yardımcı her iki
+/// komutun aynı authority seviyesini paylaşmasını sağlar (issue #105 — `run_trajectory_init`
+/// eskiden `VisionVector::new`/GlobalDefault kullanıyordu, navigator'a bağlanınca reject).
+fn user_confirmed_trajectory_vision() -> osp_core::vision::VisionVector {
+    osp_core::vision::VisionVector::with_source(
+        osp_core::coords::RawPosition {
+            x: 0.4,
+            y: 0.6,
+            z: 0.5,
+            w: 0.5,
+            v: 0.5,
+        },
+        osp_core::vision::VisionSource::UserLoaded,
+    )
+}
+
 /// `osp trajectory init` — SpaceEngine kur (analyze + coord system + vision).
 pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
     use osp_core::coords::{CoordinateSystem, MetricSource};
     use osp_core::engine::{EngineConfig, SpaceEngine};
-    use osp_core::vision::VisionVector;
 
     let registry = AdapterRegistry::default_all();
     let config = AnalysisConfig {
@@ -502,13 +521,7 @@ pub fn run_trajectory_init(args: TrajectoryInitArgs) -> anyhow::Result<()> {
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
     )?;
-    let vision = VisionVector::new(osp_core::coords::RawPosition {
-        x: 0.4,
-        y: 0.6,
-        z: 0.5,
-        w: 0.5,
-        v: 0.5,
-    });
+    let vision = user_confirmed_trajectory_vision();
     let engine = SpaceEngine::with_default_rules(
         result.space,
         cs,
@@ -558,18 +571,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         EntropyAxis::from_commit_entropy(6.0),
         WitnessDepthAxis::from_witness(0.3, 5),
     )?;
-    let vision = osp_core::vision::VisionVector::with_source(
-        osp_core::coords::RawPosition {
-            x: 0.4,
-            y: 0.6,
-            z: 0.5,
-            w: 0.5,
-            v: 0.5,
-        },
-        // INV-T9 Step 4b: mutation yüzeyinde GlobalDefault authority reject edilir;
-        // user-confirmed (UserLoaded) vision gerekli (navigator commit_task_claim).
-        osp_core::vision::VisionSource::UserLoaded,
-    );
+    let vision = user_confirmed_trajectory_vision();
     let mut engine = SpaceEngine::with_default_rules(
         result.space,
         cs,
@@ -996,6 +998,28 @@ mod mode_matrix_tests {
         assert_eq!(
             task.allowed_operations,
             vec![osp_core::trajectory::OpKind::RemoveImport]
+        );
+    }
+}
+
+#[cfg(test)]
+mod trajectory_vision_authority_tests {
+    //! INV-T9 Step 4b (issue #105): trajectory vision authority regression guard.
+    //!
+    //! `run_trajectory_init` eskiden `VisionVector::new` (GlobalDefault) kullanıyordu —
+    //! navigator'a bağlanınca `commit_task_claim` vision authority gate'inde reject olurdu.
+    //! Bu test `user_confirmed_trajectory_vision` yardımcısının UserLoaded authority
+    //! kullandığını doğrular (GlobalDefault'a geri dönülmesini engeller).
+    use super::*;
+
+    #[test]
+    fn trajectory_vision_uses_user_loaded_authority_not_global_default() {
+        let vision = user_confirmed_trajectory_vision();
+        assert_eq!(
+            vision.source,
+            osp_core::vision::VisionSource::UserLoaded,
+            "trajectory vision must use UserLoaded authority — GlobalDefault is rejected \
+             at the authorization-gated mutation surface (INV-T9 Step 4b, issue #105)"
         );
     }
 }
