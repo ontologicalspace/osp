@@ -60,8 +60,8 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-${{ hashFiles('rust-toolchain.toml', '**/Cargo.lock') }}
 
-      - name: Check formatting (warnings only)
-        run: cargo fmt --all -- --check || true
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
       # osp-desktop is a Tauri (v2) app: building its binary pulls in
       # webkit2gtk / gtk-sys / glib-sys, which require system packages
@@ -76,6 +76,14 @@ jobs:
       # compiler flags) üçlüsüne duyarlıdır; deterministic CI için zorunlu.
       - name: Build
         run: cargo build --locked --workspace --verbose --exclude osp-desktop
+
+      # CI hardening (#94): clippy -D warnings zorunlu. Workspace --all-targets
+      # (lib + bin + test + examples) PR #115 sonrası tamamen temiz. osp-desktop
+      # headless CI'da system package gerektirdiği için exclude (bkz. Build notu).
+      # RUSTFLAGS=-D warnings zaten env'de set, ama clippy lint'leri için ayrı adım
+      # daha okunabilir fail mesajı verir.
+      - name: Clippy (deny warnings)
+        run: cargo clippy --locked --workspace --all-targets --all-features --exclude osp-desktop -- -D warnings
 
       - name: Run tests
         run: cargo test --locked --workspace --verbose --exclude osp-desktop
