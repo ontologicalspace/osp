@@ -2054,7 +2054,14 @@ impl SpaceEngine {
     ///
     /// Stub: Faz 2'de full_access mask (tüm node'lar writable). Faz 5'te God Mode
     /// config'ten yüklenen gerçek PermissionMask ile çalışır.
-    #[allow(dead_code, clippy::result_large_err)] // Faz 5'te commit() imzasına mask parametresi eklenecek; EngineCommitError carries MeasurementBindingVerificationError (intentional inline), see measurement.rs layout decision
+    #[allow(
+        dead_code,
+        reason = "Faz 5 production consumer — commit() imzasına mask parametresi eklenecek"
+    )]
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries intentional inline MeasurementBindingVerificationError; see measurement.rs layout decision"
+    )]
     fn check_permissions(
         &self,
         _claim: &Claim,
@@ -2183,7 +2190,10 @@ impl SpaceEngine {
         }
 
         // Q5 Vision (Step 4b: captured vision context + typed failure)
-        #[allow(clippy::result_large_err)]
+        #[allow(
+            clippy::result_large_err,
+            reason = "local closure propagates intentional inline EngineCommitError; see MeasurementBindingVerificationError layout decision"
+        )]
         let vision_result = self
             .effective_vision_gate_context(claim)
             .map_err(EngineCommitError::VisionContextInvalid)
@@ -2198,7 +2208,10 @@ impl SpaceEngine {
         }
 
         // Q6 Rule (Step 4a: context-aware)
-        #[allow(clippy::result_large_err)]
+        #[allow(
+            clippy::result_large_err,
+            reason = "local closure propagates intentional inline EngineCommitError; see MeasurementBindingVerificationError layout decision"
+        )]
         let rule_result = self
             .current_rule_evaluation_context()
             .map_err(EngineCommitError::AuthorizationContextFailed)

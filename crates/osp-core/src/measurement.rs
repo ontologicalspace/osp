@@ -14,11 +14,11 @@
 //! lint'i bu yüzden Measurement pipeline fonksiyonlarında uyarı verir.
 //!
 //! **Karar (clippy ontolojik temizlik):** blanket module-level allow KALDIRILDI.
-//! Artık her `result_large_err` diagnostic'i **item-level** `#[allow(reason=...)]`
-//! ile dar kapsamlı bastırılır. Karar tek canonical yerde — ilgili error tipinin
-//! üstündeki source comment'te (ör. `MeasurementBindingVerificationError`).
-//! Large version-dispatch carrier enum'lar (`VersionedPendingAuthorizationEnvelope`,
-//! `VersionedAuthorizationBasisRepr`) Box'lanır; cold-path error tipleri inline kalır.
+//! Artık her `result_large_err` diagnostic'i mümkün olan en dar **item veya statement**
+//! yüzeyinde gerekçeli `#[allow]` ile ele alınır. Karar tek canonical yerde — ilgili
+//! error tipinin üstündeki source comment'te (ör. `MeasurementBindingVerificationError`,
+//! `MeasurementError`). Large version-dispatch carrier enum'ları Box'lanır; cold
+//! failure-path error tipleri vaka bazında inline tutulabilir.
 //! - Canonical impact edges: `CanonicalEdgeIdentity` (raw `EdgeRef` DEĞİL)
 //! - Shared `CanonicalStructuralDelta` producer (single canonicalization truth)
 //! - Centroid axis identity + mass validation
@@ -1715,7 +1715,7 @@ impl EngineMeasurement {
     /// `MeasurementInputDigest::compute(context) == request.measurement_input_digest`.
     #[allow(
         clippy::result_large_err,
-        reason = "intentional inline measurement failure type; same layout decision as MeasurementBindingVerificationError"
+        reason = "intentional inline MeasurementError; see MeasurementError layout decision"
     )]
     pub(crate) fn new(
         before: MeasurementBaseline,
@@ -2104,6 +2104,17 @@ pub enum MeasurementBindingVerificationError {
 // Error taxonomy
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Layout decision (clippy ontolojik temizlik):
+//
+// MeasurementError inline tutulur. Büyük varyantları (ör. RevisionMismatch —
+// SpaceViewRevision içerir) yalnızca measurement construction/derivation
+// FAILURE path'inde üretilir. Box failure başına allocation getirir ve public
+// error shape'ini değiştirir.
+//
+// Bu vaka-bazlı bir karar; gerekçesi MeasurementBindingVerificationError'dan
+// DEVRALINMAZ — ayrı error taxonomy'si, ayrı üretim yolları. Her ikisi de
+// inline tutulmakla birlikte bağımsız değerlendirilmiştir. Bkz. karşıt karar:
+// authorization.rs version-dispatch carrier enum'ları (>480 byte, Box'lı).
 /// Measurement pipeline hatası.
 ///
 /// **Reviewer v4 P1-1:** blanket `CanonicalizationError` `#[from]` YOK — explicit
