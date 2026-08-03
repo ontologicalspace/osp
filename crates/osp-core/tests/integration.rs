@@ -10,6 +10,8 @@ use osp_core::persistence::SnapshotStore;
 use osp_core::space::{Edge, EdgeKind, Node, NodeKind, Space};
 use osp_core::vision_config::VisionConfig;
 use osp_core::witness::{Claim, EvidenceEvent, EvidenceId, Intent, WitnessKind, WitnessSet};
+// `FromStr` trait — `VisionConfig::from_str` test çağrıları için (idiomatic trait method).
+use std::str::FromStr;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test helpers

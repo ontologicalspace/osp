@@ -2778,6 +2778,10 @@ impl AuthorizationBasisV2 {
     /// + request snapshot → digest reverify (reviewer P0-2). Başarısızsa basis doğmaz.
     ///   Tek creation yolu (field'lar private). Builder (Commit 2) bu constructor'ı çağırır.
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "checked wire restore constructor requires all persisted commitments simultaneously; grouping into partial builder state would weaken restore-boundary validation (17 canonical fields: identity + 6 digests + evidence + 4 Faz 5 policy fields)"
+    )]
     pub(crate) fn new(
         task_id: crate::trajectory::TaskId,
         claim_id: crate::witness::ClaimId,
@@ -13137,8 +13141,8 @@ z = 0.5
 w = 0.5
 v = 0.5
 "#;
-        let config =
-            crate::vision_config::VisionConfig::from_str(toml).expect("valid TOML must parse");
+        let config: crate::vision_config::VisionConfig =
+            toml.parse().expect("valid TOML must parse");
         let vector = config.to_vision_vector();
         assert_eq!(
             vector.source(),

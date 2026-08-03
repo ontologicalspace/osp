@@ -479,8 +479,22 @@ pub(crate) struct VerifiedTaskMeasurementBinding {
     task_goal_evidence: crate::authorization::CanonicalTaskGoalEvidenceV2,
 }
 
+/// `into_parts()` Faz 4+5 extension — 5 field ayrı tuple (digest + evidence +
+/// snapshot + policy). `into_parts` dönüş tipini sadeleştirmek için type alias.
+pub(crate) type VerifiedTaskMeasurementExtension = (
+    crate::measurement::TaskGoalDigest,
+    crate::authorization::CanonicalTaskGoalEvidenceV2,
+    crate::measurement::EngineMeasurementDigest,
+    Option<crate::coords::RawPosition>,
+    crate::measurement::PredicateGatePolicyDigestV2,
+);
+
 impl VerifiedTaskMeasurementBinding {
     /// Modül-private constructor — yalnız `verify_measurement_binding` çağırır.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "module-private checked constructor — single atomic creation boundary for verified measurement binding; all fields are cross-field-validated together (10 fields: identity + 4 digests + binding + Faz 4/5 extension)"
+    )]
     fn new(
         task_id: crate::trajectory::TaskId,
         claim_id: crate::witness::ClaimId,
@@ -588,14 +602,8 @@ impl VerifiedTaskMeasurementBinding {
         crate::measurement::TaskClaimDigest,
         crate::measurement::MeasurementDigest,
         VerifiedMeasurementBinding,
-        // Faz 4+5 extension — 5 field ayrı tuple (digest + evidence + snapshot + policy).
-        (
-            crate::measurement::TaskGoalDigest,
-            crate::authorization::CanonicalTaskGoalEvidenceV2,
-            crate::measurement::EngineMeasurementDigest,
-            Option<crate::coords::RawPosition>,
-            crate::measurement::PredicateGatePolicyDigestV2,
-        ),
+        // Faz 4+5 extension — type alias (clippy type_complexity).
+        VerifiedTaskMeasurementExtension,
     ) {
         (
             self.task_id,
@@ -3257,7 +3265,7 @@ z = 0.5
 w = 0.5
 v = 0.5
 "#;
-        let config = VisionConfig::from_str(toml).unwrap();
+        let config: VisionConfig = toml.parse().unwrap();
         let cs = CoordinateSystem::default_raw_three(
             crate::coords::MetricSource::Placeholder,
             EntropyAxis::from_commit_entropy(6.0),
