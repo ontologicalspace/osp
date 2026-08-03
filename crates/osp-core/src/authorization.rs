@@ -8590,6 +8590,14 @@ pub struct FilesystemPendingAuthorizationStore {
 
 impl FilesystemPendingAuthorizationStore {
     /// Yeni store — `root` altında `.osp/pending-authorizations/` dizini kullanılır.
+    ///
+    /// **CWD-bağımlılık (production kontrat):** Production CLI `--state-dir`
+    /// verilmezse default `root` **CWD**'dir → `.osp/pending-authorizations/`
+    /// CWD'ye yazılır. Analyzed git repo CWD ise bu writes `git status`'ü
+    /// kirletir → snapshot eligibility fail. Bu yüzden CLI `--state-dir`'i
+    /// analyzed repo DIŞINDA bir path'e externalize eder (PR #104). Integration
+    /// test'leri için bkz. `docs/notes/test-project-guide.md` "Integration test
+    /// isolation pattern'i" — `HarnessFixture` repo/work tempdir ayrımı.
     pub fn new(root: impl Into<std::path::PathBuf>) -> Self {
         Self { root: root.into() }
     }

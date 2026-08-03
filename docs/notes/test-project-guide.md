@@ -187,8 +187,98 @@ Task dosyası yüklenirken şu kontroller fail-closed uygulanır:
 | malformed JSON | `Parse` |
 | dirty worktree | `ensure_snapshot_eligible` reject |
 
+## Integration test isolation pattern'i
+
+`osp trajectory attempt` integration testleri (binary'yi `assert_cmd` ile çağıran)
+iki tuzağa karşı izole edilmeli. Bu bölüm, `HarnessFixture` pattern'ini
+(`crates/osp-cli/tests/completed_loop.rs`) dokümante eder — gelecek integration
+test yazarlarının aynı teşhis sürecini yaşamaması için.
+
+### Tuzak 1: `.osp/` writes → repo dirty → snapshot eligibility fail
+
+`FilesystemPendingAuthorizationStore::new(root)` `root` altında
+`.osp/pending-authorizations/` dizinine Held artifact yazıyor. Production
+default (`--state-dir` verilmezse) **CWD**'ye yazar.
+
+Eğer test CWD'yi analyzed repo içine ayarlarsa (`current_dir(repo_path)`):
+`.osp/` analyzed repo'ya yazılır → `git status` dirty → `ensure_snapshot_eligible`
+reject → test fail. Bu bir workaround değil, **production fix**'tir (PR #104):
+`--state-dir` harness mode'da zorunlu ve analyzed repo **dışında** olmalı.
+
+### Tuzak 2: Paralel test CWD contamination
+
+Integration testler `cargo test` ile paralel koşer. Eğer testler aynı CWD'yi
+paylaşırsa, `.osp/` writes cross-test contamination'a uğrar — bir testin Held
+artifact'i diğer testin state-dir'inde belirir, flaky failure'lar üretir.
+
+### Çözüm: `HarnessFixture` — repo/work tempdir ayrımı
+
+Her test **iki ayrı tempdir** sahibi:
+
+```rust
+struct HarnessFixture {
+    repo: tempfile::TempDir,  // analyzed git repo (clean, immutable HEAD)
+    work: tempfile::TempDir,  // CWD — task/proposal dosyaları + state-dir burada
+    head: String,
+}
+```
+
+- `repo`: analyzed git repository. Test boyunca **salt okunur** (HEAD binding
+  snapshot eligibility için). `.osp/` BURAYA yazılmaz.
+- `work`: CWD. Task/proposal JSON dosyaları ve `--state-dir` burada. **Analyzed
+  repo DIŞINDA** → `.osp/` writes git status'ü kirletmez.
+- Binary çağrısı: `cmd.current_dir(work.path())` + `--state-dir work/osp-state`
+
+### Deterministic fixture (CRLF + commit dates)
+
+Paralel/makine bağımsız kararlılık için iki konfigürasyon zorunlu:
+
+1. **`core.autocrlf=false` + `core.eol=lf`**: Windows'ta CRLF normalization
+   çalıştıktan sonra repo dirty görünmesin (analyzer dosya byte'larını okur,
+   git index ile karşılaştırır).
+
+2. **`GIT_AUTHOR_DATE` + `GIT_COMMITTER_DATE`**: Fixed commit tarihleri →
+   kararlı SHA. Aksi halde makine saati farklılığı cross-machine/cross-run
+   HEAD mismatch üretir (`RepositoryHeadMismatch`).
+
+```rust
+let commit = |args: &[&str]| {
+    Command::new("git")
+        .args(["-C", repo.to_str().unwrap()])
+        .args(args)
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+        .status()
+};
+```
+
+### `OSP_ATTEMPT_LOCK` defensive serialization
+
+`trajectory attempt` Held artifact disk I/O yapar. Paralel testler aynı
+`--state-dir`'e yazmasın diye `OSP_ATTEMPT_LOCK` environment variable'ı
+file-lock serialization sağlar (defensive — test isolation tempdir'lerle
+zaten sağlanır, ama işlem-hiyerarşisi contamination'a karşı ek güvenlik).
+
+### Ne zaman hangi pattern?
+
+| Test tipi | Pattern | Neden |
+|---|---|---|
+| `osp analyze` only | `fixture_repo()` tek tempdir (bkz. `analyze_provenance_flow.rs`) | `.osp/` yazılmaz, CWD ayrımı gereksiz |
+| `osp trajectory attempt` | `HarnessFixture` (repo + work ayrımı) | `.osp/` writes → dirty worktree riski |
+| `osp trajectory attempt` harness mode | `HarnessFixture` + `--state-dir work/` zorunlu | harness invariant: state-dir repo dışı |
+
+### Anti-pattern'ler
+
+- ❌ `current_dir(repo_path)` — `.osp/` analyzed repo'ya yazılır, dirty worktree.
+- ❌ Aynı CWD'yi paylaşan paralel testler — `.osp/` cross-contamination.
+- ❌ `--state-dir repo/.osp` — harness mode reject eder (production fix).
+- ❌ CRLF normalization açık — Windows'ta flaky dirty-worktree failure.
+- ❌ Commit tarihleri default (makine saati) — kararsız SHA, cross-machine fail.
+
 ## Test referansı
 
 Bakınız: `crates/osp-cli/tests/completed_loop.rs` — 20-senaryo integration matrix
 (mode-matrix guard, task-loader fail-closed, Completed-loop happy path, state-dir
-invariant, fail-closed no-side-effects).
+invariant, fail-closed no-side-effects, `HarnessFixture` pattern referans
+implementation). `crates/osp-cli/tests/analyze_provenance_flow.rs` — analyze-only
+tek-tempdir pattern örneği.
