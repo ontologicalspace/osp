@@ -8925,9 +8925,14 @@ pub fn load_pending_authorization(
 #[derive(Debug, Clone)]
 pub(crate) enum VersionedPendingAuthorizationEnvelope {
     /// V1 — mevcut `PendingAuthorizationEnvelope` (frozen).
-    V1(PendingAuthorizationEnvelope),
+    // Her iki varyant Box'lı: inline payload'lar ≥904/1136 byte — enum ve onu
+    // taşıyan Result/struct yerleşimini dominant hâle getiriyordu (clippy
+    // large_enum_variant). Box payload'ları heap'e taşıyıp taşıyıcıyı
+    // pointer-scale seviyesine indirir. Wire format (serde derive'suz, sadece
+    // program içi) değişmez.
+    V1(Box<PendingAuthorizationEnvelope>),
     /// V2 — tam persisted context (basis + gate_evaluation + witness_requirement).
-    V2(PendingAuthorizationEnvelopeV2),
+    V2(Box<PendingAuthorizationEnvelopeV2>),
 }
 
 /// **INV-T9 #70 Faz 8-P1:** Versioned envelope load error (review 5. tur P1-3 typed).
@@ -8995,12 +9000,16 @@ pub(crate) fn load_pending_authorization_versioned(
             let envelope: PendingAuthorizationEnvelope = serde_json::from_slice(&bytes)
                 .map_err(|e| VersionedPendingAuthorizationLoadError::V1Decode(e.to_string()))?;
             envelope.verify()?;
-            Ok(VersionedPendingAuthorizationEnvelope::V1(envelope))
+            Ok(VersionedPendingAuthorizationEnvelope::V1(Box::new(
+                envelope,
+            )))
         }
         PENDING_AUTHORIZATION_SCHEMA_V2 => {
             // V2 path — checked restore.
             let envelope = deserialize_pending_authorization_envelope_v2(&bytes)?;
-            Ok(VersionedPendingAuthorizationEnvelope::V2(envelope))
+            Ok(VersionedPendingAuthorizationEnvelope::V2(Box::new(
+                envelope,
+            )))
         }
         other => Err(VersionedPendingAuthorizationLoadError::UnknownSchema {
             found: other.to_string(),
@@ -9363,9 +9372,13 @@ pub struct VersionedAuthorizationBasis {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+// Her iki varyant Box'lı: inline payload'lar ≥480/864 byte — enum ve taşıyıcı
+// `VersionedAuthorizationBasis` struct yerleşimini dominant hâle getiriyordu
+// (clippy large_enum_variant). Wire format (Serialize impl 10363'te ref-based,
+// Box internal repr dışarı sızmaz) değişmez.
 enum VersionedAuthorizationBasisRepr {
-    V1(AuthorizationBasisV1),
-    V2(AuthorizationBasisV2),
+    V1(Box<AuthorizationBasisV1>),
+    V2(Box<AuthorizationBasisV2>),
 }
 
 impl VersionedAuthorizationBasis {
@@ -9379,14 +9392,14 @@ impl VersionedAuthorizationBasis {
             });
         }
         Ok(Self {
-            repr: VersionedAuthorizationBasisRepr::V1(basis),
+            repr: VersionedAuthorizationBasisRepr::V1(Box::new(basis)),
         })
     }
 
     /// **P1-1 v3:** V2 constructor — AuthorizationBasisV2 zaten checked constructor.
     pub fn try_v2(basis: AuthorizationBasisV2) -> Self {
         Self {
-            repr: VersionedAuthorizationBasisRepr::V2(basis),
+            repr: VersionedAuthorizationBasisRepr::V2(Box::new(basis)),
         }
     }
 
@@ -9401,7 +9414,7 @@ impl VersionedAuthorizationBasis {
     /// V1 basis accessor (legacy/strict).
     pub fn as_v1(&self) -> Option<&AuthorizationBasisV1> {
         match &self.repr {
-            VersionedAuthorizationBasisRepr::V1(v) => Some(v),
+            VersionedAuthorizationBasisRepr::V1(v) => Some(v.as_ref()),
             VersionedAuthorizationBasisRepr::V2(_) => None,
         }
     }
@@ -9409,7 +9422,7 @@ impl VersionedAuthorizationBasis {
     /// V2 basis accessor (strict).
     pub fn as_v2(&self) -> Option<&AuthorizationBasisV2> {
         match &self.repr {
-            VersionedAuthorizationBasisRepr::V2(v) => Some(v),
+            VersionedAuthorizationBasisRepr::V2(v) => Some(v.as_ref()),
             VersionedAuthorizationBasisRepr::V1(_) => None,
         }
     }
@@ -10363,12 +10376,12 @@ impl serde::Serialize for VersionedAuthorizationBasis {
         match self.repr() {
             VersionedAuthorizationBasisRepr::V1(basis) => VersionedV1EnvelopeRef {
                 schema_version: AUTHORIZATION_BASIS_WIRE_SCHEMA_V1,
-                basis,
+                basis: basis.as_ref(),
             }
             .serialize(serializer),
             VersionedAuthorizationBasisRepr::V2(basis) => VersionedV2EnvelopeRef {
                 schema_version: AUTHORIZATION_BASIS_WIRE_SCHEMA_V2,
-                basis: RawAuthorizationBasisV2Ref::from_domain(basis),
+                basis: RawAuthorizationBasisV2Ref::from_domain(basis.as_ref()),
             }
             .serialize(serializer),
         }
@@ -10711,6 +10724,32 @@ mod tests {
     use super::*;
     use crate::canonical_encoding::encode_optional_f64_to_vec;
     use crate::trajectory::{CommitLane, TaskId};
+
+    // Layout regression: V1/V2 varyantları Box'lanmıştır (clippy large_enum_variant).
+    // Bu testler enum'un yeniden yüzlerce byte inline hâle gelmesini yakalar.
+    // Tam ABI boyutuna bağlanmaz — mimari toleranslı, discriminant+alignment nedeniyle
+    // birden fazla pointer boyutu normal. "exactly pointer sized" DEĞİL, "pointer scale".
+    #[test]
+    fn versioned_pending_authorization_envelope_is_pointer_scale() {
+        let actual = std::mem::size_of::<VersionedPendingAuthorizationEnvelope>();
+        let maximum = 4 * std::mem::size_of::<usize>();
+        assert!(
+            actual <= maximum,
+            "VersionedPendingAuthorizationEnvelope grew beyond pointer scale: \
+             actual={actual}, maximum={maximum}"
+        );
+    }
+
+    #[test]
+    fn versioned_authorization_basis_repr_is_pointer_scale() {
+        let actual = std::mem::size_of::<VersionedAuthorizationBasisRepr>();
+        let maximum = 4 * std::mem::size_of::<usize>();
+        assert!(
+            actual <= maximum,
+            "VersionedAuthorizationBasisRepr grew beyond pointer scale: \
+             actual={actual}, maximum={maximum}"
+        );
+    }
 
     fn sample_basis() -> AuthorizationBasis {
         AuthorizationBasis {
