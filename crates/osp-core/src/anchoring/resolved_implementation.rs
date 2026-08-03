@@ -581,7 +581,7 @@ pub fn project_resolved_implementations(
 
     // 2b. R1a P1-1 (review tur 2) — Orphan record check (record → edge yönü).
     //     Her record'un Accepted ResolvesTo edge karşılığı olmalı.
-    for (pair, _) in &record_pairs {
+    for pair in record_pairs.keys() {
         if !edge_pairs.contains_key(pair) {
             return Err(
                 ResolvedImplementationStructureError::OrphanResolutionRecord {

@@ -564,9 +564,9 @@ impl TaskClaimDigest {
     ) -> Result<Self, MeasurementDigestError> {
         let mut hasher = blake3::Hasher::new();
         hasher.update(Self::DOMAIN_SEPARATOR);
-        crate::canonical_encoding::encode_u64(&mut hasher, claim.id.into(), "claim_id");
+        crate::canonical_encoding::encode_u64(&mut hasher, claim.id, "claim_id");
         crate::canonical_encoding::encode_u64(&mut hasher, task_id, "task_id");
-        crate::canonical_encoding::encode_u64(&mut hasher, claim.author.into(), "claim_author");
+        crate::canonical_encoding::encode_u64(&mut hasher, claim.author, "claim_author");
         hasher.update(structural_delta_digest.as_bytes());
         Ok(Self(hasher.finalize().into()))
     }
@@ -1501,10 +1501,10 @@ impl TaskGoalDigest {
         Ok(())
     }
 
-    /// **Review P1-1:** Eski domain `push_predicate_scope` kaldırıldı — V2 encoder
-    /// `push_canonical_predicate_scope_v2` tek source (CanonicalPredicateScope alır).
-    /// Domain→canonical projection `TryFrom<&Task> for CanonicalTaskGoalEvidenceV2` içinde
-    /// yapılır (Adım 16 authoritative forward projection).
+    // **Review P1-1:** Eski domain `push_predicate_scope` kaldırıldı — V2 encoder
+    // `push_canonical_predicate_scope_v2` tek source (CanonicalPredicateScope alır).
+    // Domain→canonical projection `TryFrom<&Task> for CanonicalTaskGoalEvidenceV2` içinde
+    // yapılır (Adım 16 authoritative forward projection).
 
     #[allow(dead_code, reason = "Faz 4 basis builder consumer")]
     pub(crate) fn as_bytes(&self) -> &[u8; 32] {
@@ -1603,8 +1603,8 @@ impl PredicateGatePolicyDigestV2 {
 
     /// **Tek producer (review P0-3 + P1-2):** `task_id` + `task_goal_digest` + `TaskPolicy`
     /// + `EffectiveImprovementPolicy` üzerinden — gate kararını belirleyen gerçek policy
-    /// girdileri + cryptographic task binding. Runtime→canonical projection (checked).
-    /// Shared writer çağırır. Consumer: `verify_measurement_binding_inner` (engine.rs).
+    ///   girdileri + cryptographic task binding. Runtime→canonical projection (checked).
+    ///   Shared writer çağırır. Consumer: `verify_measurement_binding_inner` (engine.rs).
     pub(crate) fn compute(
         task_id: crate::trajectory::TaskId,
         task_goal_digest: &TaskGoalDigest,
@@ -2004,8 +2004,8 @@ pub enum MeasurementBindingDerivationError {
     /// computation failure — `PredicateGatePolicyDigestV2::compute` hatası. Semantic
     /// ayrım: task goal commitment DEĞİL, policy commitment (task_id + task_goal_digest
     /// + policy + improvement_policy preimage). Eski kod bu hatayı
-    /// `TaskGoalDigestComputationFailed`'a map ediyordu — epistemik olarak farklıdır,
-    /// telemetry'de birleştirilmemeli.
+    ///   `TaskGoalDigestComputationFailed`'a map ediyordu — epistemik olarak farklıdır,
+    ///   telemetry'de birleştirilmemeli.
     #[error("predicate gate policy digest computation failed: {detail}")]
     PredicateGatePolicyDigestComputationFailed { detail: String },
 }

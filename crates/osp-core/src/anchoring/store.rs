@@ -489,9 +489,9 @@ pub trait AnchorStore {
 
     /// INV-C15 (Faz 8b): Atomic supersession transition. Status (Accepted→SupersededAccepted)
     /// + successor edge (successor→superseded, `Supersedes`) tek işlemde. `SupersedeApplication`
-    /// opaque (private fields, pub(crate) ctor, no Deserialize) — production üretici
-    /// `SupersedeSession` (PR #50); test üretici `issue_operator_for_tests`. Store:
-    /// seq/prior_status/new_status/edge record üretiminden sorumludur.
+    ///   opaque (private fields, pub(crate) ctor, no Deserialize) — production üretici
+    ///   `SupersedeSession` (PR #50); test üretici `issue_operator_for_tests`. Store:
+    ///   seq/prior_status/new_status/edge record üretiminden sorumludur.
     fn apply_supersede(
         &mut self,
         application: crate::anchoring::review::SupersedeApplication,

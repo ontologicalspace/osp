@@ -340,7 +340,7 @@ pub enum NavigatorResult {
     /// Explicit witness rejection — agent proposal revises. Budget tüketmez.
     /// Evidence-preserving: embedded `SuspendedAttemptEvidence` (Rejected disposition)
     /// + `evidence_digest` (INV-T9 #72 — attempt_evidence_id kaldırıldı, dangling
-    /// reference yok; accessor'lar evidence üzerinden).
+    ///   reference yok; accessor'lar evidence üzerinden).
     RequiresRevision(crate::authorization::RevisionRequired),
     /// Pending authorization persistence failure — terminal (non-retryable).
     PendingAuthorizationPersistenceFailure {
@@ -414,20 +414,15 @@ pub struct AgentNavigator<'a, L: LlmClient + ?Sized, R: TaskResolver> {
 /// production navigator default Production, G2c runner/test HarnessAutoApprove override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum NavigatorWitnessPolicy {
     /// Production: Paper 1 witness güven modeli (min_approvers=2, quorum_threshold=1.5).
     /// WitnessSet default quorum ile kurulur. Gerçek deployment'ta kullanılır.
+    #[default]
     Production,
     /// Harness/test: tek-agent auto-approve (min_approvers=0, quorum=0.0).
     /// SADECE controlled experiment için — production navigator asla bu modda çalışmaz.
     HarnessAutoApprove,
-}
-
-impl Default for NavigatorWitnessPolicy {
-    fn default() -> Self {
-        // Production güvenli — witness gate aktif. Harness kullanıcıları açıkça override eder.
-        NavigatorWitnessPolicy::Production
-    }
 }
 
 /// **INV-T9 #72 closure (P1-4):** Rejected yolunun tek production mapper'ı.

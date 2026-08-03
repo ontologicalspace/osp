@@ -1654,7 +1654,7 @@ impl PredicateGate {
 /// **INV-T9 #70 Faz 5 Adım 12 (review P0-2 düzeltme):** Eski `is_improved_loss` ayrı
 /// wrapper olarak kaldırıldı — logic `assess_improvement_v1`'e taşındı (aynı semantik,
 /// improvement assessment producer). Core loss/measured erişmez.
-
+///
 /// **INV-T9 #70 Faz 5 Adım 12 (P0-1, review P0-2 düzeltme):** Improvement assessment
 /// producer — loss + hard-cap hesabını YAPAR. `evaluate_decision_core` loss/measured
 /// ERİŞMEZ (frozen negatif koşul); bu fonksiyon assessment'ı üretir, core sadece

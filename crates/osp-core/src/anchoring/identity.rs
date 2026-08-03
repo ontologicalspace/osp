@@ -190,6 +190,7 @@ const CODE_ENTITY_DERIVATION_DOMAIN_TAG: &str = "osp:code-entity:v1";
 ///   - scheme discriminant (`"AnalysisPathV1"`)
 ///   - case-policy discriminant (`"CaseSensitive"` | `"AsciiCaseInsensitive"`)
 ///   - canonical key bytes
+///
 /// Output: `CodeEntity:<16-hex>`
 ///
 /// # Sözleşme (tur 3 P2-B — "collision imkansız" DEĞİL)
