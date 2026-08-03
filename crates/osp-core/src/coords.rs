@@ -397,8 +397,12 @@ pub enum CoordinateMeasurementError {
     /// monoton olduğu için A→B→A revert'te descriptor A görülür ama epoch artar →
     /// fail-closed (gerçek transient ABA).
     ///
-    /// **Box (reviewer v8 P2-1):** `AxisDescriptor` String + Vec<u8> içerir;
-    /// `large_err` clippy warning önlenir.
+    /// **Box (reviewer v8 P2-1):** Large descriptor payloads (`AxisDescriptor` —
+    /// String + Vec<u8>) field-level Box edilir, böylece `AxisStateDrift`
+    /// varyantı `CoordinateMeasurementError`'ın inline layout'unu dominant
+    /// hâle getirmez. Karar vaka-bazlıdır; bkz. measurement.rs
+    /// `MeasurementBindingVerificationError` layout decision (inline tutulan
+    /// cold-path error) ve authorization.rs version-dispatch carrier enum'ları.
     #[error("axis `{axis_id}` state drift at {phase:?}: expected_descriptor={expected_descriptor:?}, actual_descriptor={actual_descriptor:?}, expected_epoch={expected_epoch:?}, actual_epoch={actual_epoch:?}")]
     AxisStateDrift {
         axis_id: &'static str,

@@ -11,11 +11,14 @@
 //!
 //! `MeasurementError` enum'u `SpaceViewRevision` (içinde `SpaceDigest` + `SpaceViewId`)
 //! ve `CanonicalizationError` gibi ~128 byte üstü tipler içerir. clippy::result_large_err
-//! lint'i bu yüzden Measurement pipeline fonksiyonlarında uyarı verir; error tipi
-//! authorization pattern ile uyumlu (auth `AuthorizationContext` da aynı tipleri taşır)
-//! ve hot path değil — measurement başına bir kez üretilir. Box'lama Commit 3'te
-//! API surface'i büyütür; erken optimizasyon olarak reddedilir.
-#![allow(clippy::result_large_err)]
+//! lint'i bu yüzden Measurement pipeline fonksiyonlarında uyarı verir.
+//!
+//! **Karar (clippy ontolojik temizlik):** blanket module-level allow KALDIRILDI.
+//! Artık her `result_large_err` diagnostic'i **item-level** `#[allow(reason=...)]`
+//! ile dar kapsamlı bastırılır. Karar tek canonical yerde — ilgili error tipinin
+//! üstündeki source comment'te (ör. `MeasurementBindingVerificationError`).
+//! Large version-dispatch carrier enum'lar (`VersionedPendingAuthorizationEnvelope`,
+//! `VersionedAuthorizationBasisRepr`) Box'lanır; cold-path error tipleri inline kalır.
 //! - Canonical impact edges: `CanonicalEdgeIdentity` (raw `EdgeRef` DEĞİL)
 //! - Shared `CanonicalStructuralDelta` producer (single canonicalization truth)
 //! - Centroid axis identity + mass validation
@@ -1710,6 +1713,10 @@ pub struct EngineMeasurement {
 impl EngineMeasurement {
     /// Private-field constructor. Defensive cross-field verify (P1-3 v3):
     /// `MeasurementInputDigest::compute(context) == request.measurement_input_digest`.
+    #[allow(
+        clippy::result_large_err,
+        reason = "intentional inline measurement failure type; same layout decision as MeasurementBindingVerificationError"
+    )]
     pub(crate) fn new(
         before: MeasurementBaseline,
         after: MeasuredRawPosition,
@@ -2063,6 +2070,19 @@ pub enum MeasurementBindingDriftError {
 /// - **Mismatch:** Presented token geçersiz (caller'ın authority'si)
 /// - **Derivation:** Engine sistemi hatası (operational fault — capture dahil)
 /// - **Drift:** Verification epoch boyunca gerçeklik değişti (coord/revision drift)
+//
+// Layout decision (clippy ontolojik temizlik):
+//
+// Bu error tipi inline tutulur. En büyük layout'u cari pinned x86_64
+// toolchain'de ~184 byte ölçüldü (largest variant: Drift). Error construction
+// yalnızca verification FAILURE path'inde olur — hot path değil. Box ekleme
+// failure başına allocation getirir ve public pattern-matching ergonomisini
+// zayıflatır.
+//
+// Bu vaka-bazlı bir karar, genel byte eşiği KURAL DEĞİL. Large version-dispatch
+// carrier enum'ları (ör. VersionedPendingAuthorizationEnvelope) ayrı olarak
+// Box'lanır çünkü inline payload'ları taşıyıcı layout'u dominant hâle getirir.
+// Bkz. authorization.rs carrier enum tanımları + coords.rs AxisStateDrift.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum MeasurementBindingVerificationError {
     /// Presented token mismatch — caller'ın sunduğu authority geçersiz.

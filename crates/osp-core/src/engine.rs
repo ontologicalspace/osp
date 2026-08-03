@@ -683,6 +683,10 @@ impl SpaceEngine {
     /// - inner verifier Ok → operation Ok, coord finalization + revision re-verify
     ///
     /// Session begin failure (capture failure) → Derivation, finalization yok (session yok).
+    #[allow(
+        clippy::result_large_err,
+        reason = "intentional inline verification failure type; see MeasurementBindingVerificationError layout decision"
+    )]
     fn with_epoch<R>(
         &self,
         f: impl FnOnce(
@@ -738,6 +742,10 @@ impl SpaceEngine {
     ///
     /// Precedence: coord drift > revision recheck failed > revision before≠after > ordinary.
     /// Drift tespit edilirse ordinary verification sonucu güvenilmez — drift öncelikli.
+    #[allow(
+        clippy::result_large_err,
+        reason = "intentional inline verification failure type; see MeasurementBindingVerificationError layout decision"
+    )]
     fn finalize_verification<R>(
         &self,
         operation: EpochOperationResult<R>,
@@ -756,7 +764,8 @@ impl SpaceEngine {
     /// `RevisionRecheckFailed` kolunu doğrudan doğrular.
     #[allow(
         dead_code,
-        reason = "Faz 3 test matrisi consumer — combine_verification_results test'leri"
+        clippy::result_large_err,
+        reason = "Faz 3 test matrisi consumer — combine_verification_results test'leri; intentional inline verification failure type, see MeasurementBindingVerificationError layout decision"
     )]
     fn combine_verification_results<R>(
         operation: EpochOperationResult<R>,
@@ -839,7 +848,8 @@ impl SpaceEngine {
     /// failure (begin Err) → Derivation; gözlenen değişim → Drift.
     #[allow(
         dead_code,
-        reason = "Binding primitive established in Faz 3; production commit-path wiring is Faz 8"
+        clippy::result_large_err,
+        reason = "Binding primitive established in Faz 3; production commit-path wiring is Faz 8; intentional inline verification failure type, see MeasurementBindingVerificationError layout decision"
     )]
     pub(crate) fn verify_measurement_binding(
         &self,
@@ -870,6 +880,10 @@ impl SpaceEngine {
     /// Subject → Impact → StructuralDelta → Revision → ContextDigest → CurrentContext.
     /// Her mismatch testi kendisinden önceki check'leri geçecek fixture ile tasarlanmalı
     /// (reviewer P2-1 — check-order-aware).
+    #[allow(
+        clippy::result_large_err,
+        reason = "intentional inline verification failure type; see MeasurementBindingVerificationError layout decision"
+    )]
     fn verify_measurement_binding_inner(
         &self,
         epoch: &VerificationEpochView<'_>,
@@ -1276,6 +1290,10 @@ impl SpaceEngine {
     /// 3. SAVE DELTA: event-sourcing
     /// 4. MILESTONE: periyodik tam snapshot
     /// 5. EMIT: CommitOutcome
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     pub fn commit(
         &mut self,
         claim: &Claim,
@@ -1377,6 +1395,10 @@ impl SpaceEngine {
     /// 6. MutationDecision → ApplyTarget (INV-T8: Reject→NotApplied, Progress→Checkpoint)
     /// 7. Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress ise — apply_delta)
     /// 8. TaskCommitResult (outcome + apply_target + witness)
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     pub fn commit_task_claim(
         &mut self,
         input: TaskCommitInput<'_>,
@@ -1697,6 +1719,10 @@ impl SpaceEngine {
     /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Artık ayrılmış helper'lara delegasyon —
     /// `check_claim_structure` (structural 1-3) + `check_raw_position_finite` (computed_raw 4).
     /// Task-bound path (Faz 3) `measurement.after().to_raw()` ile finite-check yapar.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     fn check_claim_syntax(&self, claim: &Claim) -> Result<(), EngineCommitError> {
         self.check_claim_structure(claim)?;
         self.check_raw_position_finite(claim.id, "computed_raw", &claim.computed_raw)?;
@@ -1706,6 +1732,10 @@ impl SpaceEngine {
     /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Structural syntax validation —
     /// node mass/kind, duplicate ID, edge self-import. `claim.computed_raw`'a dokunmaz
     /// (finite-check ayrı). Legacy `commit()` + task-bound path ortak kullanır.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     fn check_claim_structure(&self, claim: &Claim) -> Result<(), EngineCommitError> {
         // 1. Node validation
         for node in &claim.delta_nodes {
@@ -1758,6 +1788,10 @@ impl SpaceEngine {
     /// finite-check — flat x/y/z/w/v eksen değerleri finite. `claim.computed_raw`'dan
     /// ayrı parametre (task-bound path `measurement.after().to_raw()` ile çağırır — Faz 3).
     /// `source_label` nötr — "computed_raw" (legacy) veya "measurement.after" (task-bound).
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     fn check_raw_position_finite(
         &self,
         claim_id: crate::witness::ClaimId,
@@ -1799,6 +1833,10 @@ impl SpaceEngine {
     /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** `claim.computed_raw`'a delegasyon —
     /// `check_vision_raw_with_context`. Task-bound path (Faz 3) `measurement.after().to_raw()`
     /// ile çağırır.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     fn check_claim_vision_with_context(
         &self,
         claim: &Claim,
@@ -1810,6 +1848,10 @@ impl SpaceEngine {
     /// **INV-T9 #70 Commit 4b (reviewer v2 P1-3):** Vision gate — ayrı raw parametre.
     /// `claim.computed_raw`'dan bağımsız — task-bound path `measurement.after().to_raw()`
     /// ile çağırır (token authority). Violation evidence `raw` field'ı authority-tied.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     fn check_vision_raw_with_context(
         &self,
         claim_id: crate::witness::ClaimId,
@@ -1964,6 +2006,10 @@ impl SpaceEngine {
     /// sırasının ayrışmasına izin vermez. Descriptor kuralı evaluate edemez — runtime
     /// rule implementation'ları `self.rules` üzerinden çağrılır, context sadece alignment
     /// doğrular.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     fn check_claim_rules_with_context(
         &self,
         claim: &Claim,
@@ -2008,7 +2054,7 @@ impl SpaceEngine {
     ///
     /// Stub: Faz 2'de full_access mask (tüm node'lar writable). Faz 5'te God Mode
     /// config'ten yüklenen gerçek PermissionMask ile çalışır.
-    #[allow(dead_code)] // Faz 5'te commit() imzasına mask parametresi eklenecek
+    #[allow(dead_code, clippy::result_large_err)] // Faz 5'te commit() imzasına mask parametresi eklenecek; EngineCommitError carries MeasurementBindingVerificationError (intentional inline), see measurement.rs layout decision
     fn check_permissions(
         &self,
         _claim: &Claim,
@@ -2072,6 +2118,10 @@ impl SpaceEngine {
     // ── Persistence ────────────────────────────────────────────────────────
 
     /// Time-travel (event-sourcing): milestone + delta replay → request_t_c.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     pub fn restore(&mut self, request_t_c: u64) -> Result<usize, EngineCommitError> {
         let store = self
             .snapshot_store
@@ -2089,6 +2139,10 @@ impl SpaceEngine {
     }
 
     /// Manuel milestone snapshot (tag vb.).
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
     pub fn save_milestone(&self) -> Result<(), EngineCommitError> {
         let store = self
             .snapshot_store
@@ -2129,11 +2183,12 @@ impl SpaceEngine {
         }
 
         // Q5 Vision (Step 4b: captured vision context + typed failure)
-        match self
+        #[allow(clippy::result_large_err)]
+        let vision_result = self
             .effective_vision_gate_context(claim)
             .map_err(EngineCommitError::VisionContextInvalid)
-            .and_then(|ctx| self.check_claim_vision_with_context(claim, &ctx))
-        {
+            .and_then(|ctx| self.check_claim_vision_with_context(claim, &ctx));
+        match vision_result {
             Ok(()) => results.push(GateResult::passed("Q5 Vision", "θ within bound")),
             Err(e) => {
                 let h = crate::agent::HallucinationType::from_engine_error(&e);
@@ -2143,11 +2198,12 @@ impl SpaceEngine {
         }
 
         // Q6 Rule (Step 4a: context-aware)
-        match self
+        #[allow(clippy::result_large_err)]
+        let rule_result = self
             .current_rule_evaluation_context()
             .map_err(EngineCommitError::AuthorizationContextFailed)
-            .and_then(|ctx| self.check_claim_rules_with_context(claim, &ctx))
-        {
+            .and_then(|ctx| self.check_claim_rules_with_context(claim, &ctx));
+        match rule_result {
             Ok(()) => results.push(GateResult::passed("Q6 Rule", "No rule violations")),
             Err(e) => {
                 let h = crate::agent::HallucinationType::from_engine_error(&e);
