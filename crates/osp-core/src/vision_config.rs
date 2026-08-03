@@ -159,14 +159,7 @@ impl VisionConfig {
     /// TOML dosyası yükle + parse + validate.
     pub fn load(path: &Path) -> Result<Self, VisionConfigError> {
         let text = std::fs::read_to_string(path)?;
-        Self::from_str(&text)
-    }
-
-    /// TOML string'den parse + validate (testler için).
-    pub fn from_str(toml_str: &str) -> Result<Self, VisionConfigError> {
-        let config: Self = toml::from_str(toml_str)?;
-        config.validate()?;
-        Ok(config)
+        text.parse()
     }
 
     /// Validation (colleague #1): raw değerler [0,1].
@@ -291,6 +284,20 @@ impl VisionConfig {
     }
 }
 
+/// `FromStr` — TOML string'den parse + validate.
+///
+/// Clippy `should_implement_trait`: inherent `from_str` yerine idiomatik `FromStr`
+/// trait. `VisionConfig::load` ve çağrı yerleri `text.parse()` kullanır.
+impl std::str::FromStr for VisionConfig {
+    type Err = VisionConfigError;
+
+    fn from_str(toml_str: &str) -> Result<Self, Self::Err> {
+        let config: Self = toml::from_str(toml_str)?;
+        config.validate()?;
+        Ok(config)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Testler
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -298,6 +305,7 @@ impl VisionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     const FULL_CONFIG: &str = r#"
 [raw]

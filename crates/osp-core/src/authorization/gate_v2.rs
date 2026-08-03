@@ -236,6 +236,10 @@ impl VerifiedGateEvaluationBundleV2 {
         dead_code,
         reason = "Faz 5 evaluate_task_gate_v2 consumer (Faz 8 wiring)"
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "private evaluator-output constructor binds all gate-passed evidence atomically; partial builder state would allow tampering-proof boundary to leak (14 fields: identity + digests + evidence + verified gate)"
+    )]
     fn from_gate_passed(
         task_id: crate::trajectory::TaskId,
         claim_id: crate::witness::ClaimId,

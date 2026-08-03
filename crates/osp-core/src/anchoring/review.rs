@@ -682,6 +682,10 @@ pub struct SupersedeApplication {
 impl SupersedeApplication {
     /// In-crate constructor. Authority'yi by-value alır (Copy → tüketilmez, level çıkarılır).
     /// Tek production caller: `SupersedeSession` (PR #50); token içeride mint edilir.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "checked constructor is the single atomic supersession-application boundary; all inputs are mandatory (concept pair + authority + basis + reason + session/operator/time) and token minting depends on the complete set"
+    )]
     pub(crate) fn new(
         superseded: ConceptNodeId,
         successor: ConceptNodeId,
