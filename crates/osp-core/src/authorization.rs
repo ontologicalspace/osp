@@ -11560,8 +11560,8 @@ mod tests {
     /// **INV-T9 #70 Commit 1 v1 byte contract:** Real axis constructor'larından üretilen
     /// measurement input digest pinned. Source descriptor encoding (TreeSitter topology
     /// + Scip observed cohesion + Heuristic entropy/witness) dahil — descriptor semantics
-    /// v2 değişince digest değişir, golden catches drift. Schema hâlâ v1 (yalnız content
-    /// değişti).
+    ///   v2 değişince digest değişir, golden catches drift. Schema hâlâ v1 (yalnız content
+    ///   değişti).
     const MEASUREMENT_SEMANTICS_V2_GOLDEN_HEX: &str =
         "9ca484c73dae2ee6e27a945ee19e00df5a2ccfc028b8b05c615ab954f144336c";
 
@@ -11827,8 +11827,8 @@ mod tests {
         a.nodes.insert(1, mk_node(1));
         a.nodes.insert(2, mk_node(2));
         a.nodes.insert(3, mk_node(3));
-        a.edges.push(edge_a.clone());
-        a.edges.push(edge_b.clone());
+        a.edges.push(edge_a);
+        a.edges.push(edge_b);
 
         let mut b = Space::default();
         b.nodes.insert(1, mk_node(1));
@@ -16741,7 +16741,7 @@ v = 0.5
         // **Reviewer P1-3:** measurement_request.base_revision değişir → mismatch.
         let parts = faz4_basis_v2_raw_parts(42);
         let mut bad_evidence = parts.measurement_request.clone();
-        bad_evidence.base_revision.sequence = bad_evidence.base_revision.sequence + 1;
+        bad_evidence.base_revision.sequence += 1;
         let err = faz4_basis_v2_with_bad_request_evidence(bad_evidence).unwrap_err();
         assert!(
             matches!(

@@ -3005,7 +3005,7 @@ mod tests {
     }
 
     fn ev(id: EvidenceId, actor: u64) -> EvidenceEvent {
-        EvidenceEvent::new(id, &format!("src-{id}"), WitnessKind::MergeCommit, actor, 1)
+        EvidenceEvent::new(id, format!("src-{id}"), WitnessKind::MergeCommit, actor, 1)
     }
 
     fn two_witnesses() -> WitnessSet {

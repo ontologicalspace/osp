@@ -496,7 +496,7 @@ pub(crate) fn projected_metric_unchecked_for_contract_tests(
     ProjectedCodeMetric {
         node_id,
         axis,
-        value: MetricAxisValue::new(value).unwrap_or(MetricAxisValue(std::f64::NAN)), // forged — NaN bile geçebilir
+        value: MetricAxisValue::new(value).unwrap_or(MetricAxisValue(f64::NAN)), // forged — NaN bile geçebilir
         provenance: ProjectedMetricProvenance {
             source,
             confidence: MetricConfidence::new(confidence).unwrap_or(MetricConfidence(confidence)), // forged — raw değer

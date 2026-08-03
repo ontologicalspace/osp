@@ -157,15 +157,16 @@ pub fn run_interactive<R: BufRead, W: Write>(
                 writeln!(output, "Session ended.").ok();
                 break;
             }
-            "list" | "l" => match service.execute_query(ReviewQuery::List) {
-                Ok(ReviewReadOutput::List { items, revision }) => {
+            "list" | "l" => {
+                if let Ok(ReviewReadOutput::List { items, revision }) =
+                    service.execute_query(ReviewQuery::List)
+                {
                     for item in &items {
                         writeln!(output, "  {}  {}  [{}]", item.id, item.canonical, item.kind).ok();
                     }
                     writeln!(output, "  Revision: {revision}").ok();
                 }
-                _ => {}
-            },
+            }
             "show" | "s" => {
                 let id = match parts.next() {
                     Some(id) => id,

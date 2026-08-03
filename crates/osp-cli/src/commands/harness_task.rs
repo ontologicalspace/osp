@@ -639,8 +639,7 @@ mod tests {
             &node_paths,
             maneuver_override,
         )
-        .err()
-        .expect("test expects an error; task should be rejected")
+        .expect_err("test expects an error; task should be rejected")
     }
 
     #[test]

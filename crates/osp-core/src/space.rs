@@ -830,8 +830,10 @@ mod tests {
         // Production'dır (#[default]).
         // Gerçek Position serialize edip classification'ı çıkararak simüle et
         // (elle yazmak Position struct tüm alanlarına bağımlı olur).
-        let mut full = Node::default();
-        full.id = 1;
+        let full = Node {
+            id: 1,
+            ..Default::default()
+        };
         let mut json_val: serde_json::Value = serde_json::to_value(&full).expect("serialize");
         // classification alanını çıkar → eski snapshot formatı
         json_val

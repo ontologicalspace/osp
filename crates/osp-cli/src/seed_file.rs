@@ -70,6 +70,14 @@ impl CandidateSeedFile {
 
     /// Legacy `GraphSeedNodeDraft` üretir — F1 semantics (ConceptualIntent, Candidate, aliases).
     /// Canonical dedup + empty kontrolü burada; NodeId collision GraphSeedBuilder'da.
+    //
+    // `into_*` convention `self` by-value ister ama bu metod `&self` alıp birden fazla
+    // callsite'te (örn. to_graph_seed içinde) self'i tekrar kullanır — rename `to_drafts`
+    // API değişikliği. Şimdilik allow, ileride to_drafts rename düşünülebili.
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "rename to to_drafts is API change; &self reused across callsites"
+    )]
     pub(crate) fn into_drafts(&self) -> Result<Vec<GraphSeedNodeDraft>, SeedError> {
         use std::collections::BTreeSet;
         let mut seen: BTreeSet<String> = BTreeSet::new();

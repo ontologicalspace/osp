@@ -379,7 +379,7 @@ mod tests {
         let rule = EdgeTargetExistsRule::new();
         let space = Space::new();
         // Node 99 is in delta_nodes — edge is valid
-        let nodes = vec![Node {
+        let nodes = [Node {
             id: 99,
             kind: NodeKind::Module,
             mass: 1.0,

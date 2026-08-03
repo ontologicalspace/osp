@@ -8,7 +8,7 @@ pub mod harness_task;
 pub mod repo_snapshot;
 pub mod run_envelope;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Args, ValueEnum};
 use osp_analyzer::contract::AnalysisConfig;
@@ -411,20 +411,20 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 /// Reject `--out` path inside the analyzed repository in require-clean-snapshot mode
 /// (review P1-4). Writing into the repo would dirty the next snapshot-bound step →
 /// surprising B-3 harness rejection. Generic observed mode allows it.
-fn reject_output_inside_repo(repo: &PathBuf, out: &PathBuf) -> anyhow::Result<()> {
+fn reject_output_inside_repo(repo: &Path, out: &Path) -> anyhow::Result<()> {
     // canonicalize the repo (exists). For out, canonicalize the parent if the file
     // doesn't exist yet (output not yet written), else canonicalize the path itself.
-    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.clone());
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
     let canon_out = if out.exists() {
-        out.canonicalize().unwrap_or_else(|_| out.clone())
+        out.canonicalize().unwrap_or_else(|_| out.to_path_buf())
     } else {
         // Resolve via parent (which exists) + file_name, then make absolute if needed.
         match out.parent().and_then(|p| p.canonicalize().ok()) {
             Some(parent) => out
                 .file_name()
                 .map(|name| parent.join(name))
-                .unwrap_or_else(|| out.clone()),
-            None => out.clone(),
+                .unwrap_or_else(|| out.to_path_buf()),
+            None => out.to_path_buf(),
         }
     };
     if canon_out.starts_with(&canon_repo) {
@@ -642,7 +642,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
 /// Mode matrix (review P0-2 — no legacy fallback bypass):
 /// - `(Harness, Some(path))` → snapshot-bound harness task (HEAD + scope binding + Node-only V1)
 /// - `(Harness, None)`       → `Err` — harness REQUIRES snapshot-bound task file; legacy fallback
-///                              tüm harness garantilerini bypass eder.
+///   tüm harness garantilerini bypass eder.
 /// - `(Production, Some)`    → snapshot-bound task, witness policy Production (trusted operator)
 /// - `(Production, None)`    → legacy hardcoded coupling ≤ 0.55 (D1 backward-compat)
 fn resolve_task(
@@ -687,9 +687,11 @@ fn resolve_task(
         }
         (CliExecutionMode::Production, None) => {
             // Legacy hardcoded fallback (Node(0), coupling ≤ 0.55). D1 backward-compat.
-            let mut policy = TaskPolicy::default();
-            policy.maneuver_limit = args.maneuver_limit.unwrap_or(5);
-            policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+            let policy = TaskPolicy {
+                maneuver_limit: args.maneuver_limit.unwrap_or(5),
+                predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+                ..Default::default()
+            };
             Ok(osp_core::trajectory::Task {
                 id: args.task_id,
                 milestone_id: 1,

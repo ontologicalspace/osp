@@ -389,8 +389,7 @@ impl OspMcpServer {
         // 3. Single-attempt submit (engine measure + PredicateGate).
         let outcome_json = {
             let mut ws = self.workspace.lock().map_err(|e| e.to_string())?;
-            ws.submit_delta_attempt(&proposal, &task, input.task_id)
-                .map_err(|e| e)?
+            ws.submit_delta_attempt(&proposal, &task, input.task_id)?
         };
         let envelope = McpEnvelope::success(
             "osp_submit_delta",
@@ -439,7 +438,7 @@ impl OspMcpServer {
             _cap,
             self.trajectory_id,
             input.label.clone(),
-            vision.clone(),
+            vision,
         );
         // Sonuç (operator coordinate içerir — leak check YOK).
         let result = serde_json::json!({
@@ -847,7 +846,7 @@ impl Workspace {
         );
 
         // 3. Claim build + commit_task_claim.
-        let claim = match build_claim_from_proposal(&proposal, computed_raw, task_id, 1, 1) {
+        let claim = match build_claim_from_proposal(proposal, computed_raw, task_id, 1, 1) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(serde_json::json!({

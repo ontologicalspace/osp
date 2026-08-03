@@ -974,11 +974,11 @@ mod tests {
         // Volatil ekstrem witness (C_MAX aşımı) → volatility 1.0, total clamp [0,1].
         let w_extreme = witness(10_000, 1, 0, 1.0);
         let (score, _) = compute_risk_score(1.0, Some(&w_extreme), 1.0);
-        assert!(score >= 0.0 && score <= 1.0, "clamped [0,1], got {score}");
+        assert!((0.0..=1.0).contains(&score), "clamped [0,1], got {score}");
 
         // Out-of-range θ/confidence girdileri clamp edilir → total yine [0,1].
         let (score2, _) = compute_risk_score(5.0, None, 2.0);
-        assert!(score2 >= 0.0 && score2 <= 1.0, "input clamp works");
+        assert!((0.0..=1.0).contains(&score2), "input clamp works");
     }
 
     #[test]

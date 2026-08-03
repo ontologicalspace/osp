@@ -2184,10 +2184,7 @@ fn commit_invalid_mixed_case(
         measured,
     });
 
-    match result {
-        Err(e) => Some(e),
-        Ok(_) => None,
-    }
+    result.err()
 }
 
 /// Tek node'un cohesion ölçümünü production path üzerinden üretir (P1-4 pre-aggregation).

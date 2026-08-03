@@ -215,6 +215,12 @@ pub fn load_manifest(root: &Path) -> Result<Manifest, FixtureLoadError> {
     // Sidecar parse: strict 64 lowercase hex.
     let sidecar_text = std::str::from_utf8(&sidecar_bytes)
         .map_err(|e| FixtureLoadError::SidecarParse(format!("sidecar not UTF-8: {e}")))?;
+    // MSRV note (issue #110): `str::trim_ascii` Rust 1.80+ stable. Workspace
+    // MSRV=1.75 iddia ediyor ama toolchain pin 1.97 — çelişki #110'da takip ediliyor.
+    #[allow(
+        clippy::incompatible_msrv,
+        reason = "toolchain pin 1.97.1; MSRV gap tracked by #110"
+    )]
     let expected_hex = sidecar_text.trim_ascii();
     validate_digest_hex(expected_hex)
         .map_err(|e| FixtureLoadError::SidecarParse(format!("invalid sidecar format: {e}")))?;
@@ -336,7 +342,7 @@ pub fn compute_case_measured_subject_digests() -> Vec<(String, Result<String, Su
         })
         .map(|case| {
             let digest = compute_measured_subject_digest(&case);
-            (case.id, digest.map(|bytes| hex::encode(bytes)))
+            (case.id, digest.map(hex::encode))
         })
         .collect()
 }
@@ -1494,6 +1500,14 @@ pub struct DecisionInputObservation {
 /// **Review P0-2 fix:** Artık subject/value-bits/sources her iki path için de taşır
 /// (V1 subject = affected_nodes, V2 subject = task scope). Exact parity assertion'ları
 /// için gerekli zenginleştirme.
+// Layout: Produced varyantı ~205 byte (Vec + ProvenancedRawPosition + arrays + baseline).
+// Test fixture — production carrier enum DEĞİL (Result'ta taşınmaz, lokal değişken).
+// PR #112 ontolojik kararından farklı: orada carrier enum'lar her Result'ta taşınıyordu
+// (gerçek layout maliyeti). Burada test-only allow makul.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "test fixture enum — local variable, not carried in Result; production carrier boxing policy (PR #112) does not apply"
+)]
 #[derive(Debug, Clone)]
 pub enum MeasurementObservation {
     /// Measurement başarıyla üretildi.
@@ -1819,7 +1833,7 @@ impl MutationDecisionObservation {
             PipelineObservation::CommitReached {
                 mutation_decision: Some(md),
                 ..
-            } => Self::Observed(md.clone()),
+            } => Self::Observed(*md),
             PipelineObservation::CommitReached {
                 mutation_decision: None,
                 ..
@@ -2228,8 +2242,8 @@ pub fn evaluate_v2_candidate_case(
 /// **Review tur 6 P0-1 (Held fabrication çürütüldü):** Held/Rejected `AuthorizationContext`
 /// taşır (engine.rs:1133) — `authorization.outcome` gerçek `AttemptOutcome` (predicate_completion
 /// + mutation_decision) + `authorization.apply_target` verir. Tur 1 "Held fabrication"
-/// düzeltmesi yanlıştı; Held/Rejected'da outcome observation'a taşınır (authoritative
-/// engine çıktısı, fabrication DEĞİL).
+///   düzeltmesi yanlıştı; Held/Rejected'da outcome observation'a taşınır (authoritative
+///   engine çıktısı, fabrication DEĞİL).
 fn finalize_pipeline_observation_commit_reached(
     result: &osp_core::engine::EngineCommitResult,
 ) -> PipelineObservation {
@@ -2239,9 +2253,9 @@ fn finalize_pipeline_observation_commit_reached(
             // Evaluated → witness Satisfied; gerçek outcome TaskCommitResult'ta surfaced.
             PipelineObservation::CommitReached {
                 q5: Q5Observation::Passed, // Q5 passed (commit reached past vision gate)
-                predicate_completion: Some(result.outcome.predicate_completion.clone()),
-                mutation_decision: Some(result.outcome.mutation_decision.clone()),
-                apply_target: Some(result.apply_target.clone()),
+                predicate_completion: Some(result.outcome.predicate_completion),
+                mutation_decision: Some(result.outcome.mutation_decision),
+                apply_target: Some(result.apply_target),
                 witness_reachability: WitnessReachability::Evaluated,
             }
         }
@@ -2252,17 +2266,17 @@ fn finalize_pipeline_observation_commit_reached(
             // + authorization.apply_target içerir. Bu authoritative engine çıktısıdır —
             // fabrication DEĞİL. Önceki tur "Held fabrication" düzeltmesi yanlıştı; gerçek
             // outcome observation'a taşınmalı (tur 1 fabrication iddiası çürütüldü).
-            predicate_completion: Some(authorization.outcome.predicate_completion.clone()),
-            mutation_decision: Some(authorization.outcome.mutation_decision.clone()),
-            apply_target: Some(authorization.apply_target.clone()),
+            predicate_completion: Some(authorization.outcome.predicate_completion),
+            mutation_decision: Some(authorization.outcome.mutation_decision),
+            apply_target: Some(authorization.apply_target),
             witness_reachability: WitnessReachability::Held,
         },
         EngineCommitResult::Rejected { authorization, .. } => PipelineObservation::CommitReached {
             q5: Q5Observation::Passed,
             // Rejected aynı şekilde authorization taşır (engine.rs:1140).
-            predicate_completion: Some(authorization.outcome.predicate_completion.clone()),
-            mutation_decision: Some(authorization.outcome.mutation_decision.clone()),
-            apply_target: Some(authorization.apply_target.clone()),
+            predicate_completion: Some(authorization.outcome.predicate_completion),
+            mutation_decision: Some(authorization.outcome.mutation_decision),
+            apply_target: Some(authorization.apply_target),
             witness_reachability: WitnessReachability::Rejected,
         },
     }

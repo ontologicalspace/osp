@@ -192,9 +192,7 @@ fn run_held_out_case(case: &HeldOutCase) -> Value {
 
     // (6) lowering + ambiguity/axes
     let outcome = lower_rule_to_predicate_stub(node).expect("lowering");
-    let stub = match outcome {
-        PredicateLoweringOutcome::Stub(s) => s,
-    };
+    let PredicateLoweringOutcome::Stub(stub) = outcome;
     let (ambiguity_str, axes_str, hint_present) = match case.expected_ambiguity {
         Some(exp_ambig) => {
             let hint = stub.cross_family_hint().unwrap_or_else(|| {

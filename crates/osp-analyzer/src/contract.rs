@@ -159,20 +159,15 @@ pub struct AnalysisResult {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Unknown import'lar için politika.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnknownImportPolicy {
     /// Edge YOK, diagnostic üret (default — coupling şişmez).
+    #[default]
     DiagnosticOnly,
     /// Sessizce atla.
     Skip,
     /// Internal edge gibi say (riskli — coupling şişebilir).
     TreatAsInternal,
-}
-
-impl Default for UnknownImportPolicy {
-    fn default() -> Self {
-        Self::DiagnosticOnly
-    }
 }
 
 /// Analyzer konfigürasyonu.

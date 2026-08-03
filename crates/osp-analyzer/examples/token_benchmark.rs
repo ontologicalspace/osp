@@ -119,11 +119,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     // Estimate average file size (full repo / file count)
-    let avg_file_size = if file_count > 0 {
-        full_text_size / file_count
-    } else {
-        0
-    };
+    let avg_file_size = full_text_size.checked_div(file_count).unwrap_or(0);
     let context_2hop_size = relevant_nodes.len() * avg_file_size;
     let context_2hop_tokens = context_2hop_size / 4;
 

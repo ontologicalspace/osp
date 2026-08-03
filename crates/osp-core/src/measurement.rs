@@ -3103,7 +3103,7 @@ pub(crate) mod tests {
     ) -> crate::witness::Claim {
         use crate::coords::RawPosition;
         crate::witness::Claim {
-            id: claim_id.into(),
+            id: claim_id,
             intent: crate::witness::Intent::new(100, RawPosition::default()),
             author,
             computed_raw: RawPosition::default(),

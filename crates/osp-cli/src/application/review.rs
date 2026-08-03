@@ -72,6 +72,14 @@ pub enum ReviewMutationCommand {
 }
 
 /// Read-only query çıktısı (revision dahil — operator'a güncel revision göstermek için).
+//
+// Layout: List/Show varyantları 296-520 byte (Vec + rich details). CLI query output —
+// Result'ta taşınmaz (return value only). PR #112 production carrier enum kararından
+// farklı: orada carrier'lar her Result'ta taşınıyordu. Burada allow makul.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "CLI query return value — not carried in Result; production carrier boxing policy (PR #112) does not apply"
+)]
 #[derive(Debug, Clone)]
 pub enum ReviewReadOutput {
     List {
@@ -331,8 +339,8 @@ impl<R: ReviewStoreRepository> ReviewApplicationService<R> {
                     .map_err(|e| ReviewError::Store(e.to_string()))?;
                 let node = candidates
                     .into_iter()
-                    .find(|n| &n.id == &id)
-                    .or_else(|| store.graph().nodes_iter().find(|n| &n.id == &id).cloned());
+                    .find(|n| n.id == id)
+                    .or_else(|| store.graph().nodes_iter().find(|n| n.id == id).cloned());
                 let details = node.map(|n| {
                     // Node freshness digest — tüm statülerde (Candidate/Accepted/SupersededAccepted/Rejected).
                     // Tek source of truth; Candidate review `--basis-digest`, supersede iki endpoint için.
@@ -1095,13 +1103,13 @@ fn apply_supersede(
         .map_err(|e| ReviewError::Store(e.to_string()))?;
     let old = current
         .iter()
-        .find(|n| &n.id == &cmd.superseded)
+        .find(|n| n.id == cmd.superseded)
         .ok_or_else(|| {
             endpoint_not_current_or_missing(store, &cmd.superseded, SupersedeEndpoint::Superseded)
         })?;
     let new = current
         .iter()
-        .find(|n| &n.id == &cmd.successor)
+        .find(|n| n.id == cmd.successor)
         .ok_or_else(|| {
             endpoint_not_current_or_missing(store, &cmd.successor, SupersedeEndpoint::Successor)
         })?;

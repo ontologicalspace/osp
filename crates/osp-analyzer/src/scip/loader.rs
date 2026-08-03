@@ -340,7 +340,7 @@ fn extract_last_segment(symbol: &str) -> String {
     }
 
     // Son `#` veya `/` delimiter'ından sonraki kısım = identifier
-    if let Some(pos) = stripped.rfind(|c: char| c == '#' || c == '/') {
+    if let Some(pos) = stripped.rfind(['#', '/']) {
         stripped[pos + 1..].to_string()
     } else {
         stripped.to_string()

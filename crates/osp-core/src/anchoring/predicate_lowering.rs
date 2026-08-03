@@ -1901,10 +1901,8 @@ mod tests {
             }
         }
         // Pinleyen bind test: CouplingAzaltmali stub'ında Cohesion bind → AxisMismatch.
-        let stub = match lower_rule_to_predicate_stub(&rule_candidate("CouplingAzaltmali")).unwrap()
-        {
-            PredicateLoweringOutcome::Stub(s) => s,
-        };
+        let PredicateLoweringOutcome::Stub(stub) =
+            lower_rule_to_predicate_stub(&rule_candidate("CouplingAzaltmali")).unwrap();
         let binding = MetricThresholdBinding::new(
             PhysicalCodeMetricAxis::Cohesion, // Coupling değil → mismatch
             crate::trajectory::PredicateScope::Node(1),

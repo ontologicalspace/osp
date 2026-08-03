@@ -253,7 +253,7 @@ pub(crate) fn project_candidate_nodes(
         let path = analysis
             .node_paths
             .get(&node_id)
-            .ok_or_else(|| BridgeError::MissingNodePath { node_id })?;
+            .ok_or(BridgeError::MissingNodePath { node_id })?;
 
         // Canonical identity üret (lexical normalizasyon + case fold).
         let identity = CanonicalCodeIdentity::new(path, policy)?;

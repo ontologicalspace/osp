@@ -540,8 +540,8 @@ fn find_methods(node: &Node, source: &[u8]) -> Vec<String> {
 /// `./foo.js` → `./foo`, `./types.d.ts` → `./types`
 pub fn strip_js_extension(s: &str) -> &str {
     for ext in [".d.ts", ".mjs", ".cjs", ".tsx", ".ts", ".jsx", ".js"] {
-        if s.ends_with(ext) {
-            return &s[..s.len() - ext.len()];
+        if let Some(stripped) = s.strip_suffix(ext) {
+            return stripped;
         }
     }
     s
@@ -807,6 +807,11 @@ impl ImportResolver {
     /// HashMap entry count (diagnostic).
     pub fn len(&self) -> usize {
         self.map.len()
+    }
+
+    /// HashMap boş mu (clippy len_without_is_empty).
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
     }
 }
 

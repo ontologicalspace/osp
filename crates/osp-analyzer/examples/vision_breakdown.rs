@@ -182,7 +182,7 @@ fn main() -> anyhow::Result<()> {
         Verdict::Reject,
         Verdict::Inconclusive,
     ] {
-        let c = *verdict_counts.get(&v).or(Some(&0)).unwrap();
+        let c = *verdict_counts.get(&v).unwrap_or(&0);
         let pct = pct(c, total);
         let label = match v {
             Verdict::Pass => "pass",
