@@ -410,9 +410,8 @@ mod tests {
         let graph = graph_with(vec![rule.clone(), task_cand]);
 
         // 2. RuleCandidate → PredicateStub (axis hint Coupling).
-        let stub = match lower_rule_to_predicate_stub(&rule).unwrap() {
-            crate::anchoring::PredicateLoweringOutcome::Stub(s) => s,
-        };
+        let crate::anchoring::PredicateLoweringOutcome::Stub(stub) =
+            lower_rule_to_predicate_stub(&rule).unwrap();
         assert_eq!(
             stub.suggested_axis(),
             Some(PhysicalCodeMetricAxis::Coupling)

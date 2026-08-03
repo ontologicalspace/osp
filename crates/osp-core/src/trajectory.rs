@@ -2738,9 +2738,11 @@ mod tests {
     // 6. accept_improvement_policy_accepts_progress (INV-T6)
     #[test]
     fn accept_improvement_policy_accepts_progress() {
-        let mut policy = TaskPolicy::default();
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let (task, target) = test_task(1, 0.55, policy);
         let mut reg = InMemoryTaskRegistry::new();
         reg.insert(task);
@@ -2764,9 +2766,11 @@ mod tests {
     #[test]
     fn regression_rejected_even_if_one_axis_improved() {
         // coupling improved ama instability 0.90 (> 0.85 hard cap) → is_improved false → Reject.
-        let mut policy = TaskPolicy::default();
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let (task, target) = test_task(1, 0.55, policy);
         let mut reg = InMemoryTaskRegistry::new();
         reg.insert(task);
@@ -2813,8 +2817,10 @@ mod tests {
     // Ek: operator_approval_policy (review v2 — critical domain)
     #[test]
     fn operator_approval_policy_requires_human_review() {
-        let mut policy = TaskPolicy::default();
-        policy.predicate_failure_policy = PredicateFailurePolicy::OperatorApproval;
+        let policy = TaskPolicy {
+            predicate_failure_policy: PredicateFailurePolicy::OperatorApproval,
+            ..Default::default()
+        };
         let (task, target) = test_task(1, 0.55, policy);
         let mut reg = InMemoryTaskRegistry::new();
         reg.insert(task);
@@ -2972,8 +2978,10 @@ mod tests {
             nodes.push(dec_node(i, role, 0.80, 0.1 * i as f64));
         }
         let space = dec_space(nodes, 0.55);
-        let mut policy = DecompositionPolicy::default();
-        policy.max_tasks_per_milestone = 2; // strict cap
+        let policy = DecompositionPolicy {
+            max_tasks_per_milestone: 2, // strict cap
+            ..Default::default()
+        };
         let tasks = decompose_milestone(
             &milestone,
             &space,

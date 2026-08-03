@@ -15,10 +15,11 @@
 use clap::ValueEnum;
 
 /// Server modu — agent mı operator mü?
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub enum ServerMode {
     /// Agent mode — observation + validation + policy-bound execution only.
     /// Operator tools (trajectory_init, task_add, ...) DISABLED.
+    #[default]
     Agent,
     /// Operator mode — tüm tools aktif (insan/trusted orchestrator).
     Operator,
@@ -36,12 +37,5 @@ impl ServerMode {
             ServerMode::Agent => "agent",
             ServerMode::Operator => "operator",
         }
-    }
-}
-
-impl Default for ServerMode {
-    fn default() -> Self {
-        // Default: agent (en güvenli — operator açık opt-in).
-        ServerMode::Agent
     }
 }

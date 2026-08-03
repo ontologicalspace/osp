@@ -428,6 +428,10 @@ fn build_task(
 /// **G2c-5:** `lang` parametresi eklendi — repo başına doğru dil etiketi
 /// (rust/javascript/python/go). Analyzer auto-detect eder (`AdapterRegistry::default_all()`
 /// extension'a göre dispatch), `lang` yalnızca evidence metadata etiketi.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "example experiment harness — all params mandatory for evidence metadata"
+)]
 fn run_one_experiment(
     repo_path: &Path,
     repo_label: &str,

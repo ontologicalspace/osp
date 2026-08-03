@@ -101,12 +101,12 @@ mod tests {
         }
     }
     fn ev(id: EvidenceId, actor: AgentId) -> EvidenceEvent {
-        EvidenceEvent::new(id, &format!("s{id}"), WitnessKind::MergeCommit, actor, 1)
+        EvidenceEvent::new(id, format!("s{id}"), WitnessKind::MergeCommit, actor, 1)
     }
 
     #[test]
     fn advance_commit_mutates_space_and_returns_commit() {
-        let mut fsm = TimeFSM::default();
+        let mut fsm = TimeFSM;
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn advance_hold_does_not_mutate_space() {
-        let mut fsm = TimeFSM::default();
+        let mut fsm = TimeFSM;
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200)]); // Held (tek witness)
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn advance_commit_result_carries_actual_delta() {
-        let mut fsm = TimeFSM::default();
+        let mut fsm = TimeFSM;
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn advance_propagates_safety_weakened() {
-        let mut fsm = TimeFSM::default();
+        let mut fsm = TimeFSM;
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn timefsm_is_default_constructible_and_stateless() {
-        let mut fsm = TimeFSM::default();
+        let mut fsm = TimeFSM;
         let mut space = Space::new();
         let claim = claim_with(100, 1);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn multiple_advances_accumulate_nodes() {
-        let mut fsm = TimeFSM::default();
+        let mut fsm = TimeFSM;
         let mut space = Space::new();
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
         for i in 1..=5 {

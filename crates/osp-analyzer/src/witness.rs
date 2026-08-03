@@ -418,7 +418,7 @@ mod tests {
         let dir = make_fixture_with_commits();
         let profile = extract_witness(dir.path());
         // En son commit az önce → days_ago ~0
-        for (_, w) in &profile.by_file {
+        for w in profile.by_file.values() {
             assert!(
                 w.last_modified_days_ago <= 1,
                 "fresh commit → days_ago <= 1, got {}",

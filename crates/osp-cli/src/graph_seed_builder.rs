@@ -82,6 +82,10 @@ pub(crate) struct GraphSeedBuilder;
 impl GraphSeedBuilder {
     /// Draftları GraphSeed'e dönüştür — ya tam seed, ya hata (B1).
     /// Source draft sırasını korur (O1); insertion-order preserved.
+    #[allow(
+        clippy::result_large_err,
+        reason = "cold builder-failure path; GraphSeedBuilderError inline tutulur (PR #112 pattern — cold-path error, Box allocation maliyeti)"
+    )]
     pub fn build(
         drafts: impl IntoIterator<Item = GraphSeedNodeDraft>,
     ) -> Result<GraphSeed, GraphSeedBuilderError> {

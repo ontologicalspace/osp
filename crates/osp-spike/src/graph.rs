@@ -53,8 +53,8 @@ pub fn extract(repo: &Path) -> Result<DepGraph> {
 
     // Kenar kurulumu: her dosyanın import'larını iç dosyalara çözümle.
     let mut edges: Vec<Edge> = Vec::new();
-    for i in 0..files.len() {
-        for imp in &imports_per_file[i] {
+    for (i, imports) in imports_per_file.iter().enumerate().take(files.len()) {
+        for imp in imports {
             if let Some(target_path) = resolve_import(imp, &files) {
                 if let Some(&target_id) = path_to_id.get(&target_path) {
                     if i as NodeId != target_id {
@@ -223,8 +223,8 @@ fn extract_imports(source: &str, lang: Language, kind: LangKind) -> Result<Vec<S
 /// uzantılar önce denenir (`.d.ts` > `.ts`).
 fn strip_js_extension(s: &str) -> &str {
     for ext in [".d.ts", ".mjs", ".cjs", ".tsx", ".ts", ".jsx", ".js"] {
-        if s.ends_with(ext) {
-            return &s[..s.len() - ext.len()];
+        if let Some(stripped) = s.strip_suffix(ext) {
+            return stripped;
         }
     }
     s

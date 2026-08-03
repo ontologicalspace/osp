@@ -213,9 +213,7 @@ fn preflight_canonical_and_rule_signal_for_paper3_evidence_sentences() {
 
         // (5) lowering çıktısı — ambiguity + axes
         let outcome = lower_rule_to_predicate_stub(node).expect("lowering");
-        let stub = match outcome {
-            PredicateLoweringOutcome::Stub(s) => s,
-        };
+        let PredicateLoweringOutcome::Stub(stub) = outcome;
         match exp_hint {
             ExpectedHint::SingleCandidate(exp_axis) => {
                 let hint = stub.cross_family_hint().unwrap_or_else(|| {
@@ -323,9 +321,7 @@ fn build_e2e_binding_chain_replay() -> Value {
 
     // ── Step 3: RuleCandidate → PredicateStub (INV-P1) ────────────────────────
     let outcome = lower_rule_to_predicate_stub(rule_node).expect("lowering");
-    let stub = match outcome {
-        PredicateLoweringOutcome::Stub(s) => s,
-    };
+    let PredicateLoweringOutcome::Stub(stub) = outcome;
     let step3 = json!({
         "step": 3,
         "name": "RuleCandidate → PredicateStub (INV-P1)",

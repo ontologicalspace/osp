@@ -3935,7 +3935,7 @@ mod tests {
                 assert!(
                     source
                         .downcast_ref::<StoreError>()
-                        .map_or(false, |e| matches!(
+                        .is_some_and(|e| matches!(
                             e,
                             StoreError::IncompatibleSupersedeEndpoints { .. }
                         )),

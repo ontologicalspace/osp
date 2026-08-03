@@ -1259,9 +1259,11 @@ mod tests {
         // → 0 coupling → predicate satisfied). Maneuver limit'i LLM proposals'ı tükendiğinde
         // (NoMoreProposals) test ederiz — loop maneuver_limit kadar çalışır, sonra LlmError.
         // D2'de (gerçek engine measure) ExceededManeuverLimit testi anlamlı olur.
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 3;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 3,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -1306,9 +1308,11 @@ mod tests {
     // 4. navigator_records_evidence_per_attempt (boşluk #6)
     #[test]
     fn navigator_records_evidence_per_attempt() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 2;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 2,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -1351,10 +1355,12 @@ mod tests {
     #[test]
     fn navigator_accepts_progress_checkpoint() {
         // AcceptImprovement policy + allow_progress_checkpoint. LLM coupling azaltıyor.
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 5;
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            maneuver_limit: 5,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -1394,9 +1400,11 @@ mod tests {
     // 10. navigator_token_cost_accumulated (RQ6)
     #[test]
     fn navigator_token_cost_accumulated() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 2;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 2,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2025,7 +2033,7 @@ mod tests {
             cohesion: Some(0.6),
             ..Default::default()
         };
-        let raw_no_edge = engine.compute_raw_from_delta(&[node.clone()], &[], &[], &[]);
+        let raw_no_edge = engine.compute_raw_from_delta(std::slice::from_ref(&node), &[], &[], &[]);
         let raw_with_edge = engine.compute_raw_from_delta(
             &[node],
             &[Edge {
@@ -2091,9 +2099,11 @@ mod tests {
     /// Öncesi: `continue` (evidence YOK). Şimdi: before=after=current, RejectedBySyntax.
     #[test]
     fn navigator_records_evidence_for_empty_proposal() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 2;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 2,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2144,9 +2154,11 @@ mod tests {
     /// G2c-1b #2: Reject attempt'lerde gate_decision set edilir (empty/Q4/commit-error).
     #[test]
     fn navigator_evidence_includes_gate_decision() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 1;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 1,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2188,9 +2200,11 @@ mod tests {
     /// before == after, gate=RejectedBySyntax, mutation=Reject.
     #[test]
     fn navigator_syntax_reject_evidence_does_not_advance_state() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 1;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 1,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2311,9 +2325,11 @@ mod tests {
     #[test]
     fn g2c_removed_edges_requires_allowed_operation() {
         use crate::agent::EdgeRef;
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 1;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 1,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         // Task allowed_operations'ta RemoveImport YOK → removed_edges reject edilmeli.
         let mut task = coupling_task(1, 0.55, policy);
         task.allowed_operations = vec![]; // RemoveImport yok
@@ -2579,10 +2595,12 @@ mod tests {
     /// RQ9 ana kanıtı: progress checkpoint policy state'i adım adım hedefe yaklaştırır.
     #[test]
     fn g2c3_incremental_coupling_reduction_completes() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 3; // review 8 #3 — NoMoreProposals tuzağı yok (3 proposal = 3 attempt)
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            maneuver_limit: 3, // review 8 #3 — NoMoreProposals tuzağı yok (3 proposal = 3 attempt)
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2602,9 +2620,11 @@ mod tests {
     /// RQ9 kontrol hücresi: strict reject state'i dondurur, aynı task ilerlemez.
     #[test]
     fn g2c3_strict_reject_freezes_state_at_maneuver_limit() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 3;
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 3,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2629,10 +2649,12 @@ mod tests {
     /// PR #21'in Unknown borcu kapanır — success path artık Unknown değil.
     #[test]
     fn g2c3_completed_evidence_has_passed_all_gate_decision() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 3;
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            maneuver_limit: 3,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2666,10 +2688,12 @@ mod tests {
     fn inv_t9_predicate_satisfied_without_quorum_returns_awaiting_witnesses() {
         // HarnessAutoApprove DEĞİL — Production witness policy (Paper 1 güven modeli).
         // Boş witness set → Held.
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 5;
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            maneuver_limit: 5,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2749,8 +2773,10 @@ mod tests {
         // Bu test, navigator Held'de continue YAPMADIĞINI doğrular.
         // Eğer Held retry olsaydı, maneuver limit tükenirdi ve ExceededManeuverLimit dönerdi.
         // Held → AwaitingWitnesses (terminal) ise ExceededManeuverLimit DÖNMEZ.
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 2; // Düşük limit — eğer Held retry olsaydı hızla tükenirdi.
+        let policy = TaskPolicy {
+            maneuver_limit: 2, // Düşük limit — eğer Held retry olsaydı hızla tükenirdi.
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2809,8 +2835,10 @@ mod tests {
         // Bu test, LLM call_count'unun maneuver_limit'ten fazla OLMADIĞINI doğrular.
         // Eğer Held retry olsaydı, LLM her attempt için çağrılırdı (call_count artardı).
         // Held terminal ise LLM sadece 1 kez çağrılır (proposal generation).
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 10; // Yüksek limit — eğer Held retry olsaydı 10 kez çağrılırdı.
+        let policy = TaskPolicy {
+            maneuver_limit: 10, // Yüksek limit — eğer Held retry olsaydı 10 kez çağrılırdı.
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2866,8 +2894,10 @@ mod tests {
     fn inv_t7_syntax_rejection_still_consumes_budget_and_retries() {
         // Boş proposal (syntax reject) → OutputContract reject → evidence + retry.
         // Birden fazla boş proposal ver → maneuver limit tükenene kadar retry.
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 3;
+        let policy = TaskPolicy {
+            maneuver_limit: 3,
+            ..Default::default()
+        };
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -2991,9 +3021,11 @@ mod tests {
         use crate::witness::WitnessHoldReason;
 
         // Faz 1: deterministic task — Coupling <= 1.0 (her geçerli proposal satisfy eder).
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 10; // Held retry'a dönüşürse 2. LLM çağrısı → call_count kırılır.
-        policy.predicate_failure_policy = PredicateFailurePolicy::StrictReject;
+        let policy = TaskPolicy {
+            maneuver_limit: 10, // Held retry'a dönüşürse 2. LLM çağrısı → call_count kırılır.
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
         let mut task = coupling_task(1, 1.0, policy);
         // P1-3 scope alignment: balanced fixture node 0 üzerindeki import'lar.
         task.target_predicate_set.predicates[0].predicate.scope = PredicateScope::Node(0);
@@ -3374,9 +3406,11 @@ mod tests {
         let t_c_before = engine.t_c();
 
         // Task + single proposal → LLM bir kez çağrılır, sonra terminal.
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 5; // Yüksek — eğer retry olsaydı 5 kez çağrılırdı.
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        let policy = TaskPolicy {
+            maneuver_limit: 5, // Yüksek — eğer retry olsaydı 5 kez çağrılırdı.
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
@@ -3434,7 +3468,7 @@ mod tests {
     /// `inv_t9_72_held_production_path_exact` — deterministic fixture (WitnessSet authority,
     /// scope Node(0), target preferred_vector'den), exact AwaitingWitnesses, call_count==1,
     /// full evidence assertions + disk reload.
-
+    ///
     /// **INV-T9 #72 (Commit 2):** Evidence factory production policy'de
     /// retry/budget izolasyonunu değiştirmez.
     ///
@@ -3442,10 +3476,12 @@ mod tests {
     /// invariant'ı bozmamalı (commit öncesi davranışın korunması).
     #[test]
     fn inv_t9_72_held_evidence_factory_preserves_budget_isolation() {
-        let mut policy = TaskPolicy::default();
-        policy.maneuver_limit = 3;
-        policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
-        policy.allow_progress_checkpoint = true;
+        let policy = TaskPolicy {
+            maneuver_limit: 3,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            allow_progress_checkpoint: true,
+            ..Default::default()
+        };
         let task = g2c3_coupling_task(1, &policy);
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);

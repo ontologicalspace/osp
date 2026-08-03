@@ -249,8 +249,7 @@ mod tests {
                     "ImplementedBy üretilmemeli"
                 );
             }
-            Err(AnchorError::Gate(GateError::IllegalDirectCodeBinding { .. })) | _ => { /* kabul */
-            }
+            _ => { /* kabul — IllegalDirectCodeBinding dahil tüm anchor hataları */ }
         }
     }
 }

@@ -57,7 +57,7 @@ impl LlmClient for RuntimeLlmClient {
         };
         let raw = self.runtime.complete_raw(&req).map_err(map_runtime_error)?;
         // G2c-4 (review 10 #5): usage'ı parse error'da DA koru — token harcandı.
-        let usage = raw.usage.clone();
+        let usage = raw.usage;
         *self.last_usage.lock().expect("last_usage poisoned") = raw.usage;
         let token_cost = Some(TokenCost {
             prompt_tokens: usage.prompt_tokens,
@@ -74,7 +74,7 @@ impl LlmClient for RuntimeLlmClient {
     }
 
     fn last_token_cost(&self) -> TokenCost {
-        let u = self.last_usage.lock().expect("last_usage poisoned").clone();
+        let u = *self.last_usage.lock().expect("last_usage poisoned");
         TokenCost {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,

@@ -265,7 +265,7 @@ pub fn analyze_repo_with_config(
     let repo_head = std::process::Command::new("git")
         .arg("-C")
         .arg(&repo)
-        .args(&["rev-parse", "--short", "HEAD"])
+        .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
@@ -640,7 +640,7 @@ mod tests {
         assert_eq!(result.node_paths.len(), 3, "node_paths covers all nodes");
 
         // Path'ler repo-relative ve .py ile bitmeli (main.py, models.py, utils.py)
-        for (_id, path) in &result.node_paths {
+        for path in result.node_paths.values() {
             assert!(
                 path.ends_with(".py"),
                 "node path should be a source file, got: {path}"
@@ -712,7 +712,7 @@ mod tests {
             3,
             "node_semantics should have an entry per node"
         );
-        for (_id, sem) in &result.node_semantics {
+        for sem in result.node_semantics.values() {
             assert_eq!(sem.class_count, 0, "no SCIP → class_count should be 0");
             assert_eq!(sem.method_count, 0, "no SCIP → method_count should be 0");
             assert_eq!(sem.field_count, 0, "no SCIP → field_count should be 0");
@@ -734,7 +734,7 @@ mod tests {
 
         // Every module has coupling + instability metrics (from CouplingAxis/InstabilityAxis)
         assert_eq!(result.module_metrics.len(), 3);
-        for (_id, m) in &result.module_metrics {
+        for m in result.module_metrics.values() {
             assert!(
                 m.coupling.value >= 0.0 && m.coupling.value < 1.0,
                 "coupling ∈ [0,1)"
@@ -750,7 +750,7 @@ mod tests {
 
         // **INV-T9 #70 (P0):** SCIP olmadan node.cohesion None olmalı — CohesionAxis
         // fallback→Placeholder ile placeholder'ı Scip olarak yükseltme açığı kapanır.
-        for (_id, n) in &result.space.nodes {
+        for n in result.space.nodes.values() {
             assert!(
                 n.cohesion.is_none(),
                 "INV-T9 #70 P0: without SCIP, node.cohesion must be None (got {:?})",

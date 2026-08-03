@@ -122,7 +122,7 @@ fn main() -> anyhow::Result<()> {
 
     // Top-10 churn (en çok değişen dosyalar — volatility hotspot'ları)
     let mut by_churn: Vec<_> = profile.by_file.iter().collect();
-    by_churn.sort_by(|a, b| b.1.churn.cmp(&a.1.churn));
+    by_churn.sort_by_key(|(_, w)| std::cmp::Reverse(w.churn));
     println!("\n--- Top-10 churn (volatility hotspots) ---");
     for (path, w) in by_churn.iter().take(10) {
         println!(
