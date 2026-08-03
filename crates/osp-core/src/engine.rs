@@ -865,7 +865,7 @@ impl SpaceEngine {
     /// → build_authorization_context_v2(bundle, witness, measurement) → AuthorizationContextV2.
     ///
     /// **Production wiring Faz 8.**
-
+    ///
     /// **7 binding validation + commitment derivation.** Check sırası: TaskMismatch →
     /// Subject → Impact → StructuralDelta → Revision → ContextDigest → CurrentContext.
     /// Her mismatch testi kendisinden önceki check'leri geçecek fixture ile tasarlanmalı
@@ -1173,7 +1173,7 @@ impl SpaceEngine {
             coord_system,
             vision,
             rules: vec![], // Faz 5: God Mode `register_rule()` ile ekler
-            time: TimeFSM::default(),
+            time: TimeFSM,
             config,
             t_c: 0,
             snapshot_store: None,

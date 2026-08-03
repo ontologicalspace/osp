@@ -670,7 +670,7 @@ pub enum BindingError {
 /// - `unresolved_slots` boş VE `reason != NoTemplateMatch` → `EmptyUnresolvedSlots`.
 /// - `reason == NoTemplateMatch` VE `suggested_templates` dolu →
 ///   `NoTemplateMatchCannotSuggestTemplate` (çelişki).
-/// *"A PredicateStub is not absence of knowledge; it is structured uncertainty."*
+///   *"A PredicateStub is not absence of knowledge; it is structured uncertainty."*
 ///
 /// # Serde boundary (Patch 5)
 /// `Serialize`-only (audit). `Deserialize` YOK — stub yeniden apply edilememeli

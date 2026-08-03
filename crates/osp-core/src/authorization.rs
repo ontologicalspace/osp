@@ -2147,7 +2147,7 @@ pub enum CanonicalTrajectoryEvidenceBaseline {
 /// unavailable reason — opaque struct. Private repr; tek creation yolu checked
 /// `try_from_reason` (local invalid state üretilemez: sort + dedup + non-empty + disjoint
 /// + union == subject). Struct literal bypass imkânsız. Cross-object tutarsızlık
-/// `validate_against_subject` ile tüketim sınırında yeniden doğrulanır (defense-in-depth).
+///   `validate_against_subject` ile tüketim sınırında yeniden doğrulanır (defense-in-depth).
 ///
 /// **Serialization (reviewer P2-3 v4):** `#[serde(transparent)]` — wrapper iç repr enum
 /// gibi serialize olur (eski public enum wire shape korunur). Wire format Commit 1b'de
@@ -2776,7 +2776,7 @@ impl AuthorizationBasisV2 {
     /// **Checked constructor (plan md:157, reviewer P1-2):** `validate_semantics` çağırır
     /// — nested evidence + baseline digest reverify + engine_measurement_digest reverify
     /// + request snapshot → digest reverify (reviewer P0-2). Başarısızsa basis doğmaz.
-    /// Tek creation yolu (field'lar private). Builder (Commit 2) bu constructor'ı çağırır.
+    ///   Tek creation yolu (field'lar private). Builder (Commit 2) bu constructor'ı çağırır.
     #[allow(dead_code, reason = "Faz 4 basis builder / Commit 2 consumer")]
     pub(crate) fn new(
         task_id: crate::trajectory::TaskId,
@@ -2907,8 +2907,8 @@ impl AuthorizationBasisV2 {
         // CanonicalTaskGoalEvidenceV2 kendi task_id field'ını taşır — basis identity binding.
         if self.task_goal_evidence.task_id != self.task_id {
             return Err(AuthorizationBasisV2Error::TaskGoalEvidenceTaskIdMismatch {
-                evidence: self.task_goal_evidence.task_id.into(),
-                basis: self.task_id.into(),
+                evidence: self.task_goal_evidence.task_id,
+                basis: self.task_id,
             });
         }
 
@@ -3025,8 +3025,8 @@ impl AuthorizationBasisV2 {
     ///
     /// Restore edilen `CanonicalPredicateEvaluationBasisV2` + `CanonicalTrajectoryLossEvidence`
     /// + stored gate decision (`CanonicalGateEvaluationV2`) tutarlılık doğrulaması.
-    /// Runtime `evaluate_task_gate_v2`'nin completion-first matrisi ile restore edilen
-    /// stored değerler çelişmemeli.
+    ///   Runtime `evaluate_task_gate_v2`'nin completion-first matrisi ile restore edilen
+    ///   stored değerler çelişmemeli.
     ///
     /// **Matris (GatePassed exhaustive, issue #83):**
     /// - Completed → AcceptAsCompleted (loss irrelevant)
@@ -3564,7 +3564,7 @@ impl AuthorizationBasisDigestV2 {
 
         // Identity.
         encode_u64(&mut hasher, basis.task_id, "v2_task_id");
-        encode_u64(&mut hasher, basis.claim_id.into(), "v2_claim_id");
+        encode_u64(&mut hasher, basis.claim_id, "v2_claim_id");
 
         // Commitment digests — raw 32 bytes each.
         hasher.update(basis.task_claim_digest.as_bytes());
@@ -4452,8 +4452,8 @@ fn validate_evidence_semantics(
     Ok(())
 }
 
-/// **INV-T9 #70 Commit 4b (reviewer v4 P1-4 + Faz 2 scoped P1-2):** v2 production
-/// GateDecision tag encoder — **`gate_decision_tag_v2`** (yeniden adlandırıldı).
+// **INV-T9 #70 Commit 4b (reviewer v4 P1-4 + Faz 2 scoped P1-2):** v2 production
+// GateDecision tag encoder — **`gate_decision_tag_v2`** (yeniden adlandırıldı).
 // ═══════════════════════════════════════════════════════════════════════════════
 // INV-T9 #70 Commit 4b Faz 4 — Pinned canonical tag newtype'ları (plan md:115)
 //
@@ -6082,7 +6082,7 @@ pub enum AuthorizationContextV2Error {
 
 /// **INV-T9 #70 Commit 4b Faz 4 (plan md:31, 69-72):** Authorization context V2 — basis
 /// + verified gate snapshot + canonical witness requirement. Checked constructor
-/// proof-gated: `VerifiedGateEvaluationV2` tüketir, `CanonicalGateEvaluationV2` reddeder.
+///   proof-gated: `VerifiedGateEvaluationV2` tüketir, `CanonicalGateEvaluationV2` reddeder.
 ///
 /// **3 katman:** Context = Basis (kanıtsal zemin) + verified gate snapshot (Faz 5
 /// evaluator'den) + canonical witness requirement. `apply_target` context'te YOK
@@ -7221,11 +7221,7 @@ impl SuspendedAttemptEvidenceDigestV2 {
             "v2_evidence_schema_version",
         );
         encode_u64(&mut hasher, evidence.task_id, "v2_evidence_task_id");
-        encode_u64(
-            &mut hasher,
-            evidence.claim_id.into(),
-            "v2_evidence_claim_id",
-        );
+        encode_u64(&mut hasher, evidence.claim_id, "v2_evidence_claim_id");
         hasher.update(evidence.authorization_context_digest.as_bytes());
         encode_u64(
             &mut hasher,
@@ -8135,14 +8131,14 @@ impl PendingAuthorizationEnvelope {
     ///   alanları, witness policy, basis iç task_id invariant
     ///
     /// **INV-T9 #72 (Commit 3):** 11-adım verification chain (kullanıcı sırası):
-    /// 1. Schema version
-    /// 2. Structural delta defensive validation (mevcut)
-    /// 3. `AuthorizationBasisDigest` recompute
-    /// 4-8. record ↔ evidence via `validate_internal` (evidence digest, task_id,
-    ///    claim_id, attempt_num, basis digest binding, Held, reason/snapshot)
-    /// 9. record ↔ basis karar alanları (predicate/mutation/apply/revision/ec-digest)
-    /// 10. witness_requirement ↔ basis.witness_policy
-    /// 11. basis iç task_id invariant (disposition semantic validate_internal'da)
+    /// - 1. Schema version
+    /// - 2. Structural delta defensive validation (mevcut)
+    /// - 3. `AuthorizationBasisDigest` recompute
+    /// - 4–8. record ↔ evidence via `validate_internal` (evidence digest, task_id,
+    ///   claim_id, attempt_num, basis digest binding, Held, reason/snapshot)
+    /// - 9. record ↔ basis karar alanları (predicate/mutation/apply/revision/ec-digest)
+    /// - 10. witness_requirement ↔ basis.witness_policy
+    /// - 11. basis iç task_id invariant (disposition semantic validate_internal'da)
     pub fn verify(&self) -> Result<(), PendingAuthorizationLoadError> {
         // 1. Schema version
         if self.schema != PENDING_AUTHORIZATION_SCHEMA {
@@ -9097,8 +9093,8 @@ fn deserialize_pending_authorization_envelope_v2(
         .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
     let evidence = SuspendedAttemptEvidenceV2::try_from_canonical_wire(
         raw.record.suspended_attempt_evidence.schema_version,
-        raw.record.suspended_attempt_evidence.task_id.into(),
-        raw.record.suspended_attempt_evidence.claim_id.into(),
+        raw.record.suspended_attempt_evidence.task_id,
+        raw.record.suspended_attempt_evidence.claim_id,
         raw.record
             .suspended_attempt_evidence
             .authorization_context_digest
@@ -9109,8 +9105,8 @@ fn deserialize_pending_authorization_envelope_v2(
     )
     .map_err(|e| VersionedPendingAuthorizationLoadError::V2Decode(e.to_string()))?;
     let record = PendingAuthorizationV2::try_new_with_verified_digest(
-        raw.record.task_id.into(),
-        raw.record.claim_id.into(),
+        raw.record.task_id,
+        raw.record.claim_id,
         raw.record
             .authorization_context_digest
             .into_context_digest(),
@@ -9161,8 +9157,8 @@ fn serialize_envelope_v2_json(envelope: &PendingAuthorizationEnvelopeV2) -> serd
     serde_json::json!({
         "schema": envelope.schema(),
         "record": {
-            "task_id": evidence.task_id() as u64,
-            "claim_id": u64::from(evidence.claim_id()),
+            "task_id": evidence.task_id(),
+            "claim_id": evidence.claim_id(),
             "authorization_context_digest": hex::encode(*evidence.authorization_context_digest().as_bytes()),
             "attempt_num": evidence.attempt_num().get(),
             "suspended_attempt_evidence": serialize_evidence_v2_json(evidence),
@@ -9200,8 +9196,8 @@ fn serialize_witness_requirement_v2_json(req: &CanonicalWitnessRequirementV2) ->
 fn serialize_evidence_v2_json(evidence: &SuspendedAttemptEvidenceV2) -> serde_json::Value {
     serde_json::json!({
         "schema_version": evidence.schema_version(),
-        "task_id": evidence.task_id() as u64,
-        "claim_id": u64::from(evidence.claim_id()),
+        "task_id": evidence.task_id(),
+        "claim_id": evidence.claim_id(),
         "authorization_context_digest": hex::encode(*evidence.authorization_context_digest().as_bytes()),
         "attempt_num": evidence.attempt_num().get(),
         "disposition": evidence.disposition(),
@@ -10042,7 +10038,7 @@ struct RawCanonicalTaskGoalEvidenceV2Ref<'a> {
 impl<'a> RawCanonicalTaskGoalEvidenceV2Ref<'a> {
     fn from_domain(evidence: &'a CanonicalTaskGoalEvidenceV2) -> Self {
         Self {
-            task_id: evidence.task_id.into(),
+            task_id: evidence.task_id,
             mode: evidence.mode.as_u8(),
             predicates: evidence
                 .predicates
