@@ -41,8 +41,9 @@ pub fn analyze_repo_with_config(
 ) -> anyhow::Result<AnalysisResult> {
     let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
 
-    // 1. Collect source files
-    let files = collect_source_files(&repo, registry)?;
+    // 1. Collect source files (split: catalog-known + registry-available vs
+    //    catalog-known + no adapter registered — see IncompleteReason)
+    let (files, incomplete_reasons) = collect_source_files(&repo, registry)?;
     tracing::info!(files = files.len(), repo = ?repo, "kaynak dosya bulundu");
 
     // 2. Phase 1: extract per-file data (isolated scope — registry borrow ends here)
@@ -359,6 +360,7 @@ pub fn analyze_repo_with_config(
         },
         semantic_coverage: build_semantic_coverage(&semantic_index, files.len(), repo_head),
         diagnostics,
+        completeness: crate::language::AnalysisCompleteness::from_reasons(incomplete_reasons),
     })
 }
 
@@ -484,18 +486,35 @@ fn extract_file_data(
     (all_class_defs, file_data)
 }
 
-fn collect_source_files(repo: &Path, registry: &AdapterRegistry) -> anyhow::Result<Vec<PathBuf>> {
+/// Discover source files, split into two phases so a catalog-known file that
+/// lacks a registered adapter is *observed* (`IncompleteReason::AdapterUnavailable`)
+/// rather than silently dropped like a non-source file. Phase 1 (catalog
+/// membership) and phase 2 (registry availability) are independent: a `.rb` or
+/// `.md` file that matches no `KnownLanguage` never reaches phase 2 and is never
+/// recorded as incomplete — it is simply out of scope. Bit-identical for the
+/// current `default_all()` full registry: every `KnownLanguage` extension set is
+/// an exact match to its adapter's `extensions()` (verified 2026-07-29), so the
+/// `files` list this produces is identical to the pre-PR-B single-phase check.
+fn collect_source_files(
+    repo: &Path,
+    registry: &AdapterRegistry,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<crate::language::IncompleteReason>)> {
     let mut files = Vec::new();
-    walk_dir(repo, &mut files, registry)?;
+    let mut incomplete = Vec::new();
+    walk_dir(repo, repo, &mut files, &mut incomplete, registry)?;
     files.sort();
-    Ok(files)
+    Ok((files, incomplete))
 }
 
 fn walk_dir(
+    repo_root: &Path,
     dir: &Path,
     files: &mut Vec<PathBuf>,
+    incomplete: &mut Vec<crate::language::IncompleteReason>,
     registry: &AdapterRegistry,
 ) -> anyhow::Result<()> {
+    use crate::language::{IncompleteReason, LanguageCatalog, RepoRelativePath};
+
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -519,12 +538,23 @@ fn walk_dir(
             {
                 continue;
             }
-            walk_dir(&path, files, registry)?;
+            walk_dir(repo_root, &path, files, incomplete, registry)?;
         } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let dotted = format!(".{ext}");
-                if registry.adapter_for_extension(&dotted).is_some() {
-                    files.push(path);
+            // Phase 1: is this a catalog-known source file at all? A non-source
+            // extension (.md/.json/.png/...) or one OSP's catalog simply doesn't
+            // know is out of scope — no record, exactly like before PR B.
+            if let Some(language) = LanguageCatalog::language_for_path(&path) {
+                // Phase 2: does THIS registry have an adapter for it? A catalog-known
+                // language can still be missing here — the registry passed to
+                // `analyze_repo_with`/`analyze_repo_with_config` is public and may be
+                // partial (e.g. `AdapterRegistry::new().with(RustAdapter)`), independent
+                // of any Cargo feature system.
+                match registry.adapter_for_language(language) {
+                    Some(_) => files.push(path),
+                    None => incomplete.push(IncompleteReason::AdapterUnavailable {
+                        language,
+                        path: RepoRelativePath::from_absolute(repo_root, &path),
+                    }),
                 }
             }
         }
@@ -616,6 +646,63 @@ mod tests {
             .edges
             .iter()
             .all(|e| e.kind == EdgeKind::Imports));
+    }
+
+    #[test]
+    fn analyze_repo_full_registry_is_complete() {
+        // default_all() covers every catalog-known extension in the fixture (.py) —
+        // completeness must be Complete, not Partial. readme.md is out of catalog
+        // scope entirely (not a "language"), so it must not appear as a reason.
+        let dir = make_fixture();
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+        assert!(
+            result.completeness.is_complete(),
+            "full registry + catalog-known-only fixture must be Complete, got {:?}",
+            result.completeness
+        );
+    }
+
+    #[test]
+    fn analyze_repo_partial_registry_reports_adapter_unavailable() {
+        // Cargo-independent scenario (verified against reviewer feedback 2026-07-29):
+        // AdapterRegistry::new().with(...) and analyze_repo_with are both public
+        // today, so a caller can already build a registry missing a catalog-known
+        // language's adapter — no feature-gating required. This must surface as
+        // IncompleteReason::AdapterUnavailable, not a silently dropped file.
+        use crate::adapters::rust::RustAdapter;
+        use crate::language::{AdapterRegistry, AnalysisCompleteness, IncompleteReason, LanguageId};
+
+        let dir = make_fixture(); // 3 .py files + readme.md
+        fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let rust_only = AdapterRegistry::new().with(RustAdapter);
+        let result = analyze_repo_with(dir.path(), &rust_only).expect("analyze succeeded");
+
+        // Only the .rs file was analyzed — the 3 .py files are catalog-known but
+        // have no adapter in this registry, so they're excluded from the graph
+        // (same as before PR B: silently not pushed to `files`) but NOW recorded.
+        assert_eq!(result.space.node_count(), 1, "only main.rs analyzed");
+
+        match &result.completeness {
+            AnalysisCompleteness::Partial { reasons } => {
+                assert_eq!(reasons.len(), 3, "one reason per unanalyzed .py file");
+                assert!(reasons.iter().all(|r| matches!(
+                    r,
+                    IncompleteReason::AdapterUnavailable { language, .. }
+                        if *language == LanguageId::Python
+                )));
+                // Paths must be repo-relative, never carry the tempdir's absolute prefix.
+                for r in reasons {
+                    let IncompleteReason::AdapterUnavailable { path, .. } = r;
+                    assert!(
+                        !path.as_str().contains(dir.path().to_str().unwrap()),
+                        "path must be repo-relative, got: {path}"
+                    );
+                    assert!(path.as_str().ends_with(".py"));
+                }
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
     }
 
     #[test]
