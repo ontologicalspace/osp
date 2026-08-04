@@ -58,3 +58,7 @@ docs/llm-apikey.md
 repos/
 /repo/
 .zcode/
+
+# SCIP index (dogfooding — 16MB+ binary, lokalde üretilir, commit edilmez)
+index.scip
+*.scip.tmp
