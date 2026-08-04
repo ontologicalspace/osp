@@ -95,12 +95,15 @@ docker run --rm -v /path/to/repo:/repo -w /repo \
   --project-name myproject --project-version 1.0.0
 ```
 
-### Rust (via Docker, rust-analyzer)
+### Rust (via Docker, scip-rust)
 
 ```bash
+# Not: rust-toolchain.toml pinned ise geçici kaldırın — scip-rust image'ı pin'i
+# kullanır ama o toolchain'de rust-analyzer olmayabilir. Image default toolchain
+# (r-a içerir) ile çalışması için pin'i geçici taşıyın.
 docker run --rm -v /path/to/repo:/repo -w /repo \
   sourcegraph/scip-rust:latest \
-  rust-analyzer scip . --output /repo/index.scip
+  scip-rust --output /repo/index.scip
 ```
 
 ### Go (via Docker)
