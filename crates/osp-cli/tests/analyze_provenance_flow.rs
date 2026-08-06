@@ -38,7 +38,14 @@ fn fixture_repo() -> tempfile::TempDir {
         .status()
         .expect("git config name");
     fs::write(repo.join("a.rs"), "pub fn a() {}\n").expect("write a.rs");
-    fs::write(repo.join("main.rs"), "mod a;\npub fn main() { a::a(); }\n").expect("write main.rs");
+    // `use crate::a::a;` — tree-sitter Rust adapter `use_declaration` çıkarır ve
+    // `crate::` internal resolution ile a.rs dosyasına resolve eder → gerçek edge
+    // (sadece `mod a;` inline modül olarak görülür, edge üretmez).
+    fs::write(
+        repo.join("main.rs"),
+        "mod a;\nuse crate::a::a;\npub fn main() { a(); }\n",
+    )
+    .expect("write main.rs");
     Command::new("git")
         .args(["-C", repo.to_str().unwrap(), "add", "-A"])
         .status()
@@ -163,30 +170,31 @@ fn analyze_json_emits_provenance_envelope() {
         "nodes length must match node_count (single truth source)"
     );
 
-    // Yönlü graf doğrulaması (P1-3): edge varsa main.rs → a.rs imports olmalı.
-    // Not: bu minimal fixture tree-sitter `use crate::` pattern'i üretmediği için
-    // 0 edge gelebilir (analyzer `mod a;`'yı inline modül olarak görür, dosya resolve
-    // edemez). Edge varsa yönlü doğrula; yoksa boş-edge contract zaten ayrı testte.
-    if !edges.is_empty() {
-        let node_id_for = |expected_path: &str| {
-            nodes
-                .iter()
-                .find(|n| n["path"].as_str() == Some(expected_path))
-                .and_then(|n| n["node_id"].as_u64())
-                .unwrap_or_else(|| panic!("missing node path: {expected_path}"))
-        };
-        let main_id = node_id_for("main.rs");
-        let a_id = node_id_for("a.rs");
-        assert!(
-            edges.iter().any(|edge| {
-                edge["from"].as_u64() == Some(main_id)
-                    && edge["to"].as_u64() == Some(a_id)
-                    && edge["kind"].as_str() == Some("imports")
-                    && edge["is_type_only"].as_bool() == Some(false)
-            }),
-            "if edges present, main.rs must value-import a.rs (directed main.rs → a.rs)"
-        );
-    }
+    // Yönlü graf doğrulaması (P1): fixture `use crate::a::a;` üretir → gerçek edge.
+    // Koşulsuz assertion — vacuous geçişi önler (review P1: "edge varsa" geçiştirme).
+    assert!(
+        !edges.is_empty(),
+        "fixture (main.rs `use crate::a::a;`) must produce at least one internal import edge"
+    );
+
+    let node_id_for = |expected_path: &str| {
+        nodes
+            .iter()
+            .find(|n| n["path"].as_str() == Some(expected_path))
+            .and_then(|n| n["node_id"].as_u64())
+            .unwrap_or_else(|| panic!("missing node path: {expected_path}"))
+    };
+    let main_id = node_id_for("main.rs");
+    let a_id = node_id_for("a.rs");
+    assert!(
+        edges.iter().any(|edge| {
+            edge["from"].as_u64() == Some(main_id)
+                && edge["to"].as_u64() == Some(a_id)
+                && edge["kind"].as_str() == Some("imports")
+                && edge["is_type_only"].as_bool() == Some(false)
+        }),
+        "main.rs must value-import a.rs (directed edge main.rs → a.rs, kind=imports, is_type_only=false)"
+    );
 
     // Tam tuple canonical order (P1): (from, to, kind_rank, is_type_only) ascending.
     // Boş array için sort invariant trivially true.
