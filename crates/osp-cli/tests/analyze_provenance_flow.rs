@@ -38,7 +38,14 @@ fn fixture_repo() -> tempfile::TempDir {
         .status()
         .expect("git config name");
     fs::write(repo.join("a.rs"), "pub fn a() {}\n").expect("write a.rs");
-    fs::write(repo.join("main.rs"), "mod a;\npub fn main() { a::a(); }\n").expect("write main.rs");
+    // `use crate::a::a;` — tree-sitter Rust adapter `use_declaration` çıkarır ve
+    // `crate::` internal resolution ile a.rs dosyasına resolve eder → gerçek edge
+    // (sadece `mod a;` inline modül olarak görülür, edge üretmez).
+    fs::write(
+        repo.join("main.rs"),
+        "mod a;\nuse crate::a::a;\npub fn main() { a(); }\n",
+    )
+    .expect("write main.rs");
     Command::new("git")
         .args(["-C", repo.to_str().unwrap(), "add", "-A"])
         .status()
@@ -145,6 +152,81 @@ fn analyze_json_emits_provenance_envelope() {
     assert!(
         has_placeholder,
         "cohesion provenance honestly reports placeholder when no SCIP"
+    );
+
+    // ── Edges array (edges feature) ─────────────────────────────────────────────
+    // Count parity — tek truth source wire yüzeyini pinle (P2-2): DTO listeleri count üretir.
+    let edges = envelope["edges"]
+        .as_array()
+        .expect("edges is array (V1 producer always emits additive edges field)");
+    assert_eq!(
+        edges.len(),
+        envelope["edge_count"].as_u64().expect("edge_count integer") as usize,
+        "edges length must match edge_count (single truth source)"
+    );
+    assert_eq!(
+        nodes.len(),
+        envelope["node_count"].as_u64().expect("node_count integer") as usize,
+        "nodes length must match node_count (single truth source)"
+    );
+
+    // Yönlü graf doğrulaması (P1): fixture `use crate::a::a;` üretir → gerçek edge.
+    // Koşulsuz assertion — vacuous geçişi önler (review P1: "edge varsa" geçiştirme).
+    assert!(
+        !edges.is_empty(),
+        "fixture (main.rs `use crate::a::a;`) must produce at least one internal import edge"
+    );
+
+    let node_id_for = |expected_path: &str| {
+        nodes
+            .iter()
+            .find(|n| n["path"].as_str() == Some(expected_path))
+            .and_then(|n| n["node_id"].as_u64())
+            .unwrap_or_else(|| panic!("missing node path: {expected_path}"))
+    };
+    let main_id = node_id_for("main.rs");
+    let a_id = node_id_for("a.rs");
+    assert!(
+        edges.iter().any(|edge| {
+            edge["from"].as_u64() == Some(main_id)
+                && edge["to"].as_u64() == Some(a_id)
+                && edge["kind"].as_str() == Some("imports")
+                && edge["is_type_only"].as_bool() == Some(false)
+        }),
+        "main.rs must value-import a.rs (directed edge main.rs → a.rs, kind=imports, is_type_only=false)"
+    );
+
+    // Tam tuple canonical order (P1): (from, to, kind_rank, is_type_only) ascending.
+    // Boş array için sort invariant trivially true.
+    fn kind_rank(kind: &str) -> u8 {
+        match kind {
+            "imports" => 0,
+            "calls" => 1,
+            "depends_on" => 2,
+            "part_of" => 3,
+            "derives_from" => 4,
+            "witnesses" => 5,
+            "approves" => 6,
+            "violates" => 7,
+            other => panic!("unknown edge kind: {other}"),
+        }
+    }
+    let actual_keys: Vec<(u64, u64, u8, bool)> = edges
+        .iter()
+        .map(|e| {
+            (
+                e["from"].as_u64().unwrap(),
+                e["to"].as_u64().unwrap(),
+                kind_rank(e["kind"].as_str().unwrap()),
+                e["is_type_only"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let mut expected_keys = actual_keys.clone();
+    expected_keys.sort_unstable();
+    assert_eq!(
+        actual_keys, expected_keys,
+        "edges must use canonical wire order (from, to, kind_rank, is_type_only)"
     );
 
     // stderr carries diagnostics (partial SCIP coverage), stdout is JSON-only.
@@ -377,4 +459,80 @@ fn analyze_head_is_full_sha_from_snapshot_authority() {
         .expect("git rev-parse");
     let git_head_str = String::from_utf8_lossy(&git_head.stdout).trim().to_string();
     assert_eq!(head, git_head_str, "head == git rev-parse HEAD");
+}
+
+/// Tek dosyalı, importsuz repo — edge olmayan graph fixture.
+fn fixture_repo_without_edges() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let repo = dir.path();
+    Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .arg(repo)
+        .status()
+        .expect("git init");
+    Command::new("git")
+        .args([
+            "-C",
+            repo.to_str().unwrap(),
+            "config",
+            "user.email",
+            "t@t.com",
+        ])
+        .status()
+        .expect("git config email");
+    Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "config", "user.name", "t"])
+        .status()
+        .expect("git config name");
+    // Tek dosya, hiç import yok → sıfır edge.
+    fs::write(repo.join("standalone.rs"), "pub fn standalone() {}\n").expect("write standalone.rs");
+    Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "add", "-A"])
+        .status()
+        .expect("git add");
+    Command::new("git")
+        .args(["-C", repo.to_str().unwrap(), "commit", "-qm", "init"])
+        .status()
+        .expect("git commit");
+    dir
+}
+
+/// `"edges" yok` ≠ `"edges": []` (P1 — V1 additive contract).
+///
+/// V1 producer her zaman `edges` alanını yayımlar. Eski V1 envelope'larda
+/// bulunmayabilir — yeni graph-topology tüketicileri alan yokluğunu boş graph
+/// olarak yorumlamamalı. Bu test producer'ın edge'siz graph için `[]` yayımladığını
+/// doğrular (sözleşmeyi executable contract'a dönüştürür).
+#[test]
+fn analyze_json_distinguishes_empty_edges_from_missing_edges() {
+    let dir = fixture_repo_without_edges();
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .args(["analyze", dir.path().to_str().unwrap(), "--format", "json"])
+        .output()
+        .expect("run osp analyze");
+
+    assert!(
+        output.status.success(),
+        "osp analyze failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let envelope: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("JSON envelope");
+
+    assert!(
+        envelope.get("edges").is_some(),
+        "V1 producer must always emit the additive edges field (even when empty)"
+    );
+    assert_eq!(
+        envelope["edge_count"], 0,
+        "edge_count is 0 for edgeless graph"
+    );
+    assert_eq!(
+        envelope["edges"],
+        serde_json::json!([]),
+        "edges is empty array, not missing — `edges missing` ≠ `edges empty`"
+    );
 }

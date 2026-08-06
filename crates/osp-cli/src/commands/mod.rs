@@ -287,6 +287,8 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
     analyze_provenance::validate_node_key_sets(&result).map_err(|e| anyhow::anyhow!(e))?;
     analyze_provenance::validate_node_paths_bijection(&result.node_paths)
         .map_err(|e| anyhow::anyhow!(e))?;
+    // Defensive graph integrity (P1-2): her edge emitted node set'ine referans vermeli.
+    analyze_provenance::validate_edge_endpoints(&result.space).map_err(|e| anyhow::anyhow!(e))?;
 
     // Per-node provenance entries (NodeId ascending — deterministic wire order).
     let mut nodes: Vec<analyze_provenance::CliAnalyzeNode> =
@@ -311,6 +313,17 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
         ));
     }
 
+    // Per-edge bağımlılık grafiği — canonical wire order (from → to → kind_rank → is_type_only).
+    // `sort_edges_canonical` ordering contract'ı kapsüller (P0-1); enum declaration order'a
+    // bağımlı değil. `space.edges` insertion-order geliyor — kendi deterministik sıralamamız.
+    let mut edges: Vec<analyze_provenance::CliEdge> = result
+        .space
+        .edges
+        .iter()
+        .map(analyze_provenance::CliEdge::from_edge)
+        .collect();
+    analyze_provenance::sort_edges_canonical(&mut edges);
+
     // Analyze provenance envelope (review P1-1 — analyzer_axis_specific, not "native").
     // repository.head tek kaynaktan: snapshot_after.head (review P1-2 — semantic_coverage
     // kısa SHA taşır, envelope authority'si olamaz).
@@ -326,8 +339,10 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
             "clean": snapshot_after.clean,
             "binding": binding
         },
-        "node_count": result.space.nodes.len(),
-        "edge_count": result.space.edges.len(),
+        // Tek truth source (P2-1): count'lar DTO listelerinden gelir, space'den değil.
+        "node_count": nodes.len(),
+        "edge_count": edges.len(),
+        "edges": edges,
         "nodes": nodes,
         "repo_metrics": {
             "abstractness": {
