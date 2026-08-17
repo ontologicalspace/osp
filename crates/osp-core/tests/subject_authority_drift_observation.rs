@@ -1,0 +1,898 @@
+//! #95 MD-1 P2-1 — `SubjectAuthorityDriftObservation` integration acceptance tests
+//! (plan v6 §5). Frozen corpus'a YENİ case eklenmez; mevcut 001/002/direct family'ler
+//! `case_by_id` ile kullanılır.
+//!
+//! Kabul kriterleri (plan v6):
+//! 1. Non-mutation (integration katmanı: revision + node/edge parity; axis katmanı
+//!    engine.rs unit testlerinde).
+//! 3. Q5 reachability — V2 Violated → downstream None.
+//! 4. Q6 RuleViolation → ReachedButUnavailable.
+//! 6. Provenance-confound sentinel (subject/raw parity + provenance/downstream divergent).
+//! 7. Measurement failure transparency — V2 failure V1'i etkilemez.
+//! 9. 002 cross-pin'ler (#92 engine-unit + PR #120 integration golden'larıyla).
+//! 10. 001 draft characterization + non-surviving drop.
+//! 13. Serde legacy — eski TrajectoryEvidence JSON → None.
+//!
+//! (2 Held / 5 Draft invariant / 8 exhaustiveness / 11 RevisionRequired wire /
+//! 12 MCP additive-contract kriterleri ilgili dosyalarda: navigator.rs tests,
+//! subject_authority.rs tests, authorization.rs tests, osp-mcp/tests.)
+
+mod common;
+
+use common::{case_by_id, engine_from_space, engine_with_case_space};
+use osp_core::coords::{MetricSource, RawPosition};
+use osp_core::navigator::build_claim_from_proposal;
+use osp_core::space::{Edge, EdgeKind, Node, NodeKind, Space};
+use osp_core::subject_authority::{
+    observe_subject_authority_drift, produce_legacy_subject_measurement,
+    v1_downstream_from_engine_commit_error, AuthoritativeDownstreamObservation, EvaluatedQ5Verdict,
+    LaneQ5Observation, LegacySubjectMeasurement, Q5ObservationFailure, V1DownstreamObservation,
+    V1DownstreamUnavailableReason, V2LaneOutcome, V2MeasurementFailure,
+};
+use osp_core::trajectory::{
+    ComparisonOp, InMemoryTaskRegistry, MetricPredicate, MutationDecision, PredicateAxis,
+    PredicateCompletion, PredicateFailurePolicy, PredicateGate, PredicateGateInput, PredicateMode,
+    PredicateScope, PredicateSet, Task, TaskBoundClaim, TaskPolicy, TaskResolver, TaskStatus,
+    WeightedPredicate,
+};
+use osp_core::witness::WitnessSet;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Fixture — tek setup kaynağı (evaluate_v1_case mapping mirror: probe claim →
+// claim.delta_nodes tek mapping kaynağı; loss_before navigator mirror).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+struct CaseSetup {
+    engine: osp_core::engine::SpaceEngine,
+    claim: osp_core::witness::Claim,
+    task: Task,
+    legacy: LegacySubjectMeasurement,
+    loss_before: f64,
+    target: RawPosition,
+}
+
+fn setup_case(case_id: &str) -> CaseSetup {
+    let case = case_by_id(case_id);
+    let engine = engine_with_case_space(&case);
+    setup_with_engine(engine, &case)
+}
+
+fn setup_with_engine(
+    engine: osp_core::engine::SpaceEngine,
+    case: &common::CharacterizationCase,
+) -> CaseSetup {
+    let probe_claim =
+        build_claim_from_proposal(&case.proposal, RawPosition::default(), case.task.id, 100, 1)
+            .expect("probe claim build should succeed for corpus case");
+    let legacy = produce_legacy_subject_measurement(
+        &engine,
+        &probe_claim.delta_nodes,
+        &probe_claim.delta_edges,
+        &case.proposal,
+    );
+    let claim = build_claim_from_proposal(&case.proposal, legacy.raw(), case.task.id, 100, 1)
+        .expect("final claim build should succeed for corpus case");
+    let target = case
+        .task
+        .target_predicate_set
+        .preferred_vector
+        .unwrap_or_default();
+    // loss_before: navigator mirror (evaluate_v1_case P0-2 fix) — pre-delta
+    // affected centroid üzerinden.
+    let affected = legacy.subject_ids().to_vec();
+    let pre_raw = engine.compute_raw_from_delta(&[], &[], &[], &affected);
+    let current_measured = osp_core::navigator::provenanced_from_raw(pre_raw, MetricSource::Scip);
+    let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
+    CaseSetup {
+        engine,
+        claim,
+        task: case.task.clone(),
+        legacy,
+        loss_before,
+        target,
+    }
+}
+
+/// Observer sözleşmesi: `legacy.raw() == claim.computed_raw` bit-exact (production
+/// wiring — navigator claim'i `legacy.raw()` ile kurar).
+fn assert_legacy_claim_raw_contract(s: &CaseSetup) {
+    let legacy_bits = [
+        s.legacy.raw().x.to_bits(),
+        s.legacy.raw().y.to_bits(),
+        s.legacy.raw().z.to_bits(),
+        s.legacy.raw().w.to_bits(),
+        s.legacy.raw().v.to_bits(),
+    ];
+    let claim_bits = [
+        s.claim.computed_raw.x.to_bits(),
+        s.claim.computed_raw.y.to_bits(),
+        s.claim.computed_raw.z.to_bits(),
+        s.claim.computed_raw.w.to_bits(),
+        s.claim.computed_raw.v.to_bits(),
+    ];
+    assert_eq!(
+        legacy_bits, claim_bits,
+        "legacy.raw() must equal claim.computed_raw bit-exact"
+    );
+}
+
+fn space_fingerprint(engine: &osp_core::engine::SpaceEngine) -> (Vec<u64>, Vec<(u64, u64)>) {
+    let mut node_ids: Vec<u64> = engine.space().nodes.keys().copied().collect();
+    node_ids.sort_unstable();
+    let mut edges: Vec<(u64, u64)> = engine
+        .space()
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to))
+        .collect();
+    edges.sort_unstable();
+    (node_ids, edges)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 1 — Non-mutation (integration katmanı)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Gözlem öncesi/sonrası `SpaceViewRevision` (content digest dahil) + node/edge set
+/// exact parity. Axis descriptor/epoch katmanı engine.rs unit testlerinde.
+#[test]
+fn observation_does_not_mutate_engine_state() {
+    let s = setup_case("wide-affected-scope-002");
+    let revision_before = s
+        .engine
+        .current_space_view_revision()
+        .expect("revision computation must succeed");
+    let fingerprint_before = space_fingerprint(&s.engine);
+
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+    let _finalized = draft.finalize(V1DownstreamObservation::Observed(
+        AuthoritativeDownstreamObservation {
+            predicate_completion: PredicateCompletion::NotCompleted,
+            mutation_decision: MutationDecision::Reject,
+        },
+    ));
+
+    let revision_after = s
+        .engine
+        .current_space_view_revision()
+        .expect("revision computation must succeed after observation");
+    assert_eq!(
+        revision_before, revision_after,
+        "observation must not change space view revision (content digest included)"
+    );
+    assert_eq!(
+        fingerprint_before,
+        space_fingerprint(&s.engine),
+        "observation must not change node/edge sets"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 9 — 002 cross-pin'ler (#92 kanıt değerleriyle)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// `wide-affected-scope-002`: V1 subject {1,2,3} vs V2 {1}; θ bit goldens engine.rs
+/// #92 testleriyle (4594662147918958728 / 4593103093345799528) cross-pin; raw bit
+/// goldens PR #120 parity testleriyle (raw(002)==raw(001) purity).
+#[test]
+fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
+    let s = setup_case("wide-affected-scope-002");
+    assert_legacy_claim_raw_contract(&s);
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+
+    // Subject divergence — V1 ordered legacy union, V2 canonical.
+    assert_eq!(draft.v1().subject.ids, vec![1, 2, 3]);
+    let v2 = match draft.v2() {
+        V2LaneOutcome::Measured(v2) => v2,
+        V2LaneOutcome::MeasurementFailed(f) => {
+            panic!("002 V2 lane must measure; got failure: {f:?}")
+        }
+    };
+    assert_eq!(v2.subject.ids, vec![1]);
+    assert_ne!(draft.v1().subject.digest, v2.subject.digest);
+
+    // Raw divergence — PR #120 parity goldens (purity: raw(002)==raw(001)).
+    assert_eq!(
+        draft.v1().raw.bits,
+        [
+            4595172819793696085,
+            4602678819172646912,
+            4602678819172646912,
+            4602678819172646912,
+            4601046424471046557,
+        ],
+        "V1 raw bits must equal frozen corpus 001/002 parity goldens"
+    );
+    assert_eq!(
+        v2.raw.bits,
+        [
+            4602678819172646912,
+            4602678819172646912,
+            4607182418800017408,
+            4602678819172646912,
+            4601046424471046557,
+        ],
+        "V2 raw bits must equal frozen corpus 001/002 parity goldens"
+    );
+
+    // Provenance — V1 compatibility-projected uniform Scip; V2 engine-native.
+    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
+    assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
+
+    // Q5 same-context divergence — #92 engine-unit goldens.
+    match &draft.v1().q5 {
+        LaneQ5Observation::Evaluated {
+            theta_bits,
+            verdict,
+            ..
+        } => {
+            assert_eq!(*theta_bits, 4594662147918958728, "V1 θ bits (≈0.15249)");
+            assert_eq!(*verdict, EvaluatedQ5Verdict::Passed);
+        }
+        other => panic!("002 V1 Q5 must be Evaluated: {other:?}"),
+    }
+    match &v2.q5 {
+        LaneQ5Observation::Evaluated {
+            theta_bits,
+            verdict,
+            ..
+        } => {
+            assert_eq!(*theta_bits, 4593103093345799528, "V2 θ bits (≈0.11711)");
+            assert_eq!(*verdict, EvaluatedQ5Verdict::Passed);
+        }
+        other => panic!("002 V2 Q5 must be Evaluated: {other:?}"),
+    }
+
+    // V2 shadow downstream — Q5 Passed → production PredicateGate ile hesaplanır.
+    let downstream = v2
+        .downstream
+        .as_ref()
+        .expect("002 V2 Q5 Passed → downstream must be computed");
+    assert_eq!(
+        downstream.predicate_completion,
+        PredicateCompletion::Completed
+    );
+}
+
+/// `removed-edge-external-source-002`: V1 subject {1,9} (removed_edge.from folded)
+/// vs V2 {1}; θ bits 4594129220971291796 / 4593103093345799528 (#92 goldens).
+#[test]
+fn removed_edge_external_source_002_observation_cross_pinned_to_92_goldens() {
+    let s = setup_case("removed-edge-external-source-002");
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+
+    assert_eq!(draft.v1().subject.ids, vec![1, 9]);
+    let v2 = match draft.v2() {
+        V2LaneOutcome::Measured(v2) => v2,
+        V2LaneOutcome::MeasurementFailed(f) => {
+            panic!("removed-002 V2 lane must measure; got failure: {f:?}")
+        }
+    };
+    assert_eq!(v2.subject.ids, vec![1]);
+
+    match &draft.v1().q5 {
+        LaneQ5Observation::Evaluated { theta_bits, .. } => {
+            assert_eq!(*theta_bits, 4594129220971291796, "V1 θ bits (≈0.13770)");
+        }
+        other => panic!("removed-002 V1 Q5 must be Evaluated: {other:?}"),
+    }
+    match &v2.q5 {
+        LaneQ5Observation::Evaluated { theta_bits, .. } => {
+            assert_eq!(*theta_bits, 4593103093345799528, "V2 θ bits (≈0.11711)");
+        }
+        other => panic!("removed-002 V2 Q5 must be Evaluated: {other:?}"),
+    }
+    assert!(
+        v2.downstream.is_some(),
+        "Q5 Passed → V2 downstream computed"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 10 — 001: Draft characterization + non-surviving drop
+// ════════════════════════════════════════════════════════════════════════════════
+
+/// 001 a) Draft characterization: GlobalDefault pre-theta yüzeyi — iki lane'in Q5'si
+/// de aynı captured-context hatasıyla `NotEvaluated{VisionAuthorityInsufficient}`;
+/// V2 ölçümü bağımsız olarak başarılı (vision'a ihtiyaç duymaz) ama downstream
+/// üretilmez (counterfactual yasak).
+///
+/// 001 b) Production eligibility: commit `VisionContextInvalid` (terminal,
+/// non-surviving) → `v1_downstream_from_engine_commit_error` None → observation
+/// emit EDİLMEZ.
+#[test]
+fn wide_affected_scope_001_draft_characterization_and_non_surviving_drop() {
+    let mut s = setup_case("wide-affected-scope-001");
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+
+    // (a) Draft characterization — iki lane aynı NotEvaluated reason.
+    assert_eq!(
+        draft.v1().q5,
+        LaneQ5Observation::NotEvaluated {
+            reason: Q5ObservationFailure::VisionAuthorityInsufficient,
+        },
+        "001 V1 Q5: GlobalDefault insufficient authority (pre-theta surface)"
+    );
+    let v2 = match draft.v2() {
+        V2LaneOutcome::Measured(v2) => v2,
+        V2LaneOutcome::MeasurementFailed(f) => {
+            panic!("001 V2 measurement itself must succeed (vision-independent): {f:?}")
+        }
+    };
+    assert_eq!(
+        v2.q5,
+        LaneQ5Observation::NotEvaluated {
+            reason: Q5ObservationFailure::VisionAuthorityInsufficient,
+        }
+    );
+    assert!(
+        v2.downstream.is_none(),
+        "Q5 NotEvaluated → counterfactual downstream üretilmez"
+    );
+
+    // (b) Non-surviving drop — commit terminal VisionContextInvalid.
+    let mut registry = InMemoryTaskRegistry::new();
+    registry.insert(s.task.clone());
+    let result = s
+        .engine
+        .commit_task_claim(osp_core::engine::TaskCommitInput {
+            claim: &s.claim,
+            omega: &WitnessSet::new(vec![]),
+            task_resolver: &registry as &dyn TaskResolver,
+            target: s.target,
+            loss_before: s.loss_before,
+            measured: s.legacy.measured().clone(),
+        });
+    match &result {
+        Err(osp_core::engine::EngineCommitError::VisionContextInvalid(_)) => {}
+        other => panic!("001 commit must fail terminal VisionContextInvalid: {other:?}"),
+    }
+    let err = match result {
+        Err(e) => e,
+        Ok(_) => unreachable!(),
+    };
+    assert_eq!(
+        v1_downstream_from_engine_commit_error(&err),
+        None,
+        "VisionContextInvalid = non-surviving → observation emit YOK (eligibility contract)"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 6 — Provenance-confound sentinel
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inline required-source fixture (corpus `direct-coupling-required-scip-*`
+/// semantics'ini taşır; corpus case'lerinde role-bearing delta node YOK → Q5
+/// NotEvaluated → downstream quadruple o fixture'da erişilemez — bu yüzden inline).
+///
+/// Sentinel quadruple: subject **parity** + raw bits **parity** + provenance
+/// **divergent** (V1 compatibility-projected [Scip;5] vs V2 engine-native) +
+/// downstream **divergent** (required_source=Scip yalnız V1 measured'ı karşılar).
+/// Bu quadruple, downstream farkının "subject authority caused predicate drift"
+/// olarak yanlış okunmasını imkânsız kılar — farkın görünür nedeni provenance (MD-2).
+#[test]
+fn direct_per_axis_required_scip_provenance_confound_sentinel() {
+    use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
+
+    let proposal = osp_core::agent::DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module, // role-bearing → Q5 yüzeyi açık (002 pattern)
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::Imports,
+        }],
+        removed_edges: vec![],
+        affected_nodes: vec![1], // V1 subject == task scope → parity by construction
+        modified_entities: vec![],
+        position_hints: vec![],
+        reasoning: "provenance sentinel fixture".to_string(),
+    };
+    let task = Task {
+        id: 1,
+        milestone_id: 1,
+        label: "required_source=Scip sentinel".into(),
+        target_predicate_set: PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 10.0,
+                    scope: PredicateScope::Node(1),
+                    required_source: Some(MetricSource::Scip),
+                    tolerance: 0.0,
+                },
+                weight: None,
+            }],
+            preferred_vector: None,
+        },
+        policy: TaskPolicy {
+            maneuver_limit: 5,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            ..Default::default()
+        },
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+    let case = common::CharacterizationCase {
+        id: "inline-required-source-scip-sentinel".into(),
+        class: common::CaseClass::DirectPerAxisAuthority,
+        source: common::CaseSource::SyntheticAdversarial,
+        description: "inline fixture — provenance confound sentinel".into(),
+        space: module_scope_space(),
+        task,
+        proposal,
+    };
+    let s = setup_with_engine(engine_from_space(case.space.clone()), &case);
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+
+    // Subject parity — digest'ler eşit (subject-authority drift YOK).
+    assert_eq!(draft.v1().subject.ids, vec![1]);
+    let v2 = match draft.v2() {
+        V2LaneOutcome::Measured(v2) => v2,
+        V2LaneOutcome::MeasurementFailed(f) => panic!("sentinel V2 must measure: {f:?}"),
+    };
+    assert_eq!(v2.subject.ids, vec![1]);
+    assert_eq!(
+        draft.v1().subject.digest,
+        v2.subject.digest,
+        "sentinel: subject parity — aynı digest"
+    );
+
+    // Raw parity — aynı subject üzerinden aynı ölçüm.
+    assert_eq!(
+        draft.v1().raw.bits,
+        v2.raw.bits,
+        "sentinel: raw bits parity — subject aynı, ölçüm aynı"
+    );
+
+    // Provenance divergent — V1 compatibility projection, V2 engine-native.
+    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
+    assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
+
+    // Q5 her iki lane'de açık ve Passed (role-bearing node) — downstream karşılaştırılabilir.
+    assert!(matches!(
+        &v2.q5,
+        LaneQ5Observation::Evaluated {
+            verdict: EvaluatedQ5Verdict::Passed,
+            ..
+        }
+    ));
+
+    // Downstream divergent — required_source=Scip yalnız V1 karşılar.
+    let v2_downstream = v2
+        .downstream
+        .as_ref()
+        .expect("sentinel V2 Q5 Passed → downstream computed");
+    assert_eq!(
+        v2_downstream.predicate_completion,
+        PredicateCompletion::NotCompleted,
+        "V2 engine-native sources → SourceInsufficient → NotCompleted (MD-2 confound görünür)"
+    );
+    // V1 authoritative: uniform-Scip → Completed (required_source karşılanır).
+    let bound = TaskBoundClaim {
+        claim: &s.claim,
+        task: &s.task,
+    };
+    let v1_gate = PredicateGate.evaluate(PredicateGateInput {
+        bound,
+        measured: s.legacy.measured(),
+        loss_before: s.loss_before,
+        target: &s.target,
+    });
+    assert_eq!(
+        v1_gate.outcome.predicate_completion,
+        PredicateCompletion::Completed,
+        "V1 compatibility-projected Scip → Completed"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 7 — Measurement failure transparency (shadow failure → authoritative etkilenmez)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Inline Module-scope task (corpus'a DOKUNMADAN): V2 lane
+/// `SubjectScopeResolutionFailed{ModuleResolutionUnavailable}` ile fail-closed
+/// sınıflanır; aynı kurulumun gözlemsiz koşumuyla (engine A: produce→claim→commit,
+/// engine B: produce→observe→claim→commit) V1 akışı ve engine state'ı bit-identical
+/// kalır — shadow lane failure'ı authoritative lane'e sızmaz.
+#[test]
+fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
+    use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
+
+    let proposal = osp_core::agent::DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::Imports,
+        }],
+        removed_edges: vec![],
+        affected_nodes: vec![1],
+        modified_entities: vec![],
+        position_hints: vec![],
+        reasoning: "module-scope fixture".to_string(),
+    };
+    let task = Task {
+        id: 1,
+        milestone_id: 1,
+        label: "Module-scope (V2 fail-closed)".into(),
+        target_predicate_set: PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 10.0,
+                    scope: PredicateScope::Module("core".into()),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            }],
+            preferred_vector: None,
+        },
+        policy: TaskPolicy {
+            maneuver_limit: 5,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            ..Default::default()
+        },
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+    let case = common::CharacterizationCase {
+        id: "inline-module-scope-fixture".into(),
+        class: common::CaseClass::DirectPerAxisAuthority,
+        source: common::CaseSource::SyntheticAdversarial,
+        description: "inline fixture — V2 Module fail-closed".into(),
+        space: module_scope_space(),
+        task: task.clone(),
+        proposal: proposal.clone(),
+    };
+
+    // Engine A: gözlemsiz koşum (produce → claim → commit).
+    let mut engine_a = engine_from_space(case.space.clone());
+    let probe = build_claim_from_proposal(&proposal, RawPosition::default(), 1, 100, 1)
+        .expect("probe claim");
+    let legacy_a = produce_legacy_subject_measurement(
+        &engine_a,
+        &probe.delta_nodes,
+        &probe.delta_edges,
+        &proposal,
+    );
+    let claim_a = build_claim_from_proposal(&proposal, legacy_a.raw(), 1, 100, 1).expect("claim A");
+    let mut registry = InMemoryTaskRegistry::new();
+    registry.insert(task.clone());
+    let target = RawPosition::default();
+    let pre_raw = engine_a.compute_raw_from_delta(&[], &[], &[], legacy_a.subject_ids());
+    let current_a = osp_core::navigator::provenanced_from_raw(pre_raw, MetricSource::Scip);
+    let loss_before = osp_core::trajectory::trajectory_loss(&current_a, &target);
+    let result_a = engine_a.commit_task_claim(osp_core::engine::TaskCommitInput {
+        claim: &claim_a,
+        omega: &WitnessSet::new(vec![]),
+        task_resolver: &registry as &dyn TaskResolver,
+        target,
+        loss_before,
+        measured: legacy_a.measured().clone(),
+    });
+    let state_a = space_fingerprint(&engine_a);
+
+    // Engine B: gözlemlü koşum (produce → observe → claim → commit).
+    let s = setup_with_engine(engine_from_space(case.space.clone()), &case);
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+
+    // V2 lane fail-closed typed sınıflama (enum equality — string değil).
+    assert_eq!(
+        draft.v2(),
+        &V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::SubjectScopeResolutionFailed {
+            module: "core".to_string(),
+        }),
+        "Module scope → SubjectScopeResolutionFailed{{ModuleResolutionUnavailable}} (fail-closed)"
+    );
+    // V1 lane ölçülmüş ve healthy.
+    assert_eq!(draft.v1().subject.ids, vec![1]);
+
+    // Authoritative lane bit-identical: aynı legacy raw, aynı commit sonucu şekli,
+    // aynı engine state.
+    assert_eq!(
+        legacy_a.raw().x.to_bits(),
+        s.legacy.raw().x.to_bits(),
+        "V1 raw unaffected by shadow observation"
+    );
+    let mut engine_b = s.engine;
+    let result_b = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput {
+        claim: &s.claim,
+        omega: &WitnessSet::new(vec![]),
+        task_resolver: &registry as &dyn TaskResolver,
+        target: s.target,
+        loss_before: s.loss_before,
+        measured: s.legacy.measured().clone(),
+    });
+    assert_eq!(
+        std::format!("{result_a:?}"),
+        std::format!("{result_b:?}"),
+        "V1 commit outcome identical with and without observation"
+    );
+    assert_eq!(state_a, space_fingerprint(&engine_b));
+}
+
+fn module_scope_space() -> Space {
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+    space.insert_node(Node {
+        id: 2,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+    space.insert_edge(Edge {
+        from: 1,
+        to: 2,
+        kind: EdgeKind::Imports,
+        is_type_only: false,
+    });
+    space
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 4 — Q6 RuleViolation → ReachedButUnavailable
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Test-only Q6 rule — her değerlendirmede ihlal üretir. (Self-import YOK: Q4 syntax
+/// gate'i onu daha erken yakalıyor — Q6 yüzeyi için Q4'ün geçtiği bir delta gerekir.)
+struct AlwaysViolateRule {
+    id: osp_core::rule::RuleId,
+}
+
+impl osp_core::rule::Rule for AlwaysViolateRule {
+    fn id(&self) -> &osp_core::rule::RuleId {
+        &self.id
+    }
+    fn descriptor(&self) -> osp_core::authorization::RuleDescriptor {
+        osp_core::authorization::RuleDescriptor {
+            rule_id: self.id.clone(),
+            semantics_version: 1,
+            canonical_parameters: vec![],
+        }
+    }
+    fn evaluate(
+        &self,
+        _new_nodes: &[Node],
+        _new_edges: &[Edge],
+        _space: &Space,
+    ) -> Option<osp_core::rule::RuleViolation> {
+        Some(osp_core::rule::RuleViolation {
+            rule_id: self.id.clone(),
+            detail: "md1 test sentinel — always violates".to_string(),
+            severity: osp_core::rule::RuleSeverity::Hard,
+        })
+    }
+}
+
+/// Production sırası Q5 → PredicateGate → Q6: RuleViolation anında PredicateGate
+/// çalışmış olabilir (bu fixture'da çalışır — coupling ≤ 10 trivially satisfied,
+/// mutation != Reject → Q6 çalışır) ama gerçek outcome error'da taşınmaz →
+/// `ReachedButUnavailable{Q6RuleViolationAfterPredicateGate}`. Sentetik
+/// NotCompleted/Reject authoritative diye taşınmaz.
+#[test]
+fn q6_rule_violation_finalizes_reached_but_unavailable() {
+    use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
+
+    let mut engine = engine_from_space(module_scope_space());
+    engine
+        .register_rule(Box::new(AlwaysViolateRule {
+            id: "test.md1_always_violate".to_string(),
+        }))
+        .expect("rule registration");
+
+    let proposal = osp_core::agent::DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module, // role-bearing → vision yüzeyi açık (002 pattern)
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::Imports,
+        }],
+        removed_edges: vec![],
+        affected_nodes: vec![1],
+        modified_entities: vec![],
+        position_hints: vec![],
+        reasoning: "q6 fixture".to_string(),
+    };
+    let task = Task {
+        id: 1,
+        milestone_id: 1,
+        label: "Q6 fixture".into(),
+        target_predicate_set: PredicateSet {
+            mode: PredicateMode::All,
+            predicates: vec![WeightedPredicate {
+                predicate: MetricPredicate {
+                    metric: PredicateAxis::Coupling,
+                    operator: ComparisonOp::Le,
+                    threshold: 10.0, // trivially satisfied → mutation != Reject → Q6 çalışır
+                    scope: PredicateScope::Node(1),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            }],
+            preferred_vector: None,
+        },
+        policy: TaskPolicy {
+            maneuver_limit: 5,
+            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+            ..Default::default()
+        },
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+    let case = common::CharacterizationCase {
+        id: "inline-q6-rule-violation-fixture".into(),
+        class: common::CaseClass::DirectPerAxisAuthority,
+        source: common::CaseSource::SyntheticAdversarial,
+        description: "inline fixture — Q6 RuleViolation".into(),
+        space: module_scope_space(),
+        task: task.clone(),
+        proposal: proposal.clone(),
+    };
+    let s = setup_with_engine(engine, &case);
+    let draft = observe_subject_authority_drift(
+        &s.engine,
+        &s.claim,
+        &s.task,
+        &s.legacy,
+        s.loss_before,
+        &s.target,
+    );
+
+    // Shadow lane: Q5 role-bearing node ile açık + trivially-satisfied predicate.
+    let v2 = match draft.v2() {
+        V2LaneOutcome::Measured(v2) => v2,
+        V2LaneOutcome::MeasurementFailed(f) => panic!("Q6 fixture V2 must measure: {f:?}"),
+    };
+    assert!(
+        matches!(v2.q5, LaneQ5Observation::Evaluated { .. }),
+        "Q6 fixture: role-bearing delta node → Q5 evaluable"
+    );
+    assert!(
+        v2.downstream.is_some(),
+        "Q5 Passed → V2 shadow downstream computed"
+    );
+
+    // Authoritative lane: commit → RuleViolation (Q6, PredicateGate SONRASI).
+    let mut registry = InMemoryTaskRegistry::new();
+    registry.insert(s.task.clone());
+    let mut engine_b = s.engine;
+    let result = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput {
+        claim: &s.claim,
+        omega: &WitnessSet::new(vec![]),
+        task_resolver: &registry as &dyn TaskResolver,
+        target: s.target,
+        loss_before: s.loss_before,
+        measured: s.legacy.measured().clone(),
+    });
+    let err = match result {
+        Err(osp_core::engine::EngineCommitError::RuleViolation { .. }) => {
+            // Beklenen yüzey.
+            match result {
+                Err(e) => e,
+                Ok(_) => unreachable!(),
+            }
+        }
+        other => panic!("Q6 fixture must fail with RuleViolation: {other:?}"),
+    };
+
+    // Navigator/MCP ortak path→finalize eşlemesi: ReachedButUnavailable.
+    assert_eq!(
+        v1_downstream_from_engine_commit_error(&err),
+        Some(V1DownstreamObservation::ReachedButUnavailable {
+            reason: V1DownstreamUnavailableReason::Q6RuleViolationAfterPredicateGate,
+        })
+    );
+    // Finalize edilen gözlem bu sınıflandırmayı taşır (evidence'a yazılan şekliyle).
+    let finalized =
+        draft.finalize(v1_downstream_from_engine_commit_error(&err).expect("surviving"));
+    assert_eq!(
+        finalized.v1.downstream,
+        V1DownstreamObservation::ReachedButUnavailable {
+            reason: V1DownstreamUnavailableReason::Q6RuleViolationAfterPredicateGate,
+        }
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 3 — Q5 reachability (Violated → downstream None) — engine-unit katmanında
+//     extreme-vision fixture; burada ek olarak NotEvaluated→None 001'de pinlendi.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// (001 testi NotEvaluated → None'ı zaten pinler; Violated → None engine.rs unit
+// testinde extreme-vision fixture ile pinlenir — md1_observer_q5_violated_*.)
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 13 — Serde legacy: eski TrajectoryEvidence JSON → subject_authority_drift None
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn legacy_trajectory_evidence_json_deserializes_with_drift_none() {
+    // Eski wire — alan YOK (G2c-1b backward-compat deseni).
+    let legacy_json = r#"{
+        "trajectory_id": 1,
+        "milestone_id": 1,
+        "task_id": 7,
+        "attempt_id": 3,
+        "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "after": {"x": 0.6, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "predicate_completion": "Completed",
+        "mutation_decision": "AcceptAsCompleted",
+        "token_cost": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        "duration_ms": 42
+    }"#;
+    let evidence: osp_core::trajectory::TrajectoryEvidence =
+        serde_json::from_str(legacy_json).expect("legacy JSON must deserialize (serde default)");
+    assert!(
+        evidence.subject_authority_drift.is_none(),
+        "eski wire → subject_authority_drift None"
+    );
+}

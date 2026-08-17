@@ -832,21 +832,19 @@ impl Workspace {
 
         // 2. Engine measure (INV-T3 — agent değiştiremez). G2c-2: removed_edges +
         // affected_nodes geçir (coupling-reducing proposals için).
-        let mut affected: Vec<osp_core::space::NodeId> = proposal.affected_nodes.clone();
-        for er in &proposal.removed_edges {
-            if !affected.contains(&er.from) {
-                affected.push(er.from);
-            }
-        }
-        let computed_raw = self.engine_mut().compute_raw_from_delta(
+        //
+        // **#95 MD-1 P2-1 REFACTOR (işaretli — semantik değişiklik YOK):** inline
+        // affected union + `compute_raw_from_delta` → explicit compatibility producer
+        // (`osp_core::subject_authority` — bit-identical; navigator ile aynı tek truth).
+        let legacy = osp_core::subject_authority::produce_legacy_subject_measurement(
+            self.engine_mut(),
             &delta_nodes,
             &delta_edges,
-            &proposal.removed_edges,
-            &affected,
+            proposal,
         );
 
         // 3. Claim build + commit_task_claim.
-        let claim = match build_claim_from_proposal(proposal, computed_raw, task_id, 1, 1) {
+        let claim = match build_claim_from_proposal(proposal, legacy.raw(), task_id, 1, 1) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(serde_json::json!({
@@ -863,12 +861,25 @@ impl Workspace {
                 }))
             }
         };
-        let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
+        // **#95 MD-1 P2-1 REFACTOR:** uniform-Scip measured projeksiyonu producer
+        // içinde üretilir (bit-identical).
+        let measured = legacy.measured().clone();
         let target = task
             .target_predicate_set
             .preferred_vector
             .unwrap_or_default();
         let loss_before = osp_core::trajectory::trajectory_loss(&self.current_measured(), &target);
+        // **#95 MD-1 P2-1 (additive):** Pre-commit shadow observation draft —
+        // navigator ile aynı sözleşme: finalize yalnız comparison-surviving
+        // yollarda; eligibility witness disposition'tan bağımsız.
+        let drift_draft = osp_core::subject_authority::observe_subject_authority_drift(
+            self.engine_mut(),
+            &claim,
+            task,
+            &legacy,
+            loss_before,
+            &target,
+        );
         let omega = WitnessSet::new(Vec::new());
         let mut tmp_reg = InMemoryTaskRegistry::new();
         tmp_reg.insert(task.clone());
@@ -884,9 +895,20 @@ impl Workspace {
             }) {
             Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,
             Ok(osp_core::engine::EngineCommitResult::Held {
-                reason, snapshot, ..
+                authorization,
+                reason,
+                snapshot,
             }) => {
                 // **INV-T9** — expected authorization bekleme. Agent failure DEĞİL.
+                // **#95 MD-1 P2-1:** Held = comparison-surviving — observation
+                // KAYBOLMAZ; authorization.outcome gerçek PredicateGate sonucudur.
+                let drift = drift_draft.finalize(
+                    osp_core::subject_authority::V1DownstreamObservation::Observed(
+                        osp_core::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
+                            &authorization.outcome,
+                        ),
+                    ),
+                );
                 return Ok(serde_json::json!({
                     "commit_result": "Held",
                     "witness_hold_reason": reason.as_reason_str(),
@@ -900,12 +922,24 @@ impl Workspace {
                     "mainline_mutation": "not_applied",
                     "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
                     "next_action": "await_external_evidence",
+                    "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
                 }));
             }
             Ok(osp_core::engine::EngineCommitResult::Rejected {
-                reasons, snapshot, ..
+                authorization,
+                reasons,
+                snapshot,
             }) => {
                 // Explicit witness rejection — RequiresRevision.
+                // **#95 MD-1 P2-1:** Rejected = comparison-surviving — observation
+                // response JSON sidecar'ında taşınır.
+                let drift = drift_draft.finalize(
+                    osp_core::subject_authority::V1DownstreamObservation::Observed(
+                        osp_core::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
+                            &authorization.outcome,
+                        ),
+                    ),
+                );
                 let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
                 return Ok(serde_json::json!({
                     "commit_result": "Rejected",
@@ -920,10 +954,16 @@ impl Workspace {
                     "mainline_mutation": "not_applied",
                     "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
                     "next_action": "requires_revision",
+                    "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
                 }));
             }
             Err(e) => {
-                return Ok(serde_json::json!({
+                // **#95 MD-1 P2-1:** Mevcut error JSON semantiği BİLİNÇLİ olarak
+                // değiştirilmez (legacy `RejectedBySyntax` davranışı ayrı issue
+                // malzemesi — plan v6 §9). Yalnız comparison-surviving retryable
+                // hatalarda (Q4/Q5/Q6) sidecar eklenir; non-surviving'de eski JSON
+                // aynen kalır.
+                let mut response = serde_json::json!({
                     "attempt_outcome": {
                         "gate_decision": "RejectedBySyntax",
                         "predicate_completion": "NotCompleted",
@@ -934,7 +974,15 @@ impl Workspace {
                     "loss_after": null,
                     "measured_after": null,
                     "message": format!("commit_task_claim: {e}"),
-                }))
+                });
+                if let Some(drift) =
+                    osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
+                        .map(|downstream| drift_draft.finalize(downstream))
+                {
+                    response["subject_authority_drift"] =
+                        serde_json::to_value(&drift).map_err(|e| e.to_string())?;
+                }
+                return Ok(response);
             }
         };
 
@@ -975,6 +1023,16 @@ impl Workspace {
                 osp_core::trajectory::CommitLane::Sandbox => "Sandbox",
             },
         };
+        // **#95 MD-1 P2-1:** Evaluated = comparison-surviving — gerçek outcome
+        // authoritative downstream olarak finalize edilir.
+        let drift = drift_draft.finalize(
+            osp_core::subject_authority::V1DownstreamObservation::Observed(
+                osp_core::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
+                    &result.outcome,
+                ),
+            ),
+        );
+
         Ok(serde_json::json!({
             "attempt_outcome": {
                 "gate_decision": gate_str,
@@ -985,6 +1043,7 @@ impl Workspace {
             "apply_target": apply_str,
             "loss_after": result.loss_after,
             "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+            "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
         }))
     }
 }

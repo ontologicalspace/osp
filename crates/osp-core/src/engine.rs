@@ -7376,7 +7376,8 @@ v = 0.5
 
         // V1 raw: production subject derivation helper — AYNI proposal_002 üzerinde
         // (review P1-1: helper ile claim aynı kaynaktan; ayrı elle proposal KURULMAZ).
-        let v1_subject = crate::navigator::derive_v1_legacy_measurement_subject(&proposal_002);
+        let v1_subject =
+            crate::subject_authority::derive_v1_legacy_measurement_subject(&proposal_002);
         let v1_raw = engine.compute_raw_from_delta(
             &probe_claim.delta_nodes,
             &probe_claim.delta_edges,
@@ -7481,7 +7482,8 @@ v = 0.5
             affected_nodes: v1_affected,
             ..Default::default()
         };
-        let v1_subject = crate::navigator::derive_v1_legacy_measurement_subject(&proposal_001);
+        let v1_subject =
+            crate::subject_authority::derive_v1_legacy_measurement_subject(&proposal_001);
         let v1_raw = engine.compute_raw_from_delta(
             &claim_001.delta_nodes,
             &claim_001.delta_edges,
@@ -7637,5 +7639,299 @@ v = 0.5
         // Q5 verdict — empirical: Passed/Passed.
         assert_eq!(obs_v1.actual_verdict, Q5VerdictObservation::Passed);
         assert_eq!(obs_v2.actual_verdict, Q5VerdictObservation::Passed);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // #95 MD-1 P2-1 — observer axis-state neutrality + fail-closed sentinel
+    // (plan v6 §5-1 crate-internal katman: `coord_system` private field'ına yalnızca
+    //  bu child test modülü erişebilir — integration test erişemez.)
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    fn md1_space_two_nodes() -> crate::space::Space {
+        let mut space = crate::space::Space::new();
+        space.insert_node(crate::space::Node {
+            id: 1,
+            kind: crate::space::NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        space.insert_node(crate::space::Node {
+            id: 2,
+            kind: crate::space::NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        space.insert_edge(crate::space::Edge {
+            from: 1,
+            to: 2,
+            kind: crate::space::EdgeKind::Imports,
+            is_type_only: false,
+        });
+        space
+    }
+
+    fn md1_engine_with_cs(cs: CoordinateSystem) -> SpaceEngine {
+        SpaceEngine::new(
+            md1_space_two_nodes(),
+            cs,
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        )
+    }
+
+    fn md1_task_node1() -> crate::trajectory::Task {
+        use crate::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
+            PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
+        };
+        crate::trajectory::Task {
+            id: 1,
+            milestone_id: 1,
+            label: "md1 axis fixture".into(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Coupling,
+                        operator: ComparisonOp::Le,
+                        threshold: 10.0,
+                        scope: PredicateScope::Node(1),
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                }],
+                preferred_vector: None,
+            },
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        }
+    }
+
+    fn md1_edge_proposal() -> crate::agent::DeltaProposal {
+        crate::agent::DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![crate::agent::NewEdgeSpec {
+                from: 1,
+                to: 2,
+                kind: crate::space::EdgeKind::Imports,
+            }],
+            removed_edges: vec![],
+            affected_nodes: vec![1],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "md1 engine-unit fixture".to_string(),
+        }
+    }
+
+    /// Observer çağrısı `BoundMeasurementSession` TCB kontratı altında axis
+    /// descriptor + epoch state'i değiştirmez: pre-observe session'ı açık tutulur,
+    /// observe çalışır, `verify_unchanged` geçmek zorundadır (interior mutation →
+    /// `AxisStateDrift` fail-closed). Descriptor parity de ayrıca pinlenir.
+    #[test]
+    fn md1_observer_preserves_axis_session_state() {
+        use crate::coords::BoundMeasurementSession;
+
+        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let probe = crate::navigator::build_claim_from_proposal(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .expect("probe claim");
+        let legacy = crate::subject_authority::produce_legacy_subject_measurement(
+            &engine,
+            &probe.delta_nodes,
+            &probe.delta_edges,
+            &proposal,
+        );
+        let claim =
+            crate::navigator::build_claim_from_proposal(&proposal, legacy.raw(), task.id, 100, 1)
+                .expect("final claim");
+        let target = RawPosition::default();
+
+        let session = BoundMeasurementSession::begin(&engine.coord_system)
+            .expect("session begin on production built-in axes");
+        let descriptors_before = session.axis_descriptors();
+
+        let draft = crate::subject_authority::observe_subject_authority_drift(
+            &engine, &claim, &task, &legacy, 0.0, &target,
+        );
+        let _finalized =
+            draft.finalize(crate::subject_authority::V1DownstreamObservation::Observed(
+                crate::subject_authority::AuthoritativeDownstreamObservation {
+                    predicate_completion: crate::trajectory::PredicateCompletion::NotCompleted,
+                    mutation_decision: crate::trajectory::MutationDecision::Reject,
+                },
+            ));
+
+        session.verify_unchanged().expect(
+            "observer must not drift axis epoch/descriptor state (Axis::measure TCB contract)",
+        );
+        assert_eq!(
+            session.axis_descriptors(),
+            descriptors_before,
+            "axis descriptors unchanged after observation"
+        );
+    }
+
+    /// `make_measurement_engine`'in CoordinateSystem üreticisi — aynı production
+    /// built-in axis seti.
+    fn make_measurement_engine_coordinate_system() -> CoordinateSystem {
+        CoordinateSystem::default_raw_five(
+            crate::coords::MetricSource::TreeSitter,
+            crate::axes::CohesionAxis::try_with_observed_source(crate::coords::MetricSource::Scip)
+                .unwrap(),
+            crate::axes::EntropyAxis::from_commit_entropy(6.5),
+            crate::axes::WitnessDepthAxis::from_witness(0.5, 3),
+        )
+        .unwrap()
+    }
+
+    /// Test-only sabit axis (Q6 sentinel setup'ı için diğer 4 core axis).
+    struct Md1ConstAxis {
+        name: &'static str,
+        value: f64,
+    }
+
+    impl crate::coords::Axis for Md1ConstAxis {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn descriptor(
+            &self,
+        ) -> Result<crate::coords::AxisDescriptor, crate::coords::AxisDescriptorError> {
+            let mut params = crate::coords::AxisParameterEncoder::new();
+            params.push_u8(0);
+            crate::coords::AxisDescriptor::try_new(self.name, 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &crate::space::Node,
+            _space: &crate::space::Space,
+        ) -> Result<crate::coords::AxisMeasurement, crate::coords::AxisMeasurementError> {
+            crate::coords::AxisMeasurement::try_new(
+                self.value,
+                crate::coords::MetricSource::Placeholder,
+            )
+        }
+        fn compute(&self, _node: &crate::space::Node, _space: &crate::space::Space) -> f64 {
+            self.value
+        }
+    }
+
+    /// **Behaviorally-mutating axis sentinel:** her `measure()` çağrısında epoch artar
+    /// → `BoundMeasurementSession` pre/post verify yakalar → observer V2 lane
+    /// fail-closed typed failure üretir. Sessiz yanlış veri YOK (plan v6 §5-1).
+    struct Md1MutatingCouplingAxis {
+        epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    }
+
+    impl crate::coords::Axis for Md1MutatingCouplingAxis {
+        fn name(&self) -> &'static str {
+            "coupling"
+        }
+        fn descriptor(
+            &self,
+        ) -> Result<crate::coords::AxisDescriptor, crate::coords::AxisDescriptorError> {
+            let mut params = crate::coords::AxisParameterEncoder::new();
+            params.push_u8(0);
+            crate::coords::AxisDescriptor::try_new("coupling", 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &crate::space::Node,
+            _space: &crate::space::Space,
+        ) -> Result<crate::coords::AxisMeasurement, crate::coords::AxisMeasurementError> {
+            use std::sync::atomic::Ordering;
+            self.epoch.fetch_add(1, Ordering::SeqCst);
+            crate::coords::AxisMeasurement::try_new(0.5, crate::coords::MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &crate::space::Node, _space: &crate::space::Space) -> f64 {
+            0.5
+        }
+        fn measurement_epoch(&self) -> crate::coords::AxisStateEpoch {
+            use std::sync::atomic::Ordering;
+            crate::coords::AxisStateEpoch::new(self.epoch.load(Ordering::SeqCst))
+        }
+    }
+
+    #[test]
+    fn md1_observer_fails_closed_on_behaviorally_mutating_axis() {
+        use crate::subject_authority::{V2LaneOutcome, V2MeasurementFailure};
+
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(Md1MutatingCouplingAxis {
+                epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            })
+            .expect("coupling axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .expect("cohesion axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "instability",
+                value: 0.4,
+            })
+            .expect("instability axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "entropy",
+                value: 0.5,
+            })
+            .expect("entropy axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "witness_depth",
+                value: 0.6,
+            })
+            .expect("witness_depth axis");
+
+        let engine = md1_engine_with_cs(cs);
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let probe = crate::navigator::build_claim_from_proposal(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .expect("probe claim");
+        let legacy = crate::subject_authority::produce_legacy_subject_measurement(
+            &engine,
+            &probe.delta_nodes,
+            &probe.delta_edges,
+            &proposal,
+        );
+        let claim =
+            crate::navigator::build_claim_from_proposal(&proposal, legacy.raw(), task.id, 100, 1)
+                .expect("final claim");
+
+        let draft = crate::subject_authority::observe_subject_authority_drift(
+            &engine,
+            &claim,
+            &task,
+            &legacy,
+            0.0,
+            &RawPosition::default(),
+        );
+
+        // Fail-closed: session epoch drift → typed CoordinateMeasurement failure.
+        assert!(
+            matches!(
+                draft.v2(),
+                V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::CoordinateMeasurement)
+            ),
+            "behaviorally-mutating axis → session fail-closed → typed failure: {:?}",
+            draft.v2()
+        );
+        // V1 legacy lane non-session compute path → shadow failure'ı etkilenmez.
+        assert_eq!(draft.v1().subject.ids, vec![1]);
     }
 }

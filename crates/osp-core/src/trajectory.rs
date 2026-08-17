@@ -1245,6 +1245,26 @@ pub struct TrajectoryEvidence {
     pub mutation_decision: MutationDecision,
     pub token_cost: TokenCost,
     pub duration_ms: u64,
+    /// **#95 MD-1 P2-1 (additive):** Subject-authority drift shadow observation —
+    /// V1 (legacy affected_nodes, authoritative) ile V2 (canonical task scope,
+    /// `measure_task_delta`) ölçüm lane'lerinin karşılaştırması.
+    ///
+    /// Eligibility: legacy measurement üretilmiş + attempt comparison-surviving
+    /// surface'e ulaşmış (Evaluated/Held/Rejected/retryable Q4-Q6). Ölçümsüz
+    /// yollarda `None`. Held/Rejected disposition'larında observation bu kanal
+    /// yerine `PendingAuthorization`/`RevisionRequired` sidecar'larında taşınır.
+    /// `#[serde(default)]` — eski JSON backward-compat (G2c-1b deseni).
+    ///
+    /// **Güven notu (EK review tur-2 P2-1):** Bu kanal **outbound/untrusted
+    /// telemetry**'dir — `TrajectoryEvidence` derive-Deserialize ile yüklenir ve
+    /// serde katmanında parent task identity cross-field kontrolü YOKTUR
+    /// (`claim_id` parent'ta da bulunmaz; `PendingAuthorization`/
+    /// `RevisionRequired` face'lerinin aksine typed load validation barındırmaz —
+    /// bilinçli). Persistence/replay girdisi olarak consume edecek bir consumer,
+    /// `evidence.task_id == observation.task_id` kontrolünü kendi yükünde
+    /// fail-closed uygulamalıdır.
+    #[serde(default)]
+    pub subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
 }
 
 /// Token maliyeti (osp-llm-runtime TokenUsage ile uyumlu).
