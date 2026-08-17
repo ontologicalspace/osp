@@ -343,14 +343,18 @@ impl AuthoritativeDownstreamObservation {
 /// **#95 MD-1 P2-1:** Commit hatasından V1 downstream reachability sınıflandırması
 /// (navigator + MCP ortak sözleşmesi — path→finalize eşlemesinin tek truth'u).
 ///
-/// Yalnız comparison-surviving retryable hatalar `Some` döner; diğer (non-surviving)
+/// Yalnız comparison-surviving retryable hatalar `Some` döner; non-surviving
 /// varyantlar `None` — caller observation emit ETMEZ (eligibility contract).
-/// Bu `None` sessiz sınıflandırma değildir: surviving/non-surviving sınırının ta kendisidir.
+/// Bu `None` sessiz sınıflandırma değildir: surviving/non-surviving sınırının ta
+/// kendisidir. **EK review P2-2:** `EngineCommitError`'ın güncel 14 varyantının
+/// TAMAMI explicit match — wildcard YOK; yeni retryable varyant eklenirse derleme
+/// hatası zorlanır (sessiz taxonomy drift imkânsız).
 pub fn v1_downstream_from_engine_commit_error(
     err: &crate::engine::EngineCommitError,
 ) -> Option<V1DownstreamObservation> {
     use crate::engine::EngineCommitError;
     match err {
+        // Comparison-surviving (retryable) — Q4/Q5/Q6.
         EngineCommitError::SyntaxViolation { .. } => Some(V1DownstreamObservation::NotReached {
             reason: V1DownstreamNotReachedReason::Q4SyntaxRejection,
         }),
@@ -362,9 +366,19 @@ pub fn v1_downstream_from_engine_commit_error(
                 reason: V1DownstreamUnavailableReason::Q6RuleViolationAfterPredicateGate,
             })
         }
-        // Non-surviving (TaskValidation, VisionContextInvalid, operational/SystemFailure,
-        // witness/persistence/internal, measurement binding...) — emit yok.
-        _ => None,
+        // Non-surviving — eligibility contract: emit yok (explicit; yeni varyant
+        // derleme hatası üretir).
+        EngineCommitError::InvalidWitnessEvidence(_)
+        | EngineCommitError::PermissionDenied(_)
+        | EngineCommitError::NoPersistence
+        | EngineCommitError::Persistence(_)
+        | EngineCommitError::Internal(_)
+        | EngineCommitError::AuthorizationContextFailed(_)
+        | EngineCommitError::VisionContextInvalid(_)
+        | EngineCommitError::TaskValidation(_)
+        | EngineCommitError::MeasurementBindingMismatch(_)
+        | EngineCommitError::MeasurementBindingFailed(_)
+        | EngineCommitError::MeasurementBindingVerification(_) => None,
     }
 }
 
@@ -493,7 +507,11 @@ fn map_v2_measurement_failure(err: &MeasurementError) -> V2MeasurementFailure {
 /// Construction-time gövde — **serde derives YOK**: persist/emit edilemez, yalnızca
 /// finalize edilebilir (alanlar `pub` — draft characterization testleri okur;
 /// invariant serde sınırıdır, görünürlük değil).
-#[derive(Debug, Clone)]
+///
+/// **EK review P1-1:** `Clone` bilinçli olarak YOK — consuming `finalize(self, ..)`
+/// "aynı draft iki farklı downstream ile finalize edilemez" invariant'ı yalnızca
+/// clone edilemezlik altında tip seviyesinde geçerli.
+#[derive(Debug)]
 pub struct SubjectAuthorityDriftObservationDraft {
     pub task_id: TaskId,
     pub claim_id: crate::witness::ClaimId,
@@ -501,6 +519,9 @@ pub struct SubjectAuthorityDriftObservationDraft {
     pub v2: V2LaneOutcome,
 }
 
+/// Draft'in V1 lane gövdesi — final observation üretme capability'si yalnız
+/// top-level Draft'ın consuming `finalize`'ındadır (bu tip tek başına finalize
+/// edilemez; Clone'u zararsız).
 #[derive(Debug, Clone)]
 pub struct V1LaneObservationDraft {
     pub subject: MeasurementSubjectObservation,
@@ -605,47 +626,49 @@ pub fn observe_subject_authority_drift(
     };
 
     // V2 lane: canonical task scope ölçümü (measure_task_delta — fail-closed typed).
+    // **EK review P2-1:** observation'daki V2 subject, ayrı bir derivation'ın değil
+    // **gerçek ölçüm token'ının request snapshot'ından** gelir
+    // (`token.request().subject()` — "measured subject"). Subject derivation hatası
+    // measure_task_delta içinden aynı typed error ile döner (ikinci derivation
+    // drift yüzeyi yok).
     let bound = TaskBoundClaim { claim, task };
-    let v2 = match engine.derive_task_subject_scope(task) {
-        Err(e) => V2LaneOutcome::MeasurementFailed(map_v2_measurement_failure(&e)),
-        Ok(subject_scope) => match measure_v2_lane(engine, &bound) {
-            V2Measured::Token(token) => {
-                let v2_raw = token.after().to_raw();
-                let v2_q5 = match shared_ctx {
-                    Some(ctx) => evaluate_lane_q5(engine, v2_raw, ctx),
-                    None => v1.q5.clone(), // context kurulamadıysa iki lane aynı NotEvaluated
-                };
-                let downstream = match &v2_q5 {
-                    LaneQ5Observation::Evaluated {
-                        verdict: EvaluatedQ5Verdict::Passed,
-                        ..
-                    } => {
-                        let gate_out = PredicateGate.evaluate(PredicateGateInput {
-                            bound: TaskBoundClaim { claim, task },
-                            measured: token.after(),
-                            loss_before,
-                            target,
-                        });
-                        Some(ShadowDownstreamObservation {
-                            predicate_completion: gate_out.outcome.predicate_completion,
-                            mutation_decision: gate_out.outcome.mutation_decision,
-                        })
-                    }
-                    _ => None,
-                };
-                V2LaneOutcome::Measured(V2LaneObservation {
-                    subject: MeasurementSubjectObservation {
-                        ids: subject_scope.member_ids().to_vec(),
-                        digest: MeasurementSubjectDigest::compute(subject_scope.member_ids())
-                            .to_hex(),
-                    },
-                    raw: raw_observation(v2_raw, measured_sources(token.after())),
-                    q5: v2_q5,
-                    downstream,
-                })
-            }
-            V2Measured::Failed(failure) => V2LaneOutcome::MeasurementFailed(failure),
-        },
+    let v2 = match measure_v2_lane(engine, &bound) {
+        V2Measured::Token(token) => {
+            let subject_scope = token.request().subject();
+            let v2_raw = token.after().to_raw();
+            let v2_q5 = match shared_ctx {
+                Some(ctx) => evaluate_lane_q5(engine, v2_raw, ctx),
+                None => v1.q5.clone(), // context kurulamadıysa iki lane aynı NotEvaluated
+            };
+            let downstream = match &v2_q5 {
+                LaneQ5Observation::Evaluated {
+                    verdict: EvaluatedQ5Verdict::Passed,
+                    ..
+                } => {
+                    let gate_out = PredicateGate.evaluate(PredicateGateInput {
+                        bound: TaskBoundClaim { claim, task },
+                        measured: token.after(),
+                        loss_before,
+                        target,
+                    });
+                    Some(ShadowDownstreamObservation {
+                        predicate_completion: gate_out.outcome.predicate_completion,
+                        mutation_decision: gate_out.outcome.mutation_decision,
+                    })
+                }
+                _ => None,
+            };
+            V2LaneOutcome::Measured(V2LaneObservation {
+                subject: MeasurementSubjectObservation {
+                    ids: subject_scope.member_ids().to_vec(),
+                    digest: MeasurementSubjectDigest::compute(subject_scope.member_ids()).to_hex(),
+                },
+                raw: raw_observation(v2_raw, measured_sources(token.after())),
+                q5: v2_q5,
+                downstream,
+            })
+        }
+        V2Measured::Failed(failure) => V2LaneOutcome::MeasurementFailed(failure),
     };
 
     SubjectAuthorityDriftObservationDraft {
@@ -995,6 +1018,75 @@ mod tests {
         for (err, expected) in &cases {
             assert_eq!(&map_v2_measurement_failure(err), expected);
         }
+    }
+
+    /// **EK review P2-2/P2-3:** surviving/non-surviving sınıflandırmasının mapping
+    /// pin'i — 3 surviving varyant exact; non-surviving representative'ları None.
+    /// Exhaustiveness compiler contract'ı (wildcard yok — 14 varyant explicit).
+    #[test]
+    fn v1_downstream_from_engine_commit_error_classifies_surviving_set() {
+        use crate::engine::EngineCommitError;
+
+        // Surviving (retryable) — path→finalize eşlemesi.
+        let syntax = EngineCommitError::SyntaxViolation {
+            violation: crate::agent::SyntaxViolation {
+                claim_id: 1,
+                detail: "self-import".to_string(),
+            },
+        };
+        assert_eq!(
+            v1_downstream_from_engine_commit_error(&syntax),
+            Some(V1DownstreamObservation::NotReached {
+                reason: V1DownstreamNotReachedReason::Q4SyntaxRejection,
+            })
+        );
+
+        let vision = EngineCommitError::VisionViolation {
+            violation: crate::engine::VisionViolation {
+                claim_id: 1,
+                theta: 0.9,
+                raw: RawPosition::default(),
+            },
+            bound: 0.3,
+        };
+        assert_eq!(
+            v1_downstream_from_engine_commit_error(&vision),
+            Some(V1DownstreamObservation::NotReached {
+                reason: V1DownstreamNotReachedReason::Q5Violated,
+            })
+        );
+
+        let rule = EngineCommitError::RuleViolation {
+            violation: crate::rule::RuleViolation {
+                rule_id: "test".to_string(),
+                detail: "sentinel".to_string(),
+                severity: crate::rule::RuleSeverity::Hard,
+            },
+        };
+        assert_eq!(
+            v1_downstream_from_engine_commit_error(&rule),
+            Some(V1DownstreamObservation::ReachedButUnavailable {
+                reason: V1DownstreamUnavailableReason::Q6RuleViolationAfterPredicateGate,
+            })
+        );
+
+        // Non-surviving representative'lar — emit yok (eligibility contract).
+        assert_eq!(
+            v1_downstream_from_engine_commit_error(&EngineCommitError::Internal(
+                "system failure".to_string()
+            )),
+            None
+        );
+        assert_eq!(
+            v1_downstream_from_engine_commit_error(&EngineCommitError::NoPersistence),
+            None
+        );
+        assert_eq!(
+            v1_downstream_from_engine_commit_error(&EngineCommitError::PermissionDenied(
+                "task not found".to_string()
+            )),
+            None
+        );
     }
 
     #[test]

@@ -5425,6 +5425,22 @@ impl PendingAuthorization {
             }
         }
 
+        // **#95 MD-1 P2-1 (EK review P1-2):** Sidecar identity — observation parent
+        // record'un task/claim kimliğine bound olmalı. Hem load (custom Deserialize)
+        // hem creation (Envelope::new → verify → burası) path'lerinde fail-closed.
+        if let Some(drift) = &self.subject_authority_drift {
+            if drift.task_id != self.task_id || drift.claim_id != self.claim_id {
+                return Err(
+                    PendingAuthorizationLoadError::SubjectAuthorityDriftIdentityMismatch {
+                        record_task_id: self.task_id,
+                        record_claim_id: self.claim_id,
+                        drift_task_id: drift.task_id,
+                        drift_claim_id: drift.claim_id,
+                    },
+                );
+            }
+        }
+
         Ok(())
     }
 }
@@ -7671,7 +7687,8 @@ pub struct RevisionRequired {
     /// shadow observation — Rejected eligibility yollarında taşınır.
     /// **Digest preimage'ine GIRMEZ** (`SuspendedAttemptEvidenceDigest` bu alandan
     /// bağımsız hesaplanır; strict digest-proof taşıyıcı sözleşmesi korunur).
-    /// `with_subject_authority_drift` builder ile set edilir (creation sonrası).
+    /// `try_with_subject_authority_drift` checked builder ile set edilir (creation
+    /// sonrası; EK review P1-2 — identity bound).
     #[serde(default)]
     subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
 }
@@ -7750,14 +7767,28 @@ impl RevisionRequired {
         })
     }
 
-    /// **#95 MD-1 P2-1:** Telemetry sidecar builder — creation sonrası set.
-    /// Digest hesaplarına girmez; sadece consume eden yüzeylere (wire/CLI) taşınır.
-    pub fn with_subject_authority_drift(
+    /// **#95 MD-1 P2-1 (EK review P1-2):** Checked telemetry sidecar builder —
+    /// observation parent evidence kimliğine (task_id/claim_id) bound DEĞİLSE
+    /// fail-closed reddeder (creation + wire load path'lerinin ikisi de buradan
+    /// geçer). Digest hesaplarına girmez; `None` her zaman geçerli.
+    pub fn try_with_subject_authority_drift(
         mut self,
         drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
-    ) -> Self {
+    ) -> Result<Self, RevisionRequiredError> {
+        if let Some(d) = &drift {
+            let record_task_id = self.suspended_attempt_evidence.task_id();
+            let record_claim_id = self.suspended_attempt_evidence.claim_id();
+            if d.task_id != record_task_id || d.claim_id != record_claim_id {
+                return Err(RevisionRequiredError::DriftSidecarIdentityMismatch {
+                    record_task_id,
+                    record_claim_id,
+                    drift_task_id: d.task_id,
+                    drift_claim_id: d.claim_id,
+                });
+            }
+        }
         self.subject_authority_drift = drift;
-        self
+        Ok(self)
     }
 
     /// **#95 MD-1 P2-1:** Telemetry sidecar accessor (digest-proof dışı).
@@ -7823,6 +7854,18 @@ pub enum RevisionRequiredError {
     /// **N3:** Embedded evidence semantic/canonical validation hatası.
     #[error("embedded evidence invalid: {0}")]
     EvidenceInvalid(SuspendedAttemptEvidenceError),
+    /// **#95 MD-1 P2-1 (EK review P1-2):** Sidecar observation parent evidence
+    /// kimliğine bound değil — MD-1 migration evidence yanlış task/claim'e
+    /// bağlanması fail-closed reddedilir.
+    #[error(
+        "subject-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
+    )]
+    DriftSidecarIdentityMismatch {
+        record_task_id: u64,
+        record_claim_id: u64,
+        drift_task_id: u64,
+        drift_claim_id: u64,
+    },
 }
 
 /// `RevisionRequired` custom Deserialize — `deny_unknown_fields` + load path (N3).
@@ -7847,12 +7890,12 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
                 Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        Ok(RevisionRequired::try_new_with_verified_digest(
+        RevisionRequired::try_new_with_verified_digest(
             wire.evidence_digest,
             wire.suspended_attempt_evidence,
         )
-        .map_err(serde::de::Error::custom)?
-        .with_subject_authority_drift(wire.subject_authority_drift))
+        .and_then(|r| r.try_with_subject_authority_drift(wire.subject_authority_drift))
+        .map_err(serde::de::Error::custom)
     }
 }
 
@@ -8445,6 +8488,18 @@ pub enum PendingAuthorizationLoadError {
     EvidenceDigestMismatch,
     #[error("task_id mismatch: record={record}, basis={basis}")]
     TaskIdMismatch { record: u64, basis: u64 },
+    /// **#95 MD-1 P2-1 (EK review P1-2):** Sidecar observation parent record
+    /// kimliğine bound değil — MD-1 migration evidence'in yanlış task/claim'e
+    /// bağlanması fail-closed reddedilir (load + creation/verify path'leri).
+    #[error(
+        "subject-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
+    )]
+    SubjectAuthorityDriftIdentityMismatch {
+        record_task_id: u64,
+        record_claim_id: u64,
+        drift_task_id: u64,
+        drift_claim_id: u64,
+    },
     #[error("claim_id mismatch: record={record}, basis={basis}, evidence={evidence}")]
     ClaimIdMismatch {
         record: u64,
@@ -11278,6 +11333,43 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════════
     // Envelope + Store tests (Commit 4)
     // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// **#95 MD-1 P2-1:** Identity-parametreli observation fixture — parent record
+    /// kimliğiyle eşleşen/eşleşmeyen sidecar'lar üretir.
+    fn md1_sample_drift(
+        task_id: u64,
+        claim_id: u64,
+    ) -> crate::subject_authority::SubjectAuthorityDriftObservation {
+        use crate::subject_authority::{
+            AuthoritativeDownstreamObservation, LaneQ5Observation, MeasurementSubjectObservation,
+            Q5ObservationFailure, RawMeasurementObservation, SubjectAuthorityDriftObservationDraft,
+            V1DownstreamObservation, V1LaneObservationDraft, V2LaneOutcome, V2MeasurementFailure,
+        };
+        SubjectAuthorityDriftObservationDraft {
+            task_id,
+            claim_id,
+            v1: V1LaneObservationDraft {
+                subject: MeasurementSubjectObservation {
+                    ids: vec![1],
+                    digest: "ab".repeat(32),
+                },
+                raw: RawMeasurementObservation {
+                    bits: [1, 2, 3, 4, 5],
+                    sources: [crate::coords::MetricSource::Scip; 5],
+                },
+                q5: LaneQ5Observation::NotEvaluated {
+                    reason: Q5ObservationFailure::VisionUnavailable,
+                },
+            },
+            v2: V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::EmptySubjectScope),
+        }
+        .finalize(V1DownstreamObservation::Observed(
+            AuthoritativeDownstreamObservation {
+                predicate_completion: PredicateCompletion::Completed,
+                mutation_decision: MutationDecision::AcceptAsCompleted,
+            },
+        ))
+    }
 
     fn sample_pending_record() -> PendingAuthorization {
         // **INV-T9 #72 (Commit 3):** Evidence ve digest `sample_basis()` ile tutarlı
@@ -15530,11 +15622,6 @@ v = 0.5
     /// ve evidence identity unchanged (upgrade-directional compatibility).
     #[test]
     fn revision_required_subject_authority_drift_sidecar_wire_invariants() {
-        use crate::subject_authority::{
-            AuthoritativeDownstreamObservation, LaneQ5Observation, MeasurementSubjectObservation,
-            Q5ObservationFailure, RawMeasurementObservation, SubjectAuthorityDriftObservationDraft,
-            V1DownstreamObservation, V1LaneObservationDraft, V2LaneOutcome, V2MeasurementFailure,
-        };
         use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
 
         let basis_digest = AuthorizationBasisDigest::from_hex(
@@ -15563,32 +15650,11 @@ v = 0.5
         let rev_plain = RevisionRequired::try_new(evidence).unwrap();
         let digest_plain = rev_plain.evidence_digest().clone();
 
-        // Production composition: draft → finalize → builder ile sidecar set.
-        let drift = SubjectAuthorityDriftObservationDraft {
-            task_id: 1,
-            claim_id: 42,
-            v1: V1LaneObservationDraft {
-                subject: MeasurementSubjectObservation {
-                    ids: vec![1],
-                    digest: "ab".repeat(32),
-                },
-                raw: RawMeasurementObservation {
-                    bits: [1, 2, 3, 4, 5],
-                    sources: [crate::coords::MetricSource::Scip; 5],
-                },
-                q5: LaneQ5Observation::NotEvaluated {
-                    reason: Q5ObservationFailure::VisionUnavailable,
-                },
-            },
-            v2: V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::EmptySubjectScope),
-        }
-        .finalize(V1DownstreamObservation::Observed(
-            AuthoritativeDownstreamObservation {
-                predicate_completion: PredicateCompletion::Completed,
-                mutation_decision: MutationDecision::AcceptAsCompleted,
-            },
-        ));
-        let rev_with = rev_plain.with_subject_authority_drift(Some(drift));
+        // Production composition: draft → finalize → checked builder ile sidecar set
+        // (identity: task 1 / claim 42 — evidence ile eşleşir).
+        let rev_with = rev_plain
+            .try_with_subject_authority_drift(Some(md1_sample_drift(1, 42)))
+            .expect("matching identity sidecar accepted");
 
         // (1) Sidecar digest preimage'ine girmez.
         assert_eq!(
@@ -15612,6 +15678,101 @@ v = 0.5
             serde_json::from_value(old).expect("old wire deserializes (serde default)");
         assert!(old_rev.subject_authority_drift().is_none());
         assert_eq!(old_rev.evidence_digest(), &digest_plain);
+    }
+
+    /// **EK review P1-2:** Sidecar parent task/claim kimliğine bound DEĞİLSE
+    /// fail-closed — `RevisionRequired` checked builder VE strict wire load
+    /// path'i reddeder.
+    #[test]
+    fn revision_required_rejects_identity_mismatched_sidecar() {
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+
+        fn rejected_evidence(basis_hex: &str) -> SuspendedAttemptEvidence {
+            SuspendedAttemptEvidence::try_new(
+                TaskId::from(1u64),
+                ClaimId::from(42u64),
+                AuthorizationBasisDigest::from_hex(basis_hex).unwrap(),
+                AttemptNumber::try_from(5u64).unwrap(),
+                SuspendedAttemptDisposition::Rejected {
+                    reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
+                        witness: 7u64,
+                        rationale: None,
+                    }),
+                    snapshot: WitnessQuorumSnapshot {
+                        approvers: 0,
+                        required_approvers: 2,
+                        support: 0.0,
+                        required_support: 1.5,
+                    },
+                },
+            )
+            .unwrap()
+        }
+
+        // Evidence: task=1, claim=42.
+        let rev = RevisionRequired::try_new(rejected_evidence(
+            "3333333333333333333333333333333333333333333333333333333333333333",
+        ))
+        .unwrap();
+
+        // Checked builder: mismatched sidecar (task=2) → typed Err.
+        let err = rev
+            .try_with_subject_authority_drift(Some(md1_sample_drift(2, 42)))
+            .expect_err("identity mismatch must be rejected");
+        assert!(matches!(
+            err,
+            crate::authorization::RevisionRequiredError::DriftSidecarIdentityMismatch { .. }
+        ));
+
+        // Strict wire load path: identity-mismatched sidecar'lı JSON → deserialize Err.
+        let base = RevisionRequired::try_new(rejected_evidence(
+            "4444444444444444444444444444444444444444444444444444444444444444",
+        ))
+        .unwrap();
+        let mut json_value = serde_json::to_value(base).expect("to_value");
+        json_value
+            .as_object_mut()
+            .expect("revision wire is an object")
+            .insert(
+                "subject_authority_drift".to_string(),
+                serde_json::to_value(md1_sample_drift(1, 43)).expect("sidecar to_value"),
+            );
+        let result: Result<RevisionRequired, _> = serde_json::from_value(json_value);
+        assert!(
+            result.is_err(),
+            "strict wire must reject identity-mismatched sidecar"
+        );
+    }
+
+    /// **EK review P1-2:** `PendingAuthorization` tarafı — `validate_internal`
+    /// (load + Envelope::new → verify → creation) identity mismatch'i reddeder;
+    /// strict wire deserialize de reddeder.
+    #[test]
+    fn pending_authorization_rejects_identity_mismatched_sidecar() {
+        // sample_pending_record: task=1, claim=42.
+        let mut record = sample_pending_record();
+        record.subject_authority_drift = Some(md1_sample_drift(2, 42));
+        let err = record
+            .validate_internal()
+            .expect_err("identity mismatch must fail validate_internal");
+        assert!(matches!(
+            err,
+            crate::authorization::PendingAuthorizationLoadError::SubjectAuthorityDriftIdentityMismatch { .. }
+        ));
+
+        // Strict wire: matched record + mismatched sidecar (claim=43) → deserialize Err.
+        let mut json = serde_json::to_value(sample_pending_record()).expect("to_value");
+        json.as_object_mut()
+            .expect("pending wire is an object")
+            .insert(
+                "subject_authority_drift".to_string(),
+                serde_json::to_value(md1_sample_drift(1, 43)).expect("sidecar to_value"),
+            );
+        let result: Result<PendingAuthorization, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "strict wire must reject identity-mismatched sidecar"
+        );
     }
 
     #[test]

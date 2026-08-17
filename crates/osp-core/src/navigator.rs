@@ -478,8 +478,12 @@ pub(crate) fn make_revision_required_from_rejection(
     };
     match crate::authorization::RevisionRequired::try_new(evidence) {
         // **#95 MD-1 P2-1:** Non-digested telemetry sidecar — Rejected yollarında
-        // observation kaybolmaz; digest preimage'lerine girmez.
-        Ok(r) => Ok(r.with_subject_authority_drift(drift)),
+        // observation kaybolmaz; digest preimage'lerine girmez. Checked builder
+        // (EK review P1-2): sidecar parent evidence kimliğine bound değilse
+        // fail-closed SystemFailure.
+        Ok(r) => r
+            .try_with_subject_authority_drift(drift)
+            .map_err(|e| NavigatorResult::SystemFailure(e.to_string())),
         Err(e) => Err(NavigatorResult::SystemFailure(e.to_string())),
     }
 }
