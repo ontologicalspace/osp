@@ -121,7 +121,7 @@ regolden (tarihsel bağ korunarak — sessiz overwrite değil) + compatibility y
 - Canonical task-derived subject üretimi (`measure_task_delta` zaten task scope kullanır).
 - Compatibility producer (legacy affected_nodes ölçen, shadow observation).
 - SubjectAuthorityDriftObservation (P2-1 additive).
-- Issue #92: Case 2/3 tam decision drift matrisi (subject→raw→theta→Q5→predicate→decision).
+- Issue #92: Case 2/3 tam decision drift matrisi (subject→raw→theta→Q5→predicate→decision). **TAMAMLANDI** — role-bearing 002 variants (intervention purity: raw(002)==raw(001) bit-exact) + production V1 subject helper (dual pinning). Sonuç: subject/raw Divergent, theta Divergent (θV1≠θV2, same context), karar yüzeyi NoDrift (Passed/Passed, Completed parity) — bkz. `faz8-p2-parity-characterization.md` #92 section.
 
 ### Cutover acceptance criteria (Faz 8a gate, Issue #92 kanıtı sonrası)
 

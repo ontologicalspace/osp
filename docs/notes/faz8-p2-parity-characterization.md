@@ -339,14 +339,42 @@ divergence'ı yansıtır. Formel: `Q5(V1) = Q5(V2)` ancak `Raw(V1) = Raw(V2)` ve
 **Migration boyutu ayrımı:**
 - **Provenance authority (INV-T4):** `MetricSource` cosine hesabına katılmaz → Q5-neutral.
 - **Baseline availability:** Q5 after-state girdisinin parçası değil → Q5-neutral.
-- **Subject authority:** OUT OF SCOPE (issue #92) — farklı subject kümeleri → farklı raw →
-  theta parity varsayılamaz.
+- **Subject authority:** ~~OUT OF SCOPE (issue #92)~~ → **#92 TAMAMLANDI** (aşağıdaki section).
 
-**Cases 1/2/3 superseded:** Özgün issue #87 scope'u "Cases 1/2/3'ü PredicateGate'e ulaştıracak
-non-default `computed_raw`" istiyordu. Bu PR bunun yerine exact theta parity'yi ayrı non-default
-engine-unit fixture (PR #91 reciprocal topology) ile kanıtladı. Cases 1/2/3'ün placeholder-failure
-karakterizasyonu (Q5 Vision ihlali) korunuyor; structural anlamını değiştirmek yerine exact theta
-ayrı fixture ile karakterize edildi.
+## #92 — Subject-authority → raw → theta downstream (role-bearing 002 variants)
+
+Issue #92'nin doldurduğu boşluk: PR #87-B parity'ı yalnız matching-subject'ta kanıtladı;
+subject-DIVERGENT topology'de zincir (farklı subject → farklı raw → farklı theta → Q5 verdict)
+karakterize edilmemişti. Mevcut Case 2/3 (001) theta'ya ULAŞAMIYORDU: `new_nodes` yok →
+delta node yok → `GlobalDefault` authority theta'dan ÖNCE reject ("Q5 stop" tesadüfi parity).
+
+**002 fixture tasarımı (intervention purity):** 001'in minimum role-bearing extension'ı —
+tek ekleme izole `NewNodeSpec` (`connected_to: []`, edge yok). Vision selection
+`delta_nodes[0]` bulunca `node_from_spec` default classification → `infer_role` → Runtime →
+`BuiltinRole (0.40, 0.60, 0.35)` ile theta yüzeyi açılır. Kanıt: `raw(002) == raw(001)`
+bit-exact her iki producer için — izole node tek deneysel müdahale.
+
+**V1 subject tek truth:** `derive_v1_legacy_measurement_subject(&proposal)` (navigator
+refactor — ordered legacy union: affected sırası korunur, unseen `removed_edges.from`
+append). Production navigator VE engine-unit testleri aynı helper'ı çağırır; integration
+mirror'ı aynı exact setleri bağımsız pinler (dual exact contract pinning).
+
+**Sonuç (engine-unit goldens, same context — effective_vision_bits dahil full identity):**
+
+| Fixture | V1 subject | V2 subject | θV1 | θV2 | Q5 verdict |
+|---------|-----------|-----------|-----|-----|------------|
+| wide-affected-scope-002 | {1,2,3} | {1} | 0.15249 | 0.11711 | **Passed == Passed** |
+| removed-edge-external-source-002 | {1,9} | {1} | 0.13770 | 0.11711 | **Passed == Passed** |
+
+**Epistemik sonuç:** PR #87-B `same raw + same context → same theta`; #92 `different subject →
+different raw + same context → different theta, AMA different theta ≠ zorunlu farklı verdict`.
+Fixture-scoped empirical claim (cosine projection many-to-one — genel teorem iddia edilmez).
+
+**Drift matrisi (integration):** subject=Divergent, raw=Divergent, reachability=BothReached,
+predicate=Parity, mutation=Parity → `decision_drift_class = NoDrift` (MD-1 canonical taxonomy —
+KARAR yüzeyinde drift yok anlamında; subject/raw/theta drift orthogonal gözlemler olarak ayrı).
+Pipeline'lar CommitReached: Q5 Passed/Passed, Completed/Completed, AcceptAsCompleted parity,
+Lane(Mainline), Held witness. #95 (MD-1 Faz 8a cutover) evidence gate'i karşılandı.
 
 **Test hiyerarşisi (engine.rs `#[cfg(test)]`):**
 - **Test 1** (`q5_theta_v1_v2_exact_parity_under_same_raw_and_captured_context`): V1/V2 migration

@@ -147,6 +147,24 @@ impl LlmClient for MockLlmClient {
 // DeltaProposal → Claim + ProvenancedRawPosition bridge (boşluk #3, #7)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// V1 (legacy) measurement subject derivation — navigator'ın `compute_raw_from_delta`
+/// ölçüm scope'u (G2c-2). MD-1 (#92 evidence) karakterizasyonunda tek truth olarak
+/// paylaşılır: production navigator VE engine-unit theta testleri bu fonksiyonu çağırır.
+///
+/// **Sıra kontratı (issue #92 review P2-1):** ordered legacy union — `affected_nodes`
+/// sırasını koru; daha önce bulunmayan `removed_edges.from` değerlerini proposal
+/// sırasıyla append et. HashSet/sort KULLANMA — mass-weighted centroid aggregation
+/// sırası `f64` rounding bitlerini etkileyebilir (exact `to_bits()` goldens var).
+pub(crate) fn derive_v1_legacy_measurement_subject(proposal: &DeltaProposal) -> Vec<NodeId> {
+    let mut affected: Vec<NodeId> = proposal.affected_nodes.clone();
+    for er in &proposal.removed_edges {
+        if !affected.contains(&er.from) {
+            affected.push(er.from);
+        }
+    }
+    affected
+}
+
 /// Claim build hatası.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClaimBuildError {
@@ -802,12 +820,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 .collect();
             // G2c-2: affected_nodes = removed_edges.from (coupling düşen node'lar) +
             // proposal.affected_nodes. compute_raw_from_delta bu node'ları ölçer.
-            let mut affected: Vec<NodeId> = proposal.affected_nodes.clone();
-            for er in &proposal.removed_edges {
-                if !affected.contains(&er.from) {
-                    affected.push(er.from);
-                }
-            }
+            let affected: Vec<NodeId> = derive_v1_legacy_measurement_subject(&proposal);
             // D2: computed_raw = engine hypothetical ölçümü (gerçek space + delta_edges +
             // G2c-2 delta_removed + affected_nodes ölçüm scope).
             let computed_raw = self.engine.compute_raw_from_delta(
@@ -1089,6 +1102,97 @@ mod tests {
         TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
     };
     use crate::vision::VisionVector;
+
+    /// #92 dual exact contract pinning — production helper yanı.
+    ///
+    /// `derive_v1_legacy_measurement_subject` frozen corpus Case 2/3 proposal
+    /// şekilleriyle exact pinlenir. Integration mirror (`tests/common`) aynı
+    /// fixture ID'leri için aynı setleri bağımsız pinler (cross-crate assertion
+    /// kurulamaz — dual pinning).
+    #[test]
+    fn v1_legacy_subject_derivation_pinned_to_frozen_corpus_shapes() {
+        use crate::agent::{EdgeRef, NewEdgeSpec};
+        use crate::space::EdgeKind;
+
+        // Case 2 shape (wide-affected-scope-001): affected_nodes=[1,2,3],
+        // removed_edges boş → subject [1,2,3] (affected sırası korunur).
+        let wide = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![NewEdgeSpec {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::Imports,
+            }],
+            removed_edges: vec![],
+            affected_nodes: vec![1, 2, 3],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "case-2 shape".to_string(),
+        };
+        assert_eq!(
+            derive_v1_legacy_measurement_subject(&wide),
+            vec![1, 2, 3],
+            "Case 2: legacy subject = affected_nodes as-is (ordered)"
+        );
+
+        // Case 3 shape (removed-edge-external-source-001): affected_nodes=[1],
+        // removed_edges.from=9 (external) → subject [1,9] (unseen from append).
+        let removed_external = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![NewEdgeSpec {
+                from: 1,
+                to: 9,
+                kind: EdgeKind::Imports,
+            }],
+            removed_edges: vec![EdgeRef {
+                from: 9,
+                to: 1,
+                kind: EdgeKind::Imports,
+            }],
+            affected_nodes: vec![1],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "case-3 shape".to_string(),
+        };
+        assert_eq!(
+            derive_v1_legacy_measurement_subject(&removed_external),
+            vec![1, 9],
+            "Case 3: legacy subject = affected + unseen removed_edges.from (proposal order)"
+        );
+
+        // Sıra kontratı (P2-1): duplicate from → tekrar append edilmez;
+        // affected sırası değişmez.
+        let dup_from = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![],
+            removed_edges: vec![
+                EdgeRef {
+                    from: 9,
+                    to: 1,
+                    kind: EdgeKind::Imports,
+                },
+                EdgeRef {
+                    from: 3,
+                    to: 2,
+                    kind: EdgeKind::Imports,
+                },
+                EdgeRef {
+                    from: 9,
+                    to: 2,
+                    kind: EdgeKind::Imports,
+                },
+            ],
+            affected_nodes: vec![3, 1],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "order contract".to_string(),
+        };
+        assert_eq!(
+            derive_v1_legacy_measurement_subject(&dup_from),
+            vec![3, 1, 9],
+            "ordered legacy union: affected order preserved; unseen from appended once, in proposal order"
+        );
+    }
 
     fn measured_pos(coupling: f64) -> ProvenancedRawPosition {
         provenanced_from_raw(
