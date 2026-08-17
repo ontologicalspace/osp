@@ -274,6 +274,9 @@ pub fn build_all_cases() -> Vec<CharacterizationCase> {
         matching_single_node_001(),
         wide_affected_scope_001(),
         removed_edge_external_source_001(),
+        // #92 — role-bearing theta variants (intervention purity: raw==001 bit-exact).
+        wide_affected_scope_002(),
+        removed_edge_external_source_002(),
         delta_introduced_subject_001(),
         delta_introduced_subject_policy_001(),
         // Faz 8-P2 #88 — DirectPerAxisAuthority family (5 case).
@@ -300,6 +303,27 @@ pub fn load_cases_by_class(class: CaseClass) -> Vec<CharacterizationCase> {
         .into_iter()
         .filter(|c| c.class == class)
         .collect()
+}
+
+/// #92: Case ID ile tek-case resolution — uniqueness guard'lı.
+///
+/// Class bazlı `.find()` aynı class'ta 001+002 bulununca ambiguous olurdu (build
+/// sırasına bağlı sessiz fixture seçimi). Bu helper ID'ye bağlar ve uniqueness
+/// assert eder: 0 match → panic, 2+ match → duplicate-ID panic (frozen corpus
+/// epistemik guard — issue #92 review P2-3). Tarihsel 001 golden'ları gerçekten
+/// 001'e bağlı kalır (MD-1 "eski golden tarihsel korunur").
+pub fn case_by_id(id: &str) -> CharacterizationCase {
+    let matches: Vec<CharacterizationCase> = build_all_cases()
+        .into_iter()
+        .filter(|c| c.id == id)
+        .collect();
+    match matches.len() {
+        1 => matches.into_iter().next().expect("len checked"),
+        0 => panic!("case_by_id: no case with id {id:?} in frozen corpus"),
+        n => panic!(
+            "case_by_id: duplicate case id {id:?} — {n} matches (frozen corpus integrity violation)"
+        ),
+    }
 }
 
 /// Builder → manifest digest güncelleme helper'ı (test amaçlı).
@@ -881,6 +905,188 @@ fn removed_edge_external_source_001() -> CharacterizationCase {
         source: CaseSource::SyntheticAdversarial,
         description: "Task Node(1); affected=[1] + removed_edge from=9 (external). \
             V1 folds 9 into affected set; V2 subject scope {1} excludes it."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #92 — role-bearing 002 variants (theta yüzeyini açan minimum extension)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// #92: `wide-affected-scope-002` — 001'in **minimum role-bearing extension**'ı.
+///
+/// Tek deneysel müdahale: `new_nodes: [izole NewNodeSpec]` (connected_to BOŞ —
+/// hypothetical graph'a edge eklemez, 001 geometrisi korunur). Amaç: claim
+/// `delta_nodes[0]` taşıyınca vision selection `node_from_spec` default
+/// classification → `infer_role` → Runtime → BuiltinRole (0.40, 0.60, 0.35)
+/// ile Q5 theta yüzeyini AÇMAK. 001'de GlobalDefault authority theta'dan önce
+/// reject ediyordu ("Q5 stop" tesadüfi parity idi).
+///
+/// Intervention purity: `raw_v1(002) == raw_v1(001)` ve `raw_v2(002) == raw_v2(001)`
+/// bit-exact (test'lerde assert) — subject/raw divergence 001'den aynen korunur,
+/// yalnız theta yüzeyi açılır.
+fn wide_affected_scope_002() -> CharacterizationCase {
+    use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
+    use osp_core::space::{EdgeKind, Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 1, 2, 3 mevcut (001 ile aynı).
+    let mut space = Space::new();
+    for id in 1..=3u64 {
+        space.insert_node(Node {
+            id,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+    }
+
+    // Task: Node(1) predicate scope (001 ile aynı).
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 42,
+        milestone_id: 0,
+        label: "wide-affected-scope-002".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Proposal: 001 ile aynı structural delta + TEK EKLEME — izole role-bearing
+    // new_node (connected_to BOŞ: edge yok, geometri değişmez; sadece vision
+    // selection'ın delta_nodes[0] bulması için).
+    let proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1, 2, 3],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "wide-affected-scope-002".to_string(),
+        class: CaseClass::WideAffectedScope,
+        source: CaseSource::SyntheticAdversarial,
+        description: "#92 theta variant: 001 + isolated role-bearing new_node \
+            (connected_to=[]). raw(002)==raw(001) bit-exact; Q5 theta yüzeyi açık \
+            (BuiltinRole Runtime). Subject divergence korunur: V1 {1,2,3}, V2 {1}."
+            .to_string(),
+        space,
+        task,
+        proposal,
+    }
+}
+
+/// #92: `removed-edge-external-source-002` — 001'in minimum role-bearing extension'ı.
+/// wide_affected_scope_002 ile aynı müdahale disiplini (izole node, edge yok).
+fn removed_edge_external_source_002() -> CharacterizationCase {
+    use osp_core::agent::{EdgeRef, NewEdgeSpec, NewNodeSpec};
+    use osp_core::space::{EdgeKind, Node, NodeKind};
+    use osp_core::trajectory::{
+        ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, PredicateSet,
+        TaskPolicy, TaskStatus, WeightedPredicate,
+    };
+
+    // Space: node 1 (subject), node 9 (external — 001 ile aynı).
+    let mut space = Space::new();
+    space.insert_node(Node {
+        id: 1,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+    space.insert_node(Node {
+        id: 9,
+        kind: NodeKind::Module,
+        mass: 1.0,
+        ..Default::default()
+    });
+
+    let predicate = MetricPredicate {
+        metric: PredicateAxis::Coupling,
+        operator: ComparisonOp::Le,
+        threshold: 0.5,
+        scope: PredicateScope::Node(1),
+        required_source: None,
+        tolerance: 0.0,
+    };
+    let ps = PredicateSet {
+        mode: PredicateMode::All,
+        predicates: vec![WeightedPredicate {
+            predicate,
+            weight: None,
+        }],
+        preferred_vector: None,
+    };
+    let task = Task {
+        id: 42,
+        milestone_id: 0,
+        label: "removed-edge-external-002".to_string(),
+        target_predicate_set: ps,
+        policy: TaskPolicy::default(),
+        allowed_operations: vec![],
+        constraints: vec![],
+        status: TaskStatus::Pending,
+    };
+
+    // Proposal: 001 ile aynı + izole role-bearing new_node.
+    let proposal = DeltaProposal {
+        new_nodes: vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }],
+        new_edges: vec![NewEdgeSpec {
+            from: 1,
+            to: 9,
+            kind: EdgeKind::Imports,
+        }],
+        removed_edges: vec![EdgeRef {
+            from: 9,
+            to: 1,
+            kind: EdgeKind::Imports,
+        }],
+        affected_nodes: vec![1],
+        ..Default::default()
+    };
+
+    CharacterizationCase {
+        id: "removed-edge-external-source-002".to_string(),
+        class: CaseClass::RemovedEdgeExternalSource,
+        source: CaseSource::SyntheticAdversarial,
+        description: "#92 theta variant: 001 + isolated role-bearing new_node \
+            (connected_to=[]). raw(002)==raw(001) bit-exact; Q5 theta yüzeyi açık. \
+            Subject divergence korunur: V1 {1,9}, V2 {1}."
             .to_string(),
         space,
         task,

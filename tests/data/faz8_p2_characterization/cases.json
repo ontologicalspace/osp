@@ -3,8 +3,8 @@
   "description": "Faz 8-P2 P2-0B characterization corpus — V1 (compute_raw_from_delta + provenanced_from_raw) vs V2-candidate (measure_task_delta) semantic divergence measurement. Case content is produced by Rust builders (crates/osp-core/tests/common/faz8_p2_cases.rs); this manifest pins each case's serialized-bytes BLAKE3 digest so builder drift is DETECTED (explicit fixture+digest update required). Corpus change is detected by digest verification, not prevented.",
   "divergence_classes": {
     "matching_scope": "task.predicate.scope and proposal.affected_nodes describe the same node set — subject/value parity but INV-T4 source divergence (V1 Scip override vs V2 TreeSitter axis)",
-    "wide_affected_scope": "proposal.affected_nodes is a strict superset of task.predicate.scope — known production-reachable divergence (V1 measures wider centroid)",
-    "removed_edge_external_source": "removed_edges[*].from references a node outside task.predicate.scope — divergence (V1 folds into affected set)",
+    "wide_affected_scope": "proposal.affected_nodes is a strict superset of task.predicate.scope — known production-reachable divergence (V1 measures wider centroid). Two families: 001 (base — Q5 vision authority surface closed, GlobalDefault pre-theta reject) and 002 (#92 theta variant — isolated role-bearing new_node opens Q5 theta surface; raw==001 bit-exact intervention purity).",
+    "removed_edge_external_source": "removed_edges[*].from references a node outside task.predicate.scope — divergence (V1 folds into affected set). Two families: 001 (base — Q5 closed) and 002 (#92 theta variant — isolated role-bearing new_node; raw==001 bit-exact).",
     "delta_introduced_subject": "task.predicate.scope members are all introduced by the delta — V2 baseline UnavailableAllIntroduced (typed), V1 DefaultFallback (empty positions → RawPosition::default). Two cases: (1) delta-introduced-subject-001 baseline availability divergence; (2) delta-introduced-subject-policy-001 NotCompleted + AcceptImprovement policy/decision divergence (Migration 3 (b) proof — V1 AcceptAsProgress vs V2 Reject).",
     "direct_per_axis_authority": "Concrete V2 per-axis source required_source ile eşleşince predicate completion Completed; legacy V1 projection (uniform Scip) eşleşmeyince SourceInsufficient. Coupling axis, Node(1) scope. V1 legacy projected coupling = Scip; V2 measured = TreeSitter (engine topology_source). 5-case required_source matrisi (None/Scip/TreeSitter/Placeholder/Heuristic). Pozitif-matching kontrolü: required_source=TreeSitter → V2 Completed (MixedPerAxisSources'ta bu dal kaybolur). Threshold Le 0.5 (exact eski fixture, binary exact). affected_nodes:[1] = V1 legacy measurement selector. Evidence: predicate completion (PredicateSet::evaluate_completion) — task/mainline/witness completion iddiası DEĞİL.",
     "mixed_per_axis_sources": "Mixed aggregate measured source — concrete authority şartını karşılayamaz, declaration requirement olarak talep edilemez. Cohesion axis, Subgraph[1,2] scope. V2 measured cohesion source = Mixed (aggregate [Scip(node1 cohesion=Some), Placeholder(node2 cohesion=None)]); V1 legacy projected = uniform Scip. 6-case required_source matrisi (None/Scip/TreeSitter/Heuristic/Placeholder predicate evaluation + Mixed declaration-validation reject). Mixed gerçek cohesion aggregation hattından doğar (elle enjekte edilmez). DependsOn delta 5 measured axis'te nötr (metric isolation). Threshold Ge 0.50 (measured 0.55, 0.05 marjın). Implementation-scoped: mevcut production measurement path'inde gerçek heterogeneous aggregation yalnız cohesion axis'i üzerinden üretilebilir."
@@ -33,6 +33,22 @@
       "description": "Task Node(1); affected=[1] + removed_edge from=9 (external). V1 folds 9 into affected set; V2 subject scope {1} excludes it.",
       "builder_digest_blake3": "1690fd36d4727631ae5bce06dcabd993c26c0fbbbb0b971dc3dbdf15c916c878",
       "notes": "removed_edges.from external to task scope — V1 affected-set contamination."
+    },
+    {
+      "id": "wide-affected-scope-002",
+      "class": "wide_affected_scope",
+      "source": "synthetic_adversarial",
+      "description": "#92 theta variant: 001 + isolated role-bearing new_node (connected_to=[]). raw(002)==raw(001) bit-exact; Q5 theta yüzeyi açık (BuiltinRole Runtime). Subject divergence korunur: V1 {1,2,3}, V2 {1}.",
+      "builder_digest_blake3": "cb445092eb877016551a04a3c445dff4f5e576257642e02fa23e3d3872bd6c1c",
+      "notes": "Issue #92 evidence: subject-authority divergence'in Q5 theta downstream etkisi. Minimum role-bearing extension — intervention purity kanitli (raw==001 bit-exact). 001'de GlobalDefault authority theta'dan once reject ediyordu (Q5 stop tesadufi parity); 002 BuiltinRole Runtime vision ile theta yuzeyini acar."
+    },
+    {
+      "id": "removed-edge-external-source-002",
+      "class": "removed_edge_external_source",
+      "source": "synthetic_adversarial",
+      "description": "#92 theta variant: 001 + isolated role-bearing new_node (connected_to=[]). raw(002)==raw(001) bit-exact; Q5 theta yüzeyi açık. Subject divergence korunur: V1 {1,9}, V2 {1}.",
+      "builder_digest_blake3": "fb892d274f1fa65be90865beeb14481c5da4bb95f3d3ae51768e045cec3a1ff4",
+      "notes": "Issue #92 evidence: removed-edge external-source contamination'in Q5 theta downstream etkisi. Ayni intervention purity (raw==001 bit-exact, izole node)."
     },
     {
       "id": "delta-introduced-subject-001",

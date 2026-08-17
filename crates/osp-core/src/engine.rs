@@ -7292,4 +7292,327 @@ v = 0.5
             "observation preserves asymmetric x/y/z/w/v axis order"
         );
     }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // Issue #92 — subject-divergent raw → theta downstream (same context).
+    //
+    // PR #87-B kanıtı (conditional): Q5(V1)=Q5(V2) ancak raw ve context eşitse.
+    // #92 (bu bölüm): subject-authority divergent topology'de farklı raw'ın
+    // theta'ya propagate olduğunun fixture-scoped empirical karakterizasyonu.
+    // Claim disiplini: "bu iki frozen fixture'da gözlemlenir" — cosine projection
+    // many-to-one olduğundan genel teorem iddia EDİLMEZ.
+    //
+    // wide-affected-scope-002 / removed-edge-external-source-002 corpus case'lerinin
+    // engine-unit kanıt yüzeyi (integration drift matrisi ayrı — parity test).
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /// #92 ortak gövde: tek probe_claim → iki raw producer (V1 legacy subject /
+    /// V2 task scope) → aynı engine'de observe_q5_theta. Context identity
+    /// construction-by-design: clone, yalnız computed_raw değişir.
+    ///
+    /// Dönen: (obs_v1, obs_v2, v1_subject). Intervention purity 001 karşılıkları
+    /// (boş delta-node claim) ile ayrıca assert edilir — bkz. gövde.
+    fn q92_observe_divergent_pair(
+        space_node_ids: &[u64],
+        delta_edges: Vec<Edge>,
+        removed_edges: Vec<crate::agent::EdgeRef>,
+        v1_affected: Vec<NodeId>,
+        v2_task_scope: NodeId,
+    ) -> (
+        Q5ThetaObservation,
+        Q5ThetaObservation,
+        Vec<NodeId>,
+        RawPosition,
+        RawPosition,
+    ) {
+        let mut engine = make_measurement_engine();
+        for id in space_node_ids {
+            engine.space_mut().insert_node(q5_fixture_module(*id));
+        }
+        // 002 delta: izole role-bearing node 10_000 (connected_to=[] — edge yok,
+        // hypothetical geometri değişmez; vision selection delta_nodes[0] bulur).
+        let delta_node = q5_fixture_module(10_000);
+        let probe_claim = claim_with_task_id(
+            42,
+            vec![delta_node],
+            delta_edges.clone(),
+            removed_edges.clone(),
+        );
+
+        let revision_before = engine
+            .current_space_view_revision()
+            .expect("revision before measurement");
+
+        // V1 raw: production subject derivation helper (dual pinning — navigator
+        // VE bu test aynı tek truth'ı çağırır; elle subject sabiti YOK).
+        use crate::agent::DeltaProposal;
+        let proposal = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![],
+            removed_edges: removed_edges.clone(),
+            affected_nodes: v1_affected.clone(),
+            ..Default::default()
+        };
+        let v1_subject = crate::navigator::derive_v1_legacy_measurement_subject(&proposal);
+        let v1_raw = engine.compute_raw_from_delta(
+            &probe_claim.delta_nodes,
+            &probe_claim.delta_edges,
+            &probe_claim.removed_edges,
+            &v1_subject,
+        );
+
+        // V2 raw: task scope (measure_task_delta).
+        let task = task_with_node_scope(v2_task_scope, 42);
+        let probe_bound = crate::trajectory::TaskBoundClaim {
+            claim: &probe_claim,
+            task: &task,
+        };
+        let measurement = engine
+            .measure_task_delta(&probe_bound, &revision_before, None)
+            .expect("V2 measurement");
+        let v2_raw = measurement.after().to_raw();
+
+        // Tek structural claim → clone → yalnız raw değişir (context identity
+        // construction-by-design; ayrıca full assert aşağıda).
+        let mut v1_claim = probe_claim.clone();
+        v1_claim.computed_raw = v1_raw;
+        let mut v2_claim = probe_claim.clone();
+        v2_claim.computed_raw = v2_raw;
+
+        let obs_v1 = observe_q5_theta(&engine, &v1_claim);
+        let obs_v2 = observe_q5_theta(&engine, &v2_claim);
+
+        // Revision invariant: characterization tek engine revision içinde.
+        let revision_after = engine
+            .current_space_view_revision()
+            .expect("revision after measurement");
+        assert_eq!(
+            revision_before, revision_after,
+            "#92 characterization must remain within one engine revision"
+        );
+
+        (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw)
+    }
+
+    /// #92: full context identity assert — vision_subject, effective_vision_bits,
+    /// vision_source, 3 semver, theta_bound_bits (review P1-1: effective_vision_bits
+    /// DAHİL; "aynı context" koşulunun tam tanımı). Sessiz/tesadüfi context drift
+    /// kapanır — downstream fark tek başına subject-set farkına bağlanabilir.
+    fn q92_assert_context_identity(obs_v1: &Q5ThetaObservation, obs_v2: &Q5ThetaObservation) {
+        assert_eq!(
+            obs_v1.vision_subject, obs_v2.vision_subject,
+            "context identity: vision subject"
+        );
+        assert_eq!(
+            obs_v1.effective_vision_bits, obs_v2.effective_vision_bits,
+            "context identity: effective vision bits (the Q5 context itself)"
+        );
+        assert_eq!(
+            obs_v1.vision_source, obs_v2.vision_source,
+            "context identity: vision source"
+        );
+        assert_eq!(
+            obs_v1.role_inference_semver, obs_v2.role_inference_semver,
+            "context identity: role inference semver"
+        );
+        assert_eq!(
+            obs_v1.vision_selection_semver, obs_v2.vision_selection_semver,
+            "context identity: vision selection semver"
+        );
+        assert_eq!(
+            obs_v1.deviation_semver, obs_v2.deviation_semver,
+            "context identity: deviation semver"
+        );
+        assert_eq!(
+            obs_v1.theta_bound_bits, obs_v2.theta_bound_bits,
+            "context identity: theta bound"
+        );
+    }
+
+    /// Intervention purity: 002 raw == 001 raw (bit-exact) her iki producer için.
+    /// 001 claim = aynı structural delta ama delta_nodes BOŞ (role-bearing node yok).
+    ///
+    /// V1 subject burada da production helper'dan türetilir (removed_edges.from
+    /// fold dahil — ham affected listesi DEĞİL; wide'da etkisiz, removed'da kritik).
+    fn q92_001_raws(
+        space_node_ids: &[u64],
+        delta_edges: Vec<Edge>,
+        removed_edges: Vec<crate::agent::EdgeRef>,
+        v1_affected: Vec<NodeId>,
+        v2_task_scope: NodeId,
+    ) -> (RawPosition, RawPosition) {
+        let mut engine = make_measurement_engine();
+        for id in space_node_ids {
+            engine.space_mut().insert_node(q5_fixture_module(*id));
+        }
+        // 001 shape: new_nodes YOK → delta_nodes boş (GlobalDefault pre-theta reject
+        // yüzeyi — bu yüzden 001'de theta kanıtı yok).
+        let claim_001 = claim_with_task_id(42, vec![], delta_edges, removed_edges.clone());
+        let revision = engine.current_space_view_revision().unwrap();
+        // V1 subject: production derivation (affected + removed_edges.from fold).
+        use crate::agent::DeltaProposal;
+        let proposal_001 = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![],
+            removed_edges,
+            affected_nodes: v1_affected,
+            ..Default::default()
+        };
+        let v1_subject = crate::navigator::derive_v1_legacy_measurement_subject(&proposal_001);
+        let v1_raw = engine.compute_raw_from_delta(
+            &claim_001.delta_nodes,
+            &claim_001.delta_edges,
+            &claim_001.removed_edges,
+            &v1_subject,
+        );
+        let task = task_with_node_scope(v2_task_scope, 42);
+        let bound = crate::trajectory::TaskBoundClaim {
+            claim: &claim_001,
+            task: &task,
+        };
+        let measurement = engine
+            .measure_task_delta(&bound, &revision, None)
+            .expect("V2 001 measurement");
+        (v1_raw, measurement.after().to_raw())
+    }
+
+    #[test]
+    fn q5_theta_subject_divergent_same_context_shows_theta_divergence() {
+        // wide-affected-scope-002: space {1,2,3}, edge 1→2, affected [1,2,3],
+        // task scope Node(1). V1 subject {1,2,3} vs V2 {1}.
+        let (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw) =
+            q92_observe_divergent_pair(&[1, 2, 3], vec![edge(1, 2)], vec![], vec![1, 2, 3], 1);
+
+        // Subject evidence: production helper'dan exact (elle sabit yok).
+        assert_eq!(
+            v1_subject,
+            vec![1, 2, 3],
+            "V1 legacy subject (helper-derived)"
+        );
+
+        // Intervention purity: raw(002) == raw(001) bit-exact — izole role-bearing
+        // node tek müdahale; subject/raw divergence 001'den aynen korunur.
+        let (raw_v1_001, raw_v2_001) =
+            q92_001_raws(&[1, 2, 3], vec![edge(1, 2)], vec![], vec![1, 2, 3], 1);
+        assert_eq!(
+            q5_axis_bits(&v1_raw),
+            q5_axis_bits(&raw_v1_001),
+            "intervention purity: raw_v1(002) == raw_v1(001)"
+        );
+        assert_eq!(
+            q5_axis_bits(&v2_raw),
+            q5_axis_bits(&raw_v2_001),
+            "intervention purity: raw_v2(002) == raw_v2(001)"
+        );
+
+        // Raw divergence (PR #85 zinciri bu fixture'da da): farklı subject → farklı raw.
+        assert_ne!(
+            obs_v1.computed_raw_bits, obs_v2.computed_raw_bits,
+            "subject divergence must propagate to raw in this fixture"
+        );
+
+        // Full context identity (P1-1 — effective_vision_bits dahil).
+        q92_assert_context_identity(&obs_v1, &obs_v2);
+
+        // Theta divergence — fixture-scoped empirical (ana teorem iddiası YOK).
+        assert_ne!(
+            obs_v1.theta_bits, obs_v2.theta_bits,
+            "raw divergence must propagate to theta in this fixture (same context)"
+        );
+
+        // Exact theta goldens (probe-then-freeze; ~0.15249 vs ~0.11711).
+        assert_eq!(
+            obs_v1.theta_bits,
+            4594662147918958728,
+            "theta_v1 golden (f64={})",
+            f64::from_bits(obs_v1.theta_bits)
+        );
+        assert_eq!(
+            obs_v2.theta_bits,
+            4593103093345799528,
+            "theta_v2 golden (f64={})",
+            f64::from_bits(obs_v2.theta_bits)
+        );
+
+        // Q5 verdict — empirical:Passed/Passed (theta drift ≠ zorunlu verdict drift;
+        // bu fixture'da ikisi de theta_bound=0.3 altında).
+        assert_eq!(obs_v1.actual_verdict, Q5VerdictObservation::Passed);
+        assert_eq!(obs_v2.actual_verdict, Q5VerdictObservation::Passed);
+    }
+
+    #[test]
+    fn q5_theta_removed_edge_external_same_context_shows_theta_divergence() {
+        // removed-edge-external-source-002: space {1,9}, edge 1→9, removed 9→1,
+        // affected [1] (helper 9'u ekler → {1,9}), task scope Node(1).
+        let (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw) = q92_observe_divergent_pair(
+            &[1, 9],
+            vec![edge(1, 9)],
+            vec![crate::agent::EdgeRef {
+                from: 9,
+                to: 1,
+                kind: crate::space::EdgeKind::Imports,
+            }],
+            vec![1],
+            1,
+        );
+
+        // Subject evidence: removed_edges.from=9 helper tarafından fold edilir.
+        assert_eq!(
+            v1_subject,
+            vec![1, 9],
+            "V1 legacy subject (helper-derived, 9 folded)"
+        );
+
+        // Intervention purity: raw(002) == raw(001) bit-exact.
+        let (raw_v1_001, raw_v2_001) = q92_001_raws(
+            &[1, 9],
+            vec![edge(1, 9)],
+            vec![crate::agent::EdgeRef {
+                from: 9,
+                to: 1,
+                kind: crate::space::EdgeKind::Imports,
+            }],
+            vec![1],
+            1,
+        );
+        assert_eq!(
+            q5_axis_bits(&v1_raw),
+            q5_axis_bits(&raw_v1_001),
+            "intervention purity: raw_v1(002) == raw_v1(001)"
+        );
+        assert_eq!(
+            q5_axis_bits(&v2_raw),
+            q5_axis_bits(&raw_v2_001),
+            "intervention purity: raw_v2(002) == raw_v2(001)"
+        );
+
+        // Raw + theta divergence (same context).
+        assert_ne!(
+            obs_v1.computed_raw_bits, obs_v2.computed_raw_bits,
+            "subject divergence must propagate to raw in this fixture"
+        );
+        q92_assert_context_identity(&obs_v1, &obs_v2);
+        assert_ne!(
+            obs_v1.theta_bits, obs_v2.theta_bits,
+            "raw divergence must propagate to theta in this fixture (same context)"
+        );
+
+        // Exact theta goldens (probe-then-freeze; ~0.13770 vs ~0.11711).
+        assert_eq!(
+            obs_v1.theta_bits,
+            4594129220971291796,
+            "theta_v1 golden (f64={})",
+            f64::from_bits(obs_v1.theta_bits)
+        );
+        assert_eq!(
+            obs_v2.theta_bits,
+            4593103093345799528,
+            "theta_v2 golden (f64={})",
+            f64::from_bits(obs_v2.theta_bits)
+        );
+
+        // Q5 verdict — empirical: Passed/Passed.
+        assert_eq!(obs_v1.actual_verdict, Q5VerdictObservation::Passed);
+        assert_eq!(obs_v2.actual_verdict, Q5VerdictObservation::Passed);
+    }
 }
