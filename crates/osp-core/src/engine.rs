@@ -7306,12 +7306,15 @@ v = 0.5
     // engine-unit kanıt yüzeyi (integration drift matrisi ayrı — parity test).
     // ═════════════════════════════════════════════════════════════════════════════
 
-    /// #92 ortak gövde: tek probe_claim → iki raw producer (V1 legacy subject /
+    /// #92 ortak gövde: gerçek DeltaProposal → `build_claim_from_proposal` →
+    /// `node_from_spec` (production claim-mapping yolu — review P1-1: elle
+    /// `q5_fixture_module` claim KURULMAZ; classification semantics değişirse
+    /// corpus ile birlikte drift eder) → iki raw producer (V1 legacy subject /
     /// V2 task scope) → aynı engine'de observe_q5_theta. Context identity
     /// construction-by-design: clone, yalnız computed_raw değişir.
     ///
-    /// Dönen: (obs_v1, obs_v2, v1_subject). Intervention purity 001 karşılıkları
-    /// (boş delta-node claim) ile ayrıca assert edilir — bkz. gövde.
+    /// Dönen: (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw). Intervention purity
+    /// 001 karşılıkları (boş delta-node claim) ile ayrıca assert edilir — bkz. gövde.
     fn q92_observe_divergent_pair(
         space_node_ids: &[u64],
         delta_edges: Vec<Edge>,
@@ -7325,35 +7328,55 @@ v = 0.5
         RawPosition,
         RawPosition,
     ) {
+        use crate::agent::{NewEdgeSpec, NewNodeSpec};
         let mut engine = make_measurement_engine();
         for id in space_node_ids {
             engine.space_mut().insert_node(q5_fixture_module(*id));
         }
-        // 002 delta: izole role-bearing node 10_000 (connected_to=[] — edge yok,
-        // hypothetical geometri değişmez; vision selection delta_nodes[0] bulur).
-        let delta_node = q5_fixture_module(10_000);
-        let probe_claim = claim_with_task_id(
+        // 002 delta: izole role-bearing NewNodeSpec (connected_to=[] — edge yok,
+        // hypothetical geometri değişmez). Claim production mapping üzerinden
+        // kurulur: build_claim_from_proposal → node_from_spec → default
+        // classification → infer_role(Runtime) → BuiltinRole vision.
+        let new_edge_specs: Vec<NewEdgeSpec> = delta_edges
+            .iter()
+            .map(|e| NewEdgeSpec {
+                from: e.from,
+                to: e.to,
+                kind: e.kind,
+            })
+            .collect();
+        let proposal_002 = crate::agent::DeltaProposal {
+            new_nodes: vec![NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }],
+            new_edges: new_edge_specs,
+            removed_edges: removed_edges.clone(),
+            affected_nodes: v1_affected.clone(),
+            ..Default::default()
+        };
+        let probe_claim = crate::navigator::build_claim_from_proposal(
+            &proposal_002,
+            RawPosition::default(), // placeholder — V1/V2 raw producer'ları override eder
             42,
-            vec![delta_node],
-            delta_edges.clone(),
-            removed_edges.clone(),
+            100,
+            1,
+        )
+        .expect("002 probe claim (non-empty: new_nodes var)");
+        // Production mapping id discipline: node_from_spec ilk spec'e 10_000 atar.
+        assert_eq!(
+            probe_claim.delta_nodes[0].id, 10_000,
+            "node_from_spec production id assignment (first spec → 10_000)"
         );
 
         let revision_before = engine
             .current_space_view_revision()
             .expect("revision before measurement");
 
-        // V1 raw: production subject derivation helper (dual pinning — navigator
-        // VE bu test aynı tek truth'ı çağırır; elle subject sabiti YOK).
-        use crate::agent::DeltaProposal;
-        let proposal = DeltaProposal {
-            new_nodes: vec![],
-            new_edges: vec![],
-            removed_edges: removed_edges.clone(),
-            affected_nodes: v1_affected.clone(),
-            ..Default::default()
-        };
-        let v1_subject = crate::navigator::derive_v1_legacy_measurement_subject(&proposal);
+        // V1 raw: production subject derivation helper — AYNI proposal_002 üzerinde
+        // (review P1-1: helper ile claim aynı kaynaktan; ayrı elle proposal KURULMAZ).
+        let v1_subject = crate::navigator::derive_v1_legacy_measurement_subject(&proposal_002);
         let v1_raw = engine.compute_raw_from_delta(
             &probe_claim.delta_nodes,
             &probe_claim.delta_edges,

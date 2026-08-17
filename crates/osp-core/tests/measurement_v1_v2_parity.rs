@@ -2678,12 +2678,70 @@ enum PipelineReachability {
     V1StoppedBeforeCommit,
     #[allow(dead_code)]
     V2StoppedBeforeCommit,
+    #[allow(dead_code)]
+    BothStoppedBeforeCommit,
+}
+
+/// #92 dondurülmüş downstream empirical snapshot (review P1-3): characterization
+/// "iki taraf eşit" DEĞİL, "iki taraf ŞU exact durumda eşit" pinler. Aksi halde
+/// NotCompleted==NotCompleted + Reject==Reject durumunda da NoDrift üretilir ama
+/// dondurulan #92 kanıtı sessizce bozulur.
+fn q92_assert_exact_downstream_snapshot(
+    case_id: &str,
+    obs: &CharacterizationObservation,
+    lane: &str,
+) {
+    match &obs.pipeline {
+        PipelineObservation::CommitReached {
+            q5,
+            predicate_completion,
+            mutation_decision,
+            apply_target,
+            witness_reachability,
+        } => {
+            use osp_core::trajectory::{MutationDecision, PredicateCompletion};
+            assert_eq!(
+                *q5,
+                common::Q5Observation::Passed,
+                "{case_id} {lane}: Q5 exact = Passed"
+            );
+            assert_eq!(
+                *predicate_completion,
+                Some(PredicateCompletion::Completed),
+                "{case_id} {lane}: predicate exact = Some(Completed)"
+            );
+            assert_eq!(
+                *mutation_decision,
+                Some(MutationDecision::AcceptAsCompleted),
+                "{case_id} {lane}: mutation exact = Some(AcceptAsCompleted)"
+            );
+            assert_eq!(
+                format!("{apply_target:?}"),
+                format!(
+                    "{:?}",
+                    Some(osp_core::trajectory::ApplyTarget::Lane(
+                        osp_core::trajectory::CommitLane::Mainline
+                    ))
+                ),
+                "{case_id} {lane}: apply exact = Some(Lane(Mainline))"
+            );
+            assert_eq!(
+                *witness_reachability,
+                common::WitnessReachability::Held,
+                "{case_id} {lane}: witness exact = Held"
+            );
+        }
+        other => panic!("{case_id} {lane}: expected CommitReached, got {other:?}"),
+    }
 }
 
 /// Tek 002 case'inin tam downstream drift matrisini üretir + subject/raw
 /// kanıtlarını assert eder. Mirror pinning: integration harness'ın kendi V1
 /// subject derivation'ı aynı exact setleri üretir (navigator/unit pin'i ile
 /// dual — cross-crate assertion kurulamaz, iki yüz bağımsız pinlenir).
+///
+/// Downstream yüzey exact snapshot olarak pinlenir (P1-3) — parity türetmesi
+/// değil: zincirin her halkası literal dondurulur, üstüne NoDrift sınıflanır.
 fn q92_drift_matrix(
     case_id: &str,
 ) -> (
@@ -2711,65 +2769,40 @@ fn q92_drift_matrix(
         DriftFlag::Parity
     };
 
-    // ── Q5 verdict + reachability + karar yüzeyi ──
-    let (reachability, q5_parity, predicate_parity, mutation_parity) =
-        match (&obs_v1.pipeline, &obs_v2.pipeline) {
+    // ── Reachability + exact downstream snapshot (P1-3 + P2-1 + P2-2) ──
+    // q5/predicate/mutation/apply/witness EXACT dondurulur (discard yok);
+    // parity bunun üzerine türetilir — eşitlik kanıtı exact durumdan gelir.
+    let (reachability, decision_drift_class) = match (&obs_v1.pipeline, &obs_v2.pipeline) {
+        (PipelineObservation::CommitReached { .. }, PipelineObservation::CommitReached { .. }) => {
+            q92_assert_exact_downstream_snapshot(case_id, &obs_v1, "V1");
+            q92_assert_exact_downstream_snapshot(case_id, &obs_v2, "V2");
+            // Exact snapshot pinlendikten sonra parity construction-by-design:
+            // her iki taraf aynı literal durumda → karar yüzeyi NoDrift.
             (
-                PipelineObservation::CommitReached {
-                    q5: q5_v1,
-                    predicate_completion: pc_v1,
-                    mutation_decision: md_v1,
-                    ..
-                },
-                PipelineObservation::CommitReached {
-                    q5: q5_v2,
-                    predicate_completion: pc_v2,
-                    mutation_decision: md_v2,
-                    ..
-                },
-            ) => (
                 PipelineReachability::BothReached,
-                if q5_v1 == q5_v2 {
-                    DriftFlag::Parity
-                } else {
-                    DriftFlag::Divergent
-                },
-                if pc_v1 == pc_v2 {
-                    DriftFlag::Parity
-                } else {
-                    DriftFlag::Divergent
-                },
-                if md_v1 == md_v2 {
-                    DriftFlag::Parity
-                } else {
-                    DriftFlag::Divergent
-                },
-            ),
-            (PipelineObservation::StoppedBeforeCommit { .. }, _) => (
-                PipelineReachability::V1StoppedBeforeCommit,
-                DriftFlag::Divergent,
-                DriftFlag::Divergent,
-                DriftFlag::Divergent,
-            ),
-            (_, PipelineObservation::StoppedBeforeCommit { .. }) => (
-                PipelineReachability::V2StoppedBeforeCommit,
-                DriftFlag::Divergent,
-                DriftFlag::Divergent,
-                DriftFlag::Divergent,
-            ),
-        };
-    let _ = q5_parity;
-
-    // ── MD-1 canonical decision drift class (KARAR yüzeyi) ──
-    let decision_drift_class = match (predicate_parity, mutation_parity) {
-        (DriftFlag::Parity, DriftFlag::Parity) => DecisionDriftClass::NoDrift,
-        (DriftFlag::Divergent, _) => DecisionDriftClass::PredicateResultDrift,
-        (_, DriftFlag::Divergent) => DecisionDriftClass::MutationDecisionDrift,
+                DecisionDriftClass::NoDrift,
+            )
+        }
+        (
+            PipelineObservation::StoppedBeforeCommit { .. },
+            PipelineObservation::StoppedBeforeCommit { .. },
+        ) => (
+            PipelineReachability::BothStoppedBeforeCommit,
+            DecisionDriftClass::NoDrift,
+        ),
+        (PipelineObservation::StoppedBeforeCommit { .. }, _) => (
+            PipelineReachability::V1StoppedBeforeCommit,
+            DecisionDriftClass::PredicateResultDrift,
+        ),
+        (_, PipelineObservation::StoppedBeforeCommit { .. }) => (
+            PipelineReachability::V2StoppedBeforeCommit,
+            DecisionDriftClass::PredicateResultDrift,
+        ),
     };
 
     eprintln!(
-        "#92 drift matrix [{}]: subject={:?} raw={:?} reachability={:?} predicate={:?} mutation={:?} → decision_class={:?}",
-        case_id, subject_drift, raw_drift, reachability, predicate_parity, mutation_parity, decision_drift_class
+        "#92 drift matrix [{}]: subject={:?} raw={:?} reachability={:?} → decision_class={:?} (exact snapshot pinned)",
+        case_id, subject_drift, raw_drift, reachability, decision_drift_class
     );
 
     (subject_drift, raw_drift, reachability, decision_drift_class)
@@ -2811,4 +2844,67 @@ fn removed_edge_external_source_002_shows_downstream_decision_drift_matrix() {
         DecisionDriftClass::NoDrift,
         "decision surface parity (θ 0.13770/0.11711 — ikisi de bound altında)"
     );
+}
+
+/// #92 review P1-2: intervention purity GERÇEK frozen corpus üzerinde kanıtlanır —
+/// engine-unit lokal fixture'ları arasında değil. Manifest-korumalı 001/002
+/// builder'larının ürettiği observation'lar arasında bit-exact raw eşitliği.
+///
+/// 002'nin tek deneysel müdahalesi "izole role-bearing new_node ile Q5 theta
+/// yüzeyini açmak"; subject/raw divergence 001'den aynen korunur:
+/// raw_v1(002) == raw_v1(001) VE raw_v2(002) == raw_v2(001) — her iki family için.
+#[test]
+fn variant_002_raw_purity_matches_001_frozen_corpus() {
+    for (id_001, id_002, expected_v1_subject, expected_v2_subject) in [
+        (
+            "wide-affected-scope-001",
+            "wide-affected-scope-002",
+            vec![1u64, 2, 3],
+            vec![1u64],
+        ),
+        (
+            "removed-edge-external-source-001",
+            "removed-edge-external-source-002",
+            vec![1u64, 9],
+            vec![1u64],
+        ),
+    ] {
+        let case_001 = common::case_by_id(id_001);
+        let case_002 = common::case_by_id(id_002);
+        let (obs_001_v1, obs_001_v2) = observe_case(&case_001);
+        let (obs_002_v1, obs_002_v2) = observe_case(&case_002);
+
+        // Subject: 002, 001'in exact subject setlerini korur (mirror pinning —
+        // integration harness derivation'ı, navigator pin'i ile dual).
+        let (s_001_v1, s_001_v2) = measurement_subjects(&obs_001_v1, &obs_001_v2, id_001);
+        let (s_002_v1, s_002_v2) = measurement_subjects(&obs_002_v1, &obs_002_v2, id_002);
+        assert_eq!(s_001_v1, expected_v1_subject, "{id_001} V1 subject exact");
+        assert_eq!(s_001_v2, expected_v2_subject, "{id_001} V2 subject exact");
+        assert_eq!(
+            s_002_v1, expected_v1_subject,
+            "{id_002} V1 subject == 001 (korunur)"
+        );
+        assert_eq!(
+            s_002_v2, expected_v2_subject,
+            "{id_002} V2 subject == 001 (korunur)"
+        );
+
+        // Intervention purity: raw bit-exact eşitlik — gerçek corpus builders arasında.
+        let (r_001_v1, r_001_v2) = measurement_value_bits(&obs_001_v1, &obs_001_v2, id_001);
+        let (r_002_v1, r_002_v2) = measurement_value_bits(&obs_002_v1, &obs_002_v2, id_002);
+        assert_eq!(
+            r_002_v1, r_001_v1,
+            "{id_002} V1 raw == {id_001} V1 raw (bit-exact; izole node tek müdahale)"
+        );
+        assert_eq!(
+            r_002_v2, r_001_v2,
+            "{id_002} V2 raw == {id_001} V2 raw (bit-exact)"
+        );
+
+        // Divergence korunur (bu fixture'larda V1 raw != V2 raw).
+        assert_ne!(
+            r_002_v1, r_002_v2,
+            "{id_002} subject divergence → raw divergence"
+        );
+    }
 }
