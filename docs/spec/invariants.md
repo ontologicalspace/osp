@@ -195,8 +195,9 @@ edilir (heterojen → `HeterogeneousPredicateScopes` fail-closed). Caller-declar
 measurement authority DEĞİL; impact hint veya compatibility observation. Bu INV-T3'ün
 (engine ölçer) extension'ıdır; dayanağı INV-T2 (operator task hedefini/scope'unu tanımlar) —
 task declaration'ı ölçülen gerçekliğin sınırını tanımlar, engine bunu canonical subject'a
-çözer. Subject (task scope) ve impact (structural delta) ayrı tutulur. (Status: planned —
-MD-1 accepted, caller cutover Faz 8a; `docs/notes/faz8-p2-migration-decisions.md`.)
+çözer. Subject (task scope) ve impact (structural delta) ayrı tutulur. (Status: P2-1
+implemented — `subject_authority.rs` additive compatibility observation (`#95`);
+caller cutover Faz 8a pending; `docs/notes/faz8-p2-migration-decisions.md`.)
 
 ### INV-T4 — Predicate provenance (RawPosition provenance taşımalı)
 **Status:** planned (Aşama A)

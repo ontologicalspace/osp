@@ -123,6 +123,21 @@ regolden (tarihsel bağ korunarak — sessiz overwrite değil) + compatibility y
 - SubjectAuthorityDriftObservation (P2-1 additive).
 - Issue #92: Case 2/3 tam decision drift matrisi (subject→raw→theta→Q5→predicate→decision). **TAMAMLANDI** — role-bearing 002 variants (intervention purity: raw(002)==raw(001) bit-exact) + production V1 subject helper (dual pinning). Sonuç: subject/raw Divergent, theta Divergent (θV1≠θV2, same context), karar yüzeyi NoDrift (Passed/Passed, Completed parity) — bkz. `faz8-p2-parity-characterization.md` #92 section.
 
+### P2-1 implementation (Tamamlandı — #95 P2-1)
+
+**Modül:** `crates/osp-core/src/subject_authority.rs` — MD-1 compatibility semantics'in tek evi.
+
+- **Explicit compatibility producer:** `produce_legacy_subject_measurement` — subject + raw + measured (uniform-Scip **compatibility projection**, MD-2 konusu) tek yapıda (`LegacySubjectMeasurement`, private field'lar + tek üretici → construction property). `derive_v1_legacy_measurement_subject` navigator.rs'ten buraya taşındı (dual pinning korundu). Navigator + MCP ölçüm noktaları bu producer'ı çağırır (bit-identical refactor).
+- **`SubjectAuthorityDriftObservation`** (V1/V2 subject digest + raw bits + per-axis sources + Q5 + downstream):
+  - **Draft → Finalized:** gözlem pre-commit üretilir (Draft, serde'siz — persist/emit edilemez); `finalize(self, downstream)` consuming — finalize edilmemiş downstream telemetry'sinin varlığı tip seviyesinde imkânsız.
+  - **Q5 "same context" construction property:** `EffectiveVisionGateContext` bir kez capture; V1/V2 raw'ları aynı captured context altında değerlendirilir.
+  - **V1 downstream üç-durumlu reachability:** `Observed` (Evaluated/Held/Rejected gerçek outcome) / `NotReached{Q5Violated|Q4SyntaxRejection}` / `ReachedButUnavailable{Q6RuleViolationAfterPredicateGate}` — Q6 RuleViolation'da navigator'ın sentetik NotCompleted/Reject evidence'ı authoritative diye taşınmaz (PredicateGate Q6'dan önce çalışır ama gerçek outcome error'da yok).
+  - **V2 downstream:** yalnız Q5 Passed'te, production `PredicateGate.evaluate` ile (aynı loss_before/target input) — counterfactual yasak.
+  - **MD-2 separation:** `RawMeasurementObservation.sources` V1 compatibility-projected [Scip;5] vs V2 engine-native per-axis olarak ayrı görünür — downstream farkının provenance kaynaklı olduğu sentinel testle pinli (subject/raw parity + provenance/downstream divergent).
+  - **Eligibility (comparison-surviving surface):** Evaluated · Held · Rejected · retryable Q4/Q5/Q6 → observation emit; TaskValidation · VisionContextInvalid · SystemFailure → emit yok. Witness disposition eligibility'yi etkilemez.
+  - **Digest ayrımı:** observation `PendingAuthorization`/`RevisionRequired` telemetry sidecar'ları ile `TrajectoryEvidence.subject_authority_drift` alanında taşınır; digest preimage'lerine (SuspendedAttemptEvidence, AuthorizationBasis, evidence_digest) **asla** girmez (test pinli). Wire upgrade-directional: new reader old wire'ı kabul eder (`#[serde(default)]` + strict `deny_unknown_fields` korunur).
+- **Held/Rejected kaybı yok:** navigator Held → `PendingAuthorization.subject_authority_drift`; Rejected → `RevisionRequired.with_subject_authority_drift()`; MCP Held/Rejected/Evaluated/retryable-Err response JSON'larına additive sidecar (mevcut error JSON semantiği bilinçli olarak değiştirilmez).
+
 ### Cutover acceptance criteria (Faz 8a gate, Issue #92 kanıtı sonrası)
 
 - Tüm driftler açıklanabilir ve subject-set farkına bağlanabilir.

@@ -386,6 +386,25 @@ Lane(Mainline), Held witness. #95 (MD-1 Faz 8a cutover) evidence gate'i karşıl
 - **Test 3** (`q5_theta_observation_preserves_asymmetric_axis_order`): Observation representation
   regression guard — migration proof DEĞİL; x/y/z/w/v axis sıralaması.
 
+## #95 P2-1 — Production SubjectAuthorityDriftObservation (additive)
+
+`subject_authority.rs` modülü #92 karakterizasyon değerlerini **production gözlem
+yüzeyine** taşır (plan v6, 5 review turu):
+
+- **002 cross-pin'leri bit-exact transfer:** `wide-affected-scope-002` gözlemi
+  V1 θ bits `4594662147918958728` / V2 `4593103093345799528`;
+  `removed-edge-external-source-002` V1 `4594129220971291796` / V2
+  `4593103093345799528` — yukarıdaki engine-unit goldens ile birebir
+  (`tests/subject_authority_drift_observation.rs`).
+- **001 yüzeyi:** iki lane Q5 `NotEvaluated{VisionAuthorityInsufficient}`
+  (GlobalDefault pre-theta) — V2 ölçümü vision'dan bağımsız başarılı, downstream
+  üretilmez; commit `VisionContextInvalid` non-surviving → emit yok.
+- **MD-2 confound sentinel:** subject parity + raw parity + provenance divergent
+  (V1 compatibility-projected [Scip;5] vs V2 engine-native) + downstream divergent
+  (required_source=Scip) → "subject authority caused predicate drift" okuması imkânsız.
+- **Q6 reachability:** RuleViolation → `ReachedButUnavailable` (PredicateGate çalıştı,
+  gerçek outcome error'da taşınmaz — sentetik evidence authoritative değil).
+
 ---
 
 ## Üç Ayrı Semantic Migration (review tur 4 ontolojik değerlendirme)
