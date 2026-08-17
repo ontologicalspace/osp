@@ -5349,6 +5349,13 @@ pub struct PendingAuthorization {
     pub evidence_digest: SuspendedAttemptEvidenceDigest,
     /// Clock trait'inden — digest'e DAHİL DEĞİL.
     pub created_at: u64,
+    /// **#95 MD-1 P2-1 (additive telemetry sidecar):** Subject-authority drift
+    /// shadow observation. **Digest preimage'ine GIRMEZ** — `AuthorizationBasisDigest`
+    /// ve `SuspendedAttemptEvidenceDigest` bu alandan bağımsız hesaplanır; authorization
+    /// authority yüzeyi değişmez. Held eligibility: legacy measurement üretilmiş +
+    /// comparison-surviving surface (witness disposition eligibility'yi etkilemez).
+    #[serde(default)]
+    pub subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
 }
 
 impl PendingAuthorization {
@@ -5448,6 +5455,12 @@ impl<'de> serde::Deserialize<'de> for PendingAuthorization {
             suspended_attempt_evidence: SuspendedAttemptEvidence,
             evidence_digest: SuspendedAttemptEvidenceDigest,
             created_at: u64,
+            /// **#95 MD-1 P2-1:** `#[serde(default)]` — eski wire (alan yok) → None;
+            /// strict `deny_unknown_fields` korunur (upgrade-directional wire
+            /// compatibility — plan v6 §9).
+            #[serde(default)]
+            subject_authority_drift:
+                Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let record = PendingAuthorization {
@@ -5466,6 +5479,7 @@ impl<'de> serde::Deserialize<'de> for PendingAuthorization {
             suspended_attempt_evidence: wire.suspended_attempt_evidence,
             evidence_digest: wire.evidence_digest,
             created_at: wire.created_at,
+            subject_authority_drift: wire.subject_authority_drift,
         };
         record
             .validate_internal()
@@ -7653,6 +7667,13 @@ impl RevisionRequiredV2 {
 pub struct RevisionRequired {
     evidence_digest: SuspendedAttemptEvidenceDigest,
     suspended_attempt_evidence: SuspendedAttemptEvidence,
+    /// **#95 MD-1 P2-1 (additive telemetry sidecar):** Subject-authority drift
+    /// shadow observation — Rejected eligibility yollarında taşınır.
+    /// **Digest preimage'ine GIRMEZ** (`SuspendedAttemptEvidenceDigest` bu alandan
+    /// bağımsız hesaplanır; strict digest-proof taşıyıcı sözleşmesi korunur).
+    /// `with_subject_authority_drift` builder ile set edilir (creation sonrası).
+    #[serde(default)]
+    subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
 }
 
 impl RevisionRequired {
@@ -7685,6 +7706,7 @@ impl RevisionRequired {
         Ok(Self {
             evidence_digest,
             suspended_attempt_evidence,
+            subject_authority_drift: None,
         })
     }
 
@@ -7724,7 +7746,25 @@ impl RevisionRequired {
         Ok(Self {
             evidence_digest,
             suspended_attempt_evidence,
+            subject_authority_drift: None,
         })
+    }
+
+    /// **#95 MD-1 P2-1:** Telemetry sidecar builder — creation sonrası set.
+    /// Digest hesaplarına girmez; sadece consume eden yüzeylere (wire/CLI) taşınır.
+    pub fn with_subject_authority_drift(
+        mut self,
+        drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+    ) -> Self {
+        self.subject_authority_drift = drift;
+        self
+    }
+
+    /// **#95 MD-1 P2-1:** Telemetry sidecar accessor (digest-proof dışı).
+    pub fn subject_authority_drift(
+        &self,
+    ) -> Option<&crate::subject_authority::SubjectAuthorityDriftObservation> {
+        self.subject_authority_drift.as_ref()
     }
 
     // — Accessor'lar (evidence üzerinden) —
@@ -7800,13 +7840,19 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
         struct Wire {
             evidence_digest: SuspendedAttemptEvidenceDigest,
             suspended_attempt_evidence: SuspendedAttemptEvidence,
+            /// **#95 MD-1 P2-1:** `#[serde(default)]` — eski wire (alan yok) → None.
+            /// Strict `deny_unknown_fields` korunur.
+            #[serde(default)]
+            subject_authority_drift:
+                Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
         }
         let wire = Wire::deserialize(deserializer)?;
-        RevisionRequired::try_new_with_verified_digest(
+        Ok(RevisionRequired::try_new_with_verified_digest(
             wire.evidence_digest,
             wire.suspended_attempt_evidence,
         )
-        .map_err(serde::de::Error::custom)
+        .map_err(serde::de::Error::custom)?
+        .with_subject_authority_drift(wire.subject_authority_drift))
     }
 }
 
@@ -11285,6 +11331,7 @@ mod tests {
             suspended_attempt_evidence: evidence,
             evidence_digest,
             created_at: 1_700_000_000,
+            subject_authority_drift: None,
         }
     }
 
@@ -15474,6 +15521,97 @@ v = 0.5
         assert_eq!(rev.claim_id(), ClaimId::from(42u64));
         assert!(rev.reasons().is_some());
         assert_eq!(rev.reasons().unwrap().as_slice().len(), 1);
+    }
+
+    /// **#95 MD-1 P2-1:** `RevisionRequired` telemetry sidecar wire invariant'ları —
+    /// (1) sidecar digest preimage'ine GIRMEZ (strict digest-proof taşıyıcı sözleşmesi
+    /// korunur); (2) yeni JSON (sidecar'lı) round-trip'te korunur; (3) eski wire
+    /// (alan yok, `deny_unknown_fields` altında `#[serde(default)]`) → None + digest
+    /// ve evidence identity unchanged (upgrade-directional compatibility).
+    #[test]
+    fn revision_required_subject_authority_drift_sidecar_wire_invariants() {
+        use crate::subject_authority::{
+            AuthoritativeDownstreamObservation, LaneQ5Observation, MeasurementSubjectObservation,
+            Q5ObservationFailure, RawMeasurementObservation, SubjectAuthorityDriftObservationDraft,
+            V1DownstreamObservation, V1LaneObservationDraft, V2LaneOutcome, V2MeasurementFailure,
+        };
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+
+        let basis_digest = AuthorizationBasisDigest::from_hex(
+            "2222222222222222222222222222222222222222222222222222222222222222",
+        )
+        .unwrap();
+        let evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest,
+            AttemptNumber::try_from(5u64).unwrap(),
+            SuspendedAttemptDisposition::Rejected {
+                reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
+                    witness: 7u64,
+                    rationale: None,
+                }),
+                snapshot: WitnessQuorumSnapshot {
+                    approvers: 0,
+                    required_approvers: 2,
+                    support: 0.0,
+                    required_support: 1.5,
+                },
+            },
+        )
+        .unwrap();
+        let rev_plain = RevisionRequired::try_new(evidence).unwrap();
+        let digest_plain = rev_plain.evidence_digest().clone();
+
+        // Production composition: draft → finalize → builder ile sidecar set.
+        let drift = SubjectAuthorityDriftObservationDraft {
+            task_id: 1,
+            claim_id: 42,
+            v1: V1LaneObservationDraft {
+                subject: MeasurementSubjectObservation {
+                    ids: vec![1],
+                    digest: "ab".repeat(32),
+                },
+                raw: RawMeasurementObservation {
+                    bits: [1, 2, 3, 4, 5],
+                    sources: [crate::coords::MetricSource::Scip; 5],
+                },
+                q5: LaneQ5Observation::NotEvaluated {
+                    reason: Q5ObservationFailure::VisionUnavailable,
+                },
+            },
+            v2: V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::EmptySubjectScope),
+        }
+        .finalize(V1DownstreamObservation::Observed(
+            AuthoritativeDownstreamObservation {
+                predicate_completion: PredicateCompletion::Completed,
+                mutation_decision: MutationDecision::AcceptAsCompleted,
+            },
+        ));
+        let rev_with = rev_plain.with_subject_authority_drift(Some(drift));
+
+        // (1) Sidecar digest preimage'ine girmez.
+        assert_eq!(
+            rev_with.evidence_digest(),
+            &digest_plain,
+            "observation sidecar must not enter digest preimage"
+        );
+
+        // (2) Yeni wire round-trip — sidecar korunur (load path verified digest).
+        let json = serde_json::to_string(&rev_with).expect("serialize");
+        let parsed: RevisionRequired = serde_json::from_str(&json).expect("new wire round-trip");
+        assert!(parsed.subject_authority_drift().is_some());
+        assert_eq!(parsed.evidence_digest(), &digest_plain);
+
+        // (3) Eski wire — alan yok → None; digest/evidence identity unchanged.
+        let mut old = serde_json::to_value(&rev_with).expect("to_value");
+        old.as_object_mut()
+            .expect("revision wire is an object")
+            .remove("subject_authority_drift");
+        let old_rev: RevisionRequired =
+            serde_json::from_value(old).expect("old wire deserializes (serde default)");
+        assert!(old_rev.subject_authority_drift().is_none());
+        assert_eq!(old_rev.evidence_digest(), &digest_plain);
     }
 
     #[test]
