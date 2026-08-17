@@ -573,7 +573,11 @@ impl SubjectAuthorityDriftObservationDraft {
     }
 
     /// Consuming finalize — aynı draft iki farklı downstream ile finalize edilemez
-    /// (ownership taşınır). Yalnız bu yöntem serde'li final tipi üretir.
+    /// (ownership taşınır). Production observer path'inde finalized serde tipi
+    /// yalnız bu consuming transition üzerinden üretilir. (Final DTO'nun kendisi
+    /// public-field + deserialize edilebilir bir **untrusted telemetry** yüzeyidir —
+    /// literal kurulum bilinçli olarak mümkün; Draft instance uniqueness ile
+    /// final DTO forgeability ayrı iddialardır. EK review tur-3 P2.)
     pub fn finalize(self, downstream: V1DownstreamObservation) -> SubjectAuthorityDriftObservation {
         SubjectAuthorityDriftObservation {
             task_id: self.task_id,
