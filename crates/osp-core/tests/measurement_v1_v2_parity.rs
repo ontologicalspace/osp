@@ -2699,7 +2699,7 @@ fn q92_assert_exact_downstream_snapshot(
             apply_target,
             witness_reachability,
         } => {
-            use osp_core::trajectory::{MutationDecision, PredicateCompletion};
+            use osp_core::trajectory::{ApplyTarget, MutationDecision, PredicateCompletion};
             assert_eq!(
                 *q5,
                 common::Q5Observation::Passed,
@@ -2715,14 +2715,13 @@ fn q92_assert_exact_downstream_snapshot(
                 Some(MutationDecision::AcceptAsCompleted),
                 "{case_id} {lane}: mutation exact = Some(AcceptAsCompleted)"
             );
+            // P2-1: enum equality (ApplyTarget PartialEq/Eq derive'lu) — Debug
+            // representation semantic contract değildir.
             assert_eq!(
-                format!("{apply_target:?}"),
-                format!(
-                    "{:?}",
-                    Some(osp_core::trajectory::ApplyTarget::Lane(
-                        osp_core::trajectory::CommitLane::Mainline
-                    ))
-                ),
+                *apply_target,
+                Some(ApplyTarget::Lane(
+                    osp_core::trajectory::CommitLane::Mainline
+                )),
                 "{case_id} {lane}: apply exact = Some(Lane(Mainline))"
             );
             assert_eq!(
@@ -2742,13 +2741,18 @@ fn q92_assert_exact_downstream_snapshot(
 ///
 /// Downstream yüzey exact snapshot olarak pinlenir (P1-3) — parity türetmesi
 /// değil: zincirin her halkası literal dondurulur, üstüne NoDrift sınıflanır.
+///
+/// `decision_drift_class: Option<…>` (P2-2): yalnız `BothReached` için
+/// sınıflandırılır — karar yüzeyine ulaşılmayan (stopped) durumlarda stage/error
+/// equality'siz `NoDrift` üretmek yanlış sınıflandırma riski taşır; `None` =
+/// "karar yüzeyi sınıflandırılmadı".
 fn q92_drift_matrix(
     case_id: &str,
 ) -> (
     DriftFlag,
     DriftFlag,
     PipelineReachability,
-    DecisionDriftClass,
+    Option<DecisionDriftClass>,
 ) {
     let case = common::case_by_id(case_id);
     let (obs_v1, obs_v2) = observe_case(&case);
@@ -2771,7 +2775,7 @@ fn q92_drift_matrix(
 
     // ── Reachability + exact downstream snapshot (P1-3 + P2-1 + P2-2) ──
     // q5/predicate/mutation/apply/witness EXACT dondurulur (discard yok);
-    // parity bunun üzerine türetilir — eşitlik kanıtı exact durumdan gelir.
+    // karar sınıflandırması yalnız BothReached'te — exact snapshot'tan gelir.
     let (reachability, decision_drift_class) = match (&obs_v1.pipeline, &obs_v2.pipeline) {
         (PipelineObservation::CommitReached { .. }, PipelineObservation::CommitReached { .. }) => {
             q92_assert_exact_downstream_snapshot(case_id, &obs_v1, "V1");
@@ -2780,24 +2784,19 @@ fn q92_drift_matrix(
             // her iki taraf aynı literal durumda → karar yüzeyi NoDrift.
             (
                 PipelineReachability::BothReached,
-                DecisionDriftClass::NoDrift,
+                Some(DecisionDriftClass::NoDrift),
             )
         }
         (
             PipelineObservation::StoppedBeforeCommit { .. },
             PipelineObservation::StoppedBeforeCommit { .. },
-        ) => (
-            PipelineReachability::BothStoppedBeforeCommit,
-            DecisionDriftClass::NoDrift,
-        ),
-        (PipelineObservation::StoppedBeforeCommit { .. }, _) => (
-            PipelineReachability::V1StoppedBeforeCommit,
-            DecisionDriftClass::PredicateResultDrift,
-        ),
-        (_, PipelineObservation::StoppedBeforeCommit { .. }) => (
-            PipelineReachability::V2StoppedBeforeCommit,
-            DecisionDriftClass::PredicateResultDrift,
-        ),
+        ) => (PipelineReachability::BothStoppedBeforeCommit, None),
+        (PipelineObservation::StoppedBeforeCommit { .. }, _) => {
+            (PipelineReachability::V1StoppedBeforeCommit, None)
+        }
+        (_, PipelineObservation::StoppedBeforeCommit { .. }) => {
+            (PipelineReachability::V2StoppedBeforeCommit, None)
+        }
     };
 
     eprintln!(
@@ -2825,7 +2824,7 @@ fn wide_affected_scope_002_shows_downstream_decision_drift_matrix() {
     assert_eq!(reachability, PipelineReachability::BothReached);
     assert_eq!(
         decision,
-        DecisionDriftClass::NoDrift,
+        Some(DecisionDriftClass::NoDrift),
         "decision surface parity: Q5 Passed/Passed, Completed/Completed, AcceptAsCompleted parity"
     );
 }
@@ -2841,7 +2840,7 @@ fn removed_edge_external_source_002_shows_downstream_decision_drift_matrix() {
     assert_eq!(reachability, PipelineReachability::BothReached);
     assert_eq!(
         decision,
-        DecisionDriftClass::NoDrift,
+        Some(DecisionDriftClass::NoDrift),
         "decision surface parity (θ 0.13770/0.11711 — ikisi de bound altında)"
     );
 }
