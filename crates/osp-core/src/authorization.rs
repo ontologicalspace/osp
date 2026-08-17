@@ -11335,20 +11335,21 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// **#95 MD-1 P2-1:** Identity-parametreli observation fixture — parent record
-    /// kimliğiyle eşleşen/eşleşmeyen sidecar'lar üretir.
+    /// kimliğiyle eşleşen/eşleşmeyen sidecar'lar üretir. Final tip doğrudan kurulur
+    /// (Draft'ın alanları private — construction boundary, EK review tur-2 P1).
     fn md1_sample_drift(
         task_id: u64,
         claim_id: u64,
     ) -> crate::subject_authority::SubjectAuthorityDriftObservation {
         use crate::subject_authority::{
             AuthoritativeDownstreamObservation, LaneQ5Observation, MeasurementSubjectObservation,
-            Q5ObservationFailure, RawMeasurementObservation, SubjectAuthorityDriftObservationDraft,
-            V1DownstreamObservation, V1LaneObservationDraft, V2LaneOutcome, V2MeasurementFailure,
+            Q5ObservationFailure, RawMeasurementObservation, SubjectAuthorityDriftObservation,
+            V1DownstreamObservation, V1LaneObservation, V2LaneOutcome, V2MeasurementFailure,
         };
-        SubjectAuthorityDriftObservationDraft {
+        SubjectAuthorityDriftObservation {
             task_id,
             claim_id,
-            v1: V1LaneObservationDraft {
+            v1: V1LaneObservation {
                 subject: MeasurementSubjectObservation {
                     ids: vec![1],
                     digest: "ab".repeat(32),
@@ -11360,15 +11361,13 @@ mod tests {
                 q5: LaneQ5Observation::NotEvaluated {
                     reason: Q5ObservationFailure::VisionUnavailable,
                 },
+                downstream: V1DownstreamObservation::Observed(AuthoritativeDownstreamObservation {
+                    predicate_completion: PredicateCompletion::Completed,
+                    mutation_decision: MutationDecision::AcceptAsCompleted,
+                }),
             },
             v2: V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::EmptySubjectScope),
         }
-        .finalize(V1DownstreamObservation::Observed(
-            AuthoritativeDownstreamObservation {
-                predicate_completion: PredicateCompletion::Completed,
-                mutation_decision: MutationDecision::AcceptAsCompleted,
-            },
-        ))
     }
 
     fn sample_pending_record() -> PendingAuthorization {

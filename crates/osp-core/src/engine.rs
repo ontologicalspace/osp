@@ -7925,13 +7925,13 @@ v = 0.5
         // Fail-closed: session epoch drift → typed CoordinateMeasurement failure.
         assert!(
             matches!(
-                &draft.v2,
+                draft.v2(),
                 V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::CoordinateMeasurement)
             ),
             "behaviorally-mutating axis → session fail-closed → typed failure: {:?}",
-            draft.v2
+            draft.v2()
         );
         // V1 legacy lane non-session compute path → shadow failure'ı etkilenmez.
-        assert_eq!(draft.v1.subject.ids, vec![1]);
+        assert_eq!(draft.v1().subject.ids, vec![1]);
     }
 }

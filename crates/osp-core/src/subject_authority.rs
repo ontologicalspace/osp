@@ -104,9 +104,28 @@ impl LegacySubjectMeasurement {
     }
 
     /// V1 measured — uniform-Scip compatibility projection
-    /// (`provenanced_from_raw(raw, MetricSource::Scip)`).
+    /// (`legacy_compatibility_projection(raw)`).
     pub fn measured(&self) -> &MeasuredRawPosition {
         &self.measured
+    }
+}
+
+/// **#95 MD-1 P2-1 (EK review tur-2 P2-2):** Uniform-Scip **compatibility
+/// projection** — navigator'ın legacy `provenanced_from_raw(raw, Scip)` çağrısının
+/// birebir aynı üretimi, MD-1 compatibility semantics'in parçası olarak BU modülde
+/// yaşar (`subject_authority → navigator` katman bağımlılığı yok). Bit-identical:
+/// aynı `AxisMeasurement { value, source: Scip }` construction.
+fn legacy_compatibility_projection(raw: RawPosition) -> MeasuredRawPosition {
+    let axis = |value: f64| crate::coords::AxisMeasurement {
+        value,
+        source: MetricSource::Scip,
+    };
+    MeasuredRawPosition {
+        coupling: axis(raw.x),
+        cohesion: axis(raw.y),
+        instability: axis(raw.z),
+        entropy: axis(raw.w),
+        witness_depth: axis(raw.v),
     }
 }
 
@@ -126,7 +145,7 @@ pub fn produce_legacy_subject_measurement(
         &proposal.removed_edges,
         &subject_ids,
     );
-    let measured = crate::navigator::provenanced_from_raw(raw, MetricSource::Scip);
+    let measured = legacy_compatibility_projection(raw);
     LegacySubjectMeasurement {
         subject_ids,
         raw,
@@ -505,21 +524,24 @@ fn map_v2_measurement_failure(err: &MeasurementError) -> V2MeasurementFailure {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Construction-time gövde — **serde derives YOK**: persist/emit edilemez, yalnızca
-/// finalize edilebilir (alanlar `pub` — draft characterization testleri okur;
-/// invariant serde sınırıdır, görünürlük değil).
+/// finalize edilebilir.
 ///
-/// **EK review P1-1:** `Clone` bilinçli olarak YOK — consuming `finalize(self, ..)`
-/// "aynı draft iki farklı downstream ile finalize edilemez" invariant'ı yalnızca
-/// clone edilemezlik altında tip seviyesinde geçerli.
+/// **Construction boundary (EK review tur-2 P1):** alanlar **private** + read-only
+/// accessor'lar. Dış caller Draft'ı ne clone edebilir (`Clone` yok), ne literal
+/// construct edebilir (private alanlar), ne de component clone'layıp twin Draft
+/// üretebilir — yalnızca observer'ın ürettiği capability'yi consuming `finalize`
+/// ile tek kez tüketebilir. "Aynı draft iki farklı downstream ile finalize
+/// edilemez" invariant'ı böylece tip seviyesinde gerçek.
 #[derive(Debug)]
 pub struct SubjectAuthorityDriftObservationDraft {
-    pub task_id: TaskId,
-    pub claim_id: crate::witness::ClaimId,
-    pub v1: V1LaneObservationDraft,
-    pub v2: V2LaneOutcome,
+    task_id: TaskId,
+    claim_id: crate::witness::ClaimId,
+    v1: V1LaneObservationDraft,
+    v2: V2LaneOutcome,
 }
 
-/// Draft'in V1 lane gövdesi — final observation üretme capability'si yalnız
+/// Draft'in V1 lane gövdesi — read-only erişim `SubjectAuthorityDriftObservationDraft::
+/// v1()` accessor'ü üzerinden. Final observation üretme capability'si yalnız
 /// top-level Draft'ın consuming `finalize`'ındadır (bu tip tek başına finalize
 /// edilemez; Clone'u zararsız).
 #[derive(Debug, Clone)]
@@ -530,6 +552,26 @@ pub struct V1LaneObservationDraft {
 }
 
 impl SubjectAuthorityDriftObservationDraft {
+    /// Correlation accessor — parent task kimliği.
+    pub fn task_id(&self) -> TaskId {
+        self.task_id
+    }
+
+    /// Correlation accessor — parent claim kimliği.
+    pub fn claim_id(&self) -> crate::witness::ClaimId {
+        self.claim_id
+    }
+
+    /// Read-only V1 lane gövdesi (draft characterization testleri buradan okur).
+    pub fn v1(&self) -> &V1LaneObservationDraft {
+        &self.v1
+    }
+
+    /// Read-only V2 lane sonucu.
+    pub fn v2(&self) -> &V2LaneOutcome {
+        &self.v2
+    }
+
     /// Consuming finalize — aynı draft iki farklı downstream ile finalize edilemez
     /// (ownership taşınır). Yalnız bu yöntem serde'li final tipi üretir.
     pub fn finalize(self, downstream: V1DownstreamObservation) -> SubjectAuthorityDriftObservation {

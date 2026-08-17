@@ -195,19 +195,19 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
     );
 
     // Subject divergence — V1 ordered legacy union, V2 canonical.
-    assert_eq!(draft.v1.subject.ids, vec![1, 2, 3]);
-    let v2 = match &draft.v2 {
+    assert_eq!(draft.v1().subject.ids, vec![1, 2, 3]);
+    let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => {
             panic!("002 V2 lane must measure; got failure: {f:?}")
         }
     };
     assert_eq!(v2.subject.ids, vec![1]);
-    assert_ne!(draft.v1.subject.digest, v2.subject.digest);
+    assert_ne!(draft.v1().subject.digest, v2.subject.digest);
 
     // Raw divergence — PR #120 parity goldens (purity: raw(002)==raw(001)).
     assert_eq!(
-        draft.v1.raw.bits,
+        draft.v1().raw.bits,
         [
             4595172819793696085,
             4602678819172646912,
@@ -230,11 +230,11 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
     );
 
     // Provenance — V1 compatibility-projected uniform Scip; V2 engine-native.
-    assert_eq!(draft.v1.raw.sources, [MetricSource::Scip; 5]);
+    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
     assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
 
     // Q5 same-context divergence — #92 engine-unit goldens.
-    match &draft.v1.q5 {
+    match &draft.v1().q5 {
         LaneQ5Observation::Evaluated {
             theta_bits,
             verdict,
@@ -282,8 +282,8 @@ fn removed_edge_external_source_002_observation_cross_pinned_to_92_goldens() {
         &s.target,
     );
 
-    assert_eq!(draft.v1.subject.ids, vec![1, 9]);
-    let v2 = match &draft.v2 {
+    assert_eq!(draft.v1().subject.ids, vec![1, 9]);
+    let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => {
             panic!("removed-002 V2 lane must measure; got failure: {f:?}")
@@ -291,7 +291,7 @@ fn removed_edge_external_source_002_observation_cross_pinned_to_92_goldens() {
     };
     assert_eq!(v2.subject.ids, vec![1]);
 
-    match &draft.v1.q5 {
+    match &draft.v1().q5 {
         LaneQ5Observation::Evaluated { theta_bits, .. } => {
             assert_eq!(*theta_bits, 4594129220971291796, "V1 θ bits (≈0.13770)");
         }
@@ -335,13 +335,13 @@ fn wide_affected_scope_001_draft_characterization_and_non_surviving_drop() {
 
     // (a) Draft characterization — iki lane aynı NotEvaluated reason.
     assert_eq!(
-        draft.v1.q5,
+        draft.v1().q5,
         LaneQ5Observation::NotEvaluated {
             reason: Q5ObservationFailure::VisionAuthorityInsufficient,
         },
         "001 V1 Q5: GlobalDefault insufficient authority (pre-theta surface)"
     );
-    let v2 = match &draft.v2 {
+    let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => {
             panic!("001 V2 measurement itself must succeed (vision-independent): {f:?}")
@@ -468,25 +468,27 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
     );
 
     // Subject parity — digest'ler eşit (subject-authority drift YOK).
-    assert_eq!(draft.v1.subject.ids, vec![1]);
-    let v2 = match &draft.v2 {
+    assert_eq!(draft.v1().subject.ids, vec![1]);
+    let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => panic!("sentinel V2 must measure: {f:?}"),
     };
     assert_eq!(v2.subject.ids, vec![1]);
     assert_eq!(
-        draft.v1.subject.digest, v2.subject.digest,
+        draft.v1().subject.digest,
+        v2.subject.digest,
         "sentinel: subject parity — aynı digest"
     );
 
     // Raw parity — aynı subject üzerinden aynı ölçüm.
     assert_eq!(
-        draft.v1.raw.bits, v2.raw.bits,
+        draft.v1().raw.bits,
+        v2.raw.bits,
         "sentinel: raw bits parity — subject aynı, ölçüm aynı"
     );
 
     // Provenance divergent — V1 compatibility projection, V2 engine-native.
-    assert_eq!(draft.v1.raw.sources, [MetricSource::Scip; 5]);
+    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
     assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
 
     // Q5 her iki lane'de açık ve Passed (role-bearing node) — downstream karşılaştırılabilir.
@@ -634,14 +636,14 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
 
     // V2 lane fail-closed typed sınıflama (enum equality — string değil).
     assert_eq!(
-        draft.v2,
-        V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::SubjectScopeResolutionFailed {
+        draft.v2(),
+        &V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::SubjectScopeResolutionFailed {
             module: "core".to_string(),
         }),
         "Module scope → SubjectScopeResolutionFailed{{ModuleResolutionUnavailable}} (fail-closed)"
     );
     // V1 lane ölçülmüş ve healthy.
-    assert_eq!(draft.v1.subject.ids, vec![1]);
+    assert_eq!(draft.v1().subject.ids, vec![1]);
 
     // Authoritative lane bit-identical: aynı legacy raw, aynı commit sonucu şekli,
     // aynı engine state.
@@ -806,7 +808,7 @@ fn q6_rule_violation_finalizes_reached_but_unavailable() {
     );
 
     // Shadow lane: Q5 role-bearing node ile açık + trivially-satisfied predicate.
-    let v2 = match &draft.v2 {
+    let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => panic!("Q6 fixture V2 must measure: {f:?}"),
     };
