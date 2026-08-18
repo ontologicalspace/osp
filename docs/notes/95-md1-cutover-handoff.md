@@ -1,128 +1,137 @@
-# Handoff — #95 MD-1 Implementation (Subject-authority caller migration, Faz 8a)
+# Handoff — #95 MD-1 Faz 8a (Caller Cutover) — P2-1 MERGED sonrası
 
-**Tarih:** 2026-08-17
-**Önceki oturum:** clippy serisi (66→0 + CI hardening) → dogfooding → analyze edges → #92 characterization
-**Bu dosya:** Yeni oturumda #95 ile devam etmek için tüm bağlam.
+**Tarih:** 2026-08-18
+**Önceki oturumlar:** plan v1→v6 (5 review turu) → PR #122 (P2-1) → 3 EK PR review turu → merge `be79675`
+**Bu dosya:** Yeni oturumda #95 Faz 8a caller cutover ile devam etmek için tüm bağlam.
+(P2-1 öncesi dönem notları tarihçe için git geçmişinde: `354f85d`'teki ilk sürüm.)
 
 ## Oturum nasıl başlamalı
 
 Kullanıcı bu mesajı iletecek:
 
-> Handoff: #95 MD-1 (Faz 8a) ile devam ediyoruz.
+> Handoff: #95 MD-1 **Faz 8a** (caller cutover) ile devam ediyoruz.
 > Notlar: `docs/notes/95-md1-cutover-handoff.md` — önce onu oku, durum kontrolü yap, plan moduna gir.
 
-**İlk adımlar:** (1) bu dosyayı oku, (2) `git status` + `git log --oneline -5` ile main durumunu doğrula,
-(3) `gh issue view 95` ile issue'nun güncel halini gör, (4) plan moduna girip MD-1 planını hazırla.
+**İlk adımlar:** (1) bu dosyayı oku, (2) `git status` + `git log --oneline -5` (main `be79675`+
+olmalı), (3) `gh issue view 95` (OPEN — Faz 8a) + `gh issue view 96` (sıradaki),
+(4) plan moduna girip **Faz 8a cutover planını** hazırla (v6 §9 önizlemesi aşağıda).
 
 ## Mevcut durum (bu oturumun sonunda)
 
-- **Main:** `f05ed5a` (#120 merge) — tüm CI yeşil (fmt + clippy -D warnings gerçek gate, #116'dan beri)
-- **#92 CLOSED** (PR #120, 3 review turu): subject→raw→theta downstream karakterizasyonu tamamlandı
-  - Kanıt: `different subject → different raw + same context → different theta, AMA theta ≠ zorunlu verdict`
-  - Karar yüzeyi: `NoDrift` (Passed/Passed, Completed, Mainline, Held — exact snapshot pinli)
-- **Clippy:** workspace `--all-targets` tamamen temiz (PR #108/#112/#114/#115/#116 serisi)
-- **Dogfooding:** `docs/notes/dogfood-self-analysis.md` (PR #118) + analyze `edges` array (PR #119)
+- **P2-1 MERGED** — PR #122 (`be79675`, squash): `subject_authority.rs` + navigator/MCP
+  wiring + wire sidecar'ları + 15+ test. 6 review turu geçti (5 plan + 3 EK PR).
+- **#95 OPEN** — yalnız Faz 8a kaldı. **#99'e durum yorumu yazıldı** (MD-1 kısımları bitti;
+  `measure_task_delta_checked` Faz 8a'ya, MD-2 dual evaluation #96'ya devrolmalı).
+- **Kritik yol:** #95-B (Faz 8a) → #96 (MD-2) → #97 (MD-3) → #100 (engine cutover, BLOCKED).
+- **#110 MSRV** — ara iş, istenilen noktaya sıkıştırılabilir.
 
-## #95 MD-1 nedir (issue'dan özet)
+## Dogfood gözlem penceresi kanıtı (2026-08-18, mini)
 
-**Normative rule (accepted):** Task-bound measurement subject authority = `task.predicate.scope`
-(canonical). Caller-declared `affected_nodes` measurement authority DEĞİL; yalnız impact hint
-veya compatibility observation.
+Gerçek CLI akışı (`osp trajectory attempt`, gerçek analyze + navigator, mock LLM):
 
-### Implementation scope (issue'nun 2 parçası)
+**Run A — Completed (harness + auto-approve):** evidence kaydında `subject_authority_drift`
+sidecar canlı görüldü:
 
-**P2-1 (additive, Faz 5):**
-- Canonical task-derived subject üretimi (`measure_task_delta` zaten task scope kullanıyor)
-- Compatibility producer: legacy `affected_nodes` ölçen ayrı explicit producer (subject override DEĞİL)
-- `SubjectAuthorityDriftObservation`: V1/V2 subject digest + raw bits + theta + Q5 verdict + predicate
-  result + decision
-- P2-1 caller davranışı değişmez — additive observation
+```text
+v1: subject [2], sources [Scip×5] (compatibility projection), Q5 passed,
+    downstream Observed{Completed, AcceptAsCompleted}   ← authoritative, gerçek
+v2: subject [2] (digest PARITY), sources engine-native
+    [TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic],
+    Q5 passed (aynı theta bits), downstream NotCompleted/Reject
+    (SourceInsufficient — required_source=Scip karşılanamıyor)
+```
 
-**Faz 8a caller cutover:**
-- Caller migration: navigator/MCP `affected_nodes` → impact hint/telemetry (subject authority değil)
-- Compatibility yüzeyi kaldırma
-- Case 2/3 expected semantic-change regolden (eski golden + yeni golden + reason note)
-- Downstream Q5/predicate güncellemeleri
+**Bu, gerçek üretim akışında canlı MD-2 confound kanıtıdır:** subject ve θ parity
+olmasına rağmen downstream V1/V2 arasında diverge ediyor — neden provenance (MD-2),
+subject authority DEĞİL. Telemetri farkı doğru atfediyor. **Faz 8a planının en kritik
+girdisi budur:** cutover `required_source`'lu task'larda karar yüzeyini değiştirir;
+bu senaryo #96 (MD-2) ile koordinasyonu ve Case 2/3 regolden reason-note'larını
+zorunlu kılar.
 
-### Cutover acceptance criteria (#92 kanıtı SONRASI — karşılandı)
+**Run B — Held (production witness): BAŞARISIZ, tasarım gereği:** CLI
+`FilesystemPendingAuthorizationStore` (CrossProcess) + engine hâlâ `Ephemeral`
+space identity üretiyor (persisted identity lifecycle "Commit 4" — engine.rs:2283;
+INV-T9 #72 D3 kuralı fail-closed). **CLI'de Held yüzeyi bugün structurally kapalı**
+(bizim regresyonumuz değil; completed_loop'da da Held e2e testi yok). Held sidecar
+kapsamı: navigator unit testi (`md1_held_pending_authorization_…`) + MCP e2e
+(`md1_held_response_carries_drift_sidecar_additively`). Faz 8a planında bu kısıt
+not edilmeli (cutover Held testlemesi bu kısıt altında kalır).
 
-- Caller cutover sonrası yalnız task scope (Yol 2) mutation authority
-- Eski + yeni golden'lar tarihsel korunmuş
-- Q5/predicate/policy değişiklikleri sınıflandırılmış (drift türü: NoDrift / SourceLabelOnly /
-  PredicateResultDrift / PolicyDecisionDrift / MutationDecisionDrift)
-- Compatibility code tamamen kaldırılmış
-- **Tüm driftler açıklanabilir + subject-set farkına bağlanabilir; sessiz/tesadüfi context drift yok**
+## P2-1'den devralınan varlıklar (Faz 8a'da kullanılacak/kaldırılacak)
 
-## #92'den devralınan hazır varlıklar (MD-1'de kullanılacak)
+1. **`crates/osp-core/src/subject_authority.rs`** — MD-1 compatibility semantics'in tek evi:
+   - `derive_v1_legacy_measurement_subject` (ordered union; dual pinning)
+   - `produce_legacy_subject_measurement` → `LegacySubjectMeasurement` (private fields,
+     tek üretici) — **Faz 8a'da kaldırma hedefi**
+   - `legacy_compatibility_projection` (uniform-Scip; navigator bağımlılığı yok)
+   - `observe_subject_authority_drift` → `SubjectAuthorityDriftObservationDraft`
+     (private alanlar + accessor'lar + Clone'suz; consuming `finalize`) → final
+     `SubjectAuthorityDriftObservation` (serde'li, untrusted telemetry DTO)
+   - `v1_downstream_from_engine_commit_error` — 14 `EngineCommitError` varyantı explicit
+     (surviving: Syntax/Vision/RuleViolation; diğerleri None)
+   - Eligibility contract: comparison-surviving (Evaluated/Held/Rejected/retryable
+     Q4-Q6) → emit; TaskValidation/VisionContextInvalid/SystemFailure → yok
+2. **Taşıyıcılar:** `TrajectoryEvidence.subject_authority_drift`
+   (`#[serde(default)]`, untrusted/outbound telemetry — task identity kontrolü
+   consumer'a bırakılmış, doc'ta), `PendingAuthorization.subject_authority_drift`
+   (validate_internal identity-bound), `RevisionRequired.try_with_subject_authority_drift`
+   (checked builder). Digest preimage'lerine hiçbiri girmez.
+3. **Test envanteri:** `tests/subject_authority_drift_observation.rs` (8 — 002 θ
+   cross-pin'leri #92 golden'larıyla bit-exact), navigator md1 testleri (2),
+   authorization wire/identity testleri (3), MCP sidecar e2e (3: Held/Q4/Q6),
+   engine unit axis TCB (2), modül unit (8). Corpus'a case EKLENMEDİ.
+4. **Plan v6** — `docs/notes/faz8-p2-migration-decisions.md` "P2-1 implementation"
+   section'ı + invariants INV-T3 note güncel.
 
-1. **`derive_v1_legacy_measurement_subject(&proposal)`** (navigator.rs, pub(crate)) — V1 subject
-   tek truth. Kontrat: ordered legacy union (affected sırası korunur; unseen removed_edges.from
-   proposal sırasıyla append; HashSet/sort YOK — aggregation sırası rounding bitleri etkiler).
-   Dual pinning: navigator unit test + integration mirror bağımsız pinli.
+## Faz 8a planı için kapsam önizlemesi (plan v6 §9 — detay yeni plan turunda)
 
-2. **Frozen corpus 001+002 family'leri** (tests/data/faz8_p2_characterization, 18 case):
-   - 001: base (Q5 kapalı — GlobalDefault pre-theta reject)
-   - 002: izole role-bearing node (theta yüzeyi açık; `raw(002)==raw(001)` bit-exact — intervention
-     purity kanıtlı, `variant_002_raw_purity_matches_001_frozen_corpus` integration test'i)
+- Caller cutover: navigator/MCP ölçümü `measure_task_delta` tek authority'ya kesilir
+  (V1 producer + `compute_raw_from_delta` legacy yolu kaldırılır).
+- `affected_nodes` → impact hint/telemetry (measurement subject DEĞİL).
+- Compatibility yüzeyi kaldırma: producer'lar + `compute_raw_from_delta`/
+  `try_compute_raw_from_delta` + gözlemin V1 lane'i (#100 listesiyle hizala).
+- Case 2/3 expected semantic-change regolden — **eski golden + yeni golden + reason
+  note**; dogfood'taki MD-2 confound senaryosu reason-note malzemesi.
+- LLM prompt güncellemesi (affected_nodes advisory hint dili) + downstream
+  Q5/predicate güncellemeleri.
+- **#99'un `measure_task_delta_checked` public boundary'i bu plana devrolmalı.**
+- Dikkat: CLI Held/D3 kısıtı (yukarıda) + `#92` drift sınıflandırması
+  (NoDrift/SourceLabelOnly/PredicateResultDrift/PolicyDecisionDrift/MutationDecisionDrift).
 
-3. **`case_by_id(id)`** (tests/common) — uniqueness guard'lı resolution (0→panic, 2+→duplicate panic).
-   Class bazlı `.find()` KULLANMA (002 family'ler eklenince ambiguous).
+## Plan/PR dersleri (birikmiş — yeni turlarda uygula)
 
-4. **Exact downstream snapshot pattern'i** — `q92_assert_exact_downstream_snapshot` + `Option<DecisionDriftClass>`
-   (yalnız BothReached'te sınıflandır; stopped → None). Karar yüzeyi literal pinlenir, parity
-   türetilmez.
-
-5. **Corpus ritual:** builder yaz → `build_all_cases()` ekle →
-   `cargo test -p osp-core --test faz8_p2_manifest_bootstrap print_case_digests -- --nocapture`
-   (digest'ler) + `print_sidecar` (cases.blake3) → cases.json'a yapıştır + divergence_classes
-   açıklamalarını family-kapsayıcı güncelle → guard testler yeşil olmalı.
-
-6. **Engine-unit Q5 yardımcıları** (engine.rs #[cfg(test)] Q5 section):
-   `observe_q5_theta`, `q92_observe_divergent_pair` (gerçek DeltaProposal →
-   build_claim_from_proposal → node_from_spec production yolu!), `q92_assert_context_identity`
-   (effective_vision_bits DAHİL), `q92_001_raws`.
-
-7. **#92 kanıt değerleri** (docs/notes/faz8-p2-parity-characterization.md #92 section):
-   wide θ 0.15249/0.11711, removed θ 0.13770/0.11711, Passed/Passed, karar NoDrift.
-
-## MD-1 planında dikkat edilecekler (önceki oturumların review dersleri)
-
-- **Plan review disiplini yüksek:** Bu projede planlar 3-5 review turu geçiyor. MD-1 planını
-  v1'den başlat, kullanıcı review'ları paste'liyor. Bilinen hassas noktalar:
-  - "production kod değişikliği yok" vs helper paylaşımı çelişkisi → "production SEMANTIC
-    değişikliği yok" de; refactor'ları açıkça işaretle
-  - Elle fixture/subject sabiti YAZMA — production helper'dan türet
-  - Exact snapshot dondur; "eşitlik" assert etme (NotCompleted==NotCompleted tuzağı)
-  - `Option<...>` sınıflandırma: ulaşılmayan yüzeyi sınıflandırma
-  - Debug-string equality değil enum equality
-  - Doğrulama komutlarında `||` fallback / `2>/dev/null` YOK (failure masking)
-  - Corpus'a case eklerken: ID bazlı resolve, class find değil
-- **`evaluate_v2_candidate_case` subject observation'ı** (tests/common) heterogeneous/Module
-  scope'ları sessiz düzleştirir — Node/Subgraph fixture'ları kullan, Module scope'dan kaçın.
-- **CI komutu:** `cargo clippy --locked --workspace --all-targets --all-features --exclude osp-desktop -- -D warnings`
-- **`index.scip`** (16.4 MB dogfooding SCIP index'i) repo kökünde lokal olarak durabilir —
-  .gitignore'da zaten. Yeniden üretmek: rust-toolchain.toml'u geçici taşı +
-  `MSYS_NO_PATHCONV=1 docker run --rm -v "P:/Work/SoftwarePhysics:/repo" -w /repo
-  sourcegraph/scip-rust:latest scip-rust --output /repo/index.scip` + pin'i geri getir.
+- **Conventional-commit + issue ref TUZAĞI (bu oturumda yakalandı):** `fix(core,mcp): #95 …`
+  squash merge'de GitHub tarafından `fix #95` closing keyword'ü yorumlandı → #95
+  yanlışlıkla kapandı (yeniden açıldı). **Kural:** issue referansından önce scope
+  parantezi KULLANMA — `feat: #95 …` güvenli, `feat(core): #95 …` değil.
+- Plan disiplini: 3-5 review turu normal; "production SEMANTIC değişikliği yok" de,
+  refactor'ları işaretle; elle fixture sabiti YAZMA (probe-then-freeze); exact
+  snapshot dondur; `Option` sınıflandırması yalnız ulaşilan yüzeyde; enum equality
+  (debug-string değil); doğrulama komutlarında `||`/`2>/dev/null` YOK.
+- Corpus'a case eklerken ID-bazlı `case_by_id`; class find DEĞİL.
+- Sentinel testleri: corpus'un `direct-*` case'lerinde role-bearing node yok → Q5
+  NotEvaluated → downstream quadruple erişilemez; inline fixture gerekçesiyle
+  yazıldı (aynı gerekçe Faz 8a testlerinde de geçerli olabilir).
+- GitHub PR yazarı kendi PR'ını onaylayamaz — onay metni PR yorumu olarak kaydedildi.
+- `index.scip` (16.4 MB) repo kökünde lokal; yeniden üretim: rust-toolchain.toml'u
+  geçici taşı + `MSYS_NO_PATHCONV=1 docker run --rm -v "P:/Work/SoftwarePhysics:/repo"
+  -w /repo sourcegraph/scip-rust:latest scip-rust --output /repo/index.scip`.
 
 ## Ortam notları (Windows)
 
-- Shell her sıfırlanmada `export PATH="$HOME/.cargo/bin:$PATH"` gerekebilir (cargo bulunamıyor hatası)
-- `grep` ZCode function'ı — `-oE` çakışıyor; `command grep` kullan veya awk
-- `python` yok; JSON analizi için `node -e` kullan (C:/Users/ervol/AppData/Local/Temp path'leri
-  Windows formatında ver)
-- Kullanıcının untracked kişisel notları var (docs/notes/planlama-tasarım-eskiz.txt, proje-adaylari.md,
-  sohbet-konu.txt, docs/osp-*.md, docs/design/, crates/osp-analyzer/tests/declaration_policy_characterization.rs,
-  crates/osp-desktop/gen/) — **ASLA `git add -A` kullanma; her zaman dosya bazlı add**
-  (bu oturumda bir kere yanlışlıkla eklendi, soft reset ile kurtarıldı)
+- Shell her sıfırlanmada `export PATH="$HOME/.cargo/bin:$PATH"` gerekebilir.
+- `grep` ZCode function'ı — `command grep` kullan.
+- `python` yok; JSON için `node -e` (temp path'ler `C:/Users/ervol/...` formatında).
+- **ASLA `git add -A`** — kullanıcı untracked kişisel notları var
+  (`docs/notes/planlama-tasarım-eskiz.txt`, `proje-adaylari.md`, `sohbet-konu.txt`,
+  `docs/osp-*.md`, `docs/design/`, `dump.scip`, `crates/osp-desktop/gen/`).
+- Dogfood temp fixture: `C:/Users/ervol/AppData/Local/Temp/osp-md1-dogfood/`
+  (silinmeye hazır; task/proposal/repo şablonları `crates/osp-cli/tests/completed_loop.rs`
+  mirror'idir).
 
-## Sıradaki iş önerisi (yeni oturumda)
+## Sıradaki iş önerisi
 
-1. **#95 MD-1** — P2-1 additive observation ile başla (SubjectAuthorityDriftObservation),
-   sonra Faz 8a caller cutover. Bağlı: #96 (MD-2) #95 sonrası, #100/#99/#103 #96 sonrası.
-2. Alternatif küçük iş: #110 MSRV (tech-debt; incompatible_msrv allow'ları buna bağlı)
-
-## Açık issue snapshot (2026-08-17)
-
-#95 (MD-1, sıradaki), #96 (MD-2), #97 (MD-3), #99, #100, #103, #110 (MSRV),
-#72-#79 (INV-T9 ileri tasarım), #86, #89 (karakterizasyon backlog'ları)
+1. **#95 Faz 8a caller cutover** — bu handoff ile yeni plandan başlanmalı (yukarıdaki
+   önizleme + #100 scope'u ile hizala).
+2. Sonra #96 (MD-2) — dogfood MD-2 confound kanıtı bu işin characterization input'u.
+3. Ara iş: #110 MSRV.
