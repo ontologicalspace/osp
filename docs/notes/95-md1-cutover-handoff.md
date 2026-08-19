@@ -1,215 +1,166 @@
-# Handoff — Faz 8a düzeltilmiş sıra: #96 ÖNCE (plan v5 approved)
+# Handoff — Faz 8a düzeltilmiş sıra: #96 ÖNCE (#96 detay planı v4-FİNAL APPROVED)
 
-**Tarih:** 2026-08-18 (oturum 2: Faz 8a orchestration planı v1→v5, 4 review turu, APPROVED)
+**Tarih:** 2026-08-18 (oturum 2: Faz 8a orchestration v1→v5 [4 tur] + #96 detay planı v1→v4 [4 tur, son tur APPROVE 9.8/10])
 **Önceki oturumlar:** plan v1→v6 (5 tur) → PR #122 (P2-1, `be79675`) → handoff #123 (`f003a17`)
-**Bu dosya:** Faz 8a sıralaması düzeltildi + plan v5 sözleşmeleri. Yeni oturum **#96 MD-2
-detay plan turu** ile başlamalı. (Tarihçe: `f003a17`'teki önceki sürüm — git geçmişinde.)
+**Bu dosya:** Faz 8a sıralaması düzeltildi + #96 detay planı **v4-FİNAL APPROVED**. Yeni oturum
+**#96 implementation** ile başlamalı. (Tarihçe: `f003a17` ilk sürüm — git geçmişinde.)
 
 ## Oturum nasıl başlamalı
 
 Kullanıcı bu mesajı iletecek:
 
-> Handoff: **#96 MD-2 detay plan turu** ile devam ediyoruz (Faz 8a sıralaması düzeltildi).
-> Notlar: `docs/notes/95-md1-cutover-handoff.md` — önce oku, durum kontrolü yap, plan moduna gir.
+> Handoff: **#96 MD-2 implementation** ile devam ediyoruz (detay planı v4-FİNAL APPROVED).
+> Notlar: `docs/notes/95-md1-cutover-handoff.md` — önce oku, durum kontrolü yap.
 
 **İlk adımlar:** (1) bu dosyayı oku, (2) `git status` + `git log --oneline -5`,
-(3) `gh issue view 96` (+ `--comments`: supersession kaydı + #103 subtask digest incident),
-(4) plan modunda **#96 D-A/D-C/D-E + reference-lane detay planı** hazırla (kanıt tabanı
-aşağıda + `docs/notes/faz8-p2-migration-decisions.md` MD-2 section).
+(3) `gh issue view 96` (+ `--comments`: v4 kontrat comment'i) + `gh issue view 103`,
+(4) implementation branch aç (commit formatı `feat: #96 …` — scope parens YOK), W1'den başla.
 
 ## Mevcut durum
 
-- **P2-1 merged** (`be79675`): `subject_authority.rs` additive compatibility observation +
-  navigator/MCP wiring + wire sidecar'ları + testler. **#95 OPEN** (Faz 8a, #96 sonrasına).
-- **Faz 8a orchestration planı v5 APPROVED** (4 review turu): sıralama düzeltildi —
-  **#95→#96 DEĞİL, #96→#95**. Gerekçe: canonical migration decision MD-2'yi "engine-internal,
-  Faz 8a öncesi" tanımlıyor; authority order: decision note > issue/handoff. Önceki
-  handoff'un kritik yol satırı bu gerekçeyle düzeltildi.
-- **#96 OPEN** (MD-2 provenance authority) — sıradaki iş: detay plan turu (D-A/D-C/D-E).
-  **#103** (digest parity subtask) OPEN, #96'nın girdisi. **#88** CLOSED (kanıt hazır).
+- **P2-1 merged** (`be79675`): `subject_authority.rs` additive observation + wiring + testler.
+- **#95 OPEN** (Faz 8a, #96 sonrasına). **#96 OPEN** — detay planı v4-FİNAL APPROVED; sıradaki
+  iş **implementation**. **#103** supersession/transferred kaydı ile kapanır. **#88** CLOSED.
+- **Faz 8a orchestration v5** (4 review turu) düzeltilmiş sıra: `#96 → #95-A → #95-B → #97 → #100`
+  (canonical decision doc: MD-2 "engine-internal, Faz 8a öncesi"; authority order: decision note >
+  issue/handoff). Her PR yalnız **bir epistemik authority eksenini** değiştirir:
+  #96 subject=affected_nodes (sabit) + provenance=native (değişir); #95-A subject=task scope
+  (değişir) + provenance=sabit; #95-B MD-1 cleanup; #97 baseline/loss; #100 V2 algebra + fiziksel.
 
-## Onaylı sıra (plan v5)
-
-```
-#96   provenance authority değişir (subject aynı, baseline/loss aynı)
-#95-A subject authority değişir    (provenance aynı, baseline/loss aynı)
-#95-B yalnız MD-1 gözlem/compat yüzeyi silinir
-#97   baseline/loss semantic policy değişir
-#100  V2 decision algebra + smart ctor/legacy field + fiziksel cleanup
-```
-
-Her PR yalnız **bir epistemik authority eksenini** değiştirir → bir golden değiştiğinde
-nedeni söylenebilir (subject mi, provenance mı, baseline mı — karışmaz).
-
-## Plan v5'in dondurulmuş sözleşmeleri
-
-1. **#96 yalnız `measured → measurement` authority migration.** `TaskCommitInput`
-   `{ claim, omega, task_resolver, measurement: EngineMeasurement, target, loss_before }` —
-   target/loss_before KALIR (semantik authority #97; **fiziksel** removal #100 — #97'ye
-   önceden atanmaz: #97 baseline/policy issue'su, #100 smart ctor + legacy field cleanup
-   scope'unda tutuyor).
-2. **Q4 structural/raw ayrımı (#95-A):** `check_claim_syntax` = `check_claim_structure` +
-   `check_raw_position_finite(computed_raw)`. Shared boundary: probe Claim → **Q4
-   structural** → task binding → `Task::validate_for_commit` → revision →
-   `measure_task_delta` → **Q4 final-raw finite** → final Claim → `commit_task_claim`
-   (structural + final-raw defensive repeat; Q5→Predicate→Q6→witness değişmez).
-   Structural Q4 → measurement sırası KORUNUR. Yarış acceptance testi (navigator + MCP):
-   structural-Q4-invalid proposal + measurement-failing task aynı fixture'ta → sonuç
-   daima `SyntaxViolation`, measurement error asla gözlemlenmez.
-3. **MeasurementFailureDisposition matrisi (17 varyant exact, wildcard YOK):**
-   `ClaimNotTaskBound`/`TaskBindingMismatch` → TerminalIdentityViolation;
-   `HeterogeneousPredicateScopes`/`EmptySubjectScope`/`SubjectScopeResolutionFailed`/
-   `SubjectMemberUnresolvable` → TerminalTaskDeclaration (agent `NewNodeSpec`'te ID seçemez
-   — builder `10_000+index` atar); **geri kalan 10 varyant → SystemFailure** (`RevisionMismatch`
-   dahil: atomik baseline-refresh kontratı (rev+baseline+loss_before-context+same
-   proposal+bounded) tasarlanmadan RegenerateMeasurement YOK; `MeasurementContextDrift` =
-   interior-mutability/TCB instability; `Digest(_)` fail-closed — StructuralCanonicalization
-   hem agent-delta hem task-scope kaynaklı üretebiliyor, `detail:String` ayıramaz, **string
-   parsing YASAK**, typed `StructuralCanonicalizationOrigin` sonrası agent-shape arm'ı
-   unlock; `SubjectMemberMissingAfterDelta`: grammar'da node silme yok). *
-   `RetryAgentProposal` + `RegenerateMeasurement` bugün üreticisiz — vocabulary olarak
-   kalır (repo prejededi: `DecisionDriftClass`); unlock koşulları tabloda belgeli.
-4. **CLI iki-eksen vocabulary:** `subject_authority` ("affected_nodes" → #95-A'da
-   `"task_scope"`) + `provenance_authority` (#96'da `"engine_native_per_axis"`) +
-   `provenance_native` (#96'da `true`). Eski `authority` alanı deprecated alias —
-   **yalnız `provenance_authority`'yi mirror eder** (pre-#96 `legacy_projected_v1` →
-   post-#96…#100 `engine_native_per_axis`; **#95-A değerine dokunmaz**). #100'e kadar kalır.
-5. **MD-2 reference lane:** aynı `EngineMeasurement` token — native `after()` = mutation
-   authority; **aynı değerlerin** uniform-Scip projection = MD-2 reference telemetry
-   (`LegacySubjectMeasurement`'dan bağımsız; projection fonksiyonu MD-2 observation modülüne
-   taşınır). #95-A task-scope'a geçince reference lane otomatik yeni subject'i izler; #95-B
-   MD-1 modülünü güvenle siler. Fiziksel kaldırma #100. (#96 supersession kaydı issue'ya
-   yazıldı + body sync edildi.)
-6. **Wire üç-epoch sözleşme (#95-B):** typed `TransientMigrationEpochRejected` **yalnız
-   durable wires**: `PendingAuthorization` + `RevisionRequired` (presence-aware custom
-   Deserialize; missing-vs-null ayrımı; `"subject_authority_drift": null` VE dolu
-   observation şekilleri ikisi de typed reject; generic unknown-field DEĞİL — migration-epoch
-   mesajı). `TrajectoryEvidence` kapsam DIŞI — outbound/untrusted telemetry; alan silindikten
-   sonra transient `null` unknown-field olarak sessizce tolere edilir (bilinçli, dokümante).
-   **Epoch guard:** garanti yalnız P2-1 hiçbir durable release boundary'ye girmemişken
-   geçerli; release/tag/gerçek persisted deployment oluşursa **#95-B'den ÖNCE migration
-   reader** gerekir.
-7. **#99 kapanış ledger'ı:** MD-1 compatibility producer → **#122 delivered**; MD-2 dual
-   evaluation → **#96 transferred**; checked boundary → **#95-A delivered** → #99 complete.
-   (Ön-ledger comment'i issue'ya yazıldı.)
-8. **#95-A kaynar noktaları:** `loss_before` init (navigator.rs:631) + progress update
-   (:1132) DOKUNULMAZ; `measured = token.after()` native (#96 sonrası meşru — bridge YOK);
-   `build_claim_from_proposal` → `measurement/task_measurement.rs` neutral evi (MCP→navigator
-   bağımlılığı dönmesin); `OutputContract.validate` navigator-only agent-shell preflight
-   (MCP'ye preflight eklenmez); checked boundary typed carrier `CheckedTaskMeasurement`;
-   `affected_nodes` şemada kalır, prompt dili advisory.
-
-## #96 kanıt tabanı (bu oturumda toplandı)
-
-- **#88 CLOSED** (mixed_per_axis_sources matrisi frozen); PR #85 2/5 required_source
-  divergence; dogfood Run A canlı confound (aşağıda).
-- **#103 digest incident:** `AuthorizationBasisDigest` mismatch FilesystemStore reload
-  (`authorization.rs:8253` `BasisDigestMismatch`; `inv_t9_72_held_production_path_exact`
-  navigator.rs:3226 — `ProcessLocalFilesystemTestStore` reload zinciri). Kök neden:
-  `TaskCommitInput` legacy ↔ `EngineMeasurement` native **yarı-birleşik** authority
-  modelleri → persistence wire divergence. Çözüm: **atomik** `measured → measurement`
-  migration + native basis + persistence wire version + reload verification. Başarısız
-  deneme: unmerged `faz8-test-project/completed-loop` branch'i (revert `021bd5f`+`1e0f590`).
-- **Hazır scaffolding:** `persist_v2`/`load_versioned` (authorization.rs:8886-8915) +
-  `AuthorizationBasisV2` (:2730) + `gate_v2::compute_completion_first_loss_and_decision` —
-  hepsi `#[allow(dead_code, "Faz 8a navigator consumer")]`.
-- **measured'nin commit etkileri:** (a) `evaluate_completion` source-decisive (INV-T4:
-  SourceInsufficient → her zaman Reject), (b) `AuthorizationBasis.measured_result`
-  per-axis value+source digest preimage (`authorization.rs:3433-3439`); loss/evidence
-  value-only (etkilenmez).
-- **D-A (tasarım sorusu):** legacy-subject native producer — `measured_centroid_of`
-  `pub(crate)`+generic (engine.rs:2745, space+member_ids); `try_compute_raw_from_delta`
-  native ölçüp source'ları `to_raw()` ile ATIOR; public native yüzey şekli VEYA
-  EngineMeasurement'ın legacy-subject üretimi; `EngineMeasurement::new` single-producer
-  kontratının genelleşmesi (`tests/engine_measurement_single_producer.rs`). **#96 subject
-  DEĞİŞTIREMEZ** (izolasyon #96 içinde de geçerli).
-- **D-C:** #103 checklist 6 madde (native→Held→persist→reload exact digest parity; 5-axis
-  bits/sources exact; value/source tamper fail-closed ×2; Null/Filesystem aynı digest) +
-  `AuthorizationBasisV2`/`persist_v2` wiring.
-- **D-D:** iki-eksen CLI envelope (Bölüm "sözleşmeler" madde 4) + `run_navigator`
-  hardcoded `current_measured` (commands/mod.rs:763-772) → engine-derived.
-- **D-E:** singleton centroid fast-path ULP notu (V1 authorization digest'i etkiledi —
-  dikkat; `measured_centroid_in_session`'a geri ekleme fence'i).
-- **Beyan:** #96'nın expected semantic change'i = required_source karar flip'leri (frozen
-  matrislerle birebir: Scip-required → SourceInsufficient→Reject; TreeSitter-required →
-  Completed).
-
-## Dogfood gözlem penceresi kanıtı (2026-08-18, mini — #96'nın kritik girdisi)
-
-Gerçek CLI akışı (`osp trajectory attempt`, gerçek analyze + navigator, mock LLM):
-
-**Run A — Completed (harness + auto-approve):** evidence kaydında `subject_authority_drift`
-sidecar canlı görüldü:
+## #96 v4-FİNAL authority zinciri (onaylı — implementasyon bu şekle)
 
 ```text
-v1: subject [2], sources [Scip×5] (compatibility projection), Q5 passed,
-    downstream Observed{Completed, AcceptAsCompleted}   ← authoritative, gerçek
-v2: subject [2] (digest PARITY), sources engine-native
-    [TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic],
-    Q5 passed (aynı theta bits), downstream NotCompleted/Reject
-    (SourceInsufficient — required_source=Scip karşılanamıyor)
+DeltaProposal
+  → StructurallyValidatedClaimDraft::try_new        (pub osp-core; probe Claim + Q4 STRUCTURAL tek adımda;
+                                                     claim_id tek inkrement; MCP kopyalamaz — tek truth)
+  → engine derives legacy subject INTERNALLY        (derive_v1_legacy_measurement_subject(proposal);
+                                                     serbest Vec<NodeId> parametresi YOK)
+  → BoundMeasurementSession (TEK session; begin atomik capture: descriptors→MeasurementInputDigest
+                             VE epochs→CoreAxisEpochStamp; measurement SONRASI CoordinateSystem
+                             yeniden dolaşılmaz — ikinci observation TOCTOU açar)
+      ├─ native legacy-subject measurement → authority token
+      ├─ MD-1 task-scope shadow material            (geçici köprü; #95-B'de silinir)
+      └─ final verify_unchanged
+  → NativeLegacySubjectMeasurement (opaque; ctor YALNIZ SpaceEngine)
+      { measured, legacy_subject_ids, delta_digest: MeasurementDeltaDigest (mevcut tek
+        canonicalization truth), base_revision, measurement_input_digest, axis_epoch_stamp }
+      — raw() = measured.to_raw() (bağımsız alan DEĞİL; SAME value bits = construction property)
+  → draft.finalize(&token)                          (yalnız computed_raw/Intent enjekte;
+                                                     structural + claim_id aynı object — TOCTOU kapalı)
+  → Q4 FINAL-RAW finite validation
+  → commit_task_claim → verify_native_legacy_measurement_binding (5 kontrol: delta digest,
+     computed_raw bits, current SpaceViewRevision, current descriptors, current axis epochs —
+     A→B→A ABA fence) → VerifiedNativeLegacyMeasurementBinding (private proof; "stale replay
+     fence" — aynı context'te meşru resubmit [Held+witness] engellenmez; "cannot be replayed"
+     dili KULLANILMAZ) → Q5 → PredicateGate → Q6 → AuthorizationBasis V1 (revision/context/
+     measured_result PROOF'TAN okunur — yeniden okumaz)
 ```
 
-**Bu, gerçek üretim akışında canlı MD-2 confound kanıtıdır:** subject ve θ parity
-olmasına rağmen downstream V1/V2 arasında diverge ediyor — neden provenance (MD-2),
-subject authority DEĞİL. #96'nın expected semantic change beyanının doğrudan malzemesi.
+**Error funnel (paralel ontology YOK):** mevcut `MeasurementBindingMismatch` varyantları reuse
+(StructuralDeltaMismatch/RevisionMismatch/CurrentContextMismatch) + YENİ `RawMismatch` +
+`AxisEpochMismatch`; verifier `MeasurementBindingVerificationError::Mismatch(…)` üretir; tek funnel
+`EngineCommitError::MeasurementBindingVerification(…)`. Navigator: → SystemFailure | budget yok |
+LLM retry yok. `LegacySubjectMismatch` EKLENMEZ (token legacy_subject_ids = audited measurement
+subject, canonical task authority DEĞİL — #96 sınırı).
 
-**Run B — Held (production witness): BAŞARISIZ, tasarım gereği:** CLI
-`FilesystemPendingAuthorizationStore` (CrossProcess) + engine hâlâ `Ephemeral`
-space identity üretiyor (persisted identity lifecycle "Commit 4" — engine.rs:2283;
-INV-T9 #72 D3 kuralı fail-closed). **CLI'de Held yüzeyi bugün structurally kapalı**
-(bizim regresyonumuz değil; completed_loop'da da Held e2e testi yok). Held kapsamı:
-navigator unit (`inv_t9_72_held_production_path_exact` — #96'nın digest-parity testi de
-bu yüzeyde) + MCP e2e.
+## #96 beyan (fixture-scoped)
 
-## P2-1'den devralınan varlıklar
+1. **Provenance authority (EXPECTED):** frozen #88/#85 + dogfood Run A'daki beklenen flip'ler
+   (Scip-required + native non-Scip axis → SourceInsufficient→Reject; matching TreeSitter-required
+   → numeric evaluation, fixture'da Completed). Genel teorem değil.
+2. **Subject DEĞİŞMEZ** (ordered legacy union, engine-internal derivation).
+3. **Baseline/loss DEĞİŞMEZ** (running scalar; CLI/MCP bootstrap seed'leri değer+Scip tag ile sabit;
+   MCP `current_measured()` loss_before hesaplar = gate girdisi).
+4. **ULP value parity (EXPECTED):** computed_raw session-bound native; 1-ULP farkları
+   reason-note'lu regolden. Half-merge YASAK.
 
-1. **`crates/osp-core/src/subject_authority.rs`** — MD-1 compatibility semantics (observer,
-   producer üçlüsü, eligibility, `v1_downstream_from_engine_commit_error`). #95-B'de
-   tamamen silinir; uniform-Scip projection kısmı #96'da MD-2 reference modülüne taşınır.
-2. **Taşıyıcılar:** `TrajectoryEvidence.subject_authority_drift` (outbound telemetry),
-   `PendingAuthorization.subject_authority_drift` (identity-bound), 
-   `RevisionRequired.try_with_subject_authority_drift`. Digest preimage'lerine girmez.
-3. **Test envanteri:** `tests/subject_authority_drift_observation.rs` (8), navigator md1
-   (2), authorization wire/identity (3), MCP sidecar e2e (3), engine axis TCB (2 — #95-B'de
-   `measure_task_delta`'ya re-anchor), modül unit (8). Corpus'a case eklenmedi.
+## #96 implementation checklist (W1-W9; P1/P2'ler dahil)
 
-## Plan/PR dersleri (birikmiş — uygula)
+- **W1:** `NativeAttemptMeasurement { authority, md1_shadow }` +
+  `measure_attempt_native_with_md1_shadow(draft, proposal)` (tek session); `BoundMeasurementSession`
+  `axis_epochs()`/`captured_axis_state()` accessor (atomik capture'dan); `measure_subject_in_session`
+  pub(crate); singleton fast-path `measured_centroid_in_session`'a geri + `021bd5f`'ten recovered
+  test; `try_compute_raw_from_delta`/`compute_raw_from_delta` refactor EDİLMEZ; md1_shadow cross-pin
+  (bits+sources == mevcut `measure_task_delta().after()` stable fixture'ta).
+- **W2/W3:** navigator/MCP cutover (ordering yukarıda); 17-varyant disposition tablosu LITERAL
+  (RevisionMismatch/MeasurementContextDrift → SystemFailure; Digest(_) fail-closed; string parsing
+  YASAK); `TaskCommitInput::new(...)` private fields (`measured` → `measurement: &token`;
+  target/loss_before KALIR); MD-1 observer saf fonksiyon (NativeAttemptMeasurement material'i);
+  yarış testi (nav+MCP): structural-Q4-invalid + measurement-failing → daima SyntaxViolation.
+- **W4:** verification + proof + basis proof-sourcing + Q4 helper extraction + error funnel.
+- **W5:** `provenance_authority.rs` — ProvenanceAuthorityDriftObservation (SAME subject/value bits;
+  native=authority vs uniform-Scip=reference; üç-durum eligibility: structural-Q4 reject →
+  observation YOK [precedence correction]; Q5 violated → NotReached; Predicate+Q6 fail →
+  ReachedButUnavailable; Evaluated/Held/Rejected → Observed; `Q4SyntaxRejection` arm'ı YOK);
+  sidecar'lar additive + digest DIŞI + identity binding iki durable wire'da;
+  `legacy_compatibility_projection` reference-only buraya taşınır.
+- **W6:** V1-basis persistence parity (`inv_t9_72_held_production_path_exact` native akışta +
+  reload bits/sources + tamper ×2 + Null/Filesystem aynı digest + basis↔token cross-pin'leri +
+  negatif stale/context/**ABA epoch** testleri). Process-independent reload #100'de.
+- **W7:** CLI iki-eksen envelope (`subject_authority: "affected_nodes"`,
+  `provenance_authority: "engine_native_per_axis"`, `provenance_native: true`, `authority` alias =
+  provenance mirror) + banner; bootstrap seed DOKUNULMAZ; completed_loop: before pin'leri sabit,
+  post-measurement pin'leri probe-then-freeze (1-ULP ancak reason-note ile).
+- **W8:** regolden + yeni testler (yarış, construction contract, cross-pin, binding 5 mismatch,
+  singleton, disposition exhaustiveness, MD-2 mirror envanteri). Reason-note: "provenance-driven
+  (MD-2) — frozen #88/#85 + dogfood Run A; subject-set etkisi YOK".
+- **W9:** docs/issues (#96 kapanış `feat: #96 …`; #103 transferred; #100 absorbe; INV-T4;
+  migration-decisions; handoff refresh — #95-A sıradaki).
 
-- **Conventional-commit + issue ref TUZAĞI:** issue referansından önce scope parantezi
-  KULLANMA — `feat: #95 …` güvenli, `feat(core): #95 …` değil (squash merge'de closing
-  keyword olarak yorumlanıyor; #95 yanlışlıkla kapanmıştı).
-- Plan disiplini: 3-5 review turu normal; production SEMANTIC değişikliği yoksa açıkça
-  söyle; refactor'ları işaretle; elle fixture sabiti YAZMA (probe-then-freeze); exact
-  snapshot dondur; enum equality (debug-string değil); doğrulama komutlarında
-  `||`/`2>/dev/null` YOK.
-- CI parity ritual (exact): `cargo fmt --all -- --check`; `cargo clippy --locked
-  --workspace --all-targets --all-features --exclude osp-desktop -- -D warnings`;
-  `cargo test --locked --workspace --all-features --exclude osp-desktop`; + targeted
-  suites (`-p osp-core`, `-p osp-mcp`, `-p osp-cli --test completed_loop`).
-- Corpus'a case eklerken ID-bazlı `case_by_id`; class find DEĞİL.
-- GitHub PR yazarı kendi PR'ını onaylayamaz.
-- `index.scip` (16.4 MB) repo kökünde lokal; yeniden üretim: rust-toolchain.toml'u geçici
-  taşı + `MSYS_NO_PATHCONV=1 docker run --rm -v "P:/Work/SoftwarePhysics:/repo" -w /repo
-  sourcegraph/scip-rust:latest scip-rust --output /repo/index.scip`.
+## #96 kanıt tabanı (plan turlarından)
+
+- **#103 digest incident:** `AuthorizationBasisDigest` mismatch FilesystemStore reload
+  (`authorization.rs:8253`); kök neden: yarı-birleşik authority modelleri (deneme MD-1+MD-2
+  birleşikti — navigator `measure_task_delta` kullanmıştı = subject değişimi). Doğru #96 subject'i
+  sabit tutar; navigator `measure_task_delta` ÇAĞIRMAZ. Başarısız deneme commit'leri: `021bd5f`
+  (singleton fast-path — recovered edilecek) + revert `1e0f590`; navigator migration hiç commit
+  edilmedi (working tree temizlendi).
+- **V2 zinciri dead-code scaffolding** (`AuthorizationBasisV2`/`persist_v2`/`load_versioned`/
+  `gate_v2`/`verify_measurement_binding`) → tamamı **#100'e** (EngineMeasurement task-scope token +
+  smart ctor + V2 algebra). #96 bunlara DOKUNMAZ.
+- **measured'nin commit etkileri:** `evaluate_completion` source-decisive (INV-T4);
+  `AuthorizationBasis.measured_result` per-axis value+source digest preimage; loss/evidence
+  value-only.
+- **Public `TaskCommitInput.measured` forge edilebilirliği** → opaque token + private fields çözer
+  (engine.rs:102-107'nin öngördüğü smart-ctor adımının #96 payı; #100 tamamlar).
+
+## Dogfood gözlem penceresi kanıtı (2026-08-18 — #96'nın kritik girdisi)
+
+Gerçek CLI akışı (`osp trajectory attempt`, gerçek analyze + navigator, mock LLM). **Run A —
+Completed:** `subject_authority_drift` sidecar canlı: v1 subject [2], sources [Scip×5] (compat
+projection), Q5 passed, downstream Observed{Completed, AcceptAsCompleted}; v2 subject [2] (digest
+PARITY), sources engine-native [TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic], Q5
+passed (aynı theta bits), downstream NotCompleted/Reject (SourceInsufficient — required_source=Scip).
+**Canlı MD-2 confound kanıtı:** subject+θ parity'ye rağmen downstream diverge — neden provenance.
+#96'nın expected semantic change beyanının doğrudan malzemesi. **Run B — Held:** D3/Commit-4
+kısıtı (Ephemeral space identity + CrossProcess store) — CLI Held yüzeyi yapısal kapalı; parity
+testleri `ProcessLocalFilesystemTestStore` üzerinde.
+
+## Plan/PR dersleri (uygula)
+
+- Conventional-commit tuzağı: issue ref'ten önce scope parens YOK (`feat: #96 …` güvenli).
+- Probe-then-freeze; elle fixture sabiti YAZMA; exact snapshot dondur; enum equality;
+  doğrulamada `||`/`2>/dev/null` YOK.
+- CI parity ritual (exact): `cargo fmt --all -- --check`; `cargo clippy --locked --workspace
+  --all-targets --all-features --exclude osp-desktop -- -D warnings`; `cargo test --locked
+  --workspace --all-features --exclude osp-desktop`; + targeted `-p osp-core`/`-p osp-mcp`/
+  `-p osp-cli --test completed_loop`.
+- Corpus: ID-bazlı `case_by_id`. PR yazarı kendi PR'ını onaylayamaz.
+- `index.scip` yeniden üretim: rust-toolchain.toml geçici taşı + `MSYS_NO_PATHCONV=1 docker run
+  --rm -v "P:/Work/SoftwarePhysics:/repo" -w /repo sourcegraph/scip-rust:latest scip-rust
+  --output /repo/index.scip`.
 
 ## Ortam notları (Windows)
 
-- Shell her sıfırlanmada `export PATH="$HOME/.cargo/bin:$PATH"` gerekebilir.
-- `grep` ZCode function'ı — `command grep` kullan.
-- `python` yok; JSON için `node -e` (temp path'ler `C:/Users/ervol/...` formatında).
-- **ASLA `git add -A`** — kullanıcı untracked kişisel notları var
-  (`docs/notes/planlama-tasarım-eskiz.txt`, `proje-adaylari.md`, `sohbet-konu.txt`,
-  `docs/osp-*.md`, `docs/design/`, `dump.scip`, `crates/osp-desktop/gen/`).
-- Dogfood temp fixture: `C:/Users/ervol/AppData/Local/Temp/osp-md1-dogfood/`
-  (silinmeye hazır; task/proposal/repo şablonları `crates/osp-cli/tests/completed_loop.rs`
-  mirror'idir).
+- Shell sıfırlanınca `export PATH="$HOME/.cargo/bin:$PATH"`.
+- `command grep`; `python` yok → `node -e` (temp path'ler `C:/Users/ervol/...`).
+- **ASLA `git add -A`** (untracked kişisel notlar: `docs/notes/planlama-tasarım-eskiz.txt`,
+  `proje-adaylari.md`, `sohbet-konu.txt`, `docs/osp-*.md`, `docs/design/`, `dump.scip`,
+  `crates/osp-desktop/gen/`).
+- Dogfood temp fixture: `C:/Users/ervol/AppData/Local/Temp/osp-md1-dogfood/` (disposable).
 
 ## Sıradaki iş önerisi
 
-1. **#96 MD-2 detay plan turu** — D-A/D-C/D-E + reference-lane + dual evaluation
-   tasarımı; bu dosyadaki kanıt tabanı + `faz8-p2-migration-decisions.md` MD-2 section
-   temelinde. Kendi sıkı review'u olacak.
-2. #96 implementasyonu (atomik measured→measurement + digest parity + CLI iki-eksen).
-3. #95-A (MD-1 caller cutover — plan v5 Bölüm 4 hazır), #95-B (MD-1 cleanup).
-4. Sonra #97 (MD-3). Ara iş: #110 MSRV.
+1. **#96 implementation** (W1→W9; bu dosyadaki zincir + checklist).
+2. #95-A (MD-1 subject cutover — typed draft temeli #96'dan hazır), #95-B (MD-1 cleanup).
+3. #97 (MD-3), sonra #100. Ara iş: #110 MSRV.
