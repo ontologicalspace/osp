@@ -84,7 +84,8 @@ impl From<CanonicalizationError> for MeasurementDigestError {
 /// Shared helper (P1-1 v4): `MeasurementInputDigest::compute` `AuthorizationBasisDigestError`
 /// döner — measurement-domain `MeasurementDigestError::MeasurementInputDigest`'e sarmalar.
 /// Hem `MeasurementRequest::try_new` hem `EngineMeasurement::new` bunu kullanır.
-fn compute_measurement_input_digest(
+/// **#96:** `NativeLegacySubjectMeasurement` producer'ı da kullanır (pub(crate)).
+pub(crate) fn compute_measurement_input_digest(
     context: &MeasurementInputContext,
 ) -> Result<MeasurementInputDigest, MeasurementDigestError> {
     MeasurementInputDigest::compute(context).map_err(|e| {
@@ -1805,6 +1806,114 @@ impl EngineMeasurement {
             context,
             request,
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #96 MD-2 — NativeLegacySubjectMeasurement (opaque native provenance token)
+//
+// Plan v4-FİNAL: legacy subject (affected_nodes ordered union — #95-A'ya kadar
+// değişmez) üzerinde session-bound engine-native per-axis ölçümün authority
+// token'ı. Plain `MeasuredRawPosition` forgeability'sini kapatır: private fields
+// + tek üretici (`SpaceEngine::measure_attempt_native_with_md1_shadow`).
+// EngineMeasurement DEĞİLDİR — task-scope binding yoktur (MD-1 #95-A'nın
+// authority eksenidir); baseline yoktur (MD-3 #97'nindir).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#96 MD-2 (plan v4-FİNAL):** Opaque engine-issued native provenance token —
+/// legacy subject üzerinde session-bound native ölçüm + commit-anı geçerlilik
+/// bağlamaları (delta digest, base revision, measurement context, axis epochs).
+///
+/// `raw` bağımsız alan DEĞİL: `raw()` = `measured.to_raw()` (SAME value bits
+/// construction property). Commit-time `verify_native_legacy_measurement_binding`
+/// 5 kontrolü yapar; `AuthorizationBasis` kanıtı PROOF'TAN okur.
+///
+/// **Stale replay fence:** token, üretildiği revision/context/epoch bağlamında
+/// geçerliliğini KANITLAR; aynı bağlamda meşru yeniden sunum (ör. Held + witness
+/// evidence + resubmit) engellenmez — "token cannot be replayed" iddiası YOK
+/// (`VerifiedTaskMeasurementBinding` dokümantasyon ayrımıyla hizalı).
+pub struct NativeLegacySubjectMeasurement {
+    measured: crate::coords::MeasuredRawPosition,
+    /// Audited measurement subject — `derive_v1_legacy_measurement_subject`
+    /// ordered union (boşsa legacy delta-ids fallback uygulanmış hâli).
+    /// Canonical TASK authority DEĞİLDİR (MD-1 = #95-A).
+    legacy_subject_ids: Vec<crate::space::NodeId>,
+    delta_digest: MeasurementDeltaDigest,
+    base_revision: crate::authorization::SpaceViewRevision,
+    measurement_input_digest: crate::authorization::MeasurementInputDigest,
+    axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
+}
+
+impl NativeLegacySubjectMeasurement {
+    /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native_with_md1_shadow`
+    /// çağırır (engine.rs). External construction kapalı (private fields).
+    pub(crate) fn new(
+        measured: crate::coords::MeasuredRawPosition,
+        legacy_subject_ids: Vec<crate::space::NodeId>,
+        delta_digest: MeasurementDeltaDigest,
+        base_revision: crate::authorization::SpaceViewRevision,
+        measurement_input_digest: crate::authorization::MeasurementInputDigest,
+        axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
+    ) -> Self {
+        Self {
+            measured,
+            legacy_subject_ids,
+            delta_digest,
+            base_revision,
+            measurement_input_digest,
+            axis_epoch_stamp,
+        }
+    }
+
+    /// Native per-axis measured (5 × value+source) — commit `PredicateGate` ve
+    /// `AuthorizationBasis.measured_result` bu değerleri bağlar.
+    pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
+        &self.measured
+    }
+
+    /// `measured.to_raw()` — bağımsız ikinci truth YOK (construction property).
+    pub fn raw(&self) -> crate::coords::RawPosition {
+        self.measured.to_raw()
+    }
+
+    /// Audited legacy measurement subject (ordered union + delta-ids fallback).
+    pub fn legacy_subject_ids(&self) -> &[crate::space::NodeId] {
+        &self.legacy_subject_ids
+    }
+
+    /// Claim structural delta identity — mevcut tek canonicalization truth
+    /// (`canonical_structural_delta_from_claim` → `MeasurementDeltaDigest`).
+    pub fn delta_digest(&self) -> &MeasurementDeltaDigest {
+        &self.delta_digest
+    }
+
+    /// Ölçüm anındaki space revision (commit-time stale fence karşılaştırması).
+    pub fn base_revision(&self) -> &crate::authorization::SpaceViewRevision {
+        &self.base_revision
+    }
+
+    /// Ölçüm anındaki axis context digest (commit-time context fence).
+    pub fn measurement_input_digest(&self) -> &crate::authorization::MeasurementInputDigest {
+        &self.measurement_input_digest
+    }
+
+    /// Captured axis epoch stamp — commit-time ABA fence (pub(crate): yalnız
+    /// engine verification; wire'e çıkmaz).
+    pub(crate) fn axis_epoch_stamp(&self) -> crate::coords::CoreAxisEpochStamp {
+        self.axis_epoch_stamp
+    }
+}
+
+impl std::fmt::Debug for NativeLegacySubjectMeasurement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeLegacySubjectMeasurement")
+            .field("measured", &self.measured)
+            .field("legacy_subject_ids", &self.legacy_subject_ids)
+            .field("delta_digest", &self.delta_digest)
+            .field("base_revision", &self.base_revision)
+            .field("measurement_input_digest", &self.measurement_input_digest)
+            .field("axis_epoch_stamp", &self.axis_epoch_stamp.as_u64s())
+            .finish()
     }
 }
 // NOT: Deserialize intentionally absent — `EngineMeasurement` authority token, wire'dan

@@ -15,16 +15,16 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::agent::{DeltaProposal, NewNodeSpec, OutputContract};
+use crate::agent::{DeltaProposal, OutputContract};
 use crate::coords::{MetricSource, RawPosition};
 use crate::engine::SpaceEngine;
-use crate::space::{Edge, Node, NodeId};
+use crate::space::{Edge, Node};
 use crate::trajectory::{
     AgentTaskView, AttemptOutcome, GateDecision, InternalTaskPlan, MutationDecision,
     PredicateCompletion, PredicateScope, ProvenancedRawPosition, TaskId, TaskResolver, TokenCost,
     TrajectoryEvidence,
 };
-use crate::witness::{AgentId, Claim, ClaimId, Intent};
+use crate::witness::AgentId;
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // LlmClient trait (D1 — mock + production abstraction)
@@ -153,20 +153,13 @@ impl LlmClient for MockLlmClient {
 // bağımlılığı olmasın). Unit pin test'i de taşındı; tests/common integration
 // mirror'i dokunulmadı (dual pinning korunur).
 
-/// Claim build hatası.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ClaimBuildError {
-    /// DeltaProposal'da node/edge yok (empty proposal).
-    EmptyProposal,
-}
+// **#96 MD-2 (plan v4-FİNAL):** `build_claim_from_proposal` + `node_from_spec` +
+// `ClaimBuildError` navigator.rs'ten `task_measurement` modülüne taşındı (neutral
+// shared home — MCP navigator implementation katmanına bağımlı olmasın; Q4
+// structural truth tek kaynak). Pub re-export test-compat için korunur.
 
-impl std::fmt::Display for ClaimBuildError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ClaimBuildError::EmptyProposal => write!(f, "DeltaProposal has no nodes/edges"),
-        }
-    }
-}
+pub use crate::task_measurement::{build_claim_from_proposal, ClaimBuildError};
+use crate::task_measurement::node_from_spec;
 
 impl std::error::Error for ClaimBuildError {}
 
@@ -252,77 +245,9 @@ pub fn gate_decision_from_engine_error(err: &crate::engine::EngineCommitError) -
     }
 }
 
-/// INV-T4 (boşluk #3) — DeltaProposal + engine-measured computed_raw + task_id → Claim
-/// (task-bound). Engine `compute_raw_from_delta()` ile ölçer (agent declare etmez).
-///
-/// **Not:** Bu fonksiyon engine'in hypothetical-graph ölçümünü kullanır. Navigator,
-/// `engine.compute_raw_from_delta(&delta_nodes, &delta_edges)` sonucunu computed_raw'a koyar.
-pub fn build_claim_from_proposal(
-    proposal: &DeltaProposal,
-    computed_raw: RawPosition,
-    task_id: TaskId,
-    agent: AgentId,
-    claim_id: ClaimId,
-) -> Result<Claim, ClaimBuildError> {
-    // G2c-2: empty check — removed_edges veya affected_nodes varsa proposal boş değil.
-    // (sadece additive delta değil, subtractive delta da geçerli proposal).
-    if proposal.new_nodes.is_empty()
-        && proposal.new_edges.is_empty()
-        && proposal.removed_edges.is_empty()
-    {
-        return Err(ClaimBuildError::EmptyProposal);
-    }
-    // NewNodeSpec → Node (resolve: connected_to ile yeni ID'ler ata).
-    let delta_nodes: Vec<Node> = proposal
-        .new_nodes
-        .iter()
-        .enumerate()
-        .map(|(i, spec)| node_from_spec(spec, i))
-        .collect();
-    // NewEdgeSpec → Edge.
-    let mut delta_edges: Vec<Edge> = proposal
-        .new_edges
-        .iter()
-        .map(|spec| Edge {
-            from: spec.from,
-            to: spec.to,
-            kind: spec.kind,
-            is_type_only: false,
-        })
-        .collect();
-    // connected_to edge'leri delta_edges'e ekle (NewNodeSpec.connected_to).
-    for (i, spec) in proposal.new_nodes.iter().enumerate() {
-        let node_id = delta_nodes[i].id;
-        for (target, kind) in &spec.connected_to {
-            delta_edges.push(Edge {
-                from: node_id,
-                to: *target,
-                kind: *kind,
-                is_type_only: false,
-            });
-        }
-    }
-    let intent = Intent::new(agent, computed_raw);
-    Ok(Claim {
-        id: claim_id,
-        intent,
-        author: agent,
-        computed_raw,
-        delta_nodes,
-        delta_edges,
-        task_id: Some(task_id),
-        removed_edges: proposal.removed_edges.clone(), // G2c-2: subtractive delta
-    })
-}
-
-fn node_from_spec(spec: &NewNodeSpec, index: usize) -> Node {
-    Node {
-        id: (10_000 + index as NodeId), // yeni node ID'leri (mevcut ID'lerle çakışmaması için)
-        kind: spec.kind,
-        mass: spec.initial_mass,
-        ..Default::default()
-    }
-}
+/// INV-T4 (boşluk #3) — `build_claim_from_proposal` + `node_from_spec`
+/// `task_measurement.rs`'e taşındı (#96). Bu doc-anchor yalnız keşfe yardımcı;
+/// gerçek implementasyon: `crate::task_measurement::build_claim_from_proposal`.
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // AgentNavigator — D1 loop driver (boşluk #4, #5, #6, #8)
@@ -1164,6 +1089,7 @@ mod tests {
     use crate::coords::CoordinateSystem;
     use crate::engine::{EngineConfig, SpaceEngine};
     use crate::space::{NodeKind, Space};
+    use crate::witness::{Claim, ClaimId, Intent};
     use crate::trajectory::{
         ApplyTarget, CommitLane, ComparisonOp, InMemoryTaskRegistry, MetricPredicate,
         MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy, PredicateGate,

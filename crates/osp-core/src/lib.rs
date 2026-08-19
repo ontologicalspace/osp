@@ -29,6 +29,7 @@ pub mod rule;
 pub mod space;
 pub mod subject_authority;
 pub mod task_bridge;
+pub mod task_measurement;
 pub mod time;
 pub mod trajectory;
 pub mod vision;

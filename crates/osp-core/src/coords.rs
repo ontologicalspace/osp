@@ -1245,6 +1245,34 @@ impl std::fmt::Debug for BoundAxisState {
     }
 }
 
+/// **#96 MD-2 (plan v4 P2-1):** Captured 5 core axis epoch snapshot — ölçüm token'ının
+/// commit-anı geçerlilik kanıtına (binding verification) girer. `CoreAxisStates`'ten
+/// üretilir; `begin`'in atomik capture'ı ile descriptor'lar AYNI andan alınır.
+/// A→B→A descriptor revert'inde descriptor equality yakalanamazken epoch monoton
+/// artar → commit-time karşılaştırma fail-closed reddeder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CoreAxisEpochStamp {
+    coupling: AxisStateEpoch,
+    cohesion: AxisStateEpoch,
+    instability: AxisStateEpoch,
+    entropy: AxisStateEpoch,
+    witness_depth: AxisStateEpoch,
+}
+
+impl CoreAxisEpochStamp {
+    /// Epoch değerleri `CORE_RAW_AXIS_IDS` sırasında (coupling, cohesion,
+    /// instability, entropy, witness_depth).
+    pub(crate) fn as_u64s(&self) -> [u64; 5] {
+        [
+            self.coupling.get(),
+            self.cohesion.get(),
+            self.instability.get(),
+            self.entropy.get(),
+            self.witness_depth.get(),
+        ]
+    }
+}
+
 /// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Captured 5 core axis state'leri —
 /// `bind_core_axes_with_descriptors` tarafından atomik olarak üretilir.
 ///
@@ -1271,6 +1299,18 @@ impl CoreAxisStates {
             self.entropy.descriptor.clone(),
             self.witness_depth.descriptor.clone(),
         ]
+    }
+
+    /// **#96 MD-2 (plan v4 P2-1):** Captured epoch stamp — descriptor'lar ile aynı
+    /// atomik capture'dan. Token binding (commit-time ABA fence) bunu kullanır.
+    pub(crate) fn epoch_stamp(&self) -> CoreAxisEpochStamp {
+        CoreAxisEpochStamp {
+            coupling: self.coupling.epoch(),
+            cohesion: self.cohesion.epoch(),
+            instability: self.instability.epoch(),
+            entropy: self.entropy.epoch(),
+            witness_depth: self.witness_depth.epoch(),
+        }
     }
 }
 
@@ -1400,6 +1440,15 @@ impl<'a> BoundMeasurementSession<'a> {
     /// snapshot'tan. Token, ölçümlerin üretildiği aynı descriptor set'ini bağlar.
     pub(crate) fn axis_descriptors(&self) -> Vec<AxisDescriptor> {
         self.axes.states().descriptors()
+    }
+
+    /// **#96 MD-2 (plan v4 P2-1):** Captured axis epoch stamp — token binding için.
+    /// `begin`'in atomik capture'ından (descriptor'lar ile AYNI snapshot) gelir;
+    /// measurement sonrası CoordinateSystem yeniden dolaşılmaz (ikinci observation
+    /// TOCTOU yeniden açardı). Commit-time verification mevcut epoch'larla bunu
+    /// karşılaştırır — A→B→A descriptor revert'i epoch artışıyla yakalanır.
+    pub(crate) fn axis_epochs(&self) -> CoreAxisEpochStamp {
+        self.axes.states().epoch_stamp()
     }
 
     fn verify_bound_states(

@@ -472,7 +472,9 @@ pub enum V2MeasurementFailure {
     InvalidTotalSubjectMass,
 }
 
-fn map_v2_measurement_failure(err: &MeasurementError) -> V2MeasurementFailure {
+/// **#96:** pub(crate) — engine'in md1_shadow lane'i telemetry sınıflandırması için
+/// kullanır (authority lane'i etkilenmez).
+pub(crate) fn map_v2_measurement_failure(err: &MeasurementError) -> V2MeasurementFailure {
     use crate::measurement::{MeasurementError as E, SubjectScopeResolutionError};
     match err {
         E::CoordinateMeasurement(_) => V2MeasurementFailure::CoordinateMeasurement,
