@@ -1271,6 +1271,18 @@ impl CoreAxisEpochStamp {
             self.witness_depth.get(),
         ]
     }
+
+    /// Characterization-only token construction (measurement.rs
+    /// `new_characterization_legacy`) — epoch'lar u64 dizisinden.
+    pub(crate) fn from_u64s(v: [u64; 5]) -> Self {
+        Self {
+            coupling: AxisStateEpoch::from(v[0]),
+            cohesion: AxisStateEpoch::from(v[1]),
+            instability: AxisStateEpoch::from(v[2]),
+            entropy: AxisStateEpoch::from(v[3]),
+            witness_depth: AxisStateEpoch::from(v[4]),
+        }
+    }
 }
 
 /// **INV-T9 #70 Commit 4a P1-2 (reviewer v9):** Captured 5 core axis state'leri —

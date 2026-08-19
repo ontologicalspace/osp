@@ -18,7 +18,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::agent::{DeltaProposal, OutputContract};
 use crate::coords::{MetricSource, RawPosition};
 use crate::engine::SpaceEngine;
-use crate::space::{Edge, Node};
 use crate::trajectory::{
     AgentTaskView, AttemptOutcome, GateDecision, InternalTaskPlan, MutationDecision,
     PredicateCompletion, PredicateScope, ProvenancedRawPosition, TaskId, TaskResolver, TokenCost,
@@ -159,7 +158,6 @@ impl LlmClient for MockLlmClient {
 // structural truth tek kaynak). Pub re-export test-compat için korunur.
 
 pub use crate::task_measurement::{build_claim_from_proposal, ClaimBuildError};
-use crate::task_measurement::node_from_spec;
 
 impl std::error::Error for ClaimBuildError {}
 
@@ -728,45 +726,20 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 continue;
             }
 
-            // 4. DeltaProposal → Claim (task-bound, boşluk #3).
-            // D2: computed_raw = engine hypothetical ölçümü (gerçek space + delta_edges).
-            let delta_nodes: Vec<Node> = proposal
-                .new_nodes
-                .iter()
-                .enumerate()
-                .map(|(i, s)| node_from_spec(s, i))
-                .collect();
-            let delta_edges: Vec<Edge> = proposal
-                .new_edges
-                .iter()
-                .map(|spec| Edge {
-                    from: spec.from,
-                    to: spec.to,
-                    kind: spec.kind,
-                    is_type_only: false,
-                })
-                .collect();
-            // G2c-2 + **#95 MD-1 P2-1 REFACTOR (işaretli — semantik değişiklik YOK):**
-            // eski inline `derive_v1_legacy_measurement_subject` +
-            // `compute_raw_from_delta` ikilisi, explicit compatibility producer'a
-            // taşındı (`subject_authority::produce_legacy_subject_measurement`).
-            // Bit-identical: aynı iki production çağrısı, bundle edilmiş; ayrıca
-            // uniform-Scip measured projeksiyonu da tek yerden üretilir.
-            let legacy = crate::subject_authority::produce_legacy_subject_measurement(
-                self.engine,
-                &delta_nodes,
-                &delta_edges,
+            // 4. **#96 MD-2 (plan v4-FİNAL):** Draft — probe Claim + Q4 STRUCTURAL
+            //    validation tek adımda (pub shared boundary `task_measurement`;
+            //    claim_id tek inkrement; placeholder raw — ölçüm henüz YOK).
+            //    Structural Q4 fallible measurement'tan ÖNCE (Q4-vs-measurement
+            //    precedence: Q4-invalid + measurement-failing → daima SyntaxViolation).
+            let draft = match crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
                 &proposal,
-            );
-            let claim = match build_claim_from_proposal(
-                &proposal,
-                legacy.raw(),
+                RawPosition::default(),
                 task_id,
                 agent,
                 claim_id_counter,
             ) {
-                Ok(c) => c,
-                Err(_) => {
+                Ok(d) => d,
+                Err(crate::task_measurement::ClaimDraftError::Build(_)) => {
                     // Empty proposal (G2c-1b — arkadaş review 6 "en güçlü taraf"):
                     // evidence push ekle — boş/malformed proposal da iz bırakmalı.
                     // before = after = current (state unchanged, INV-T6).
@@ -791,29 +764,116 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     ));
                     continue;
                 }
+                Err(crate::task_measurement::ClaimDraftError::Syntax(_violation)) => {
+                    // **#96 Q4-precedence:** structural Q4 hatası fallible native
+                    // measurement'dan ÖNCE yakalandı — measurement error gözlemlenmez
+                    // (yarış acceptance testi pinler). Evidence + D4 calibration.
+                    let before_raw = self.current_measured.to_raw();
+                    self.evidence.push(TrajectoryEvidence {
+                        trajectory_id: self.trajectory_id,
+                        milestone_id: self.milestone_id,
+                        task_id,
+                        attempt_id: attempt_num as u64,
+                        before: before_raw,
+                        after: before_raw,
+                        gate_decision: GateDecision::RejectedBySyntax,
+                        predicate_completion: PredicateCompletion::NotCompleted,
+                        mutation_decision: MutationDecision::Reject,
+                        token_cost,
+                        duration_ms: 0,
+                        subject_authority_drift: None,
+                    });
+                    feedback_history.push(format!(
+                        "Attempt {attempt_num}: Structural syntax violation — {_violation}"
+                    ));
+                    continue;
+                }
             };
             claim_id_counter += 1;
 
-            // 5. Engine-measured → ProvenancedRawPosition (boşluk #7).
-            // **#95 MD-1 P2-1 REFACTOR:** uniform-Scip compatibility projection
-            // producer içinde üretilir (bit-identical — provenanced_from_raw çağrısının aynısı).
-            let measured = legacy.measured().clone();
+            // 5. **#96 MD-2:** Native measurement — tek `BoundMeasurementSession`
+            //    (authority token + md1_shadow). Legacy subject engine-internal
+            //    derivation; `loss_before`/`target` DOKUNULMAZ (running scalar — #97).
+            //    Fallible → 17-varyant disposition tablosu (v4-FİNAL; navigator+MCP
+            //    ortak helper `task_measurement::measurement_failure_disposition`).
+            let native =
+                match self
+                    .engine
+                    .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+                {
+                    Ok(n) => n,
+                    Err(e) => {
+                        use crate::task_measurement::measurement_failure_disposition;
+                        match measurement_failure_disposition(&e) {
+                            // Tablo: budget EVET + LLM retry EVET — yalnız
+                            // RetryAgentProposal. Bugün üreticisi YOK (unlock:
+                            // node-removal op / explicit ID allocation / typed
+                            // structural origin — plan v5 tablo notları).
+                            crate::task_measurement::MeasurementFailureDisposition::RetryAgentProposal => {
+                                feedback_history.push(format!(
+                                    "Attempt {attempt_num}: measurement rejected the proposal — {e}; revise the delta."
+                                ));
+                                continue;
+                            }
+                            // TerminalTaskDeclaration / TerminalIdentityViolation /
+                            // RegenerateMeasurement (dormant) / SystemFailure —
+                            // budget YOK, LLM retry YOK, fail-closed terminal.
+                            _ => {
+                                return NavigatorResult::SystemFailure(format!(
+                                    "native measurement failed (disposition={:?}): {e}",
+                                    measurement_failure_disposition(&e)
+                                ));
+                            }
+                        }
+                    }
+                };
 
-            // **#95 MD-1 P2-1 (additive):** Pre-commit shadow observation draft —
-            // V2 lane pre-mutation baseline üzerinden ölçülür (post-commit çağrı
-            // yanlış baseline verirdi); finalize commit sonucuyla, yalnızca
-            // comparison-surviving yollarda yapılır. Non-surviving terminal yollarda
-            // emit edilmez (eligibility contract — subject_authority.rs modül doc).
+            // 6. Final Claim — draft.consume: YALNIZ computed_raw/Intent enjekte
+            //    (structural fields + claim_id aynı object — probe↔final TOCTOU
+            //    type-level kapalı) + Q4 FINAL-RAW finite validation (measurement
+            //    gerçeği; engine defensively tekrar kontrol eder).
+            let claim = draft.finalize(native.authority());
+            if let Err(violation) = crate::task_measurement::validate_raw_position_finite(
+                claim.id,
+                "measurement.after",
+                &claim.computed_raw,
+            ) {
+                let before_raw = self.current_measured.to_raw();
+                self.evidence.push(TrajectoryEvidence {
+                    trajectory_id: self.trajectory_id,
+                    milestone_id: self.milestone_id,
+                    task_id,
+                    attempt_id: attempt_num as u64,
+                    before: before_raw,
+                    after: before_raw,
+                    gate_decision: GateDecision::RejectedBySyntax,
+                    predicate_completion: PredicateCompletion::NotCompleted,
+                    mutation_decision: MutationDecision::Reject,
+                    token_cost,
+                    duration_ms: 0,
+                    subject_authority_drift: None,
+                });
+                feedback_history.push(format!(
+                    "Attempt {attempt_num}: measured raw not finite — {violation}"
+                ));
+                continue;
+            }
+
+            // **#96 re-anchor:** Pre-commit shadow observation draft — her iki lane
+            // AYNI native bundle'dan (tek session; V1=authority native, V2=md1_shadow
+            // native) — gözlem yalnız subject farkı taşır. Finalize commit sonucuyla,
+            // yalnızca comparison-surviving yollarda (eligibility contract).
             let drift_draft = crate::subject_authority::observe_subject_authority_drift(
                 self.engine,
                 &claim,
                 &task,
-                &legacy,
+                &native,
                 loss_before,
                 &self.target_vector,
             );
 
-            // 6. D2 — commit_task_claim: Q4→bind→Q5→Q5.b(PredicateGate)→Q6→mutate→Q1-Q3.
+            // 7. D2 — commit_task_claim: Q4(defensive)→bind→validate→**native binding
+            //    verification**→Q5→Q5.b(PredicateGate)→Q6→mutate→Q1-Q3.
             // G2c-3b (arkadaş review 9): witness policy'ye göre WitnessSet quorum.
             // Production: Paper 1 witness güven modeli (min_approvers=2). Harness: auto-approve.
             let omega = match self.witness_policy {
@@ -822,16 +882,16 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0)
                 }
             };
-            let task_result = match self
-                .engine
-                .commit_task_claim(crate::engine::TaskCommitInput {
-                    claim: &claim,
-                    omega: &omega,
-                    task_resolver: self.resolver as &dyn TaskResolver,
-                    target: self.target_vector,
+            let task_result = match self.engine.commit_task_claim(
+                crate::engine::TaskCommitInput::new(
+                    &claim,
+                    &omega,
+                    self.resolver as &dyn TaskResolver,
+                    self.target_vector,
                     loss_before,
-                    measured: measured.clone(),
-                }) {
+                    native.authority(),
+                ),
+            ) {
                 Ok(crate::engine::EngineCommitResult::Evaluated { result, .. }) => result,
                 Ok(crate::engine::EngineCommitResult::Held {
                     authorization,
@@ -931,7 +991,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                                 witness_status: None,
                             });
                             let before_raw = self.current_measured.to_raw();
-                            let after_raw = measured.to_raw();
+                            let after_raw = native.authority().raw();
                             self.evidence.push(TrajectoryEvidence {
                                 trajectory_id: self.trajectory_id,
                                 milestone_id: self.milestone_id,
@@ -1027,14 +1087,16 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             ));
 
             // 7. Evidence kaydet (boşluk #6) — inline push (field borrow çatışmasını önle).
+            // **#96:** after = authority token raw (native session-bound ölçüm).
             let before_raw = self.current_measured.to_raw();
+            let after_raw = native.authority().raw();
             self.evidence.push(TrajectoryEvidence {
                 trajectory_id: self.trajectory_id,
                 milestone_id: self.milestone_id,
                 task_id,
                 attempt_id: attempt_num as u64,
                 before: before_raw,
-                after: measured.to_raw(),
+                after: after_raw,
                 gate_decision: outcome.gate_decision,
                 predicate_completion: outcome.predicate_completion,
                 mutation_decision: outcome.mutation_decision,
@@ -1046,7 +1108,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             // 8. Mutation decision → loop control (boşluk #8).
             match outcome.mutation_decision {
                 MutationDecision::AcceptAsCompleted => {
-                    self.current_measured = measured;
+                    self.current_measured = native.authority().measured().clone();
                     return NavigatorResult::Completed {
                         attempts: attempt_num,
                         total_tokens,
@@ -1055,7 +1117,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 MutationDecision::AcceptAsProgress => {
                     // Progress checkpoint — loss güncelle, continue.
                     loss_before = loss_after;
-                    self.current_measured = measured;
+                    self.current_measured = native.authority().measured().clone();
                 }
                 MutationDecision::Reject => {
                     // Retry — calibration feedback D2'de.
@@ -1088,7 +1150,7 @@ mod tests {
     use crate::agent::NewNodeSpec;
     use crate::coords::CoordinateSystem;
     use crate::engine::{EngineConfig, SpaceEngine};
-    use crate::space::{NodeKind, Space};
+    use crate::space::{Edge, Node, NodeKind, Space};
     use crate::witness::{Claim, ClaimId, Intent};
     use crate::trajectory::{
         ApplyTarget, CommitLane, ComparisonOp, InMemoryTaskRegistry, MetricPredicate,
@@ -1166,9 +1228,22 @@ mod tests {
     }
 
     fn make_engine() -> SpaceEngine {
+        // **#96 MD-2:** Eski `CoordinateSystem::default()` (axis'siz) legacy
+        // `compute_raw_from_delta` tarafından sessiz-default ile tolere ediliyordu;
+        // native session-bound ölçüm fail-closed ("missing core raw axes"). Fixture
+        // gerçek axis setine geçirildi — boş space (0 coupling → predicate satisfied)
+        // test semantiği korunur.
+        use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+        let cs = CoordinateSystem::default_raw_five(
+            crate::coords::MetricSource::Scip,
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(6.0),
+            WitnessDepthAxis::from_witness(0.3, 5),
+        )
+        .unwrap();
         SpaceEngine::new(
             Space::default(),
-            CoordinateSystem::default(),
+            cs,
             VisionVector::default(),
             EngineConfig::default_calibrated(),
         )
@@ -1307,13 +1382,19 @@ mod tests {
         };
         let result = nav.run_task(1, 7);
         // D1: mock engine satisfied döndüğü için Completed; D2'de gerçek measure ile
-        // ExceededManeuverLimit. Şimdilik loop çalıştığını doğrula (Completed veya LlmError).
+        // ExceededManeuverLimit. Şimdilik loop çalıştığını doğrula.
+        // **#96 MD-2 (regolden):** Gerçek axis'li ölçümle tek proposal Completed
+        // üretir; Production witness (boş set) → Held terminal. Eski ekseni-boş
+        // sessiz-default + GlobalDefault-vision reject zincirine dayanan LlmError
+        // beklentisi geçersiz (fixture artık dürüst ölçüyor).
         assert!(
             matches!(
                 result,
-                NavigatorResult::Completed { .. } | NavigatorResult::LlmError(_)
+                NavigatorResult::Completed { .. }
+                    | NavigatorResult::LlmError(_)
+                    | NavigatorResult::AwaitingWitnesses { .. }
             ),
-            "D1: loop ran to completion or LLM error: {result:?}"
+            "D1: loop ran to completion, Held, or LLM error: {result:?}"
         );
     }
 
@@ -1507,7 +1588,7 @@ mod tests {
             is_type_only: false,
         });
         let cs = CoordinateSystem::default_raw_five(
-            crate::coords::MetricSource::Placeholder,
+            crate::coords::MetricSource::Scip, // #96: native coupling source Scip — coupling_task required_source=Some(Scip) native ölçümle onurlanır
             CohesionAxis::new(),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
@@ -1553,20 +1634,21 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
-        let result = engine.commit_task_claim(TaskCommitInput {
-            claim: &claim,
-            omega: &omega,
-            task_resolver: &resolver as &dyn TaskResolver,
-            target: RawPosition {
+        let commit_token = characterization_token(&engine, &claim, measured);
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &claim,
+            &omega,
+            &resolver as &dyn TaskResolver,
+            RawPosition {
                 x: 0.55,
                 y: 0.6,
                 z: 0.4,
                 w: 0.5,
                 v: 0.3,
             },
-            loss_before: 1.0,
-            measured,
-        });
+            1.0,
+            &commit_token,
+        ));
         // Q5.b çalıştı — Reject (witness yok) veya Ok (predicate reject NotApplied).
         // İkisi de Q5.b'nin çalıştığını gösterir. Witness boş → INV-T9 Held beklenir.
         match result {
@@ -1638,14 +1720,15 @@ mod tests {
         let space_digest_before =
             crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         let t_c_before = engine.t_c();
-        let result = engine.commit_task_claim(TaskCommitInput {
-            claim: &claim,
-            omega: &omega,
-            task_resolver: &resolver as &dyn TaskResolver,
+        let commit_token = characterization_token(&engine, &claim, measured.clone());
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &claim,
+            &omega,
+            &resolver as &dyn TaskResolver,
             target,
-            loss_before: 1.0,
-            measured: measured.clone(),
-        });
+            1.0,
+            &commit_token,
+        ));
 
         // Ayrı olarak aynı girdilerle PredicateGate.evaluate → gate_out.
         let resolved_task = resolver.resolve(TaskId::from(1u64)).expect("task exists");
@@ -1748,14 +1831,15 @@ mod tests {
             w: 0.5,
             v: 0.3,
         };
-        let result = engine.commit_task_claim(TaskCommitInput {
-            claim: &claim,
-            omega: &omega,
-            task_resolver: &resolver as &dyn TaskResolver,
+        let commit_token = characterization_token(&engine, &claim, measured.clone());
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &claim,
+            &omega,
+            &resolver as &dyn TaskResolver,
             target,
-            loss_before: 1.0,
-            measured: measured.clone(),
-        });
+            1.0,
+            &commit_token,
+        ));
         let resolved_task = resolver.resolve(TaskId::from(1u64)).unwrap();
         let gate_out = PredicateGate.evaluate(PredicateGateInput {
             bound: TaskBoundClaim {
@@ -1795,14 +1879,15 @@ mod tests {
         let claim = test_claim_with_task(1, None, 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(TaskCommitInput {
-            claim: &claim,
-            omega: &omega,
-            task_resolver: &resolver as &dyn TaskResolver,
-            target: RawPosition::default(),
-            loss_before: 1.0,
-            measured,
-        });
+        let commit_token = characterization_token(&engine, &claim, measured);
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &claim,
+            &omega,
+            &resolver as &dyn TaskResolver,
+            RawPosition::default(),
+            1.0,
+            &commit_token,
+        ));
         assert!(
             result.is_err(),
             "standalone claim rejected by commit_task_claim"
@@ -1836,21 +1921,53 @@ mod tests {
         }
     }
 
-    /// Helper: build TaskCommitInput for a task + claim pair.
-    fn build_commit_input<'a>(
-        claim: &'a Claim,
-        resolver: &'a dyn TaskResolver,
-        omega: &'a crate::witness::WitnessSet,
+    /// **#96 MD-2:** Crate-internal characterization token — private-field
+    /// `TaskCommitInput::new` test fixture'ları (tests/common mirror'i ile aynı
+    /// kurulum; audit subject = claim delta node id'leri; epoch [0;5] — fixture
+    /// axis'leri immutable).
+    fn characterization_token(
+        engine: &SpaceEngine,
+        claim: &Claim,
         measured: ProvenancedRawPosition,
-    ) -> TaskCommitInput<'a> {
-        TaskCommitInput {
+    ) -> crate::measurement::NativeLegacySubjectMeasurement {
+        use crate::authorization::{
+            canonical_structural_delta_from_claim, MeasurementInputContext, MeasurementInputDigest,
+        };
+        use crate::measurement::{MeasurementDeltaDigest, NativeLegacySubjectMeasurement};
+        let canonical = canonical_structural_delta_from_claim(claim).unwrap();
+        let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical).unwrap();
+        let revision = engine.current_space_view_revision().unwrap();
+        let ctx = MeasurementInputContext::try_from(engine.coord_system()).unwrap();
+        let input_digest = MeasurementInputDigest::compute(&ctx).unwrap();
+        let subject = claim.delta_nodes.iter().map(|n| n.id).collect();
+        NativeLegacySubjectMeasurement::new_characterization_legacy(
+            measured,
+            subject,
+            delta_digest,
+            revision,
+            input_digest,
+            [0; 5],
+        )
+    }
+
+    /// Helper: commit with default target/loss_before (build_commit_input yerine —
+    /// #96 private-field `TaskCommitInput::new` + characterization token).
+    fn commit_test(
+        engine: &mut SpaceEngine,
+        claim: &Claim,
+        resolver: &dyn TaskResolver,
+        omega: &crate::witness::WitnessSet,
+        measured: ProvenancedRawPosition,
+    ) -> Result<crate::engine::EngineCommitResult, crate::engine::EngineCommitError> {
+        let token = characterization_token(engine, claim, measured);
+        engine.commit_task_claim(TaskCommitInput::new(
             claim,
             omega,
-            task_resolver: resolver,
-            target: RawPosition::default(),
-            loss_before: 1.0,
-            measured,
-        }
+            resolver,
+            RawPosition::default(),
+            1.0,
+            &token,
+        ))
     }
 
     #[test]
@@ -1863,12 +1980,12 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(build_commit_input(
+        let result = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
         use crate::engine::EngineCommitError;
         use crate::trajectory::TaskValidationError;
         assert!(
@@ -1894,12 +2011,12 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.95);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(build_commit_input(
+        let result = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
         use crate::engine::EngineCommitError;
         assert!(
             matches!(result, Err(EngineCommitError::TaskValidation(_))),
@@ -1917,12 +2034,12 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(build_commit_input(
+        let result = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
         // TaskValidation → Err (gate hiç çalışmadı, Evaluated dönmez).
         assert!(
             result.is_err(),
@@ -1940,12 +2057,12 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(build_commit_input(
+        let result = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
         assert!(result.is_err(), "invalid task must not reach Q6 rules");
     }
 
@@ -1960,12 +2077,12 @@ mod tests {
         // HarnessAutoApprove witness — ama witness hiç çağrılmamalı.
         let omega = crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(build_commit_input(
+        let result = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
         assert!(
             result.is_err(),
             "invalid task must not reach witness evaluation"
@@ -1986,12 +2103,12 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let _ = engine.commit_task_claim(build_commit_input(
+        let _ = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
 
         assert_eq!(
             engine.t_c(),
@@ -2021,12 +2138,12 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let result = engine.commit_task_claim(build_commit_input(
+        let result = commit_test(&mut engine, 
             &claim,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
-        ));
+        );
         // Valid task → TaskValidation geçer, normal pipeline devam (Err DEĞİL).
         assert!(
             result.is_ok(),
@@ -2504,7 +2621,7 @@ mod tests {
             is_type_only: false,
         });
         let cs = CoordinateSystem::default_raw_five(
-            crate::coords::MetricSource::Placeholder,
+            crate::coords::MetricSource::Scip, // #96: native coupling source Scip — coupling_task required_source=Some(Scip) native ölçümle onurlanır
             CohesionAxis::new(),
             EntropyAxis::from_commit_entropy(6.0),
             WitnessDepthAxis::from_witness(0.3, 5),
@@ -2826,7 +2943,21 @@ mod tests {
             ],
             "v1 raw bits == evidence.after bits (legacy.raw == claim.computed_raw == measured)"
         );
-        assert_eq!(obs.v1.raw.sources, [crate::coords::MetricSource::Scip; 5]);
+        // **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE per-axis kaynaklar
+        // taşır (eski pin: uniform [Scip;5] compatibility projection — tarihsel).
+        // make_balanced_engine axis seti: coupling=Scip (#96 fixture düzeltmesi),
+        // cohesion=Placeholder, instability=Scip, entropy=Heuristic, witness=Heuristic.
+        assert_eq!(
+            obs.v1.raw.sources,
+            [
+                crate::coords::MetricSource::Scip,
+                crate::coords::MetricSource::Placeholder,
+                crate::coords::MetricSource::Scip,
+                crate::coords::MetricSource::Heuristic,
+                crate::coords::MetricSource::Heuristic,
+            ],
+            "V1 lane native per-axis sources (re-anchor — provenance iki lane'de native)"
+        );
         assert_eq!(obs.task_id, last.task_id);
     }
 
@@ -3450,20 +3581,21 @@ mod tests {
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
 
-        let result = engine.commit_task_claim(TaskCommitInput {
-            claim: &claim,
-            omega: &omega,
-            task_resolver: &resolver as &dyn crate::trajectory::TaskResolver,
-            target: crate::coords::RawPosition {
+        let commit_token = characterization_token(&engine, &claim, measured);
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &claim,
+            &omega,
+            &resolver as &dyn crate::trajectory::TaskResolver,
+            crate::coords::RawPosition {
                 x: 0.55,
                 y: 0.6,
                 z: 0.4,
                 w: 0.5,
                 v: 0.3,
             },
-            loss_before: 1.0,
-            measured,
-        });
+            1.0,
+            &commit_token,
+        ));
 
         // **reviewer P2 (test sıkılaştırma):** Fixture kesin Held üretmeli (boş witness →
         // MinApproversNotMet; predicate coupling 0.40 ≤ 0.55 Completed ama witness yok).
@@ -3516,7 +3648,7 @@ mod tests {
             );
         }
         let cs = crate::coords::CoordinateSystem::default_raw_five(
-            crate::coords::MetricSource::Placeholder,
+            crate::coords::MetricSource::Scip, // #96: native coupling source Scip — coupling_task required_source=Some(Scip) native ölçümle onurlanır
             crate::axes::CohesionAxis::new(),
             crate::axes::EntropyAxis::from_commit_entropy(6.0),
             crate::axes::WitnessDepthAxis::from_witness(0.3, 5),

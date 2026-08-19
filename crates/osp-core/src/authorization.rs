@@ -1378,7 +1378,7 @@ pub(crate) fn canonicalize_node(
 ///
 /// `Claim`'in `delta_nodes`/`delta_edges`/`removed_edges` field'larından `CanonicalStructuralDelta`
 /// üretir. Duplicate/cross-list/non-finite `try_new` validation'ı ile reddedilir.
-pub(crate) fn canonical_structural_delta_from_claim(
+pub fn canonical_structural_delta_from_claim(
     claim: &crate::witness::Claim,
 ) -> Result<CanonicalStructuralDelta, CanonicalizationError> {
     let new_nodes: Vec<CanonicalNode> = claim

@@ -279,6 +279,92 @@ impl std::fmt::Debug for StructurallyValidatedClaimDraft {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// #96 — MeasurementFailureDisposition (plan v5 tablosu LITERAL; navigator+MCP ortak)
+//
+// Measurement PRODUCTION failure'ları (17 `MeasurementError` varyantı — exact,
+// wildcard YOK). Token-BINDING failure'ları ayrıdır (funnel:
+// `EngineCommitError::MeasurementBindingVerification` → SystemFailure).
+// `RetryAgentProposal`/`RegenerateMeasurement` bugün üreticisiz — vocabulary +
+// unlock notları tabloda (repo prejededi: `DecisionDriftClass`).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Pre-commit native measurement failure disposition — maneuver-budget/retry policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MeasurementFailureDisposition {
+    /// Task declaration kendisi geçersiz (agent düzeltemez). Budget YOK, LLM YOK.
+    TerminalTaskDeclaration,
+    /// Claim/task identity wiring hatası. Budget YOK, LLM YOK.
+    TerminalIdentityViolation,
+    /// Stale token — atomik baseline-refresh kontratı tasarlanmadan AÇILMAZ
+    /// (unlock: refresh revision + baseline + loss_before-consistent context +
+    /// same proposal + bounded retry). Bugün üreticisiz.
+    RegenerateMeasurement,
+    /// Agent-shape kaynaklı — budget EVET, LLM retry EVET.
+    /// Unlock koşulları: node-removal op / explicit ID allocation /
+    /// typed `StructuralCanonicalizationOrigin`. Bugün üreticisiz.
+    RetryAgentProposal,
+    /// Operational fault / TCB instability / space veri bozukluğu. Budget YOK, LLM YOK.
+    SystemFailure,
+}
+
+/// 17 varyantın exact eşlemesi (plan v5/#96 v4-FİNAL tablosu; wildcard YOK —
+/// yeni varyant derleme hatası zorlar).
+pub fn measurement_failure_disposition(
+    err: &crate::measurement::MeasurementError,
+) -> MeasurementFailureDisposition {
+    use crate::measurement::MeasurementError;
+    match err {
+        // TerminalIdentityViolation — claim/task binding wiring.
+        MeasurementError::ClaimNotTaskBound { .. } | MeasurementError::TaskBindingMismatch { .. } => {
+            MeasurementFailureDisposition::TerminalIdentityViolation
+        }
+        // TerminalTaskDeclaration — task yazarı hatası; agent ID SEÇEMEZ
+        // (production builder `10_000 + index` atar — explicit ID allocation
+        // gelirse yeniden değerlendirme).
+        MeasurementError::HeterogeneousPredicateScopes { .. }
+        | MeasurementError::EmptySubjectScope
+        | MeasurementError::SubjectScopeResolutionFailed(..)
+        | MeasurementError::SubjectMemberUnresolvable { .. } => {
+            MeasurementFailureDisposition::TerminalTaskDeclaration
+        }
+        // SystemFailure — grammar'da node silme YOK (`removed_nodes` yok);
+        // agent düzeltemez. Node-removal op gelirse normatif yeniden değerlendirme.
+        MeasurementError::SubjectMemberMissingAfterDelta { .. } => {
+            MeasurementFailureDisposition::SystemFailure
+        }
+        // SystemFailure — atomik baseline-refresh kontratı olmadan regenerate,
+        // eski current_measured/loss_before ↔ yeni-space measurement karışımı üretir.
+        MeasurementError::RevisionMismatch { .. } => MeasurementFailureDisposition::SystemFailure,
+        // SystemFailure — interior-mutability threat / measurement TCB instability.
+        MeasurementError::MeasurementContextDrift { .. } => {
+            MeasurementFailureDisposition::SystemFailure
+        }
+        // SystemFailure — caller kod hatası (production None geçirir).
+        MeasurementError::SubjectScopeHintMismatch { .. } => {
+            MeasurementFailureDisposition::SystemFailure
+        }
+        // SystemFailure — defensive invariant / construction / computation faults.
+        MeasurementError::MeasurementContextDigestMismatch
+        | MeasurementError::MeasurementContext(..)
+        | MeasurementError::RevisionComputationFailed { .. } => {
+            MeasurementFailureDisposition::SystemFailure
+        }
+        // SystemFailure (fail-closed) — `Digest` tüm arm'lar: StructuralCanonicalization
+        // hem agent-delta hem task-scope kaynaklı üretilebiliyor; `detail: String`
+        // ontolojik sebebi ayıramaz, string parsing YASAK. Typed
+        // `StructuralCanonicalizationOrigin` sonrası agent-shape arm'ı
+        // RetryAgentProposal'a AÇILABİLİR (unlock).
+        MeasurementError::Digest(_) => MeasurementFailureDisposition::SystemFailure,
+        // SystemFailure — axis machinery / space veri bozukluğu (operator).
+        MeasurementError::CoordinateMeasurement(..)
+        | MeasurementError::InvalidSubjectMass { .. }
+        | MeasurementError::InvalidTotalSubjectMass { .. } => {
+            MeasurementFailureDisposition::SystemFailure
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

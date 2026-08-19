@@ -2169,14 +2169,22 @@ fn commit_invalid_mixed_case(
     registry.insert(case.task.clone());
     let omega = WitnessSet::new(vec![]);
 
-    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &probe_claim,
-        omega: &omega,
-        task_resolver: &registry as &dyn TaskResolver,
+    // **#96 MD-2:** private-field TaskCommitInput::new — characterization token
+    // (uniform-Scip projected measured; historical invalid-Mixed pipeline surface).
+    let token = common::characterization_native_token(
+        &engine,
+        &probe_claim,
+        measured.clone(),
+        case.proposal.affected_nodes.clone(),
+    );
+    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &probe_claim,
+        &omega,
+        &registry as &dyn TaskResolver,
         target,
-        loss_before: osp_core::trajectory::trajectory_loss(&measured, &target),
-        measured,
-    });
+        osp_core::trajectory::trajectory_loss(&measured, &target),
+        &token,
+    ));
 
     result.err()
 }

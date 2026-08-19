@@ -2134,6 +2134,43 @@ pub fn engine_with_case_space(case: &CharacterizationCase) -> osp_core::engine::
 /// üzerinden DEĞİL. Önceki kod `trajectory_loss(&measured, &target)` ile loss_before =
 /// loss_after yapıyordu; bu sistematik improved=false üretirdi ve V1/V2 baseline
 /// karşılaştırmasını bozardı.
+/// **#96 MD-2 (plan v4-FİNAL):** Characterization-native commit token — V1/V2
+/// harness lane'lerinin `commit_task_claim` (private-field `TaskCommitInput::new`)
+/// üzerinden geçebilmesi. `new_characterization_legacy` (doc-hidden) production
+/// forge-edilebilirlik kapanışının AÇIKÇA İSİMLENDİRİLMİŞ istisnasıdır — yalnız
+/// Faz 8-P2 characterization machinery; #100'de V1 lane kaldırılınca silinir.
+/// Epoch'lar [0;5] — corpus axis'leri immutable (monoton epoch ZERO).
+pub fn characterization_native_token(
+    engine: &osp_core::engine::SpaceEngine,
+    claim: &osp_core::witness::Claim,
+    measured: osp_core::coords::MeasuredRawPosition,
+    subject_ids: Vec<u64>,
+) -> osp_core::measurement::NativeLegacySubjectMeasurement {
+    use osp_core::authorization::{
+        canonical_structural_delta_from_claim, MeasurementInputContext, MeasurementInputDigest,
+    };
+    use osp_core::measurement::{MeasurementDeltaDigest, NativeLegacySubjectMeasurement};
+    let canonical = canonical_structural_delta_from_claim(claim)
+        .expect("canonical structural delta should succeed for characterization claim");
+    let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical)
+        .expect("delta digest computation should succeed");
+    let revision = engine
+        .current_space_view_revision()
+        .expect("revision computation should succeed");
+    let context = MeasurementInputContext::try_from(engine.coord_system())
+        .expect("measurement input context should succeed");
+    let input_digest = MeasurementInputDigest::compute(&context)
+        .expect("measurement input digest should succeed");
+    NativeLegacySubjectMeasurement::new_characterization_legacy(
+        measured,
+        subject_ids,
+        delta_digest,
+        revision,
+        input_digest,
+        [0; 5],
+    )
+}
+
 pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
@@ -2215,18 +2252,21 @@ pub fn evaluate_v1_case(
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
     // Registry + commit.
+    // **#96 MD-2:** private-field TaskCommitInput::new — V1 lane characterization
+    // token (uniform-Scip projected measured KORUNUR — historical reference lane).
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(case.task.clone());
     let omega = WitnessSet::new(vec![]);
+    let v1_token = characterization_native_token(engine, &claim, measured.clone(), affected.clone());
 
-    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &claim,
-        omega: &omega,
-        task_resolver: &registry as &dyn TaskResolver,
+    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &claim,
+        &omega,
+        &registry as &dyn TaskResolver,
         target,
         loss_before,
-        measured: measured.clone(),
-    });
+        &v1_token,
+    ));
 
     // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
     // V1 loss_before = trajectory_loss(current_measured, target) (yukarıda baseline loss_bits
@@ -2405,14 +2445,34 @@ pub fn evaluate_v2_candidate_case(
     registry.insert(case.task.clone());
     let omega = WitnessSet::new(vec![]);
 
-    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &final_claim,
-        omega: &omega,
-        task_resolver: &registry as &dyn TaskResolver,
+    // **#96 MD-2:** V2 candidate characterization token — native measured
+    // (`token.after()`) ile; audit subject = task scope members.
+    let v2_subject: Vec<u64> = case
+        .task
+        .target_predicate_set
+        .predicates
+        .iter()
+        .flat_map(|wp| match &wp.predicate.scope {
+            osp_core::trajectory::PredicateScope::Node(n) => vec![*n],
+            osp_core::trajectory::PredicateScope::Subgraph(ns) => ns.clone(),
+            osp_core::trajectory::PredicateScope::Module(_) => vec![],
+        })
+        .collect();
+    let native_token = characterization_native_token(
+        engine,
+        &final_claim,
+        measured_for_commit.clone(),
+        v2_subject,
+    );
+
+    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &final_claim,
+        &omega,
+        &registry as &dyn TaskResolver,
         target,
         loss_before,
-        measured: measured_for_commit,
-    });
+        &native_token,
+    ));
 
     // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
     // V2 candidate fail-closed projection: loss_before = project_v1_loss_before_compatibility_v2

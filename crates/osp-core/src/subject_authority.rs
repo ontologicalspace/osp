@@ -647,10 +647,18 @@ pub fn observe_subject_authority_drift(
     engine: &SpaceEngine,
     claim: &Claim,
     task: &Task,
-    legacy: &LegacySubjectMeasurement,
+    native: &crate::engine::NativeAttemptMeasurement,
     loss_before: f64,
     target: &RawPosition,
 ) -> SubjectAuthorityDriftObservationDraft {
+    // **#96 MD-2 re-anchor (plan v4 P1-tur4):** her iki lane AYNI measurement
+    // bundle'ından (tek BoundMeasurementSession) — V1 lane authority token'ının
+    // native değerleri, V2 lane md1_shadow material'i. Observer'ın kendi
+    // `measure_task_delta` çağrısı KALDIRILDI (ikinci bağımsız session YOK —
+    // "yalnız subject farkı" iddiası SAME context/session altında geçerli).
+    // Provenance iki lane'de de native: gözlem yalnız SUBJECT farkını taşır
+    // (dogfood Run A confound'u giderildi).
+
     // Tek captured vision context — iki lane'in ortak değerlendirme zemini.
     // Context kurulamazsa (ör. GlobalDefault → VisionAuthorityInsufficient,
     // frozen corpus 001 yüzeyi) iki lane'in Q5'sü de aynı NotEvaluated ile
@@ -659,31 +667,28 @@ pub fn observe_subject_authority_drift(
         .effective_vision_gate_context(claim)
         .map_err(map_q5_observation_failure);
 
+    let authority = native.authority();
     let (v1_q5, shared_ctx) = match &shared_context {
-        Ok(ctx) => (evaluate_lane_q5(engine, legacy.raw(), ctx), Some(ctx)),
+        Ok(ctx) => (evaluate_lane_q5(engine, authority.raw(), ctx), Some(ctx)),
         Err(reason) => (LaneQ5Observation::NotEvaluated { reason: *reason }, None),
     };
 
     let v1 = V1LaneObservationDraft {
         subject: MeasurementSubjectObservation {
-            ids: legacy.subject_ids().to_vec(),
-            digest: MeasurementSubjectDigest::compute(legacy.subject_ids()).to_hex(),
+            ids: authority.legacy_subject_ids().to_vec(),
+            digest: MeasurementSubjectDigest::compute(authority.legacy_subject_ids()).to_hex(),
         },
-        raw: raw_observation(legacy.raw(), measured_sources(legacy.measured())),
+        raw: raw_observation(authority.raw(), measured_sources(authority.measured())),
         q5: v1_q5,
     };
 
-    // V2 lane: canonical task scope ölçümü (measure_task_delta — fail-closed typed).
-    // **EK review P2-1:** observation'daki V2 subject, ayrı bir derivation'ın değil
-    // **gerçek ölçüm token'ının request snapshot'ından** gelir
-    // (`token.request().subject()` — "measured subject"). Subject derivation hatası
-    // measure_task_delta içinden aynı typed error ile döner (ikinci derivation
-    // drift yüzeyi yok).
-    let bound = TaskBoundClaim { claim, task };
-    let v2 = match measure_v2_lane(engine, &bound) {
-        V2Measured::Token(token) => {
-            let subject_scope = token.request().subject();
-            let v2_raw = token.after().to_raw();
+    // V2 lane: md1_shadow material (task scope, native) — AYNI session'dan
+    // (`measure_attempt_native_with_md1_shadow`). Subject, ölçümün canonical
+    // task-scope snapshot'ından ("measured subject"); failure'lar fail-closed
+    // telemetry sınıflandırması (authority lane'i etkilenmez).
+    let v2 = match native.md1_shadow() {
+        Ok(material) => {
+            let v2_raw = material.measured().to_raw();
             let v2_q5 = match shared_ctx {
                 Some(ctx) => evaluate_lane_q5(engine, v2_raw, ctx),
                 None => v1.q5.clone(), // context kurulamadıysa iki lane aynı NotEvaluated
@@ -695,7 +700,7 @@ pub fn observe_subject_authority_drift(
                 } => {
                     let gate_out = PredicateGate.evaluate(PredicateGateInput {
                         bound: TaskBoundClaim { claim, task },
-                        measured: token.after(),
+                        measured: material.measured(),
                         loss_before,
                         target,
                     });
@@ -708,15 +713,15 @@ pub fn observe_subject_authority_drift(
             };
             V2LaneOutcome::Measured(V2LaneObservation {
                 subject: MeasurementSubjectObservation {
-                    ids: subject_scope.member_ids().to_vec(),
-                    digest: MeasurementSubjectDigest::compute(subject_scope.member_ids()).to_hex(),
+                    ids: material.subject_ids().to_vec(),
+                    digest: MeasurementSubjectDigest::compute(material.subject_ids()).to_hex(),
                 },
-                raw: raw_observation(v2_raw, measured_sources(token.after())),
+                raw: raw_observation(v2_raw, measured_sources(material.measured())),
                 q5: v2_q5,
                 downstream,
             })
         }
-        V2Measured::Failed(failure) => V2LaneOutcome::MeasurementFailed(failure),
+        Err(failure) => V2LaneOutcome::MeasurementFailed(failure.clone()),
     };
 
     SubjectAuthorityDriftObservationDraft {
@@ -724,28 +729,6 @@ pub fn observe_subject_authority_drift(
         claim_id: claim.id,
         v1,
         v2,
-    }
-}
-
-#[allow(
-    clippy::large_enum_variant,
-    reason = "single-use internal helper — EngineMeasurement kısa ömürlü taşınır; Box allokasyonu gereksiz"
-)]
-enum V2Measured {
-    Token(crate::measurement::EngineMeasurement),
-    Failed(V2MeasurementFailure),
-}
-
-fn measure_v2_lane(engine: &SpaceEngine, bound: &TaskBoundClaim<'_>) -> V2Measured {
-    let revision = match engine.current_space_view_revision() {
-        Ok(r) => r,
-        Err(_) => {
-            return V2Measured::Failed(V2MeasurementFailure::RevisionComputationFailed);
-        }
-    };
-    match engine.measure_task_delta(bound, &revision, None) {
-        Ok(token) => V2Measured::Token(token),
-        Err(e) => V2Measured::Failed(map_v2_measurement_failure(&e)),
     }
 }
 
@@ -1290,26 +1273,21 @@ mod tests {
             status: crate::trajectory::TaskStatus::Pending,
         };
 
-        let probe = crate::navigator::build_claim_from_proposal(
+        let draft_claim = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
             task.id,
             100,
             1,
         )
-        .expect("probe claim");
-        let legacy = produce_legacy_subject_measurement(
-            &engine,
-            &probe.delta_nodes,
-            &probe.delta_edges,
-            &proposal,
-        );
-        let claim =
-            crate::navigator::build_claim_from_proposal(&proposal, legacy.raw(), task.id, 100, 1)
-                .expect("final claim");
+        .expect("draft (probe + structural Q4)");
+        let native = engine
+            .measure_attempt_native_with_md1_shadow(&draft_claim, &proposal, &task)
+            .expect("native measurement");
+        let claim = draft_claim.finalize(native.authority());
         let target = RawPosition::default();
 
-        let draft = observe_subject_authority_drift(&engine, &claim, &task, &legacy, 0.0, &target);
+        let draft = observe_subject_authority_drift(&engine, &claim, &task, &native, 0.0, &target);
 
         // Her iki lane de Evaluated olmalı (UserLoaded authority) ve Violated
         // (ölçüm vision'dan uzak) — aynı captured context altında.

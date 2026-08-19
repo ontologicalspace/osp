@@ -99,25 +99,46 @@ pub struct CommitOutcome {
 /// **Prensip:** `commit() = legacy/standalone claim path; commit_task_claim() = trajectory/task-bound path.`
 /// Mevcut commit() korunur (Paper 1 uyumluluk); commit_task_claim Paper 2 için.
 ///
-/// **INV-T9 #70 Commit 4b (reviewer v3 P1-1 — TODO Faz 8):** Bu struct atomik migration'da
-/// smart constructor'a çevrilecek: `{ claim, omega, task_resolver, measurement: EngineMeasurement }`.
-/// `target`/`loss_before`/`measured` kaldırılıp engine-owned derivation'a geçilecek (Faz 3).
-/// Public struct + private fields + `new()` smart constructor (external crate literal bypass
-/// kapalı). Şimdilik mevcut caller'lar (navigator, MCP, test) korunduğu için public field'lar
-/// kaldı — Faz 8 caller migration ile aynı commit'te smart constructor'a çevrilecek.
+/// **#96 MD-2 (plan v4-FİNAL — P0-tur3):** Public field'lar KALDIRILDI (private
+/// fields + `new()` smart ctor — external crate literal bypass kapalı). `measured`
+/// alanı gitti → **opaque `measurement: &NativeLegacySubjectMeasurement`** (engine-
+/// issued; caller native kaynak forge edemez). `target`/`loss_before` KALIR
+/// (semantik authority #97 MD-3; **fiziksel** removal #100 smart ctor tamamlaması).
+/// (Eski TODO'daki `measurement: EngineMeasurement` şekli task-scope binding gerekçesiyle
+/// #100'e devredildi — #96'nin token'ı legacy-subject native'dir; plan v4 keşfi.)
 pub struct TaskCommitInput<'a> {
-    pub claim: &'a crate::witness::Claim,
-    pub omega: &'a crate::witness::WitnessSet,
-    pub task_resolver: &'a dyn crate::trajectory::TaskResolver,
+    claim: &'a crate::witness::Claim,
+    omega: &'a crate::witness::WitnessSet,
+    task_resolver: &'a dyn crate::trajectory::TaskResolver,
     /// preferred_vector (loss/distance target — INV-T1 internal).
-    /// **TODO Faz 8:** kaldırılır, engine `task.target_predicate_set.preferred_vector`'den derive eder.
-    pub target: crate::coords::RawPosition,
-    /// Loss before (mevcut durumun preferred_vector'e uzaklığı).
-    /// **TODO Faz 8:** kaldırılır, engine-owned typed loss evidence (reviewer v4 P0).
-    pub loss_before: f64,
-    /// Engine-measured simulated_after (INV-T3 — claim.computed_raw'tan ProvenancedRawPosition).
-    /// **TODO Faz 8:** `measurement: EngineMeasurement` ile değiştirilir (token authority).
-    pub measured: crate::trajectory::ProvenancedRawPosition,
+    /// **#96:** değişmez; semantik authority #97, fiziksel removal #100.
+    target: crate::coords::RawPosition,
+    /// Loss before (running scalar — navigator :631 init / :1132 progress update).
+    /// **#96:** değişmez (MD-3 #97); fiziksel removal #100.
+    loss_before: f64,
+    /// **#96 MD-2:** Opaque engine-issued native provenance token (legacy subject).
+    measurement: &'a crate::measurement::NativeLegacySubjectMeasurement,
+}
+
+impl<'a> TaskCommitInput<'a> {
+    /// Smart constructor — private field'lara tek giriş (struct literal bypass kapalı).
+    pub fn new(
+        claim: &'a crate::witness::Claim,
+        omega: &'a crate::witness::WitnessSet,
+        task_resolver: &'a dyn crate::trajectory::TaskResolver,
+        target: crate::coords::RawPosition,
+        loss_before: f64,
+        measurement: &'a crate::measurement::NativeLegacySubjectMeasurement,
+    ) -> Self {
+        Self {
+            claim,
+            omega,
+            task_resolver,
+            target,
+            loss_before,
+            measurement,
+        }
+    }
 }
 
 /// Aşama D2 — commit_task_claim çıktısı. Attempt + outcome + apply_target + witness.
@@ -733,6 +754,63 @@ impl TaskScopeNativeMaterial {
     }
     pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
         &self.measured
+    }
+}
+
+/// **#96 MD-2 (plan v4 P0-tur3):** Commit-anı geçerlilik KANITI —
+/// `verify_native_legacy_measurement_binding` üretir (private ctor; yalnız engine).
+///
+/// **İkinci TOCTOU kapanışı:** `build_authorization_context` bu proof'tan okur —
+/// `base_space_view_revision` / `measurement_input_digest` / `measured_result`
+/// yeniden üretilmez ("verify context A → axis mutates → basis records B" imkânsız;
+/// rule/vision captured-context paylaşım prensibinin measurement uyarlaması).
+///
+/// **Stale replay fence** (`VerifiedTaskMeasurementBinding` dokümantasyon ayrımıyla
+/// hizalı): cross-context substitution / stale-space / context-drift / ABA axis-state
+/// koruması kanıtlanır; aynı context'te meşru yeniden sunum (Held + witness evidence
+/// + resubmit) engellenmez — "token cannot be replayed" iddiası YOK.
+pub struct VerifiedNativeLegacyMeasurementBinding {
+    base_revision: crate::authorization::SpaceViewRevision,
+    measurement_input_digest: crate::authorization::MeasurementInputDigest,
+    measured: crate::coords::MeasuredRawPosition,
+}
+
+impl VerifiedNativeLegacyMeasurementBinding {
+    /// Private ctor — yalnız `verify_native_legacy_measurement_binding` üretir.
+    fn new(
+        base_revision: crate::authorization::SpaceViewRevision,
+        measurement_input_digest: crate::authorization::MeasurementInputDigest,
+        measured: crate::coords::MeasuredRawPosition,
+    ) -> Self {
+        Self {
+            base_revision,
+            measurement_input_digest,
+            measured,
+        }
+    }
+
+    pub(crate) fn base_revision(&self) -> &crate::authorization::SpaceViewRevision {
+        &self.base_revision
+    }
+
+    pub(crate) fn measurement_input_digest(
+        &self,
+    ) -> &crate::authorization::MeasurementInputDigest {
+        &self.measurement_input_digest
+    }
+
+    pub(crate) fn measured(&self) -> &crate::coords::MeasuredRawPosition {
+        &self.measured
+    }
+}
+
+impl std::fmt::Debug for VerifiedNativeLegacyMeasurementBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VerifiedNativeLegacyMeasurementBinding")
+            .field("base_revision", &self.base_revision)
+            .field("measurement_input_digest", &self.measurement_input_digest)
+            .field("measured", &self.measured)
+            .finish()
     }
 }
 
@@ -1495,10 +1573,19 @@ impl SpaceEngine {
         // kontrol edilir: empty predicate set, non-finite threshold/tolerance, Mixed
         // source requirement, geçersiz policy.
         //
-        // Guard order: Q4 syntax → task bind → **validate_for_commit** → Q5 vision →
-        // (Faz 8: verify_measurement_binding) → Q5.b gate → Q6 rule → witness.
+        // Guard order: Q4 syntax → task bind → **validate_for_commit** →
+        // **#96: verify_native_legacy_measurement_binding** → Q5 vision →
+        // Q5.b gate → Q6 rule → witness.
         // Terminal — maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
         bound.task.validate_for_commit()?;
+
+        // **#96 MD-2 (plan v4 P0-tur3):** Opaque token'ın commit-anı geçerlilik kanıtı
+        // (5 kontrol: delta digest / raw bits / revision / context / epoch — ABA fence).
+        // Başarılıysa private proof döner; Q5/gate/basis bu proof ile beslenir.
+        // Failure → tek funnel `MeasurementBindingVerification` (SystemFailure sınıfı —
+        // navigator terminal, budget yok, LLM retry yok).
+        let verified_binding = self
+            .verify_native_legacy_measurement_binding(input.claim, input.measurement)?;
 
         // Phase 0c: Q5 Vision (θ bound — negatif-uzay safety).
         // **Step 4b:** Captured `EffectiveVisionGateContext` — bir kez üretilir, Q5 +
@@ -1510,9 +1597,11 @@ impl SpaceEngine {
         self.check_claim_vision_with_context(input.claim, &vision_context)?;
 
         // Phase 0d: Q5.b PredicateGate (soft gate — task completion + policy).
+        // **#96 MD-2:** measured artık native token'dan (proof-verified) — caller
+        // supplied plain measured YOK.
         let gate_out = PredicateGate.evaluate(PredicateGateInput {
             bound,
-            measured: &input.measured,
+            measured: verified_binding.measured(),
             loss_before: input.loss_before,
             target: &input.target,
         });
@@ -1558,6 +1647,7 @@ impl SpaceEngine {
                 &outcome,
                 apply_target,
                 &input,
+                &verified_binding,
                 input.loss_before,
                 loss_after,
                 &gate_out.improvement_policy,
@@ -1619,6 +1709,7 @@ impl SpaceEngine {
         outcome: &crate::trajectory::AttemptOutcome,
         apply_target: crate::trajectory::ApplyTarget,
         input: &TaskCommitInput<'_>,
+        verified_binding: &VerifiedNativeLegacyMeasurementBinding,
         loss_before: f64,
         loss_after: f64,
         improvement_policy: &crate::authorization::EffectiveImprovementPolicy,
@@ -1628,9 +1719,8 @@ impl SpaceEngine {
     ) -> Result<crate::authorization::AuthorizationContext, String> {
         use crate::authorization::{
             AuthorizationBasis, CanonicalF64, CanonicalPredicateContent, CanonicalRawPosition,
-            CanonicalWitnessPolicy, ClaimAuthor, ClaimIdentity, MeasurementInputContext,
-            MeasurementInputDigest, PredicateEvaluationBasis, ProvenancedMeasuredResult,
-            WitnessRequirement,
+            CanonicalWitnessPolicy, ClaimAuthor, ClaimIdentity, PredicateEvaluationBasis,
+            ProvenancedMeasuredResult, WitnessRequirement,
         };
         use crate::canonical_tags::{PredicateAxisTag, PredicateModeTag};
         let claim = input.claim;
@@ -1701,8 +1791,10 @@ impl SpaceEngine {
         };
 
         // Measured result — 5 eksen value + source (INV-T4 per-axis provenance).
-        // Her eksenin MetricSource'u ayrı bağlanır — INV-T4 source-requirement kararının
-        // evidence basis'i tam (placeholder source ile task kapatma engeli reconstructible).
+        // **#96 MD-2:** PROOF'TAN okunur (verified native token measured) — caller
+        // supplied measured YOK; verification sonrası yeniden üretim YOK (ikinci
+        // TOCTOU kapalı). Her eksenin MetricSource'u ayrı bağlanır — INV-T4
+        // source-requirement kararının evidence basis'i tam.
         let mk_axis = |am: &crate::trajectory::AxisMetric| -> Result<_, String> {
             Ok(crate::authorization::CanonicalAxisMeasurement {
                 value: am.value,
@@ -1710,24 +1802,23 @@ impl SpaceEngine {
                     .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?,
             })
         };
+        let verified_measured = verified_binding.measured();
         let measured_result = ProvenancedMeasuredResult {
-            coupling: mk_axis(&input.measured.coupling)?,
-            cohesion: mk_axis(&input.measured.cohesion)?,
-            instability: mk_axis(&input.measured.instability)?,
-            entropy: mk_axis(&input.measured.entropy)?,
-            witness_depth: mk_axis(&input.measured.witness_depth)?,
+            coupling: mk_axis(&verified_measured.coupling)?,
+            cohesion: mk_axis(&verified_measured.cohesion)?,
+            instability: mk_axis(&verified_measured.instability)?,
+            entropy: mk_axis(&verified_measured.entropy)?,
+            witness_depth: mk_axis(&verified_measured.witness_depth)?,
         };
 
         // Witness policy — gerçek omega'dan (plan-review #1).
         let witness_policy = CanonicalWitnessPolicy::try_from(omega).map_err(|e| e.to_string())?;
 
-        // **INV-T9 Adım 3:** Measurement input context — gerçek axis descriptor'ları
-        // (placeholder config_tag/axis_tags kaldırıldı). CoordinateSystem'den üretilir;
-        // axis implementation identity + semantics + canonical parameters bağlanır.
-        let measurement_input =
-            MeasurementInputContext::try_from(&self.coord_system).map_err(|e| e.to_string())?;
-        let measurement_input_digest =
-            MeasurementInputDigest::compute(&measurement_input).map_err(|e| e.to_string())?;
+        // **#96 MD-2 (P0-tur3 — ikinci TOCTOU kapanışı):** Measurement input digest
+        // PROOF'TAN (token'ın captured context'i) — `MeasurementInputContext::try_from
+        // (&self.coord_system)` yeniden okuması KALDIRILDI ("verify context A → axis
+        // mutates → basis records B" imkânsız).
+        let measurement_input_digest = verified_binding.measurement_input_digest().clone();
 
         // **reviewer (Step 4a + 4b + 4c closure):** Evaluation context digest — captured
         // `rule_context` + `vision_context` kullanır (commit_task_claim'in ürettiği
@@ -1737,7 +1828,10 @@ impl SpaceEngine {
         let evaluation_context_digest =
             crate::authorization::EvaluationContextDigest::compute(rule_context, vision_context)
                 .map_err(|e| e.to_string())?;
-        let base_space_view_revision = self.current_space_view_revision()?;
+        // **#96 MD-2 (P0-tur3):** base revision PROOF'TAN (token'ın ölçüm anı) —
+        // `current_space_view_revision()` yeniden okuması KALDIRILDI (verification
+        // ile basis aynı revision'ı bağlar; stale fence tutarlı).
+        let base_space_view_revision = verified_binding.base_revision().clone();
 
         let basis = AuthorizationBasis {
             schema_version: 1,
@@ -2784,6 +2878,149 @@ impl SpaceEngine {
         };
 
         run().map_err(|e| crate::subject_authority::map_v2_measurement_failure(&e))
+    }
+
+    /// **#96 MD-2 (plan v4 P0-tur3) — commit-anı geçerlilik kanıtı (5 kontrol):**
+    ///
+    /// ```text
+    /// (1) claim structural delta digest == token delta_digest     (shared producer recompute)
+    /// (2) claim.computed_raw bits    == token.measured.to_raw bits (half-merge fence)
+    /// (3) current SpaceViewRevision  == token base_revision        (stale replay fence)
+    /// (4) current descriptors digest == token measurement_input_digest (context TOCTOU fence)
+    /// (5) current axis epochs        == token epoch stamp          (A→B→A ABA fence)
+    /// ```
+    ///
+    /// Error funnel (P1-tur4): mevcut `MeasurementBindingMismatch` varyantları reuse
+    /// (StructuralDelta/Revision/CurrentContext) + YENİ `RawMismatch`/`AxisEpochMismatch`;
+    /// tek funnel `EngineCommitError::MeasurementBindingVerification` (legacy variant
+    /// doğrudan üretilmez). Derivation hataları `MeasurementBindingDerivationError`
+    /// ailesine (SystemFailure sınıfı). `LegacySubjectMismatch` YOK — token'ın
+    /// legacy_subject_ids'i audited measurement subject'tır, canonical task authority
+    /// değildir (#96 sınırı; MD-1 = #95-A).
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
+    pub fn verify_native_legacy_measurement_binding(
+        &self,
+        claim: &Claim,
+        token: &crate::measurement::NativeLegacySubjectMeasurement,
+    ) -> Result<
+        VerifiedNativeLegacyMeasurementBinding,
+        crate::measurement::MeasurementBindingVerificationError,
+    > {
+        use crate::measurement::{
+            MeasurementBindingDerivationError as DerivErr, MeasurementBindingMismatch,
+            MeasurementBindingVerificationError, MeasurementDeltaDigest,
+        };
+
+        // (1) Structural delta identity — shared canonical producer (tek truth).
+        let canonical_delta = crate::authorization::canonical_structural_delta_from_claim(claim)
+            .map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::StructuralCanonicalizationFailed { detail: e.to_string() },
+                )
+            })?;
+        let claim_delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)
+            .map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::RequestDigestComputationFailed { source: e },
+                )
+            })?;
+        if claim_delta_digest != *token.delta_digest() {
+            return Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::StructuralDeltaMismatch {
+                    expected: claim_delta_digest,
+                    presented: token.delta_digest().clone(),
+                },
+            ));
+        }
+
+        // (2) computed_raw bits — half-merge fence (final Claim AYNI token'dan).
+        let claim_bits = [
+            claim.computed_raw.x.to_bits(),
+            claim.computed_raw.y.to_bits(),
+            claim.computed_raw.z.to_bits(),
+            claim.computed_raw.w.to_bits(),
+            claim.computed_raw.v.to_bits(),
+        ];
+        let token_raw = token.raw();
+        let token_bits = [
+            token_raw.x.to_bits(),
+            token_raw.y.to_bits(),
+            token_raw.z.to_bits(),
+            token_raw.w.to_bits(),
+            token_raw.v.to_bits(),
+        ];
+        if claim_bits != token_bits {
+            return Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::RawMismatch {
+                    expected: token_bits,
+                    presented: claim_bits,
+                },
+            ));
+        }
+
+        // (3) Stale replay fence — revision ölçüm anından beri değişmedi.
+        let current_revision = self.current_space_view_revision().map_err(|e| {
+            MeasurementBindingVerificationError::Derivation(DerivErr::RevisionComputationFailed {
+                detail: e,
+            })
+        })?;
+        if current_revision != *token.base_revision() {
+            return Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::RevisionMismatch {
+                    expected: current_revision,
+                    presented: token.base_revision().clone(),
+                },
+            ));
+        }
+
+        // (4)+(5) Fresh session capture — current descriptors + epochs (atomik).
+        let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
+            .map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::CurrentContextCaptureFailed { source: e },
+                )
+            })?;
+        let context = crate::authorization::MeasurementInputContext::try_new(
+            session.axis_descriptors(),
+        )
+        .map_err(|e| {
+            MeasurementBindingVerificationError::Derivation(DerivErr::ContextConstructionFailed {
+                detail: e.to_string(),
+            })
+        })?;
+        let current_input_digest =
+            crate::measurement::compute_measurement_input_digest(&context).map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::RequestDigestComputationFailed { source: e },
+                )
+            })?;
+        if current_input_digest != *token.measurement_input_digest() {
+            return Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::CurrentContextMismatch {
+                    expected: current_input_digest,
+                    presented: token.measurement_input_digest().clone(),
+                },
+            ));
+        }
+        let current_epochs = session.axis_epochs();
+        let token_epochs = token.axis_epoch_stamp();
+        if current_epochs != token_epochs {
+            return Err(MeasurementBindingVerificationError::Mismatch(
+                MeasurementBindingMismatch::AxisEpochMismatch {
+                    expected: current_epochs.as_u64s(),
+                    presented: token_epochs.as_u64s(),
+                },
+            ));
+        }
+
+        Ok(VerifiedNativeLegacyMeasurementBinding::new(
+            token.base_revision().clone(),
+            token.measurement_input_digest().clone(),
+            token.measured().clone(),
+        ))
     }
 
     /// **INV-T9 #70 Commit 3 (P2-2 v3):** Task → subject scope üyeleri türetme (canonical).
@@ -3910,6 +4147,34 @@ v = 0.5
     // INV-T9 Step 4c — production-path regression: kaldırılan 5 config field digest'i etkilemiyor
     // ═══════════════════════════════════════════════════════════════════════════════
 
+    /// **#96 MD-2:** Crate-internal characterization token — private-field
+    /// `TaskCommitInput::new` test fixture'ları (commit-time verification'ın
+    /// geçebilmesi için claim ile tutarlı delta digest/revision/context/epoch).
+    fn characterization_native_token_test(
+        engine: &SpaceEngine,
+        claim: &Claim,
+        measured: crate::trajectory::ProvenancedRawPosition,
+    ) -> crate::measurement::NativeLegacySubjectMeasurement {
+        use crate::authorization::{
+            canonical_structural_delta_from_claim, MeasurementInputContext, MeasurementInputDigest,
+        };
+        use crate::measurement::{MeasurementDeltaDigest, NativeLegacySubjectMeasurement};
+        let canonical = canonical_structural_delta_from_claim(claim).unwrap();
+        let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical).unwrap();
+        let revision = engine.current_space_view_revision().unwrap();
+        let ctx = MeasurementInputContext::try_from(engine.coord_system()).unwrap();
+        let input_digest = MeasurementInputDigest::compute(&ctx).unwrap();
+        let subject = claim.delta_nodes.iter().map(|n| n.id).collect();
+        NativeLegacySubjectMeasurement::new_characterization_legacy(
+            measured,
+            subject,
+            delta_digest,
+            revision,
+            input_digest,
+            [0; 5],
+        )
+    }
+
     /// **Step 4c test helper:** `commit_task_claim → Held` production yolundan gerçek
     /// `(AuthorizationContext, WitnessHoldReason, WitnessQuorumSnapshot)` üret. Boş
     /// `WitnessSet` (min_approvers=2 kendi içinde) + predicate satisfied → Held.
@@ -4037,8 +4302,12 @@ v = 0.5
                 value: 0.5,
                 source: crate::coords::MetricSource::Scip,
             },
+            // **#96 RawMismatch fence'nin yakaladığı fixture tutarsızlığı:** eski
+            // değer 0.0, claim.computed_raw.v = 0.5 — eski motor measured≠computed_raw'a
+            // sesiz izin veriyordu; commit-time half-merge fence artık reddediyor.
+            // Fixture claim ile hizalandı (testin konusu evaluation-context exclusion).
             witness_depth: crate::trajectory::AxisMetric {
-                value: 0.0,
+                value: 0.5,
                 source: crate::coords::MetricSource::Scip,
             },
         };
@@ -4046,20 +4315,21 @@ v = 0.5
         // Omega: boş WitnessSet → kendi min_approvers=2/quorum=1.5 taşır → Held.
         let omega = WitnessSet::new(vec![]);
 
-        let input = TaskCommitInput {
-            claim: &claim,
-            omega: &omega,
-            task_resolver: &resolver,
-            target: RawPosition {
+        let commit_token = characterization_native_token_test(&engine, &claim, measured);
+        let input = TaskCommitInput::new(
+            &claim,
+            &omega,
+            &resolver,
+            RawPosition {
                 x: 0.5,
                 y: 0.5,
                 z: 0.5,
                 w: 0.5,
                 v: 0.5,
             },
-            loss_before: 1.0,
-            measured,
-        };
+            1.0,
+            &commit_token,
+        );
 
         match engine.commit_task_claim(input) {
             Ok(crate::engine::EngineCommitResult::Held {
@@ -8156,10 +8426,12 @@ v = 0.5
         assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[10_000u64]);
     }
 
-    /// Observer çağrısı `BoundMeasurementSession` TCB kontratı altında axis
-    /// descriptor + epoch state'i değiştirmez: pre-observe session'ı açık tutulur,
-    /// observe çalışır, `verify_unchanged` geçmek zorundadır (interior mutation →
-    /// `AxisStateDrift` fail-closed). Descriptor parity de ayrıca pinlenir.
+    /// **#96 re-anchor:** Producer çağrısı (`measure_attempt_native_with_md1_shadow`)
+    /// `BoundMeasurementSession` TCB kontratı altında axis descriptor + epoch
+    /// state'i değiştirmez: pre-produce session'ı açık tutulur, producer (authority
+    /// + md1_shadow, TEK session) çalışır, `verify_unchanged` geçmek zorundadır
+    /// (interior mutation → `AxisStateDrift` fail-closed). Descriptor parity de
+    /// ayrıca pinlenir.
     #[test]
     fn md1_observer_preserves_axis_session_state() {
         use crate::coords::BoundMeasurementSession;
@@ -8167,34 +8439,29 @@ v = 0.5
         let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
         let task = md1_task_node1();
         let proposal = md1_edge_proposal();
-        let probe = crate::navigator::build_claim_from_proposal(
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
             task.id,
             100,
             1,
         )
-        .expect("probe claim");
-        let legacy = crate::subject_authority::produce_legacy_subject_measurement(
-            &engine,
-            &probe.delta_nodes,
-            &probe.delta_edges,
-            &proposal,
-        );
-        let claim =
-            crate::navigator::build_claim_from_proposal(&proposal, legacy.raw(), task.id, 100, 1)
-                .expect("final claim");
+        .expect("draft (probe + structural Q4)");
+        let native = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .expect("native measurement");
+        let claim = draft.finalize(native.authority());
         let target = RawPosition::default();
 
         let session = BoundMeasurementSession::begin(&engine.coord_system)
             .expect("session begin on production built-in axes");
         let descriptors_before = session.axis_descriptors();
 
-        let draft = crate::subject_authority::observe_subject_authority_drift(
-            &engine, &claim, &task, &legacy, 0.0, &target,
+        let observation = crate::subject_authority::observe_subject_authority_drift(
+            &engine, &claim, &task, &native, 0.0, &target,
         );
         let _finalized =
-            draft.finalize(crate::subject_authority::V1DownstreamObservation::Observed(
+            observation.finalize(crate::subject_authority::V1DownstreamObservation::Observed(
                 crate::subject_authority::AuthoritativeDownstreamObservation {
                     predicate_completion: crate::trajectory::PredicateCompletion::NotCompleted,
                     mutation_decision: crate::trajectory::MutationDecision::Reject,
@@ -8202,12 +8469,12 @@ v = 0.5
             ));
 
         session.verify_unchanged().expect(
-            "observer must not drift axis epoch/descriptor state (Axis::measure TCB contract)",
+            "producer/observer must not drift axis epoch/descriptor state (Axis::measure TCB contract)",
         );
         assert_eq!(
             session.axis_descriptors(),
             descriptors_before,
-            "axis descriptors unchanged after observation"
+            "axis descriptors unchanged after measurement + observation"
         );
     }
 
@@ -8294,8 +8561,7 @@ v = 0.5
 
     #[test]
     fn md1_observer_fails_closed_on_behaviorally_mutating_axis() {
-        use crate::subject_authority::{V2LaneOutcome, V2MeasurementFailure};
-
+        
         let cs = CoordinateSystem::empty()
             .try_with_axis(Md1MutatingCouplingAxis {
                 epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -8325,43 +8591,27 @@ v = 0.5
         let engine = md1_engine_with_cs(cs);
         let task = md1_task_node1();
         let proposal = md1_edge_proposal();
-        let probe = crate::navigator::build_claim_from_proposal(
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
             task.id,
             100,
             1,
         )
-        .expect("probe claim");
-        let legacy = crate::subject_authority::produce_legacy_subject_measurement(
-            &engine,
-            &probe.delta_nodes,
-            &probe.delta_edges,
-            &proposal,
-        );
-        let claim =
-            crate::navigator::build_claim_from_proposal(&proposal, legacy.raw(), task.id, 100, 1)
-                .expect("final claim");
+        .expect("draft (probe + structural Q4)");
 
-        let draft = crate::subject_authority::observe_subject_authority_drift(
-            &engine,
-            &claim,
-            &task,
-            &legacy,
-            0.0,
-            &RawPosition::default(),
-        );
-
-        // Fail-closed: session epoch drift → typed CoordinateMeasurement failure.
+        // **#96 re-anchor (axis TCB):** fail-closed artık AUTHORITY lane'i korur —
+        // producer'ın TEK session'ı pre/post epoch verify ile mutating axis'i yakalar
+        // (eski yüzey: yalnız observer V2 lane'i fail-closed idi; authority legacy
+        // compute path session'sızdı. Re-anchor ile TCB güçlendi — reason note).
+        let result = engine.measure_attempt_native_with_md1_shadow(&draft, &proposal, &task);
         assert!(
             matches!(
-                draft.v2(),
-                V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::CoordinateMeasurement)
+                result,
+                Err(crate::measurement::MeasurementError::CoordinateMeasurement(_))
             ),
-            "behaviorally-mutating axis → session fail-closed → typed failure: {:?}",
-            draft.v2()
+            "behaviorally-mutating axis → producer fail-closed → typed CoordinateMeasurement: {:?}",
+            result
         );
-        // V1 legacy lane non-session compute path → shadow failure'ı etkilenmez.
-        assert_eq!(draft.v1().subject.ids, vec![1]);
     }
 }

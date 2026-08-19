@@ -1865,6 +1865,32 @@ impl NativeLegacySubjectMeasurement {
         }
     }
 
+    /// **Characterization-only (doc-hidden):** Faz 8-P2 V1 reference lane harness'i
+    /// (`tests/common/mod.rs::evaluate_v1_case`) ve test fixture'ları için — V1
+    /// lane'in legacy uniform-Scip projected measured'ı commit edebilmesi. Üretim
+    /// çağıranı OLMAZ (production forge edilebilirlik kapanışı `new()`'un pub(crate)
+    /// olmasından gelir; bu ctor açıkça isimlendirilmiş istisnadır — #100'de V1
+    /// lane kaldırıldığında silinir). Epoch'lar u64 dizisi olarak alınır
+    /// (`CoreAxisEpochStamp` pub(crate)).
+    #[doc(hidden)]
+    pub fn new_characterization_legacy(
+        measured: crate::coords::MeasuredRawPosition,
+        legacy_subject_ids: Vec<crate::space::NodeId>,
+        delta_digest: MeasurementDeltaDigest,
+        base_revision: crate::authorization::SpaceViewRevision,
+        measurement_input_digest: crate::authorization::MeasurementInputDigest,
+        axis_epoch_u64s: [u64; 5],
+    ) -> Self {
+        Self {
+            measured,
+            legacy_subject_ids,
+            delta_digest,
+            base_revision,
+            measurement_input_digest,
+            axis_epoch_stamp: crate::coords::CoreAxisEpochStamp::from_u64s(axis_epoch_u64s),
+        }
+    }
+
     /// Native per-axis measured (5 × value+source) — commit `PredicateGate` ve
     /// `AuthorizationBasis.measured_result` bu değerleri bağlar.
     pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
@@ -2014,6 +2040,24 @@ pub enum MeasurementBindingMismatch {
         expected: crate::authorization::MeasurementInputDigest,
         presented: crate::authorization::MeasurementInputDigest,
     },
+
+    /// **#96 MD-2 (plan v4 P1-tur4):** `claim.computed_raw` bit'leri token
+    /// `measured.to_raw()` bit'leri ile uyuşmuyor — half-merge fence (final Claim
+    /// token dışında bir ölçümden üretilmiş). expected/presented = (x,y,z,w,v)
+    /// `to_bits()` sırası.
+    #[error(
+        "claim computed_raw bits do not match token measured bits: expected={expected:?}, presented={presented:?}"
+    )]
+    RawMismatch { expected: [u64; 5], presented: [u64; 5] },
+
+    /// **#96 MD-2 (plan v4 P0-tur3):** Current axis epoch'ları token'ın captured
+    /// epoch stamp'ı ile uyuşmuyor — A→B→A descriptor revert'i (epoch monoton
+    /// olduğu için fail-closed yakalanır). expected/presented = `as_u64s()` sırası
+    /// (coupling, cohesion, instability, entropy, witness_depth).
+    #[error(
+        "axis epoch stamp does not match current engine epochs: expected={expected:?}, presented={presented:?}"
+    )]
+    AxisEpochMismatch { expected: [u64; 5], presented: [u64; 5] },
 }
 
 impl MeasurementBindingMismatch {
@@ -2022,7 +2066,9 @@ impl MeasurementBindingMismatch {
     pub fn disposition(&self) -> MeasurementBindingDisposition {
         match self {
             // Stale measurement — yeni token üretilebilir, LLM retry yok, budget yok.
-            Self::RevisionMismatch { .. } | Self::CurrentContextMismatch { .. } => {
+            Self::RevisionMismatch { .. }
+            | Self::CurrentContextMismatch { .. }
+            | Self::AxisEpochMismatch { .. } => {
                 MeasurementBindingDisposition::RegenerateMeasurement
             }
             // Presented authority geçersiz (replay/tamper) — terminal reject, retry yok.
@@ -2030,7 +2076,8 @@ impl MeasurementBindingMismatch {
             | Self::SubjectMismatch { .. }
             | Self::ImpactMismatch { .. }
             | Self::StructuralDeltaMismatch { .. }
-            | Self::ContextDigestMismatch { .. } => {
+            | Self::ContextDigestMismatch { .. }
+            | Self::RawMismatch { .. } => {
                 MeasurementBindingDisposition::RejectPresentedAuthority
             }
         }
