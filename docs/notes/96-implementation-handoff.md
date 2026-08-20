@@ -86,11 +86,14 @@
   `authority` alias=provenance mirror) + banner; bootstrap seed SABİT.
   `run_envelope.rs` `legacy_projected_v1()` → native ctor; `completed_loop` pin
   authority alanları (before pin'leri sabit; after pin'leri probe-then-freeze).
-- **W8:** integration test regolden (parity suite'i + drift suite'i + MCP e2e +
-  completed_loop henüz koşulmadı!) + yeni testler: Q4-vs-measurement yarış (nav+MCP),
-  binding 5 mismatch (SystemFailure/no-budget/no-retry), disposition exhaustiveness,
-  MD-2 observer envanteri. Reason-note şablonu: "provenance-driven (MD-2) —
-  frozen #88/#85 + dogfood Run A; subject-set etkisi YOK".
+- **W8:** integration test regolden (parity suite'i + MCP e2e + completed_loop henüz
+  koşulmadı! — drift suite'i 8/8 PASS: 002 V1 sources regolden `4d4d724`'te) + yeni
+  testler: Q4-vs-measurement yarış (nav+MCP), **commit binding verifier ×5 negatif**
+  (SystemFailure/no-budget/no-retry), disposition exhaustiveness, MD-2 observer
+  envanteri. **TESLİM EDİLDİ (tur-2 P1, `4d4d724`):** legacy-subject finalize binding
+  ×2 negative tests (farklı affected_nodes; aynı raw bits + farklı subject → yine
+  mismatch — `md2_finalize_rejects_*`). Reason-note şablonu: "provenance-driven
+  (MD-2) — frozen #88/#85 + dogfood Run A; subject-set etkisi YOK".
 - **W9:** docs/issues (#96 kapanış `feat: #96 …` scope-parens YOK; INV-T4 status;
   migration-decisions MD-2 record; handoff refresh), CI parity ritual (fmt/clippy/
   test --locked --all-features --exclude osp-desktop), dogfood Run A rerun.
