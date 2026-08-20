@@ -13,8 +13,15 @@ Kullanıcı bu mesajı iletecek:
 > Notlar: `docs/notes/95-md1-cutover-handoff.md` — önce oku, durum kontrolü yap.
 
 **İlk adımlar:** (1) bu dosyayı oku, (2) `git status` + `git log --oneline -5`,
-(3) `gh issue view 96` (+ `--comments`: v4 kontrat comment'i) + `gh issue view 103`,
+(3) `gh issue view 96 --comments` — okuma zinciri: **v4-FİNAL contract → PR #124 review
+addendum (binding-error bullet supersession) → PR #124 review tur-2 addendum (subject
+binding)**; yalnızca bu iki bullet superseded, diğer v4-FİNAL pin'leri değişmez;
++ `gh issue view 103`,
 (4) implementation branch aç (commit formatı `feat: #96 …` — scope parens YOK), W1'den başla.
+
+**Yerel implementation branch (push EDİLMEDİ):** `feat/96-md2-native-provenance-authority`
+@ `4d4d724` — W1-W4 + iki review düzeltmesi; ilerleyen oturum burdan devam eder
+(durum: `docs/notes/96-implementation-handoff.md`).
 
 ## Mevcut durum
 
@@ -32,8 +39,11 @@ Kullanıcı bu mesajı iletecek:
 ```text
 DeltaProposal
   → StructurallyValidatedClaimDraft::try_new        (pub osp-core; probe Claim + Q4 STRUCTURAL tek adımda;
-                                                     claim_id tek inkrement; MCP kopyalamaz — tek truth)
-  → engine derives legacy subject INTERNALLY        (derive_v1_legacy_measurement_subject(proposal);
+                                                     claim_id tek inkrement; MCP kopyalamaz — tek truth;
+                                                     **tur-2 P1: legacy_subject_binding private capture** —
+                                                     Claim affected_nodes TAŞIMAZ, proposal identity draft'ta)
+  → engine derives legacy subject INTERNALLY        (effective_legacy_measure_set — draft×producer TEK truth:
+                                                     derive_v1 ordered union; boşsa delta-ids fallback;
                                                      serbest Vec<NodeId> parametresi YOK)
   → BoundMeasurementSession (TEK session; begin atomik capture: descriptors→MeasurementInputDigest
                              VE epochs→CoreAxisEpochStamp; measurement SONRASI CoordinateSystem
@@ -42,11 +52,17 @@ DeltaProposal
       ├─ MD-1 task-scope shadow material            (geçici köprü; #95-B'de silinir)
       └─ final verify_unchanged
   → NativeLegacySubjectMeasurement (opaque; ctor YALNIZ SpaceEngine)
-      { measured, legacy_subject_ids, delta_digest: MeasurementDeltaDigest (mevcut tek
-        canonicalization truth), base_revision, measurement_input_digest, axis_epoch_stamp }
+      { measured, legacy_subject_ids, legacy_subject_binding (ids'den TÜRETİLİR — tur-2 P1),
+        delta_digest: MeasurementDeltaDigest (mevcut tek canonicalization truth; affected_nodes
+        İÇERMEZ — subject binding ayrı kanıt ister), base_revision, measurement_input_digest,
+        axis_epoch_stamp }
       — raw() = measured.to_raw() (bağımsız alan DEĞİL; SAME value bits = construction property)
-  → draft.finalize(&token)                          (yalnız computed_raw/Intent enjekte;
-                                                     structural + claim_id aynı object — TOCTOU kapalı)
+  → draft.finalize(&token) → Result                 (**tur-2 P1: legacy_subject_binding karşılaştırması —
+                                                     LegacySubjectBindingMismatch; aynı structural delta +
+                                                     farklı affected_nodes artifact mix'i reddedilir;
+                                                     raw check bağımsız kanıt DEĞİL** — finalize raw'ı
+                                                     token'dan enjekte eder; yalnız computed_raw/Intent
+                                                     enjekte, structural + claim_id aynı object)
   → Q4 FINAL-RAW finite validation
   → commit_task_claim → verify_native_legacy_measurement_binding (5 kontrol: delta digest,
      computed_raw bits, current SpaceViewRevision, current descriptors, current axis epochs —
@@ -58,14 +74,14 @@ DeltaProposal
 
 **Error funnel (PR #124 review P1 düzeltmesi — ontology):** engine-issued token hataları
 **`MeasurementBindingVerificationError::NativeAuthority(NativeLegacyMeasurementBindingError)`**
-typed family'sinde yaşar: `{ StructuralDeltaMismatch, RawMismatch, StaleSpaceRevision,
-MeasurementContextMismatch, AxisEpochMismatch }`. Mevcut `Mismatch` (presented-authority/
-caller) ailesi **yeniden anlamlandırılmaz ve dokunulmaz** — opaque token + private
-`TaskCommitInput` sonrası `RawMismatch` caller hatası olmaktan çıkmıştır (invariant
-violation/tamper); `AxisEpochMismatch` drift-kökenlidir. Tek funnel korunur:
-`EngineCommitError::MeasurementBindingVerification(…)` (paralel ontology yok). Navigator:
-`NativeAuthority` → SystemFailure | budget yok | LLM retry yok; `gate_decision` etiketi
-`RejectedByMeasurementBinding` DEĞİL (`Unknown`). `LegacySubjectMismatch` EKLENMEZ
+typed family'sinde yaşar: `{ StructuralDeltaMismatch, LegacySubjectBindingMismatch (tur-2 P1),
+RawMismatch, StaleSpaceRevision, MeasurementContextMismatch, AxisEpochMismatch }`. Mevcut
+`Mismatch` (presented-authority/caller) ailesi **yeniden anlamlandırılmaz ve dokunulmaz** —
+opaque token + private `TaskCommitInput` sonrası `RawMismatch` caller hatası olmaktan
+çıkmıştır (invariant violation/tamper); `AxisEpochMismatch` drift-kökenlidir. Tek funnel
+korunur: `EngineCommitError::MeasurementBindingVerification(…)` (paralel ontology yok).
+Navigator: `NativeAuthority` → SystemFailure | budget yok | LLM retry yok; `gate_decision`
+etiketi `RejectedByMeasurementBinding` DEĞİL (`Unknown`). `LegacySubjectMismatch` EKLENMEZ
 (token legacy_subject_ids = audited measurement subject, canonical task authority
 DEĞİL — #96 sınırı).
 
