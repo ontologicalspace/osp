@@ -128,8 +128,12 @@ DEĞİL — #96 sınırı).
   `"affected_nodes"` wire değeri **authority-family label'dır, literal subject set DEĞİL** —
   gerçek V1 subject `derive_v1_legacy_measurement_subject()`'in ordered union'ıdır
   (`affected_nodes` ∪ unseen `removed_edges.from`, sıra korunur).
-- **W8:** regolden + yeni testler (yarış, construction contract, cross-pin, binding 5 mismatch,
-  singleton, disposition exhaustiveness, MD-2 mirror envanteri). Reason-note: "provenance-driven
+- **W8:** regolden + yeni testler (yarış, construction contract, cross-pin,
+  commit binding verifier ×5 + legacy-subject finalize binding ×2 negative tests,
+  singleton, disposition exhaustiveness, MD-2 mirror envanteri).
+  Not: finalize ×2 negatif test (farklı affected_nodes; aynı raw bits + farklı
+  subject → yine mismatch) tür-2 P1 ile TESLİM EDİLDİ (feat/96 @ 4d4d724); commit
+  verifier ×5 negatifi W8’de gelecek. Reason-note: "provenance-driven
   (MD-2) — frozen #88/#85 + dogfood Run A; subject-set etkisi YOK".
 - **W9:** docs/issues (#96 kapanış `feat: #96 …`; #103 transferred; #100 absorbe; INV-T4;
   migration-decisions; handoff refresh — #95-A sıradaki).
