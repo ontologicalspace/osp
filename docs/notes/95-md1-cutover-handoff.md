@@ -56,12 +56,18 @@ DeltaProposal
      measured_result PROOF'TAN okunur — yeniden okumaz)
 ```
 
-**Error funnel (paralel ontology YOK):** mevcut `MeasurementBindingMismatch` varyantları reuse
-(StructuralDeltaMismatch/RevisionMismatch/CurrentContextMismatch) + YENİ `RawMismatch` +
-`AxisEpochMismatch`; verifier `MeasurementBindingVerificationError::Mismatch(…)` üretir; tek funnel
-`EngineCommitError::MeasurementBindingVerification(…)`. Navigator: → SystemFailure | budget yok |
-LLM retry yok. `LegacySubjectMismatch` EKLENMEZ (token legacy_subject_ids = audited measurement
-subject, canonical task authority DEĞİL — #96 sınırı).
+**Error funnel (PR #124 review P1 düzeltmesi — ontology):** engine-issued token hataları
+**`MeasurementBindingVerificationError::NativeAuthority(NativeLegacyMeasurementBindingError)`**
+typed family'sinde yaşar: `{ StructuralDeltaMismatch, RawMismatch, StaleSpaceRevision,
+MeasurementContextMismatch, AxisEpochMismatch }`. Mevcut `Mismatch` (presented-authority/
+caller) ailesi **yeniden anlamlandırılmaz ve dokunulmaz** — opaque token + private
+`TaskCommitInput` sonrası `RawMismatch` caller hatası olmaktan çıkmıştır (invariant
+violation/tamper); `AxisEpochMismatch` drift-kökenlidir. Tek funnel korunur:
+`EngineCommitError::MeasurementBindingVerification(…)` (paralel ontology yok). Navigator:
+`NativeAuthority` → SystemFailure | budget yok | LLM retry yok; `gate_decision` etiketi
+`RejectedByMeasurementBinding` DEĞİL (`Unknown`). `LegacySubjectMismatch` EKLENMEZ
+(token legacy_subject_ids = audited measurement subject, canonical task authority
+DEĞİL — #96 sınırı).
 
 ## #96 beyan (fixture-scoped)
 
@@ -101,6 +107,11 @@ subject, canonical task authority DEĞİL — #96 sınırı).
   `provenance_authority: "engine_native_per_axis"`, `provenance_native: true`, `authority` alias =
   provenance mirror) + banner; bootstrap seed DOKUNULMAZ; completed_loop: before pin'leri sabit,
   post-measurement pin'leri probe-then-freeze (1-ULP ancak reason-note ile).
+  **Ownership (PR #124 review P2):** `subject_authority` alanı **#96'da girer** (legacy authority
+  label olarak, değer `"affected_nodes"`); **#95-A yalnız değerini** `"task_scope"`a çevirir.
+  `"affected_nodes"` wire değeri **authority-family label'dır, literal subject set DEĞİL** —
+  gerçek V1 subject `derive_v1_legacy_measurement_subject()`'in ordered union'ıdır
+  (`affected_nodes` ∪ unseen `removed_edges.from`, sıra korunur).
 - **W8:** regolden + yeni testler (yarış, construction contract, cross-pin, binding 5 mismatch,
   singleton, disposition exhaustiveness, MD-2 mirror envanteri). Reason-note: "provenance-driven
   (MD-2) — frozen #88/#85 + dogfood Run A; subject-set etkisi YOK".
