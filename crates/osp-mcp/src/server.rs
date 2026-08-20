@@ -854,9 +854,28 @@ impl Workspace {
             }
         };
 
-        // 3. Final Claim (yalnız computed_raw/Intent enjekte) + Q4 FINAL-RAW finite
-        //    + commit_task_claim (native binding verification engine'de).
-        let claim = draft.finalize(native.authority());
+        // 3. Final Claim (yalnız computed_raw/Intent enjekte) + **tur-2 P1
+        //    subject-binding kontrolü** (`LegacySubjectBindingMismatch` →
+        //    NativeAuthority family kontratı: SystemFailure/no-budget/no-retry)
+        //    + Q4 FINAL-RAW finite + commit_task_claim (native binding
+        //    verification engine'de).
+        let claim = match draft.finalize(native.authority()) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "attempt_outcome": {
+                        "gate_decision": "RejectedBySyntax",
+                        "predicate_completion": "NotCompleted",
+                        "mutation_decision": "Reject",
+                        "witness_status": null,
+                    },
+                    "apply_target": "NotApplied",
+                    "loss_after": null,
+                    "measured_after": null,
+                    "message": format!("native token subject binding: {e}"),
+                }));
+            }
+        };
         if let Err(violation) = osp_core::task_measurement::validate_raw_position_finite(
             claim.id,
             "measurement.after",

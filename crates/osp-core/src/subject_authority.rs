@@ -1284,7 +1284,9 @@ mod tests {
         let native = engine
             .measure_attempt_native_with_md1_shadow(&draft_claim, &proposal, &task)
             .expect("native measurement");
-        let claim = draft_claim.finalize(native.authority());
+        let claim = draft_claim
+            .finalize(native.authority())
+            .expect("subject binding: draft ve token ayni proposal");
         let target = RawPosition::default();
 
         let draft = observe_subject_authority_drift(&engine, &claim, &task, &native, 0.0, &target);

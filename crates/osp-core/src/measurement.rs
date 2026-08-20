@@ -1810,14 +1810,57 @@ impl EngineMeasurement {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// #96 MD-2 — LegacySubjectBindingDigest (PR #124 review tur-2 P1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#96 MD-2 (PR #124 review tur-2 P1):** Legacy subject binding digest — effective
+/// legacy measure set'in (ordered union; boşsa delta-ids fallback) domain-separated
+/// commitment'i. `MeasurementDeltaDigest` yalnız new_nodes/new_edges/removed_edges
+/// bağlar (`affected_nodes` preimage'da YOK) ve final `Claim` `affected_nodes`
+/// taşımaz → structural-delta parity + raw parity, token'ın HANGİ legacy subject
+/// üzerinde ölçüldüğünü kanıtlamaz (raw check bağımsız DEĞİL: `finalize` computed_raw'ı
+/// token'dan enjekte eder). Bu digest, artifact'ın current proposal-derived legacy
+/// subject'ine bağlanmasını sağlar: `StructurallyValidatedClaimDraft` capture eder,
+/// `finalize` karşılaştırır (`LegacySubjectBindingMismatch`).
+///
+/// `subject_authority::MeasurementSubjectDigest` bilinçli olarak KULLANILMAZ —
+/// o modül #95-B'de silinir; bu digest bağımsız yaşar. #95-A sonrası task-scope
+/// authority'ye geçildiğinde anlamını yitirir (#100'de token ile birlikte ele alınır).
+///
+/// Construction property: token içinde `legacy_subject_ids`'den TÜRETİLİR
+/// (bağımsız ikinci truth YOK — `raw()`/`measured()` ilişkisiyle aynı disiplin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct LegacySubjectBindingDigest([u8; 32]);
+
+impl LegacySubjectBindingDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.legacy-subject-binding.v1\0";
+
+    /// Ordered member id listesi — sıra semantiktir (aggregation sırası f64 bitlerini
+    /// etkiler, #92; union sırası korunur). `NodeId`'ler u64 LE encode edilir.
+    pub fn compute(member_ids: &[crate::space::NodeId]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u64(
+            &mut hasher,
+            member_ids.len() as u64,
+            "legacy_subject_member_count",
+        );
+        for &id in member_ids {
+            encode_u64(&mut hasher, id, "legacy_subject_member_id");
+        }
+        Self(hasher.finalize().into())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // #96 MD-2 — NativeLegacySubjectMeasurement (opaque native provenance token)
 //
 // Plan v4-FİNAL: legacy subject (affected_nodes ordered union — #95-A'ya kadar
 // değişmez) üzerinde session-bound engine-native per-axis ölçümün authority
 // token'ı. Plain `MeasuredRawPosition` forgeability'sini kapatır: private fields
 // + tek üretici (`SpaceEngine::measure_attempt_native_with_md1_shadow`).
-// EngineMeasurement DEĞİLDİR — task-scope binding yoktur (MD-1 #95-A'nın
-// authority eksenidir); baseline yoktur (MD-3 #97'nindir).
+// EngineMeasurement DEĞİLDİR — task-scope binding yoktur (MD-1 = #95-A);
+// baseline yoktur (MD-3 = #97'nindir).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// **#96 MD-2 (plan v4-FİNAL):** Opaque engine-issued native provenance token —
@@ -1838,6 +1881,10 @@ pub struct NativeLegacySubjectMeasurement {
     /// ordered union (boşsa legacy delta-ids fallback uygulanmış hâli).
     /// Canonical TASK authority DEĞİLDİR (MD-1 = #95-A).
     legacy_subject_ids: Vec<crate::space::NodeId>,
+    /// **PR #124 review tur-2 P1:** `legacy_subject_ids`'den TÜRETİLİR (ctor
+    /// hesaplar — bağımsız ikinci truth YOK). Draft×token binding karşılaştırması
+    /// (`finalize`) bunu kullanır.
+    legacy_subject_binding: LegacySubjectBindingDigest,
     delta_digest: MeasurementDeltaDigest,
     base_revision: crate::authorization::SpaceViewRevision,
     measurement_input_digest: crate::authorization::MeasurementInputDigest,
@@ -1847,6 +1894,7 @@ pub struct NativeLegacySubjectMeasurement {
 impl NativeLegacySubjectMeasurement {
     /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native_with_md1_shadow`
     /// çağırır (engine.rs). External construction kapalı (private fields).
+    /// `legacy_subject_binding` ctor içinde `legacy_subject_ids`'den türetilir.
     pub(crate) fn new(
         measured: crate::coords::MeasuredRawPosition,
         legacy_subject_ids: Vec<crate::space::NodeId>,
@@ -1855,9 +1903,11 @@ impl NativeLegacySubjectMeasurement {
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
         axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
     ) -> Self {
+        let legacy_subject_binding = LegacySubjectBindingDigest::compute(&legacy_subject_ids);
         Self {
             measured,
             legacy_subject_ids,
+            legacy_subject_binding,
             delta_digest,
             base_revision,
             measurement_input_digest,
@@ -1871,7 +1921,7 @@ impl NativeLegacySubjectMeasurement {
     /// çağıranı OLMAZ (production forge edilebilirlik kapanışı `new()`'un pub(crate)
     /// olmasından gelir; bu ctor açıkça isimlendirilmiş istisnadır — #100'de V1
     /// lane kaldırıldığında silinir). Epoch'lar u64 dizisi olarak alınır
-    /// (`CoreAxisEpochStamp` pub(crate)).
+    /// (`CoreAxisEpochStamp` pub(crate)). Binding digest ctor içinde türetilir.
     #[doc(hidden)]
     pub fn new_characterization_legacy(
         measured: crate::coords::MeasuredRawPosition,
@@ -1881,9 +1931,11 @@ impl NativeLegacySubjectMeasurement {
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
         axis_epoch_u64s: [u64; 5],
     ) -> Self {
+        let legacy_subject_binding = LegacySubjectBindingDigest::compute(&legacy_subject_ids);
         Self {
             measured,
             legacy_subject_ids,
+            legacy_subject_binding,
             delta_digest,
             base_revision,
             measurement_input_digest,
@@ -1905,6 +1957,13 @@ impl NativeLegacySubjectMeasurement {
     /// Audited legacy measurement subject (ordered union + delta-ids fallback).
     pub fn legacy_subject_ids(&self) -> &[crate::space::NodeId] {
         &self.legacy_subject_ids
+    }
+
+    /// **PR #124 review tur-2 P1:** Legacy subject binding digest —
+    /// `legacy_subject_ids`'den türetilmiş; draft×token karşılaştırması
+    /// (`StructurallyValidatedClaimDraft::finalize`) kullanır.
+    pub fn legacy_subject_binding(&self) -> &LegacySubjectBindingDigest {
+        &self.legacy_subject_binding
     }
 
     /// Claim structural delta identity — mevcut tek canonicalization truth
@@ -2063,6 +2122,20 @@ pub enum NativeLegacyMeasurementBindingError {
     StructuralDeltaMismatch {
         expected: MeasurementDeltaDigest,
         presented: MeasurementDeltaDigest,
+    },
+
+    /// **PR #124 review tur-2 P1:** Token'ın legacy subject binding digest'i
+    /// draft'ın (current proposal) capture ettiği digest ile uyuşmuyor — aynı
+    /// structural delta + farklı `affected_nodes` artifact mix'i. `MeasurementDeltaDigest`
+    /// affected_nodes içermez ve `Claim` affected_nodes taşımaz; raw parity de
+    /// bağımsız kanıt DEĞİLDİR (finalize computed_raw'ı token'dan enjekte eder).
+    /// Kontrol `draft.finalize(&token)`'da yaşar (draft×token — proposal identity'sinin
+    /// yaşadığı tek nokta); commit verifier claim'den subject türetemez. İsim
+    /// bilinçli olarak "Binding": MD-1 canonical task authority ile KARIŞMAZ.
+    #[error("native token legacy subject binding mismatch: expected={expected:?}, presented={presented:?}")]
+    LegacySubjectBindingMismatch {
+        expected: LegacySubjectBindingDigest,
+        presented: LegacySubjectBindingDigest,
     },
 
     /// `claim.computed_raw` bit'leri token `measured.to_raw()` bit'leri ile uyuşmuyor —

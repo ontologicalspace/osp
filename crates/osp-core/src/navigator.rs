@@ -834,9 +834,18 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
 
             // 6. Final Claim — draft.consume: YALNIZ computed_raw/Intent enjekte
             //    (structural fields + claim_id aynı object — probe↔final TOCTOU
-            //    type-level kapalı) + Q4 FINAL-RAW finite validation (measurement
-            //    gerçeği; engine defensively tekrar kontrol eder).
-            let claim = draft.finalize(native.authority());
+            //    type-level kapalı) + **tur-2 P1 subject-binding kontrolü**
+            //    (`LegacySubjectBindingMismatch` → NativeAuthority family →
+            //    SystemFailure kontratı) + Q4 FINAL-RAW finite validation
+            //    (measurement gerçeği; engine defensively tekrar kontrol eder).
+            let claim = match draft.finalize(native.authority()) {
+                Ok(c) => c,
+                Err(e) => {
+                    return NavigatorResult::SystemFailure(format!(
+                        "native token subject binding: {e}"
+                    ));
+                }
+            };
             if let Err(violation) = crate::task_measurement::validate_raw_position_finite(
                 claim.id,
                 "measurement.after",

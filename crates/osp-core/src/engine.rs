@@ -2772,14 +2772,12 @@ impl SpaceEngine {
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
         // 4. Legacy subject — engine-internal derivation (P1-tur-approve).
-        //    Legacy semantics: derived union; boşsa delta node id'leri (fallback).
-        let derived_subject =
-            crate::subject_authority::derive_v1_legacy_measurement_subject(proposal);
-        let measure_set: Vec<crate::space::NodeId> = if derived_subject.is_empty() {
-            claim.delta_nodes.iter().map(|n| n.id).collect()
-        } else {
-            derived_subject
-        };
+        //    **tur-2 P1:** draft ile TEK truth — `effective_legacy_measure_set`
+        //    (ordered union; boşsa delta node id'leri fallback). Token ctor,
+        //    `legacy_subject_binding` digest'ini bu set'ten türetir; draft'ın
+        //    capture'ı ile hizalı (finalize karşılaştırır).
+        let measure_set =
+            crate::task_measurement::effective_legacy_measure_set(proposal, &claim.delta_nodes);
 
         // 5. Hypothetical (measure_task_delta P2-3 sırası: removed → nodes → edges).
         let mut hypothetical = self.space.clone();
@@ -8428,6 +8426,180 @@ v = 0.5
         assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[10_000u64]);
     }
 
+    /// **#96 MD-2 (PR #124 review tur-2 P1 — negatif test 1):** aynı structural
+    /// delta + farklı `affected_nodes` → token artifact mix'i `finalize`'da
+    /// `LegacySubjectBindingMismatch` ile reddedilir. `MeasurementDeltaDigest`
+    /// affected_nodes içermez; structural-delta parity subject identity kanıtlamaz.
+    #[test]
+    fn md2_finalize_rejects_same_delta_different_affected_nodes_token_mix() {
+        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        let task = md1_task_node1();
+        // A ve B: AYNI structural delta (edge 1→2), FARKLI affected_nodes.
+        let proposal_a = md1_edge_proposal(); // affected [1]
+        let mut proposal_b = md1_edge_proposal();
+        proposal_b.affected_nodes = vec![2];
+
+        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_a,
+            RawPosition::default(),
+            task.id,
+            1,
+            1,
+        )
+        .unwrap();
+        let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_b,
+            RawPosition::default(),
+            task.id,
+            1,
+            2,
+        )
+        .unwrap();
+
+        // Structural delta digest'leri EŞİT (precondition — delta affected_nodes
+        // içermez; review senaryosunun ta kendisi).
+        let bundle_a = engine
+            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal_a, &task)
+            .unwrap();
+        let bundle_b = engine
+            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal_b, &task)
+            .unwrap();
+        assert_eq!(
+            bundle_a.authority().delta_digest(),
+            bundle_b.authority().delta_digest(),
+            "precondition: aynı structural delta → aynı delta digest"
+        );
+        assert_ne!(
+            bundle_a.authority().legacy_subject_ids(),
+            bundle_b.authority().legacy_subject_ids(),
+            "precondition: farklı affected_nodes → farklı legacy subject"
+        );
+
+        // Pozitif kontrol: kendi draft'ı ile finalize OK.
+        let draft_a2 = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_a,
+            RawPosition::default(),
+            task.id,
+            1,
+            1,
+        )
+        .unwrap();
+        assert!(draft_a2.finalize(bundle_a.authority()).is_ok());
+
+        // Negatif: B'nin draft'ı + A'nın token'ı → mismatch (enum equality).
+        let err = draft_b
+            .finalize(bundle_a.authority())
+            .expect_err("subject binding mismatch beklenir");
+        assert!(
+            matches!(
+                err,
+                crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch { .. }
+            ),
+            "LegacySubjectBindingMismatch: {err:?}"
+        );
+    }
+
+    /// **#96 MD-2 (PR #124 review tur-2 P1 — negatif test 2):** aynı structural
+    /// delta + AYNI sonuç raw bitleri + farklı legacy subject → YİNE mismatch.
+    /// Raw parity binding hatasını MASKELEMEZ (finalize computed_raw'ı token'dan
+    /// enjekte eder — bağımsız kanıt DEĞİL; subject binding bağımsız kalandır).
+    #[test]
+    fn md2_finalize_rejects_same_raw_bits_different_legacy_subject() {
+        // Simetrik uzay: node 5 ve 6 izole, özdeş kütle → ölçümleri bit-exact eşit.
+        let mut space = crate::space::Space::new();
+        for id in [5u64, 6u64] {
+            space.insert_node(crate::space::Node {
+                id,
+                kind: crate::space::NodeKind::Module,
+                mass: 1.0,
+                ..Default::default()
+            });
+        }
+        let engine = SpaceEngine::new(
+            space,
+            make_measurement_engine_coordinate_system(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let task = md1_task_node1();
+
+        // AYNI structural delta (aynı new_nodes spec'i); farklı affected_nodes.
+        let mk_proposal = |affected: u64| {
+            let mut p = md1_edge_proposal();
+            p.new_edges = vec![];
+            p.new_nodes = vec![crate::agent::NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }];
+            p.affected_nodes = vec![affected];
+            p
+        };
+        let proposal_a = mk_proposal(5);
+        let proposal_b = mk_proposal(6);
+
+        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_a,
+            RawPosition::default(),
+            task.id,
+            1,
+            1,
+        )
+        .unwrap();
+        let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_b,
+            RawPosition::default(),
+            task.id,
+            1,
+            2,
+        )
+        .unwrap();
+        let bundle_a = engine
+            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal_a, &task)
+            .unwrap();
+        let bundle_b = engine
+            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal_b, &task)
+            .unwrap();
+
+        // Precondition 1: structural delta aynı.
+        assert_eq!(
+            bundle_a.authority().delta_digest(),
+            bundle_b.authority().delta_digest()
+        );
+        // Precondition 2: sonuç raw bitleri EŞİT (simetrik subject'ler).
+        let bits = |r: crate::coords::RawPosition| {
+            [
+                r.x.to_bits(),
+                r.y.to_bits(),
+                r.z.to_bits(),
+                r.w.to_bits(),
+                r.v.to_bits(),
+            ]
+        };
+        assert_eq!(
+            bits(bundle_a.authority().raw()),
+            bits(bundle_b.authority().raw()),
+            "precondition: simetrik subject'ler → aynı raw bits"
+        );
+        // Precondition 3: subject'ler farklı.
+        assert_ne!(
+            bundle_a.authority().legacy_subject_ids(),
+            bundle_b.authority().legacy_subject_ids()
+        );
+
+        // Negatif: aynı raw bits + farklı subject → YİNE mismatch.
+        let err = draft_b
+            .finalize(bundle_a.authority())
+            .expect_err("raw parity subject binding'i maskelememeli");
+        assert!(
+            matches!(
+                err,
+                crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch { .. }
+            ),
+            "LegacySubjectBindingMismatch (aynı raw bits): {err:?}"
+        );
+    }
+
     /// **#96 re-anchor:** Producer çağrısı (`measure_attempt_native_with_md1_shadow`)
     /// `BoundMeasurementSession` TCB kontratı altında axis descriptor + epoch
     /// state'i değiştirmez: pre-produce session'ı açık tutulur, producer (authority
@@ -8452,7 +8624,9 @@ v = 0.5
         let native = engine
             .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
             .expect("native measurement");
-        let claim = draft.finalize(native.authority());
+        let claim = draft
+            .finalize(native.authority())
+            .expect("subject binding: draft ve token ayni proposal");
         let target = RawPosition::default();
 
         let session = BoundMeasurementSession::begin(&engine.coord_system)

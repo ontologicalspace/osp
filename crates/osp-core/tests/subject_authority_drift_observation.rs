@@ -75,7 +75,9 @@ fn setup_with_engine(
     let native = engine
         .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
         .expect("native measurement should succeed for corpus case");
-    let claim = draft.finalize(native.authority());
+    let claim = draft
+        .finalize(native.authority())
+        .expect("subject binding: draft ve token ayni proposal");
     let target = case
         .task
         .target_predicate_set
@@ -234,8 +236,22 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
         "V2 raw bits must equal frozen corpus 001/002 parity goldens"
     );
 
-    // Provenance — V1 compatibility-projected uniform Scip; V2 engine-native.
-    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
+    // Provenance — **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE per-axis
+    // kaynaklar taşır (eski pin: uniform [Scip;5] compatibility projection — tarihsel;
+    // değerler/bitler yukarıdaki #92/#120 goldens'leriyle AYNEN korundu, yalnız kaynak
+    // etiketleri native). Gözlem artık yalnız SUBJECT farkı taşır; provenance ekseni
+    // #96 MD-2 observer'ına (provenance_authority.rs) aittir.
+    assert_eq!(
+        draft.v1().raw.sources,
+        [
+            MetricSource::TreeSitter,
+            MetricSource::Placeholder,
+            MetricSource::TreeSitter,
+            MetricSource::Heuristic,
+            MetricSource::Heuristic,
+        ],
+        "V1 lane native per-axis sources (fixture axis seti)"
+    );
     assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
 
     // Q5 same-context divergence — #92 engine-unit goldens.
@@ -628,7 +644,9 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
     let native_a = engine_a
         .measure_attempt_native_with_md1_shadow(&draft_a, &proposal, &task)
         .expect("native measure A");
-    let claim_a = draft_a.finalize(native_a.authority());
+    let claim_a = draft_a
+        .finalize(native_a.authority())
+        .expect("subject binding A");
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(task.clone());
     let target = RawPosition::default();
