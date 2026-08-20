@@ -62,7 +62,12 @@ fn md1_held_response_carries_drift_sidecar_additively() {
                     operator: osp_core::trajectory::ComparisonOp::Le,
                     threshold: 0.55,
                     scope: osp_core::trajectory::PredicateScope::Node(0),
-                    required_source: Some(osp_core::coords::MetricSource::Scip),
+                    // **#96 MD-2 regolden:** Scip-gereklilik kaldırıldı — legacy
+                    // uniform-Scip projeksiyonu tesadüfi karşılıyordu; native
+                    // TreeSitter coupling dürüstçe SourceInsufficient→Reject üretti
+                    // (dogfood Run A senaryosu). Held YÜZEYİ testin konusu —
+                    // kaynak gereksiniminden arındırıldı (#88 matrisleri kapsar).
+                    required_source: None,
                     tolerance: 0.0,
                 },
                 weight: None,
@@ -117,11 +122,24 @@ fn md1_held_response_carries_drift_sidecar_additively() {
         serde_json::from_value(sidecar.clone()).expect("sidecar deserializes to typed observation");
     assert_eq!(obs.task_id, task.id);
 
-    // V1 lane legacy compatibility subject'i taşır (affected+removed boş → []).
-    assert!(obs.v1.subject.ids.is_empty());
+    // V1 lane audited subject — **#96:** effective measure set (derive_v1 ordered
+    // union; boşsa delta-ids fallback). Eski pin [] (yalnız derive çıktısı) —
+    // token audited subject'i fallback dahil taşır (engine construction-contract
+    // testiyle hizalı: affected/removed boş → [10_000]).
+    assert_eq!(obs.v1.subject.ids, vec![10_000u64]);
+    // **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE kaynaklar taşır
+    // (eski pin: uniform [Scip;5] compatibility projection — tarihsel).
+    // Fixture repo analyze axis seti: [TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic].
     assert_eq!(
         obs.v1.raw.sources,
-        [osp_core::coords::MetricSource::Scip; 5]
+        [
+            osp_core::coords::MetricSource::TreeSitter,
+            osp_core::coords::MetricSource::Placeholder,
+            osp_core::coords::MetricSource::TreeSitter,
+            osp_core::coords::MetricSource::Heuristic,
+            osp_core::coords::MetricSource::Heuristic,
+        ],
+        "V1 lane native per-axis sources (re-anchor)"
     );
 
     // **Additive contract:** sidecar çıkarılınca kalan key seti pre-P2-1 ile exact.
@@ -195,14 +213,17 @@ fn assert_error_response_additive_contract(
     obs
 }
 
-/// **EK review P2-3:** MCP generic-Err branch'inin retryable composition'u e2e —
-/// Q4 `SyntaxViolation` (self-import) → sidecar `NotReached{Q4SyntaxRejection}`.
+/// **#96 MD-2 precedence correction (plan v4 P1-tur3):** structural Q4 hatası
+/// artık DRAFT aşamasında yakalanır (fallible native measurement'tan ÖNCE) —
+/// measurement yok → drift observation ÜRETİLMEZ (`NotReached{Q4SyntaxRejection}`
+/// arm'ı #96 ile observerdan gitti; eski retryable-commit-error + sidecar akışı
+/// tarihsel). Regression DEĞİL — Q4-vs-measurement precedence düzeltmesi.
 #[test]
 fn md1_q4_syntax_violation_response_carries_not_reached_sidecar() {
     let handle = make_server_handle();
     let task = md1_trivially_satisfied_task();
 
-    // Self-import (new node id = 10_000) → engine Q4 SyntaxViolation (retryable).
+    // Self-import (new node id = 10_000) → draft structural Q4 reddi.
     let proposal = osp_core::agent::DeltaProposal {
         new_nodes: vec![osp_core::agent::NewNodeSpec {
             kind: osp_core::space::NodeKind::Module,
@@ -216,7 +237,7 @@ fn md1_q4_syntax_violation_response_carries_not_reached_sidecar() {
         }],
         modified_entities: vec![],
         position_hints: vec![],
-        reasoning: "self-import → Q4".into(),
+        reasoning: "self-import → structural Q4 (draft stage)".into(),
         ..Default::default()
     };
 
@@ -225,17 +246,29 @@ fn md1_q4_syntax_violation_response_carries_not_reached_sidecar() {
         .submit_delta_attempt(&proposal, &task, 1)
         .expect("attempt");
 
-    // Legacy error JSON yüzeyi (bilinçli olarak değişmez).
+    // Legacy error JSON yüzeyi korunur (RejectedBySyntax + 5-key error shape).
     assert_eq!(
         outcome["attempt_outcome"]["gate_decision"], "RejectedBySyntax",
         "legacy error JSON semantiği korunur"
     );
-    let obs = assert_error_response_additive_contract(&outcome);
+    assert_eq!(outcome["apply_target"], "NotApplied");
+    // **Precedence correction:** sidecar YOK — measurement henüz gerçekleşmedi.
+    assert!(
+        outcome.get("subject_authority_drift").is_none(),
+        "structural-Q4 reject → observation yok (measurement öncesi yakalandı)"
+    );
+    let mut keys: Vec<&str> = outcome
+        .as_object()
+        .expect("response is an object")
+        .keys()
+        .map(|k| k.as_str())
+        .collect();
+    keys.sort_unstable();
+    let mut expected = ERROR_RESPONSE_LEGACY_KEYS.to_vec();
+    expected.sort_unstable();
     assert_eq!(
-        obs.v1.downstream,
-        osp_core::subject_authority::V1DownstreamObservation::NotReached {
-            reason: osp_core::subject_authority::V1DownstreamNotReachedReason::Q4SyntaxRejection,
-        }
+        keys, expected,
+        "draft-stage error response == pre-P2-1 error key set (sidecar yok — precedence correction)"
     );
 }
 

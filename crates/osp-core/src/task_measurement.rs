@@ -121,10 +121,7 @@ pub fn node_from_spec(spec: &crate::agent::NewNodeSpec, index: usize) -> Node {
 /// ordered union; boşsa delta node id'leri (legacy fallback). Draft'ın
 /// `legacy_subject_binding` capture'ı ile token'ın audited subject'i bu hesapla
 /// hizalı kalır (farklı hesap = sessiz binding drift).
-pub fn effective_legacy_measure_set(
-    proposal: &DeltaProposal,
-    delta_nodes: &[Node],
-) -> Vec<NodeId> {
+pub fn effective_legacy_measure_set(proposal: &DeltaProposal, delta_nodes: &[Node]) -> Vec<NodeId> {
     let derived = crate::subject_authority::derive_v1_legacy_measurement_subject(proposal);
     if derived.is_empty() {
         delta_nodes.iter().map(|n| n.id).collect()
@@ -295,9 +292,7 @@ impl StructurallyValidatedClaimDraft {
     }
 
     /// **tur-2 P1:** Capture edilen legacy subject binding digest'i (readonly).
-    pub fn legacy_subject_binding(
-        &self,
-    ) -> &crate::measurement::LegacySubjectBindingDigest {
+    pub fn legacy_subject_binding(&self) -> &crate::measurement::LegacySubjectBindingDigest {
         &self.legacy_subject_binding
     }
 
@@ -309,6 +304,10 @@ impl StructurallyValidatedClaimDraft {
     /// digest'i draft'ın capture ettiğiyle eşit olMALIDIR — eşit değilse
     /// `LegacySubjectBindingMismatch` (aynı structural delta + farklı affected_nodes
     /// artifact mix'i; MD-1 canonical authority ile karışmaz — "Binding" adı bilinçli).
+    #[allow(
+        clippy::result_large_err,
+        reason = "binding error inline (see measurement.rs layout decision)"
+    )]
     pub fn finalize(
         self,
         measurement: &NativeLegacySubjectMeasurement,
@@ -374,7 +373,8 @@ pub fn measurement_failure_disposition(
     use crate::measurement::MeasurementError;
     match err {
         // TerminalIdentityViolation — claim/task binding wiring.
-        MeasurementError::ClaimNotTaskBound { .. } | MeasurementError::TaskBindingMismatch { .. } => {
+        MeasurementError::ClaimNotTaskBound { .. }
+        | MeasurementError::TaskBindingMismatch { .. } => {
             MeasurementFailureDisposition::TerminalIdentityViolation
         }
         // TerminalTaskDeclaration — task yazarı hatası; agent ID SEÇEMEZ
@@ -451,14 +451,9 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err = StructurallyValidatedClaimDraft::try_new(
-            &proposal,
-            RawPosition::default(),
-            1,
-            1,
-            1,
-        )
-        .unwrap_err();
+        let err =
+            StructurallyValidatedClaimDraft::try_new(&proposal, RawPosition::default(), 1, 1, 1)
+                .unwrap_err();
         assert!(matches!(err, ClaimDraftError::Syntax(_)));
     }
 }

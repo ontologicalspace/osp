@@ -2144,7 +2144,10 @@ pub enum NativeLegacyMeasurementBindingError {
     #[error(
         "claim computed_raw bits do not match token measured bits: expected={expected:?}, presented={presented:?}"
     )]
-    RawMismatch { expected: [u64; 5], presented: [u64; 5] },
+    RawMismatch {
+        expected: [u64; 5],
+        presented: [u64; 5],
+    },
 
     /// Current `SpaceViewRevision` token'ın base revision'ı ile uyuşmuyor —
     /// stale replay fence. expected = current, presented = token'ınki.
@@ -2171,7 +2174,10 @@ pub enum NativeLegacyMeasurementBindingError {
     #[error(
         "native token axis epoch stamp does not match current epochs: expected={expected:?}, presented={presented:?}"
     )]
-    AxisEpochMismatch { expected: [u64; 5], presented: [u64; 5] },
+    AxisEpochMismatch {
+        expected: [u64; 5],
+        presented: [u64; 5],
+    },
 }
 
 impl MeasurementBindingMismatch {

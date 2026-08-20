@@ -739,9 +739,9 @@ impl std::fmt::Debug for NativeAttemptMeasurement {
 }
 
 /// MD-1 observer'ın V2 (task scope) lane material'i — canonical (sorted) subject
-/// + native measured. `measure_task_delta().after()` ile aynı semantik (cross-pin
-/// test pinler — observer refactor'u #95 V2 ölçüm semantiğini sessizce
-/// zayıflatamaz).
+/// ve native measured taşır; `measure_task_delta().after()` ile aynı semantiğe
+/// sahiptir (cross-pin test pinler: observer refactor'u #95 V2 ölçüm semantiğini
+/// sessizce zayıflatamaz).
 #[derive(Debug, Clone)]
 pub struct TaskScopeNativeMaterial {
     subject_ids: Vec<NodeId>,
@@ -793,9 +793,7 @@ impl VerifiedNativeLegacyMeasurementBinding {
         &self.base_revision
     }
 
-    pub(crate) fn measurement_input_digest(
-        &self,
-    ) -> &crate::authorization::MeasurementInputDigest {
+    pub(crate) fn measurement_input_digest(&self) -> &crate::authorization::MeasurementInputDigest {
         &self.measurement_input_digest
     }
 
@@ -1584,8 +1582,8 @@ impl SpaceEngine {
         // Başarılıysa private proof döner; Q5/gate/basis bu proof ile beslenir.
         // Failure → tek funnel `MeasurementBindingVerification` (SystemFailure sınıfı —
         // navigator terminal, budget yok, LLM retry yok).
-        let verified_binding = self
-            .verify_native_legacy_measurement_binding(input.claim, input.measurement)?;
+        let verified_binding =
+            self.verify_native_legacy_measurement_binding(input.claim, input.measurement)?;
 
         // Phase 0c: Q5 Vision (θ bound — negatif-uzay safety).
         // **Step 4b:** Captured `EffectiveVisionGateContext` — bir kez üretilir, Q5 +
@@ -2792,12 +2790,10 @@ impl SpaceEngine {
         }
 
         // 6. Authority measured — native per-axis, session-bound.
-        let measured =
-            self.measured_centroid_in_session(&session, &hypothetical, &measure_set)?;
+        let measured = self.measured_centroid_in_session(&session, &hypothetical, &measure_set)?;
 
         // 7. MD-1 shadow — task scope, AYNI session; failure → telemetry sınıflandırma.
-        let md1_shadow =
-            self.measure_md1_shadow_in_session(&session, &hypothetical, claim, task);
+        let md1_shadow = self.measure_md1_shadow_in_session(&session, &hypothetical, claim, task);
 
         // 8. Session-sonu verify (authority + shadow ölçümleri aynı fences altında).
         session
@@ -2805,10 +2801,9 @@ impl SpaceEngine {
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
         // 9. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
-        let context = crate::authorization::MeasurementInputContext::try_new(
-            session.axis_descriptors(),
-        )
-        .map_err(MeasurementError::MeasurementContext)?;
+        let context =
+            crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
+                .map_err(MeasurementError::MeasurementContext)?;
         let measurement_input_digest = compute_measurement_input_digest(&context)?;
         let canonical_delta = crate::authorization::canonical_structural_delta_from_claim(claim)
             .map_err(|e| {
@@ -2836,6 +2831,10 @@ impl SpaceEngine {
     /// session'dan): canonical subject derivation + unresolvable matrisi (base'e
     /// karşı) + hypothetical'ta mevcudiyet + centroid. Failure'lar authority'yi
     /// etkilemez; `map_v2_measurement_failure` telemetry sınıflandırması.
+    #[allow(
+        clippy::result_large_err,
+        reason = "MeasurementError inline (intentional — see measurement.rs layout decision); closure Err variant"
+    )]
     fn measure_md1_shadow_in_session(
         &self,
         session: &crate::coords::BoundMeasurementSession<'_>,
@@ -2909,24 +2908,25 @@ impl SpaceEngine {
         crate::measurement::MeasurementBindingVerificationError,
     > {
         use crate::measurement::{
-            MeasurementBindingDerivationError as DerivErr,
-            MeasurementBindingVerificationError, MeasurementDeltaDigest,
-            NativeLegacyMeasurementBindingError as NativeErr,
+            MeasurementBindingDerivationError as DerivErr, MeasurementBindingVerificationError,
+            MeasurementDeltaDigest, NativeLegacyMeasurementBindingError as NativeErr,
         };
 
         // (1) Structural delta identity — shared canonical producer (tek truth).
         let canonical_delta = crate::authorization::canonical_structural_delta_from_claim(claim)
             .map_err(|e| {
                 MeasurementBindingVerificationError::Derivation(
-                    DerivErr::StructuralCanonicalizationFailed { detail: e.to_string() },
+                    DerivErr::StructuralCanonicalizationFailed {
+                        detail: e.to_string(),
+                    },
                 )
             })?;
         let claim_delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)
             .map_err(|e| {
-                MeasurementBindingVerificationError::Derivation(
-                    DerivErr::RequestDigestComputationFailed { source: e },
-                )
-            })?;
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::RequestDigestComputationFailed { source: e },
+            )
+        })?;
         if claim_delta_digest != *token.delta_digest() {
             return Err(MeasurementBindingVerificationError::NativeAuthority(
                 NativeErr::StructuralDeltaMismatch {
@@ -2977,26 +2977,27 @@ impl SpaceEngine {
         }
 
         // (4)+(5) Fresh session capture — current descriptors + epochs (atomik).
-        let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
-            .map_err(|e| {
+        let session =
+            crate::coords::BoundMeasurementSession::begin(&self.coord_system).map_err(|e| {
                 MeasurementBindingVerificationError::Derivation(
                     DerivErr::CurrentContextCaptureFailed { source: e },
                 )
             })?;
-        let context = crate::authorization::MeasurementInputContext::try_new(
-            session.axis_descriptors(),
-        )
-        .map_err(|e| {
-            MeasurementBindingVerificationError::Derivation(DerivErr::ContextConstructionFailed {
-                detail: e.to_string(),
-            })
+        let context =
+            crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
+                .map_err(|e| {
+                    MeasurementBindingVerificationError::Derivation(
+                        DerivErr::ContextConstructionFailed {
+                            detail: e.to_string(),
+                        },
+                    )
+                })?;
+        let current_input_digest = crate::measurement::compute_measurement_input_digest(&context)
+            .map_err(|e| {
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::RequestDigestComputationFailed { source: e },
+            )
         })?;
-        let current_input_digest =
-            crate::measurement::compute_measurement_input_digest(&context).map_err(|e| {
-                MeasurementBindingVerificationError::Derivation(
-                    DerivErr::RequestDigestComputationFailed { source: e },
-                )
-            })?;
         if current_input_digest != *token.measurement_input_digest() {
             return Err(MeasurementBindingVerificationError::NativeAuthority(
                 NativeErr::MeasurementContextMismatch {
@@ -3196,12 +3197,11 @@ impl SpaceEngine {
         // (`compute_raw_from_delta` fast-path'i KASITLI ALINMADI — legacy V1 raw/yüzey
         // dokunulmaz; plan v4: yalnız session-bound native yol.)
         if let [single_id] = member_ids {
-            let node = space
-                .nodes
-                .get(single_id)
-                .ok_or(MeasurementError::SubjectMemberMissingAfterDelta {
+            let node = space.nodes.get(single_id).ok_or(
+                MeasurementError::SubjectMemberMissingAfterDelta {
                     node_id: *single_id,
-                })?;
+                },
+            )?;
             if !node.mass.is_finite() || node.mass < 0.0 {
                 return Err(MeasurementError::InvalidSubjectMass {
                     node_id: *single_id,
@@ -8254,11 +8254,9 @@ v = 0.5
             centroid.witness_depth.value.to_bits(),
         ];
         assert_eq!(
-            direct_bits,
-            centroid_bits,
+            direct_bits, centroid_bits,
             "singleton centroid bit-identical (f64: direct={:?}, centroid={:?})",
-            direct.coupling.value,
-            centroid.coupling.value
+            direct.coupling.value, centroid.coupling.value
         );
         assert_eq!(direct.coupling.source, centroid.coupling.source);
         assert_eq!(direct.cohesion.source, centroid.cohesion.source);
@@ -8320,10 +8318,7 @@ v = 0.5
             after.coupling.source,
             "sources exact (native per-axis)"
         );
-        assert_eq!(
-            shadow.measured().cohesion.source,
-            after.cohesion.source
-        );
+        assert_eq!(shadow.measured().cohesion.source, after.cohesion.source);
         assert_eq!(
             shadow.measured().instability.source,
             after.instability.source
@@ -8602,10 +8597,10 @@ v = 0.5
 
     /// **#96 re-anchor:** Producer çağrısı (`measure_attempt_native_with_md1_shadow`)
     /// `BoundMeasurementSession` TCB kontratı altında axis descriptor + epoch
-    /// state'i değiştirmez: pre-produce session'ı açık tutulur, producer (authority
-    /// + md1_shadow, TEK session) çalışır, `verify_unchanged` geçmek zorundadır
-    /// (interior mutation → `AxisStateDrift` fail-closed). Descriptor parity de
-    /// ayrıca pinlenir.
+    /// state'ini değiştirmez: pre-produce session'ı açık tutulur; producer hem
+    /// authority hem md1_shadow ölçümünü TEK session altında çalıştırır ve
+    /// `verify_unchanged` geçmek zorundadır — interior mutation durumunda
+    /// `AxisStateDrift` fail-closed üretir. Descriptor parity ayrıca pinlenir.
     #[test]
     fn md1_observer_preserves_axis_session_state() {
         use crate::coords::BoundMeasurementSession;
@@ -8737,7 +8732,6 @@ v = 0.5
 
     #[test]
     fn md1_observer_fails_closed_on_behaviorally_mutating_axis() {
-        
         let cs = CoordinateSystem::empty()
             .try_with_axis(Md1MutatingCouplingAxis {
                 epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -8784,7 +8778,9 @@ v = 0.5
         assert!(
             matches!(
                 result,
-                Err(crate::measurement::MeasurementError::CoordinateMeasurement(_))
+                Err(crate::measurement::MeasurementError::CoordinateMeasurement(
+                    _
+                ))
             ),
             "behaviorally-mutating axis → producer fail-closed → typed CoordinateMeasurement: {:?}",
             result
