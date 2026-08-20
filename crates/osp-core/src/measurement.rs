@@ -2040,22 +2040,63 @@ pub enum MeasurementBindingMismatch {
         expected: crate::authorization::MeasurementInputDigest,
         presented: crate::authorization::MeasurementInputDigest,
     },
+}
 
-    /// **#96 MD-2 (plan v4 P1-tur4):** `claim.computed_raw` bit'leri token
-    /// `measured.to_raw()` bit'leri ile uyuşmuyor — half-merge fence (final Claim
-    /// token dışında bir ölçümden üretilmiş). expected/presented = (x,y,z,w,v)
-    /// `to_bits()` sırası.
+/// **#96 MD-2 (PR #124 review P1 — ontology düzeltmesi):** Engine-issued
+/// `NativeLegacySubjectMeasurement` token'ının commit-anı doğrulama hataları —
+/// **presented-authority DEĞİL**. Opaque token + private `TaskCommitInput` sonrası
+/// caller authority forge edemez; bu hataların görülmesi engine invariant
+/// violation / tamper / reality drift demek. Bu yüzden mevcut
+/// `MeasurementBindingMismatch` (caller-authority) ailesinden AYRI typed family'de
+/// yaşar: `MeasurementBindingVerificationError::NativeAuthority`.
+///
+/// Navigator kontratı (#96): hepsi → SystemFailure | budget yok | LLM retry yok
+/// (`AxisEpochMismatch` drift-kökenlidir — İLERİDE bounded regeneration düşünülebilir,
+/// #96'da DEĞİL). #100'de EngineMeasurement authoritative olduğunda bu family
+/// presented-authority ile karışmaz — bilgi kaybı yok, `gate_decision` etiketi
+/// `RejectedByMeasurementBinding` DEĞİL.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum NativeLegacyMeasurementBindingError {
+    /// Claim structural delta digest, token'ın taşıdığı digest ile uyuşmuyor
+    /// (shared producer recompute — tek canonicalization truth).
+    #[error("native token structural delta digest does not match claim: expected={expected:?}, presented={presented:?}")]
+    StructuralDeltaMismatch {
+        expected: MeasurementDeltaDigest,
+        presented: MeasurementDeltaDigest,
+    },
+
+    /// `claim.computed_raw` bit'leri token `measured.to_raw()` bit'leri ile uyuşmuyor —
+    /// half-merge fence (final Claim token dışında üretilmiş = invariant violation).
+    /// expected/presented = (x,y,z,w,v) `to_bits()` sırası.
     #[error(
         "claim computed_raw bits do not match token measured bits: expected={expected:?}, presented={presented:?}"
     )]
     RawMismatch { expected: [u64; 5], presented: [u64; 5] },
 
-    /// **#96 MD-2 (plan v4 P0-tur3):** Current axis epoch'ları token'ın captured
-    /// epoch stamp'ı ile uyuşmuyor — A→B→A descriptor revert'i (epoch monoton
-    /// olduğu için fail-closed yakalanır). expected/presented = `as_u64s()` sırası
+    /// Current `SpaceViewRevision` token'ın base revision'ı ile uyuşmuyor —
+    /// stale replay fence. expected = current, presented = token'ınki.
+    #[error("native token base revision is stale: expected={expected:?}, presented={presented:?}")]
+    StaleSpaceRevision {
+        expected: SpaceViewRevision,
+        presented: SpaceViewRevision,
+    },
+
+    /// Current axis descriptor context digest'i token'ın captured context digest'i
+    /// ile uyuşmuyor — measurement-context TOCTOU fence.
+    #[error(
+        "native token measurement context digest does not match current: expected={expected:?}, presented={presented:?}"
+    )]
+    MeasurementContextMismatch {
+        expected: crate::authorization::MeasurementInputDigest,
+        presented: crate::authorization::MeasurementInputDigest,
+    },
+
+    /// Current axis epoch'ları token'ın captured epoch stamp'ı ile uyuşmuyor —
+    /// A→B→A descriptor revert fence (epoch monoton). Drift-kökenli.
+    /// expected/presented = `CoreAxisEpochStamp::as_u64s()` sırası
     /// (coupling, cohesion, instability, entropy, witness_depth).
     #[error(
-        "axis epoch stamp does not match current engine epochs: expected={expected:?}, presented={presented:?}"
+        "native token axis epoch stamp does not match current epochs: expected={expected:?}, presented={presented:?}"
     )]
     AxisEpochMismatch { expected: [u64; 5], presented: [u64; 5] },
 }
@@ -2063,12 +2104,14 @@ pub enum MeasurementBindingMismatch {
 impl MeasurementBindingMismatch {
     /// **INV-T9 #70 Commit 4b (reviewer v4 P1-3):** Retry/reject disposition.
     /// Navigator sonuç/retry davranışını bu değere göre belirler.
+    ///
+    /// **#96 not:** Bu disposition YALNIZ presented-authority (caller) ailesi içindir;
+    /// engine-issued native token hataları (`NativeLegacyMeasurementBindingError`)
+    /// bu kontrata GİRMEZ — navigator onları SystemFailure olarak işler.
     pub fn disposition(&self) -> MeasurementBindingDisposition {
         match self {
             // Stale measurement — yeni token üretilebilir, LLM retry yok, budget yok.
-            Self::RevisionMismatch { .. }
-            | Self::CurrentContextMismatch { .. }
-            | Self::AxisEpochMismatch { .. } => {
+            Self::RevisionMismatch { .. } | Self::CurrentContextMismatch { .. } => {
                 MeasurementBindingDisposition::RegenerateMeasurement
             }
             // Presented authority geçersiz (replay/tamper) — terminal reject, retry yok.
@@ -2076,8 +2119,7 @@ impl MeasurementBindingMismatch {
             | Self::SubjectMismatch { .. }
             | Self::ImpactMismatch { .. }
             | Self::StructuralDeltaMismatch { .. }
-            | Self::ContextDigestMismatch { .. }
-            | Self::RawMismatch { .. } => {
+            | Self::ContextDigestMismatch { .. } => {
                 MeasurementBindingDisposition::RejectPresentedAuthority
             }
         }
@@ -2250,6 +2292,12 @@ pub enum MeasurementBindingVerificationError {
     /// Verification epoch drift — gerçeklik değişti (reviewer v4 P2-4).
     #[error(transparent)]
     Drift(#[from] MeasurementBindingDriftError),
+    /// **#96 MD-2 (PR #124 review P1):** Engine-issued native token doğrulama
+    /// hatası — presented-authority DEĞİL (opaque token forge edilemez; invariant
+    /// violation / tamper / reality drift). Mevcut Mismatch ailesinin semantiği
+    /// yeniden anlamlandırılmaz; ayrı typed family.
+    #[error(transparent)]
+    NativeAuthority(#[from] NativeLegacyMeasurementBindingError),
 }
 
 // Not: VerifiedMeasurementBinding engine.rs'te tanımlı (reviewer Faz 2 scoped P1-3) —

@@ -2890,13 +2890,14 @@ impl SpaceEngine {
     /// (5) current axis epochs        == token epoch stamp          (A→B→A ABA fence)
     /// ```
     ///
-    /// Error funnel (P1-tur4): mevcut `MeasurementBindingMismatch` varyantları reuse
-    /// (StructuralDelta/Revision/CurrentContext) + YENİ `RawMismatch`/`AxisEpochMismatch`;
-    /// tek funnel `EngineCommitError::MeasurementBindingVerification` (legacy variant
-    /// doğrudan üretilmez). Derivation hataları `MeasurementBindingDerivationError`
-    /// ailesine (SystemFailure sınıfı). `LegacySubjectMismatch` YOK — token'ın
-    /// legacy_subject_ids'i audited measurement subject'tır, canonical task authority
-    /// değildir (#96 sınırı; MD-1 = #95-A).
+    /// Error funnel (PR #124 review P1 düzeltmesi): engine-issued token hataları
+    /// **`NativeAuthority(NativeLegacyMeasurementBindingError)`** typed family'sinde —
+    /// mevcut `Mismatch` (presented-authority/caller) ailesi YENİDEN ANLAMLANDIRILMAZ
+    /// ve DOKUNULMAZ. Tek funnel `EngineCommitError::MeasurementBindingVerification`
+    /// korunur (paralel ontology yok). Derivation hataları mevcut
+    /// `MeasurementBindingDerivationError` ailesinde (SystemFailure sınıfı).
+    /// `LegacySubjectMismatch` YOK — token'ın legacy_subject_ids'i audited
+    /// measurement subject'tır, canonical task authority değildir (#96 sınırı; MD-1 = #95-A).
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
@@ -2910,8 +2911,9 @@ impl SpaceEngine {
         crate::measurement::MeasurementBindingVerificationError,
     > {
         use crate::measurement::{
-            MeasurementBindingDerivationError as DerivErr, MeasurementBindingMismatch,
+            MeasurementBindingDerivationError as DerivErr,
             MeasurementBindingVerificationError, MeasurementDeltaDigest,
+            NativeLegacyMeasurementBindingError as NativeErr,
         };
 
         // (1) Structural delta identity — shared canonical producer (tek truth).
@@ -2928,8 +2930,8 @@ impl SpaceEngine {
                 )
             })?;
         if claim_delta_digest != *token.delta_digest() {
-            return Err(MeasurementBindingVerificationError::Mismatch(
-                MeasurementBindingMismatch::StructuralDeltaMismatch {
+            return Err(MeasurementBindingVerificationError::NativeAuthority(
+                NativeErr::StructuralDeltaMismatch {
                     expected: claim_delta_digest,
                     presented: token.delta_digest().clone(),
                 },
@@ -2953,8 +2955,8 @@ impl SpaceEngine {
             token_raw.v.to_bits(),
         ];
         if claim_bits != token_bits {
-            return Err(MeasurementBindingVerificationError::Mismatch(
-                MeasurementBindingMismatch::RawMismatch {
+            return Err(MeasurementBindingVerificationError::NativeAuthority(
+                NativeErr::RawMismatch {
                     expected: token_bits,
                     presented: claim_bits,
                 },
@@ -2968,8 +2970,8 @@ impl SpaceEngine {
             })
         })?;
         if current_revision != *token.base_revision() {
-            return Err(MeasurementBindingVerificationError::Mismatch(
-                MeasurementBindingMismatch::RevisionMismatch {
+            return Err(MeasurementBindingVerificationError::NativeAuthority(
+                NativeErr::StaleSpaceRevision {
                     expected: current_revision,
                     presented: token.base_revision().clone(),
                 },
@@ -2998,8 +3000,8 @@ impl SpaceEngine {
                 )
             })?;
         if current_input_digest != *token.measurement_input_digest() {
-            return Err(MeasurementBindingVerificationError::Mismatch(
-                MeasurementBindingMismatch::CurrentContextMismatch {
+            return Err(MeasurementBindingVerificationError::NativeAuthority(
+                NativeErr::MeasurementContextMismatch {
                     expected: current_input_digest,
                     presented: token.measurement_input_digest().clone(),
                 },
@@ -3008,8 +3010,8 @@ impl SpaceEngine {
         let current_epochs = session.axis_epochs();
         let token_epochs = token.axis_epoch_stamp();
         if current_epochs != token_epochs {
-            return Err(MeasurementBindingVerificationError::Mismatch(
-                MeasurementBindingMismatch::AxisEpochMismatch {
+            return Err(MeasurementBindingVerificationError::NativeAuthority(
+                NativeErr::AxisEpochMismatch {
                     expected: current_epochs.as_u64s(),
                     presented: token_epochs.as_u64s(),
                 },

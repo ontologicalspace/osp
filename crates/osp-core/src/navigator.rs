@@ -231,12 +231,16 @@ pub fn gate_decision_from_engine_error(err: &crate::engine::EngineCommitError) -
         // **INV-T9 #70 Commit 4b Faz 3 (reviewer v6 #1):** Tek kapsayıcı varyant —
         // inner error'a göre disposition. Mismatch → tag 8 (RejectedByMeasurementBinding);
         // Derivation/Drift → Unknown (system failure — retry gerekebilir).
+        // **#96 (PR #124 review P1):** NativeAuthority (engine-issued native token
+        // invariant/tamper/drift) → Unknown — presented-authority reddi DEĞİL;
+        // opaque token forge edilemez, caller hatası olarak etiketlenmez.
         EngineCommitError::MeasurementBindingVerification(verif_err) => match verif_err {
             crate::measurement::MeasurementBindingVerificationError::Mismatch(_) => {
                 GateDecision::RejectedByMeasurementBinding
             }
             crate::measurement::MeasurementBindingVerificationError::Derivation(_)
-            | crate::measurement::MeasurementBindingVerificationError::Drift(_) => {
+            | crate::measurement::MeasurementBindingVerificationError::Drift(_)
+            | crate::measurement::MeasurementBindingVerificationError::NativeAuthority(_) => {
                 GateDecision::Unknown
             }
         },
@@ -1064,8 +1068,11 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         // **INV-T9 #70 Commit 4b Faz 3 (reviewer v6 #1):** Tek kapsayıcı
                         // measurement binding verification error. Mismatch (tag 8 —
                         // disposition Regenerate/Reject), Derivation (system failure),
-                        // Drift (system failure — retry gerekebilir). Faz 8'de
-                        // disposition-aware navigation refine; şimdilik terminal SystemFailure.
+                        // Drift (system failure — retry gerekebilir),
+                        // **#96: NativeAuthority (engine-issued native token invariant/
+                        // tamper/drift — kontrat gereği SystemFailure | budget yok |
+                        // LLM retry yok)**. Faz 8'de disposition-aware navigation refine;
+                        // şimdilik terminal SystemFailure.
                         EngineCommitError::MeasurementBindingVerification(err) => {
                             return NavigatorResult::SystemFailure(err.to_string());
                         }
