@@ -792,14 +792,24 @@ fn completed_loop_exact_pin_via_json_envelope() {
         "envelope repository_head == fixture HEAD"
     );
 
-    // V1 honest execution-measurement metadata.
+    // **#96 MD-2 cutover — iki-eksen authority vocabulary** (eski pin:
+    // authority=legacy_projected_v1 / provenance_native=false — tarihsel; her eksen
+    // artık kendi alanında, deprecated `authority` alias yalnız provenance mirror).
     assert_eq!(
-        envelope["execution_measurement"]["authority"], "legacy_projected_v1",
-        "V1 honest authority (review P0)"
+        envelope["execution_measurement"]["subject_authority"], "affected_nodes",
+        "subject_authority: legacy family label (#95-A'da task_scope'a çevrilir)"
     );
     assert_eq!(
-        envelope["execution_measurement"]["provenance_native"], false,
-        "provenance_native=false (MD-2 deferred)"
+        envelope["execution_measurement"]["provenance_authority"], "engine_native_per_axis",
+        "provenance_authority: #96 native per-axis cutover"
+    );
+    assert_eq!(
+        envelope["execution_measurement"]["provenance_native"], true,
+        "provenance_native=true (#96)"
+    );
+    assert_eq!(
+        envelope["execution_measurement"]["authority"], "engine_native_per_axis",
+        "deprecated authority alias = provenance mirror (#100'e kadar)"
     );
 
     // Result kind + attempts.
