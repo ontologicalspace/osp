@@ -380,6 +380,7 @@ pub(crate) fn make_revision_required_from_rejection(
     snapshot: crate::witness::WitnessQuorumSnapshot,
     attempt_num: u64,
     drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+    prov_drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
 ) -> Result<crate::authorization::RevisionRequired, NavigatorResult> {
     use crate::authorization::{
         AttemptNumber, AuthorizationBasisDigest, SuspendedAttemptDisposition,
@@ -410,6 +411,7 @@ pub(crate) fn make_revision_required_from_rejection(
         // fail-closed SystemFailure.
         Ok(r) => r
             .try_with_subject_authority_drift(drift)
+            .and_then(|r| r.try_with_provenance_authority_drift(prov_drift))
             .map_err(|e| NavigatorResult::SystemFailure(e.to_string())),
         Err(e) => Err(NavigatorResult::SystemFailure(e.to_string())),
     }
@@ -433,6 +435,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
         witness_snapshot: crate::witness::WitnessQuorumSnapshot,
         attempt_num: u64,
         drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+        prov_drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
     ) -> NavigatorResult {
         use crate::authorization::{
             AttemptNumber, AuthorizationBasisDigest, PendingAuthorization,
@@ -512,6 +515,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             // **#95 MD-1 P2-1:** Non-digested telemetry sidecar — Held yollarında
             // observation kaybolmaz; digest yüzeyleri bu alandan bağımsız.
             subject_authority_drift: drift,
+            provenance_authority_drift: prov_drift,
         };
 
         let envelope = match PendingAuthorizationEnvelope::new(pending, authorization.basis) {
@@ -542,8 +546,16 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
         snapshot: crate::witness::WitnessQuorumSnapshot,
         attempt_num: u64,
         drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+        prov_drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
     ) -> Result<crate::authorization::RevisionRequired, NavigatorResult> {
-        make_revision_required_from_rejection(authorization, reasons, snapshot, attempt_num, drift)
+        make_revision_required_from_rejection(
+            authorization,
+            reasons,
+            snapshot,
+            attempt_num,
+            drift,
+            prov_drift,
+        )
     }
 
     /// Bir Task için navigator loop. Maneuver limit (INV-T7) kadar attempt.
@@ -641,6 +653,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         token_cost: tc,
                         duration_ms: 0,
                         subject_authority_drift: None,
+                        provenance_authority_drift: None,
                     });
                     feedback_history.push(format!(
                         "Attempt {attempt_num}: Your previous response was not valid \
@@ -687,6 +700,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     token_cost,
                     duration_ms: 0,
                     subject_authority_drift: None,
+                    provenance_authority_drift: None,
                 });
                 // D4 — Calibration feedback: Q4 syntax hatasını LLM'e geri besle.
                 feedback_history.push(format!(
@@ -723,6 +737,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     token_cost,
                     duration_ms: 0,
                     subject_authority_drift: None,
+                    provenance_authority_drift: None,
                 });
                 feedback_history.push(format!(
                     "Attempt {attempt_num}: Policy violation — removed_edges requires OpKind::RemoveImport in task.allowed_operations."
@@ -761,6 +776,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         token_cost,
                         duration_ms: 0,
                         subject_authority_drift: None,
+                        provenance_authority_drift: None,
                     });
                     // D4 — Calibration feedback: empty proposal uyarısı.
                     feedback_history.push(format!(
@@ -786,6 +802,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         token_cost,
                         duration_ms: 0,
                         subject_authority_drift: None,
+                        provenance_authority_drift: None,
                     });
                     feedback_history.push(format!(
                         "Attempt {attempt_num}: Structural syntax violation — {_violation}"
@@ -864,6 +881,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     token_cost,
                     duration_ms: 0,
                     subject_authority_drift: None,
+                    provenance_authority_drift: None,
                 });
                 feedback_history.push(format!(
                     "Attempt {attempt_num}: measured raw not finite — {violation}"
@@ -880,6 +898,17 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 &claim,
                 &task,
                 &native,
+                loss_before,
+                &self.target_vector,
+            );
+            // **#96 MD-2 W5:** Pre-commit provenance drift draft — AYNI token üzerinde
+            // native (otorite) ↔ uniform-Scip reference. Eligibility MD-1 ile aynı;
+            // Q4SyntaxRejection arm'ı YOK (precedence correction).
+            let prov_draft = crate::provenance_authority::observe_provenance_authority_drift(
+                self.engine,
+                &claim,
+                &task,
+                native.authority(),
                 loss_before,
                 &self.target_vector,
             );
@@ -925,12 +954,19 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                             ),
                         ),
                     );
+                    let prov = prov_draft.finalize(
+                        crate::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                            predicate_completion: authorization.outcome.predicate_completion,
+                            mutation_decision: authorization.outcome.mutation_decision,
+                        },
+                    );
                     return self.suspend_for_witness(
                         authorization,
                         reason,
                         snapshot,
                         attempt_num as u64,
                         Some(drift),
+                        Some(prov),
                     );
                 }
                 Ok(crate::engine::EngineCommitResult::Rejected {
@@ -956,12 +992,19 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                             ),
                         ),
                     );
+                    let prov = prov_draft.finalize(
+                        crate::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                            predicate_completion: authorization.outcome.predicate_completion,
+                            mutation_decision: authorization.outcome.mutation_decision,
+                        },
+                    );
                     return match Self::revision_required_from_rejection(
                         authorization,
                         reasons,
                         snapshot,
                         attempt_num as u64,
                         Some(drift),
+                        Some(prov),
                     ) {
                         Ok(revision) => NavigatorResult::RequiresRevision(revision),
                         Err(system_failure) => system_failure,
@@ -994,6 +1037,11 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                                     &e,
                                 )
                                 .map(|downstream| drift_draft.finalize(downstream));
+                            // **#96 MD-2:** retryable path→finalize eşlemesi — Q4 arm'ı
+                            // YOK (structural Q4 draft aşamasında; emission YOK kalır).
+                            let prov_observation =
+                                crate::provenance_authority::provenance_downstream_from_engine_commit_error(&e)
+                                    .map(|downstream| prov_draft.finalize(downstream));
                             // Önce e'den gerekenleri çıkar (borrow ayrımı), sonra self.evidence push.
                             last_outcome = Some(crate::trajectory::AttemptOutcome {
                                 gate_decision: gd,
@@ -1018,6 +1066,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                                 token_cost,
                                 duration_ms: 0,
                                 subject_authority_drift: drift_observation,
+                                provenance_authority_drift: prov_observation,
                             });
                             // D4 — Calibration feedback.
                             if let Some(hall) = hall {
@@ -1100,6 +1149,14 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     ),
                 ),
             ));
+            // **#96 MD-2:** Evaluated = comparison-surviving — production outcome
+            // (authoritative) native lane downstream’ı olarak.
+            let prov_observation = Some(prov_draft.finalize(
+                crate::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                    predicate_completion: outcome.predicate_completion,
+                    mutation_decision: outcome.mutation_decision,
+                },
+            ));
 
             // 7. Evidence kaydet (boşluk #6) — inline push (field borrow çatışmasını önle).
             // **#96:** after = authority token raw (native session-bound ölçüm).
@@ -1118,6 +1175,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 token_cost,
                 duration_ms: 0,
                 subject_authority_drift: drift_observation,
+                provenance_authority_drift: prov_observation,
             });
 
             // 8. Mutation decision → loop control (boşluk #8).
@@ -2441,6 +2499,7 @@ mod tests {
             token_cost: TokenCost::default(),
             duration_ms: 100,
             subject_authority_drift: None,
+            provenance_authority_drift: None,
         };
         // Progress evidence: after != before (state ilerledi), gate=PassedAll.
         assert_ne!(evidence.before, evidence.after);
@@ -3937,6 +3996,8 @@ mod tests {
             expected_attempt_num,
             // #95 MD-1 P2-1: mapper artık telemetry sidecar parametresi alıyor;
             // bu test None ile çağırır (sidecar invariant'ları ayrı testte).
+            None,
+            // #96 MD-2: provenance sidecar — aynı şekilde None (ayrı testte).
             None,
         )
         .expect("production rejection mapper");

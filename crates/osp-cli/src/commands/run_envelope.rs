@@ -240,6 +240,7 @@ mod tests {
             token_cost: TokenCost::default(),
             duration_ms: 10,
             subject_authority_drift: None,
+            provenance_authority_drift: None,
         }
     }
 

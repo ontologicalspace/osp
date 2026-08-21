@@ -910,6 +910,16 @@ impl Workspace {
             loss_before,
             &target,
         );
+        // #96 MD-2 W5: provenance drift draft — AYNI token; native ↔ uniform-Scip
+        // reference. Eligibility MD-1 ile aynı (Q4SyntaxRejection arm'ı YOK).
+        let prov_draft = osp_core::provenance_authority::observe_provenance_authority_drift(
+            self.engine_mut(),
+            &claim,
+            task,
+            native.authority(),
+            loss_before,
+            &target,
+        );
         let omega = WitnessSet::new(Vec::new());
         let mut tmp_reg = InMemoryTaskRegistry::new();
         tmp_reg.insert(task.clone());
@@ -939,6 +949,13 @@ impl Workspace {
                         ),
                     ),
                 );
+                // **#96 MD-2:** Held = comparison-surviving — prov sidecar.
+                let prov = prov_draft.finalize(
+                    osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                        predicate_completion: authorization.outcome.predicate_completion,
+                        mutation_decision: authorization.outcome.mutation_decision,
+                    },
+                );
                 return Ok(serde_json::json!({
                     "commit_result": "Held",
                     "witness_hold_reason": reason.as_reason_str(),
@@ -953,6 +970,7 @@ impl Workspace {
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "await_external_evidence",
                     "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
+                    "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
             Ok(osp_core::engine::EngineCommitResult::Rejected {
@@ -970,6 +988,13 @@ impl Workspace {
                         ),
                     ),
                 );
+                // **#96 MD-2:** Rejected = comparison-surviving — prov sidecar.
+                let prov = prov_draft.finalize(
+                    osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                        predicate_completion: authorization.outcome.predicate_completion,
+                        mutation_decision: authorization.outcome.mutation_decision,
+                    },
+                );
                 let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
                 return Ok(serde_json::json!({
                     "commit_result": "Rejected",
@@ -985,6 +1010,7 @@ impl Workspace {
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "requires_revision",
                     "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
+                    "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
             Err(e) => {
@@ -1005,6 +1031,17 @@ impl Workspace {
                     "measured_after": null,
                     "message": format!("commit_task_claim: {e}"),
                 });
+                // **#96 MD-2:** retryable Q5/Q6 → provenance sidecar (Q4 arm'ı YOK —
+                // structural Q4 draft aşamasında; emission YOK).
+                if let Some(prov) =
+                    osp_core::provenance_authority::provenance_downstream_from_engine_commit_error(
+                        &e,
+                    )
+                    .map(|downstream| prov_draft.finalize(downstream))
+                {
+                    response["provenance_authority_drift"] =
+                        serde_json::to_value(&prov).map_err(|e| e.to_string())?;
+                }
                 if let Some(drift) =
                     osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
                         .map(|downstream| drift_draft.finalize(downstream))
@@ -1062,6 +1099,13 @@ impl Workspace {
                 ),
             ),
         );
+        // **#96 MD-2:** Evaluated = comparison-surviving — production outcome.
+        let prov = prov_draft.finalize(
+            osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                predicate_completion: result.outcome.predicate_completion,
+                mutation_decision: result.outcome.mutation_decision,
+            },
+        );
 
         Ok(serde_json::json!({
             "attempt_outcome": {
@@ -1074,6 +1118,7 @@ impl Workspace {
             "loss_after": result.loss_after,
             "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
             "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
+            "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
         }))
     }
 }

@@ -25,6 +25,7 @@ pub mod engine;
 pub mod measurement;
 pub mod navigator;
 pub mod persistence;
+pub mod provenance_authority;
 pub mod rule;
 pub mod space;
 pub mod subject_authority;

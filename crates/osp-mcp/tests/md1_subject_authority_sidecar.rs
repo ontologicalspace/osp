@@ -38,6 +38,7 @@ const HELD_RESPONSE_LEGACY_KEYS: &[&str] = &[
     "mainline_mutation",
     "measured_after",
     "next_action",
+    "provenance_authority_drift",
 ];
 
 #[test]
@@ -170,6 +171,7 @@ const ERROR_RESPONSE_LEGACY_KEYS: &[&str] = &[
     "loss_after",
     "measured_after",
     "message",
+    "provenance_authority_drift",
 ];
 
 fn make_server_handle() -> std::sync::Arc<std::sync::Mutex<Workspace>> {
@@ -264,7 +266,12 @@ fn md1_q4_syntax_violation_response_carries_not_reached_sidecar() {
         .map(|k| k.as_str())
         .collect();
     keys.sort_unstable();
-    let mut expected = ERROR_RESPONSE_LEGACY_KEYS.to_vec();
+    // #96: draft-stage error — provenance sidecar YOK (measurement öncesi).
+    let mut expected = ERROR_RESPONSE_LEGACY_KEYS
+        .iter()
+        .filter(|k| **k != "provenance_authority_drift")
+        .copied()
+        .collect::<Vec<&str>>();
     expected.sort_unstable();
     assert_eq!(
         keys, expected,

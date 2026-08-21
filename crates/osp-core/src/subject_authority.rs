@@ -275,7 +275,7 @@ pub enum Q5ObservationFailure {
     CanonicalRoleConversionFailed,
 }
 
-fn map_q5_observation_failure(
+pub(crate) fn map_q5_observation_failure(
     err: crate::authorization::VisionContextError,
 ) -> Q5ObservationFailure {
     use crate::authorization::VisionContextError;
@@ -735,7 +735,7 @@ pub fn observe_subject_authority_drift(
 /// Tek captured context altında bir raw'ın Q5 yüzeyi. Verdict üretimi production
 /// karşılaştırmasının aynısı: `CosineDeviation.theta(raw, effective_vision, space)`
 /// + `theta > theta_bound` (engine.rs `check_vision_raw_with_context` gövdesi).
-fn evaluate_lane_q5(
+pub(crate) fn evaluate_lane_q5(
     engine: &SpaceEngine,
     raw: RawPosition,
     ctx: &crate::authorization::EffectiveVisionGateContext,
