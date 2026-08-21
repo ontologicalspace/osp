@@ -1932,6 +1932,11 @@ pub enum PipelineObservation {
 pub enum Q5Observation {
     /// Q5 çalışmadı (commit stopped before Q5).
     NotReached,
+    /// **#96 MD-2 P0-tur5 (review P1 — truth-surface):** Q5 gözlenMEDİ — V1
+    /// non-authoritative evaluator vision'ı çalıştıramaz (motor-private) ve
+    /// gözlenmeyen yüzeyi `Passed`/`Rejected` diye kodlamaz (fabrication YOK).
+    /// `Passed`/`Rejected` yalnız gerçek pipeline çalışmasından gelir.
+    NotObserved,
     /// Q5 passed (theta <= bound). Exact theta bits bilinmez — engine-unit gerek.
     Passed,
     /// Q5 rejected (theta > bound). theta observable via VisionViolation.
@@ -2220,66 +2225,55 @@ pub fn evaluate_v1_case(
     // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
-    // **P0-tur4 (PR review):** V1 characterization — commit pipeline YOK.
-    // Non-authoritative evaluator: Q4 structural + raw finite → vision → PredicateGate
-    // direkt değerlendirme. Authority tipi forge EDİLEMEZ (token yok).
+    // **P0-tur5 (review P1 — truth-surface):** V1 characterization — commit
+    // pipeline YOK; evaluator sentetik `EngineCommitResult` da ÜRETMEZ. Eski
+    // synthetic-Evaluated yolu Q5'i `Passed`, witness'ı `Evaluated` diye
+    // kodluyordu — hiç çalışmamış aşamaların sonucunu gözlenmiş gibi sunmak
+    // fabrication'dı. Artık yalnız GERÇEKTEN çalışan yüzeyler gözlemlenir
+    // (Q4 structural + raw finite + PredicateGate); motor-private aşamalar
+    // (Q5 vision, Q6, witness, TaskValidation) açıkça `NotObserved`/`NotReached`
+    // ile temsil edilir.
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError inline (measurement.rs layout decision)"
     )]
-    let result: Result<
-        osp_core::engine::EngineCommitResult,
-        osp_core::engine::EngineCommitError,
-    > = (|| {
-        // Q4 structural
-        osp_core::task_measurement::validate_claim_structure(&claim)?;
-        // Q4 raw finite
-        osp_core::task_measurement::validate_raw_position_finite(
-            claim.id,
-            "computed_raw",
-            &claim.computed_raw,
-        )?;
-        // Task binding
-        let bound = osp_core::trajectory::TaskBoundClaim {
-            claim: &claim,
-            task: &case.task,
-        };
-        // Q5 vision: motor private — characterization için atlanır
-        // PredicateGate
-        let gate_out = osp_core::trajectory::PredicateGate.evaluate(
-            osp_core::trajectory::PredicateGateInput {
-                bound,
-                measured: &measured,
-                loss_before,
-                target: &target,
-            },
-        );
-        let outcome = gate_out.outcome.clone();
-        let apply_target = outcome.mutation_decision.apply_target();
-        // Q6: corpus fixture'larında rule yok — skip
-        // Witness: boş set — HarnessAutoApprove olmadan Held beklenir ama
-        // characterization için predicate/decision yeterli; mutation uygulanmaz.
-        Ok(osp_core::engine::EngineCommitResult::Evaluated {
-            result: osp_core::engine::TaskCommitResult {
-                outcome,
-                apply_target,
-                loss_after: gate_out.loss_after,
-                witness: None,
-            },
-            authorization: None,
-        })
-    })();
+    let evaluation =
+        (|| {
+            // Q4 structural
+            osp_core::task_measurement::validate_claim_structure(&claim)?;
+            // Q4 raw finite
+            osp_core::task_measurement::validate_raw_position_finite(
+                claim.id,
+                "computed_raw",
+                &claim.computed_raw,
+            )?;
+            // Task binding
+            let bound = osp_core::trajectory::TaskBoundClaim {
+                claim: &claim,
+                task: &case.task,
+            };
+            // Q5 vision / Q6 / witness / TaskValidation: motor-private — evaluator
+            // ÇALIŞTIRAMAZ (aşağıda NotObserved/NotReached olarak temsil edilir).
+            // PredicateGate — V1 lane'in gözlemleyebildiği tek karar yüzeyi.
+            Ok(osp_core::trajectory::PredicateGate.evaluate(
+                osp_core::trajectory::PredicateGateInput {
+                    bound,
+                    measured: &measured,
+                    loss_before,
+                    target: &target,
+                },
+            ))
+        })();
 
-    // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
-    // V1 loss_before = trajectory_loss(current_measured, target) (yukarıda baseline loss_bits
-    // ile aynı kaynak). loss_after = trajectory_loss(measured_after, target).
+    // **PR #91 review P1:** decision-input scalar'ları. V1 loss_before =
+    // trajectory_loss(current_measured, target) (yukarıda baseline loss_bits ile
+    // aynı kaynak). loss_after = trajectory_loss(measured_after, target).
     //
-    // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate decision yoluna
-    // ulaşıldığında (commit_task_claim Ok) Some — Err (StoppedBeforeCommit) olsa bile engine
-    // çağrıldıysa scalar'lar gönderildi, ama decision yolu tamamlanmadı. Doc contract: Some ⟺
-    // PredicateGate'e ulaşıldı (EngineCommitResult üretildi).
+    // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate
+    // decision yoluna ulaşıldığında Some. Doc contract: Some ⟺ PredicateGate'e
+    // ulaşıldı (gate gerçekten çalıştı).
     let loss_after = osp_core::trajectory::trajectory_loss(&measured, &target);
-    let decision_input = result.as_ref().ok().map(|_| DecisionInputObservation {
+    let decision_input = evaluation.as_ref().ok().map(|_| DecisionInputObservation {
         loss_before_bits: loss_before.to_bits(),
         loss_after_bits: loss_after.to_bits(),
     });
@@ -2298,11 +2292,20 @@ pub fn evaluate_v1_case(
         baseline: baseline_observation,
     };
 
-    let pipeline = match result {
-        Ok(commit_result) => finalize_pipeline_observation_commit_reached(&commit_result),
+    let pipeline = match &evaluation {
+        Ok(gate_out) => PipelineObservation::CommitReached {
+            // Q5 vision motor-private — çalışTIRILAMADI (fabrication YOK:
+            // `Passed` yalnız gerçek pipeline'dan gözlemlenir).
+            q5: Q5Observation::NotObserved,
+            predicate_completion: Some(gate_out.outcome.predicate_completion),
+            mutation_decision: Some(gate_out.outcome.mutation_decision),
+            apply_target: Some(gate_out.outcome.mutation_decision.apply_target()),
+            // Witness aşamasına hiç gidilmedi (commit pipeline yok).
+            witness_reachability: WitnessReachability::NotReached,
+        },
         Err(e) => PipelineObservation::StoppedBeforeCommit {
-            stage: PipelineStage::from_engine_commit_error(&e),
-            error: PipelineFailureClass::from_engine_commit_error(&e),
+            stage: PipelineStage::from_engine_commit_error(e),
+            error: PipelineFailureClass::from_engine_commit_error(e),
         },
     };
 

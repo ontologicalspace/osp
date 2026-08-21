@@ -824,27 +824,29 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 Ok(n) => n,
                 Err(e) => {
                     use crate::task_measurement::measurement_failure_disposition;
-                    match measurement_failure_disposition(&e) {
-                            // Tablo: budget EVET + LLM retry EVET — yalnız
-                            // RetryAgentProposal. Bugün üreticisi YOK (unlock:
-                            // node-removal op / explicit ID allocation / typed
-                            // structural origin — plan v5 tablo notları).
-                            crate::task_measurement::MeasurementFailureDisposition::RetryAgentProposal => {
-                                feedback_history.push(format!(
+                    // **P1-1 (review tur 5):** ortak typed mapper — MCP aynı
+                    // tabloyu wire sınıfı için kullanır (tek ontology).
+                    match measurement_failure_disposition(&e).agent_surface() {
+                        // Tablo: budget EVET + LLM retry EVET — yalnız
+                        // RetryAgentProposal. Bugün üreticisi YOK (unlock:
+                        // node-removal op / explicit ID allocation / typed
+                        // structural origin — plan v5 tablo notları).
+                        crate::task_measurement::NativeFailureSurface::RetryAgentProposal => {
+                            feedback_history.push(format!(
                                     "Attempt {attempt_num}: measurement rejected the proposal — {e}; revise the delta."
                                 ));
-                                continue;
-                            }
-                            // TerminalTaskDeclaration / TerminalIdentityViolation /
-                            // RegenerateMeasurement (dormant) / SystemFailure —
-                            // budget YOK, LLM retry YOK, fail-closed terminal.
-                            _ => {
-                                return NavigatorResult::SystemFailure(format!(
-                                    "native measurement failed (disposition={:?}): {e}",
-                                    measurement_failure_disposition(&e)
-                                ));
-                            }
+                            continue;
                         }
+                        // TerminalTaskDeclaration / TerminalIdentityViolation /
+                        // RegenerateMeasurement (dormant) / SystemFailure —
+                        // budget YOK, LLM retry YOK, fail-closed terminal.
+                        _ => {
+                            return NavigatorResult::SystemFailure(format!(
+                                "native measurement failed (disposition={:?}): {e}",
+                                measurement_failure_disposition(&e)
+                            ));
+                        }
+                    }
                 }
             };
 

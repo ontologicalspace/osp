@@ -5431,11 +5431,13 @@ impl PendingAuthorization {
             }
         }
 
-        // **#96 MD-2:** Provenance sidecar identity — aynı fail-closed sözleşme.
+        // **#96 MD-2:** Provenance sidecar identity — aynı fail-closed sözleşme
+        // (review tur 5 P2: kendi typed varyantı — subject yanlış isimle
+        // yeniden kullanılmaz).
         if let Some(drift) = &self.provenance_authority_drift {
             if drift.task_id != self.task_id || drift.claim_id != self.claim_id {
                 return Err(
-                    PendingAuthorizationLoadError::SubjectAuthorityDriftIdentityMismatch {
+                    PendingAuthorizationLoadError::ProvenanceAuthorityDriftIdentityMismatch {
                         record_task_id: self.task_id,
                         record_claim_id: self.claim_id,
                         drift_task_id: drift.task_id,
@@ -7853,6 +7855,15 @@ impl RevisionRequired {
         self.subject_authority_drift.as_ref()
     }
 
+    /// **#96 MD-2 (PR review tur 5 P2):** Provenance telemetry sidecar accessor —
+    /// subject tarafıyla simetrik (`try_with_provenance_authority_drift` checked
+    /// builder'ın okuma yüzü).
+    pub fn provenance_authority_drift(
+        &self,
+    ) -> Option<&crate::provenance_authority::ProvenanceAuthorityDriftObservation> {
+        self.provenance_authority_drift.as_ref()
+    }
+
     // — Accessor'lar (evidence üzerinden) —
 
     pub fn evidence_digest(&self) -> &SuspendedAttemptEvidenceDigest {
@@ -8555,6 +8566,18 @@ pub enum PendingAuthorizationLoadError {
         "subject-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
     )]
     SubjectAuthorityDriftIdentityMismatch {
+        record_task_id: u64,
+        record_claim_id: u64,
+        drift_task_id: u64,
+        drift_claim_id: u64,
+    },
+    /// **#96 MD-2 (PR review tur 5 P2):** Provenance sidecar için aynı fail-closed
+    /// sözleşme — yanlış isimle `SubjectAuthorityDriftIdentityMismatch` yeniden
+    /// kullanılmaz (sidecar ailesi observable ayrışır; diagnostic truth-surface).
+    #[error(
+        "provenance-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
+    )]
+    ProvenanceAuthorityDriftIdentityMismatch {
         record_task_id: u64,
         record_claim_id: u64,
         drift_task_id: u64,

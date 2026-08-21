@@ -333,16 +333,19 @@ impl StructurallyValidatedClaimDraft {
 /// kadar taşır. `TaskCommitInput::new` YALNIZ bu tipi kabul eder; ayrı `&Claim +
 /// &token` kombinasyonu **type-level unrepresentable** (artifact mix bypass imkânsız).
 ///
-/// Construction: `StructurallyValidatedClaimDraft::finalize(&token)` — tek üretici.
-/// Private fields: external construction kapalı; `claim()`/`measurement()` accessors
-/// read-only.
+/// Construction: `StructurallyValidatedClaimDraft::finalize(&token)` — tek üretici
+/// (constructor private; crate içinden de elle kurulamaz). Private fields:
+/// external construction kapalı; `claim()`/`measurement()` accessors read-only.
 pub struct FinalizedNativeTaskClaim {
     claim: Claim,
     measurement: NativeLegacySubjectMeasurement,
 }
 
 impl FinalizedNativeTaskClaim {
-    pub(crate) fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
+    /// Private — yalnız `finalize` (aynı modül) çağırır; "sealed" iddiası crate
+    /// içinde de geçerli (review P2: `pub(crate)` herhangi bir modülün carrier'ı
+    /// elle kurmasına izin veriyordu).
+    fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
         Self { claim, measurement }
     }
 
@@ -427,6 +430,82 @@ pub enum MeasurementFailureDisposition {
     SystemFailure,
 }
 
+/// **#96 MD-2 P1-1 (PR review tur 5):** navigator + MCP ORTAK typed agent-surface
+/// sınıfı — native failure'ların agent/LLM yüzeyinde ne olduğu tek yerden tanımlı.
+/// MCP'nin her native failure'ı `RejectedBySyntax` JSON'una flatten etmesi
+/// (navigator `SystemFailure` dönerken) bu mapper ile kapanır — gözlenmeyen
+/// gate kararının gözlenmiş gibi sunulması (fabrication) YASAK.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFailureSurface {
+    /// Gerçek structural Q4 — agent'ın kendi delta'sının şekli (draft aşaması;
+    /// measurement gerçekleşmedi, sidecar yok). Wire: `RejectedBySyntax`.
+    SyntaxRejection,
+    /// Agent-correctable — budget EVET, retry EVET (commit-aşaması retryable
+    /// Syntax/Vision/Rule ailesi veya dormant measurement disposition'ları).
+    /// Wire: retry yüzeyi (gerçek gate kararı ile).
+    RetryAgentProposal,
+    /// Native authority/binding/TCB/operational fault — agent hatası DEĞİL.
+    /// Terminal: budget YOK, LLM retry YOK (navigator `SystemFailure` mirror).
+    /// Wire: system failure JSON.
+    SystemFailure,
+    /// Task resolver'da binding yok (standalone/task not found) — terminal;
+    /// navigator `TaskNotFound` mirror. Agent başka task seçer.
+    TaskNotFound,
+    /// Witness evidence operational fault (malformed/author-self/duplicate) —
+    /// terminal; navigator `WitnessEvaluationError` mirror.
+    WitnessEvaluationError,
+}
+
+impl MeasurementFailureDisposition {
+    /// Navigator'ın production arm'ı ile birebir (navigator.rs native-measurement
+    /// match): `RetryAgentProposal` → retry; diğerlerinin TAMAMI terminal
+    /// SystemFailure (budget yok, LLM retry yok).
+    pub fn agent_surface(self) -> NativeFailureSurface {
+        match self {
+            Self::RetryAgentProposal => NativeFailureSurface::RetryAgentProposal,
+            Self::TerminalTaskDeclaration
+            | Self::TerminalIdentityViolation
+            | Self::RegenerateMeasurement
+            | Self::SystemFailure => NativeFailureSurface::SystemFailure,
+        }
+    }
+}
+
+/// `EngineCommitError` → agent yüzeyi — navigator'ın production commit-error
+/// arm'ları ile birebir sınıflandırma (navigator.rs exhaustive match'in
+/// sınıflandırma yüzüi; side-effect'ler navigator'da kalır). MCP bu mapper'ı
+/// wire sınıfı için kullanır — iki tüketici tek tabloya pinlenir.
+pub fn commit_error_agent_surface(err: &crate::engine::EngineCommitError) -> NativeFailureSurface {
+    use crate::engine::EngineCommitError;
+    match err {
+        // Retryable (agent-correctable) — budget tüketir, evidence+feedback, continue.
+        EngineCommitError::SyntaxViolation { .. }
+        | EngineCommitError::VisionViolation { .. }
+        | EngineCommitError::RuleViolation { .. } => NativeFailureSurface::RetryAgentProposal,
+        // Terminal — witness evidence operational fault.
+        EngineCommitError::InvalidWitnessEvidence(_) => {
+            NativeFailureSurface::WitnessEvaluationError
+        }
+        // Terminal — task binding yok (task not found / standalone claim).
+        EngineCommitError::PermissionDenied(_) => NativeFailureSurface::TaskNotFound,
+        // Terminal system failure — operational / TCB / native-authority family
+        // (persistence, internal, fail-closed context, task-validation, measurement
+        // binding mismatch/derivation/verification — NativeAuthority kontratı:
+        // SystemFailure | budget yok | LLM retry yok).
+        EngineCommitError::NoPersistence
+        | EngineCommitError::Persistence(_)
+        | EngineCommitError::Internal(_)
+        | EngineCommitError::AuthorizationContextFailed(_)
+        | EngineCommitError::VisionContextInvalid(_)
+        | EngineCommitError::TaskValidation(_)
+        | EngineCommitError::MeasurementBindingMismatch(_)
+        | EngineCommitError::MeasurementBindingFailed(_)
+        | EngineCommitError::MeasurementBindingVerification(_) => {
+            NativeFailureSurface::SystemFailure
+        }
+    }
+}
+
 /// 17 varyantın exact eşlemesi (plan v5/#96 v4-FİNAL tablosu; wildcard YOK —
 /// yeni varyant derleme hatası zorlar).
 pub fn measurement_failure_disposition(
@@ -491,6 +570,75 @@ mod tests {
 
     // Not: kapsamlı test envanteri (yarış, construction contract, cross-pin) W8'de;
     // burada yalnız taşınan fonksiyonların bit-identical pin'leri.
+
+    /// **P1-1 (review tur 5):** disposition → agent yüzeyi tablosu — navigator
+    /// arm'ı ile birebir. Yeni disposition eklendiğinde bu test derleme hatası
+    /// verir (wildcard YOK).
+    #[test]
+    fn measurement_failure_disposition_agent_surface_table() {
+        use MeasurementFailureDisposition as D;
+        use NativeFailureSurface as S;
+        assert_eq!(D::TerminalTaskDeclaration.agent_surface(), S::SystemFailure);
+        assert_eq!(
+            D::TerminalIdentityViolation.agent_surface(),
+            S::SystemFailure
+        );
+        assert_eq!(D::RegenerateMeasurement.agent_surface(), S::SystemFailure);
+        assert_eq!(D::SystemFailure.agent_surface(), S::SystemFailure);
+        assert_eq!(D::RetryAgentProposal.agent_surface(), S::RetryAgentProposal);
+    }
+
+    /// **P1-1:** commit-error → agent yüzeyi tablosu — navigator'ın production
+    /// commit-error arm'ları ile birebir (retryable Syntax/Vision/Rule; task
+    /// binding; witness evidence; kalanı system failure).
+    #[test]
+    fn commit_error_agent_surface_table() {
+        use crate::engine::EngineCommitError;
+        use NativeFailureSurface as S;
+
+        let retryable = [
+            EngineCommitError::SyntaxViolation {
+                violation: crate::agent::SyntaxViolation {
+                    claim_id: 1,
+                    detail: "test".into(),
+                },
+            },
+            EngineCommitError::RuleViolation {
+                violation: crate::rule::RuleViolation {
+                    rule_id: "test".into(),
+                    detail: "test".into(),
+                    severity: crate::rule::RuleSeverity::Hard,
+                },
+            },
+        ];
+        for e in &retryable {
+            assert_eq!(
+                commit_error_agent_surface(e),
+                S::RetryAgentProposal,
+                "retryable family: {e:?}"
+            );
+        }
+        assert_eq!(
+            commit_error_agent_surface(&EngineCommitError::PermissionDenied(
+                "task not found".into()
+            )),
+            S::TaskNotFound
+        );
+        assert_eq!(
+            commit_error_agent_surface(&EngineCommitError::InvalidWitnessEvidence(
+                "malformed".into()
+            )),
+            S::WitnessEvaluationError
+        );
+        assert_eq!(
+            commit_error_agent_surface(&EngineCommitError::NoPersistence),
+            S::SystemFailure
+        );
+        assert_eq!(
+            commit_error_agent_surface(&EngineCommitError::Internal("x".into())),
+            S::SystemFailure
+        );
+    }
 
     #[test]
     fn build_claim_from_proposal_empty_proposal_rejected() {

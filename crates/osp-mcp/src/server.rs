@@ -828,7 +828,10 @@ impl Workspace {
         //    md1_shadow); legacy subject engine-internal derivation. `loss_before`
         //    DOKUNULMAZ (current_measured sabit tohumdan — bootstrap authority
         //    ayrı migration; loss_before = gate girdisidir, değer değişmez).
-        //    Fallible → 17-varyant disposition (navigator ile aynı ortak helper).
+        //    **P1-1 (review tur 5):** fallible → ortak typed mapper
+        //    (`MeasurementFailureDisposition::agent_surface`) — navigator ile
+        //    TEK ontology; system failure artık `RejectedBySyntax` diye
+        //    fabricate EDİLMEZ.
         let native = match self
             .engine_mut()
             .measure_attempt_native_with_md1_shadow(&draft, proposal, task)
@@ -836,21 +839,39 @@ impl Workspace {
             Ok(n) => n,
             Err(e) => {
                 use osp_core::task_measurement::measurement_failure_disposition;
-                return Ok(serde_json::json!({
-                    "attempt_outcome": {
-                        "gate_decision": "RejectedBySyntax",
-                        "predicate_completion": "NotCompleted",
-                        "mutation_decision": "Reject",
-                        "witness_status": null,
-                    },
-                    "apply_target": "NotApplied",
-                    "loss_after": null,
-                    "measured_after": null,
-                    "message": format!(
-                        "native measurement failed (disposition={:?}): {e}",
-                        measurement_failure_disposition(&e)
-                    ),
-                }));
+                let disposition = measurement_failure_disposition(&e);
+                return Ok(match disposition.agent_surface() {
+                    // Dormant branch (bugün üreticisiz — plan v5 unlock notları):
+                    // agent revize eder, budget'li retry yüzeyi.
+                    osp_core::task_measurement::NativeFailureSurface::RetryAgentProposal => {
+                        serde_json::json!({
+                            "retry_agent_proposal": { "retryable": true },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!(
+                                "measurement rejected the proposal (disposition={disposition:?}) — \
+                                 revise the delta: {e}"
+                            ),
+                        })
+                    }
+                    // TerminalTaskDeclaration / TerminalIdentityViolation /
+                    // RegenerateMeasurement (dormant) / SystemFailure — navigator
+                    // SystemFailure mirror: budget YOK, LLM retry YOK.
+                    _ => serde_json::json!({
+                        "system_failure": {
+                            "class": "NativeMeasurementFailed",
+                            "disposition": format!("{disposition:?}"),
+                            "retryable": false,
+                        },
+                        "apply_target": "NotApplied",
+                        "loss_after": null,
+                        "measured_after": null,
+                        "message": format!(
+                            "native measurement failed (disposition={disposition:?}): {e}"
+                        ),
+                    }),
+                });
             }
         };
 
@@ -859,15 +880,16 @@ impl Workspace {
         //    NativeAuthority family kontratı: SystemFailure/no-budget/no-retry)
         //    + Q4 FINAL-RAW finite + commit_task_claim (native binding
         //    verification engine'de).
+        //    **P1-1 (review tur 5):** binding hatası TCB/native-authority ailesi —
+        //    wire artık `system_failure` (navigator SystemFailure mirror; eski
+        //    `RejectedBySyntax` fabrication'ı kalktı).
         let claim = match draft.finalize(native.authority()) {
             Ok(c) => c,
             Err(e) => {
                 return Ok(serde_json::json!({
-                    "attempt_outcome": {
-                        "gate_decision": "RejectedBySyntax",
-                        "predicate_completion": "NotCompleted",
-                        "mutation_decision": "Reject",
-                        "witness_status": null,
+                    "system_failure": {
+                        "class": "NativeBindingFailed",
+                        "retryable": false,
                     },
                     "apply_target": "NotApplied",
                     "loss_after": null,
@@ -876,6 +898,9 @@ impl Workspace {
                 }));
             }
         };
+        // **P1-1 not:** non-finite measured raw = gerçek syntax-sınıfı reddi —
+        // navigator parity (navigator.rs:864-886 RejectedBySyntax evidence +
+        // feedback retry). Bu dal bilinçli olarak RejectedBySyntax kalır.
         if let Err(violation) = osp_core::task_measurement::validate_raw_position_finite(
             claim.claim().id,
             "measurement.after",
@@ -1013,42 +1038,95 @@ impl Workspace {
                 }));
             }
             Err(e) => {
-                // **#95 MD-1 P2-1:** Mevcut error JSON semantiği BİLİNÇLİ olarak
-                // değiştirilmez (legacy `RejectedBySyntax` davranışı ayrı issue
-                // malzemesi — plan v6 §9). Yalnız comparison-surviving retryable
-                // hatalarda (Q4/Q5/Q6) sidecar eklenir; non-surviving'de eski JSON
-                // aynen kalır.
-                let mut response = serde_json::json!({
-                    "attempt_outcome": {
-                        "gate_decision": "RejectedBySyntax",
-                        "predicate_completion": "NotCompleted",
-                        "mutation_decision": "Reject",
-                        "witness_status": null,
-                    },
-                    "apply_target": "NotApplied",
-                    "loss_after": null,
-                    "measured_after": null,
-                    "message": format!("commit_task_claim: {e}"),
-                });
-                // **#96 MD-2:** retryable Q5/Q6 → provenance sidecar (Q4 arm'ı YOK —
-                // structural Q4 draft aşamasında; emission YOK).
-                if let Some(prov) =
-                    osp_core::provenance_authority::provenance_downstream_from_engine_commit_error(
-                        &e,
-                    )
-                    .map(|downstream| prov_draft.finalize(downstream))
-                {
-                    response["provenance_authority_drift"] =
-                        serde_json::to_value(&prov).map_err(|e| e.to_string())?;
+                // **P1-1 (review tur 5):** ortak typed mapper — navigator'ın
+                // commit-error arm'ları ile TEK ontology
+                // (`task_measurement::commit_error_agent_surface`).
+                use osp_core::task_measurement::{
+                    commit_error_agent_surface, NativeFailureSurface,
+                };
+                match commit_error_agent_surface(&e) {
+                    // Retryable (Syntax/Vision/Rule) — agent-correctable: GERÇEK
+                    // gate kararı (hardcode RejectedBySyntax DEĞİL) +
+                    // comparison-surviving sidecar'lar (#95/#96 path→finalize).
+                    NativeFailureSurface::RetryAgentProposal => {
+                        let gate_decision =
+                            osp_core::navigator::gate_decision_from_engine_error(&e);
+                        let gate_str = match gate_decision {
+                            osp_core::trajectory::GateDecision::RejectedByVision => {
+                                "RejectedByVision"
+                            }
+                            osp_core::trajectory::GateDecision::RejectedByRule => "RejectedByRule",
+                            _ => "RejectedBySyntax",
+                        };
+                        let mut response = serde_json::json!({
+                            "attempt_outcome": {
+                                "gate_decision": gate_str,
+                                "predicate_completion": "NotCompleted",
+                                "mutation_decision": "Reject",
+                                "witness_status": null,
+                            },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        });
+                        // **#96 MD-2:** retryable Q5/Q6 → provenance sidecar
+                        // (Q4 arm'ı YOK — structural Q4 draft aşamasında; emission YOK).
+                        if let Some(prov) = osp_core::provenance_authority::
+                            provenance_downstream_from_engine_commit_error(&e)
+                            .map(|downstream| prov_draft.finalize(downstream))
+                        {
+                            response["provenance_authority_drift"] =
+                                serde_json::to_value(&prov).map_err(|e| e.to_string())?;
+                        }
+                        if let Some(drift) =
+                            osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
+                                .map(|downstream| drift_draft.finalize(downstream))
+                        {
+                            response["subject_authority_drift"] =
+                                serde_json::to_value(&drift).map_err(|e| e.to_string())?;
+                        }
+                        return Ok(response);
+                    }
+                    // Task binding yok — terminal (navigator TaskNotFound mirror).
+                    NativeFailureSurface::TaskNotFound => {
+                        return Ok(serde_json::json!({
+                            "error": "task_not_found",
+                            "retryable": false,
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        }));
+                    }
+                    // Witness evidence operational fault — terminal.
+                    NativeFailureSurface::WitnessEvaluationError => {
+                        return Ok(serde_json::json!({
+                            "system_failure": {
+                                "class": "WitnessEvidenceInvalid",
+                                "retryable": false,
+                            },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        }));
+                    }
+                    // System failure (operational/TCB/native-authority family) —
+                    // terminal; eski `RejectedBySyntax` fabrication'ı kalktı.
+                    NativeFailureSurface::SystemFailure | NativeFailureSurface::SyntaxRejection => {
+                        return Ok(serde_json::json!({
+                            "system_failure": {
+                                "class": "EngineCommitFailed",
+                                "retryable": false,
+                            },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        }));
+                    }
                 }
-                if let Some(drift) =
-                    osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
-                        .map(|downstream| drift_draft.finalize(downstream))
-                {
-                    response["subject_authority_drift"] =
-                        serde_json::to_value(&drift).map_err(|e| e.to_string())?;
-                }
-                return Ok(response);
             }
         };
 
