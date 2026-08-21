@@ -640,6 +640,144 @@ mod tests {
         );
     }
 
+    /// **W8-a (#96 MD-2 review tur-5/6 — P1 kapanışı):** 17-varyant disposition
+    /// tablosunun TAM envanter pin'i. Mapping fn zaten compiler-exhaustive; bu
+    /// test MEVCUT atamaların (plan v5/#96 v4-FİNAL frozen tablo) sessizce
+    /// değişmediğini pinler — yanlış satır taşırması regression olarak yakalanır.
+    ///
+    /// **Dormant producer envanteri:** `RetryAgentProposal` ve
+    /// `RegenerateMeasurement` disposition'larına BUGÜN hiçbir MeasurementError
+    /// üreticisi YOK (bilinçli — unlock koşulları plan v5 tablo notlarında:
+    /// node-removal op / explicit ID allocation / typed structural origin /
+    /// atomik baseline-refresh kontratı). Bu dormant durum testin bir parçası
+    /// olarak pinlenir: tablo SADECE Terminal*/SystemFailure üretir.
+    #[test]
+    fn measurement_failure_disposition_full_inventory() {
+        use crate::measurement::MeasurementError as E;
+        use MeasurementFailureDisposition as D;
+
+        let revision = || crate::authorization::SpaceViewRevision {
+            view_id: crate::authorization::SpaceViewId::Ephemeral(0),
+            sequence: 0,
+            content_digest: crate::authorization::SpaceDigest::compute(
+                &crate::space::Space::default(),
+            )
+            .unwrap(),
+        };
+        let input_digest = {
+            let cs = crate::coords::CoordinateSystem::default_raw_five(
+                crate::coords::MetricSource::Placeholder,
+                crate::axes::CohesionAxis::new(),
+                crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+            )
+            .unwrap();
+            let ctx = crate::authorization::MeasurementInputContext::try_from(&cs).unwrap();
+            crate::authorization::MeasurementInputDigest::compute(&ctx).unwrap()
+        };
+
+        // (variant, expected disposition) — 17/17.
+        let table: Vec<(E, D)> =
+            vec![
+            (
+                E::CoordinateMeasurement(crate::coords::CoordinateMeasurementError::EmptySourceSet),
+                D::SystemFailure,
+            ),
+            (
+                E::MeasurementContext(
+                    crate::authorization::CanonicalizationError::DuplicateNodeId(1),
+                ),
+                D::SystemFailure,
+            ),
+            (
+                E::RevisionComputationFailed { detail: "x".into() },
+                D::SystemFailure,
+            ),
+            (
+                E::MeasurementContextDrift {
+                    before: input_digest.clone(),
+                    after: input_digest.clone(),
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::Digest(crate::measurement::MeasurementDigestError::NonFiniteRejected),
+                D::SystemFailure,
+            ),
+            (E::MeasurementContextDigestMismatch, D::SystemFailure),
+            (E::ClaimNotTaskBound { claim_id: 1 }, D::TerminalIdentityViolation),
+            (
+                E::TaskBindingMismatch {
+                    claim_task_id: 1,
+                    bound_task_id: 2,
+                },
+                D::TerminalIdentityViolation,
+            ),
+            (
+                E::RevisionMismatch {
+                    expected: revision(),
+                    current: revision(),
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::HeterogeneousPredicateScopes { scopes: vec![] },
+                D::TerminalTaskDeclaration,
+            ),
+            (E::EmptySubjectScope, D::TerminalTaskDeclaration),
+            (
+                E::SubjectScopeResolutionFailed(
+                    crate::measurement::SubjectScopeResolutionError::ModuleResolutionUnavailable {
+                        module: "core".into(),
+                    },
+                ),
+                D::TerminalTaskDeclaration,
+            ),
+            (
+                E::SubjectMemberUnresolvable { missing: vec![7] },
+                D::TerminalTaskDeclaration,
+            ),
+            (
+                E::SubjectMemberMissingAfterDelta { node_id: 7 },
+                D::SystemFailure,
+            ),
+            (
+                E::SubjectScopeHintMismatch {
+                    hint_members: vec![1],
+                    derived_members: vec![2],
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::InvalidSubjectMass {
+                    node_id: 7,
+                    mass: -1.0,
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::InvalidTotalSubjectMass { total_mass: 0.0 },
+                D::SystemFailure,
+            ),
+        ];
+        assert_eq!(table.len(), 17, "17 varyantın TAMAMI envanterde");
+        for (err, expected) in &table {
+            assert_eq!(
+                &measurement_failure_disposition(err),
+                expected,
+                "disposition table drift: {err:?} → {expected:?} bekleniyordu"
+            );
+        }
+        // Dormant pin: envanterde RetryAgentProposal/RegenerateMeasurement YOK —
+        // bu disposition'lar bugün üreticisiz (yukarıdaki not).
+        assert!(
+            !table
+                .iter()
+                .any(|(_, d)| matches!(d, D::RetryAgentProposal | D::RegenerateMeasurement)),
+            "dormant disposition'lara üretici eklendiyse bu pin + plan v5 unlock notları güncellenmeli"
+        );
+    }
+
     #[test]
     fn build_claim_from_proposal_empty_proposal_rejected() {
         let proposal = DeltaProposal {

@@ -8792,4 +8792,483 @@ v = 0.5
             result
         );
     }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // #96 MD-2 W6 — commit-anı native authority verifier ×5 negatif + stale/ABA
+    //
+    // P0-2 sealed carrier "artifact mix'i type-level imkânsız" yapar (compile-fail
+    // pin'leri: tests/md2_authority_typelevel.rs). BU test'ler kalan üç gerçeklik
+    // fence'ini runtime'da negatifler: (1) structural delta, (2) raw bits,
+    // (3) stale space revision + (4) context TOCTOU + (5) A→B→A epoch revert.
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /// W6 sentinel: ölçüm sırasında DEĞİL, ölçüm ile commit-verify ARASINDA
+    /// değişen axis. `generation` test'in elinde; `measure()` non-mutating
+    /// (producer session pre/post verify geçer). Test generation'ı ilerletir:
+    /// - `descriptor_follows_generation=true` → descriptor byte'ı değişir →
+    ///   check-4 context digest fence (TOCTOU).
+    /// - `descriptor_follows_generation=false` → descriptor SABİT kalır, yalnız
+    ///   epoch ilerler → check-5 monoton epoch ABA fence (digest göremez).
+    struct W6DeferredAxis {
+        name: &'static str,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        descriptor_follows_generation: bool,
+    }
+
+    impl crate::coords::Axis for W6DeferredAxis {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn descriptor(
+            &self,
+        ) -> Result<crate::coords::AxisDescriptor, crate::coords::AxisDescriptorError> {
+            use std::sync::atomic::Ordering;
+            let generation = self.generation.load(Ordering::SeqCst) as u8;
+            let descriptor_byte = if self.descriptor_follows_generation {
+                generation
+            } else {
+                0
+            };
+            let mut params = crate::coords::AxisParameterEncoder::new();
+            params.push_u8(descriptor_byte);
+            crate::coords::AxisDescriptor::try_new(self.name, 1, params)
+        }
+        fn measure(
+            &self,
+            _node: &crate::space::Node,
+            _space: &crate::space::Space,
+        ) -> Result<crate::coords::AxisMeasurement, crate::coords::AxisMeasurementError> {
+            crate::coords::AxisMeasurement::try_new(0.5, crate::coords::MetricSource::Placeholder)
+        }
+        fn compute(&self, _node: &crate::space::Node, _space: &crate::space::Space) -> f64 {
+            0.5
+        }
+        fn measurement_epoch(&self) -> crate::coords::AxisStateEpoch {
+            use std::sync::atomic::Ordering;
+            crate::coords::AxisStateEpoch::new(self.generation.load(Ordering::SeqCst))
+        }
+    }
+
+    fn w6_engine_with_deferred_coupling(
+        descriptor_follows_generation: bool,
+        generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    ) -> SpaceEngine {
+        let cs = CoordinateSystem::empty()
+            .try_with_axis(W6DeferredAxis {
+                name: "coupling",
+                generation,
+                descriptor_follows_generation,
+            })
+            .expect("coupling axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "cohesion",
+                value: 0.3,
+            })
+            .expect("cohesion axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "instability",
+                value: 0.4,
+            })
+            .expect("instability axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "entropy",
+                value: 0.5,
+            })
+            .expect("entropy axis")
+            .try_with_axis(Md1ConstAxis {
+                name: "witness_depth",
+                value: 0.6,
+            })
+            .expect("witness_depth axis");
+        md1_engine_with_cs(cs)
+    }
+
+    /// W6 check-1: claim structural delta digest ≠ token delta digest →
+    /// `NativeAuthority(StructuralDeltaMismatch)`. (Sealed carrier bu mix'i
+    /// commit yüzeyinde temsil edilemez yapar; bu pin verifier KONTRATINI
+    /// sınar — check sırası (1)'in (3) revision'dan ÖNCE geldiğini de sabitler.)
+    #[test]
+    fn md2_w6_verifier_rejects_structural_delta_mismatch() {
+        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        let task = md1_task_node1();
+        let proposal_a = md1_edge_proposal(); // edge 1→2
+        let mut proposal_b = md1_edge_proposal();
+        proposal_b.new_edges = vec![crate::agent::NewEdgeSpec {
+            from: 2,
+            to: 1, // ters yön → farklı canonical delta
+            kind: crate::space::EdgeKind::Imports,
+        }];
+
+        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_a,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .unwrap();
+        let bundle_a = engine
+            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal_a, &task)
+            .unwrap();
+        let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
+
+        let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal_b,
+            RawPosition::default(),
+            task.id,
+            100,
+            2,
+        )
+        .unwrap();
+        let bundle_b = engine
+            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal_b, &task)
+            .unwrap();
+
+        // Precondition: farklı delta → farklı digest (senaryonun ta kendisi).
+        assert_ne!(
+            bundle_a.authority().delta_digest(),
+            bundle_b.authority().delta_digest()
+        );
+        // Pozitif kontrol: kendi claim×token çifti verify'den geçer.
+        assert!(engine
+            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_a.authority())
+            .is_ok());
+
+        // Negatif: claim A + token B → StructuralDeltaMismatch (enum equality).
+        let err = engine
+            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_b.authority())
+            .expect_err("cross-pair farklı delta → mismatch");
+        assert!(
+            matches!(
+                &err,
+                crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                    crate::measurement::NativeLegacyMeasurementBindingError::StructuralDeltaMismatch { .. }
+                )
+            ),
+            "check-1 StructuralDeltaMismatch bekleniyordu; got: {err:?}"
+        );
+    }
+
+    /// W6 check-2: aynı structural delta + FARKLI raw bits (farklı space
+    /// içeriği — node mass farklı) → `NativeAuthority(RawMismatch)`.
+    /// Check sırası: raw (2) revision (3)'ten önce → çapraz-space çiftinde
+    /// revision da farklı olsa bile RawMismatch raporlanır.
+    #[test]
+    fn md2_w6_verifier_rejects_raw_bits_mismatch_same_delta() {
+        let cs = make_measurement_engine_coordinate_system();
+        let engine_a = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        // Farklı space İÇERİĞİ (farklı mevcut edge yapısı — coupling derece bazlı,
+        // mass değil): node 9 + ek out-edge 1→9 → node 1 coupling ölçümü değişir.
+        // Proposal delta'sı (yeni edge 1→2) iki tarafta aynı → delta digest eşit.
+        let mut space_b = md1_space_two_nodes();
+        space_b.insert_node(crate::space::Node {
+            id: 9,
+            kind: crate::space::NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        space_b.insert_edge(crate::space::Edge {
+            from: 1,
+            to: 9,
+            kind: crate::space::EdgeKind::Imports,
+            is_type_only: false,
+        });
+        let engine_b = SpaceEngine::new(
+            space_b,
+            cs,
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+
+        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .unwrap();
+        let bundle_a = engine_a
+            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal, &task)
+            .unwrap();
+        let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
+
+        let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            2,
+        )
+        .unwrap();
+        let bundle_b = engine_b
+            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal, &task)
+            .unwrap();
+
+        // Precondition: aynı delta (aynı proposal), farklı raw (farklı mass →
+        // farklı centroid ölçümü).
+        assert_eq!(
+            bundle_a.authority().delta_digest(),
+            bundle_b.authority().delta_digest()
+        );
+        let raw_bits = |t: &crate::measurement::NativeLegacySubjectMeasurement| {
+            [
+                t.raw().x.to_bits(),
+                t.raw().y.to_bits(),
+                t.raw().z.to_bits(),
+                t.raw().w.to_bits(),
+                t.raw().v.to_bits(),
+            ]
+        };
+        assert_ne!(
+            raw_bits(bundle_a.authority()),
+            raw_bits(bundle_b.authority()),
+            "precondition: farklı space içeriği → farklı raw bits"
+        );
+
+        // Negatif: engine A claim + engine B token → RawMismatch.
+        let err = engine_a
+            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_b.authority())
+            .expect_err("cross-space raw mix → mismatch");
+        assert!(
+            matches!(
+                &err,
+                crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                    crate::measurement::NativeLegacyMeasurementBindingError::RawMismatch { .. }
+                )
+            ),
+            "check-2 RawMismatch bekleniyordu; got: {err:?}"
+        );
+    }
+
+    /// W6 check-3: measure → space mutasyonu → token replay → hem public
+    /// verifier hem GERÇEK commit pipeline `StaleSpaceRevision` ile reddeder.
+    #[test]
+    fn md2_w6_verifier_and_commit_reject_stale_space_revision_replay() {
+        let mut engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .unwrap();
+        let bundle = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .unwrap();
+        let carrier = draft.finalize(bundle.authority()).unwrap();
+        assert!(
+            engine
+                .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+                .is_ok(),
+            "precondition: mutasyon öncesi kendi çifti geçer"
+        );
+
+        // Space gerçekliği değişti (yeni node) — content digest değişti.
+        engine.space.insert_node(crate::space::Node {
+            id: 7,
+            kind: crate::space::NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+
+        // Public verifier: stale replay fence.
+        let err = engine
+            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .expect_err("stale token replay reddedilmeli");
+        assert!(
+            matches!(
+                &err,
+                crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                    crate::measurement::NativeLegacyMeasurementBindingError::StaleSpaceRevision { .. }
+                )
+            ),
+            "check-3 StaleSpaceRevision bekleniyordu; got: {err:?}"
+        );
+
+        // Gerçek commit pipeline aynı fence'i tek funnel'dan reddeder.
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task.clone());
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let commit_err = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                1.0,
+            ))
+            .expect_err("commit-time stale replay reddedilmeli");
+        assert!(
+            matches!(
+                &commit_err,
+                crate::engine::EngineCommitError::MeasurementBindingVerification(
+                    crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                        crate::measurement::NativeLegacyMeasurementBindingError::StaleSpaceRevision { .. }
+                    )
+                )
+            ),
+            "commit funnel StaleSpaceRevision bekleniyordu; got: {commit_err:?}"
+        );
+    }
+
+    /// W6 check-4: axis descriptor ölçümden sonra değişti → context digest
+    /// fence (`MeasurementContextMismatch` — TOCTOU). Sentinel ölçüm sırasında
+    /// mutasyon yapmaz (producer session'ı geçer); değişiklik ölçüm SONRASI.
+    #[test]
+    fn md2_w6_verifier_rejects_axis_descriptor_toctou() {
+        use std::sync::atomic::Ordering;
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let engine = w6_engine_with_deferred_coupling(true, generation.clone());
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .unwrap();
+        let bundle = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .expect("non-mutating axis → producer session geçer");
+        let carrier = draft.finalize(bundle.authority()).unwrap();
+
+        // Axis descriptor'ı ölçümden sonra değişti (generation 0→1).
+        generation.store(1, Ordering::SeqCst);
+
+        let err = engine
+            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .expect_err("context TOCTOU reddedilmeli");
+        assert!(
+            matches!(
+                &err,
+                crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                    crate::measurement::NativeLegacyMeasurementBindingError::MeasurementContextMismatch { .. }
+                )
+            ),
+            "check-4 MeasurementContextMismatch bekleniyordu; got: {err:?}"
+        );
+    }
+
+    /// W6 check-5: A→B→A revert — descriptor SABİT (digest fence göremez),
+    /// yalnız monoton epoch farkı yakalar (`AxisEpochMismatch`).
+    #[test]
+    fn md2_w6_verifier_rejects_aba_epoch_revert() {
+        use std::sync::atomic::Ordering;
+        let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let engine = w6_engine_with_deferred_coupling(false, generation.clone());
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .unwrap();
+        let bundle = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .expect("non-mutating axis → producer session geçer");
+        let carrier = draft.finalize(bundle.authority()).unwrap();
+
+        // A→B→A: descriptor byte SABİT (0) → context digest EŞİT kalır; epoch
+        // monoton ilerler (0→1). Digest fence bu revert'u göremez — yalnız
+        // epoch fence yakalar.
+        generation.store(1, Ordering::SeqCst);
+
+        let err = engine
+            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .expect_err("ABA epoch revert reddedilmeli");
+        assert!(
+            matches!(
+                &err,
+                crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                    crate::measurement::NativeLegacyMeasurementBindingError::AxisEpochMismatch { .. }
+                )
+            ),
+            "check-5 AxisEpochMismatch bekleniyordu; got: {err:?}"
+        );
+    }
+
+    /// W6-d basis ↔ token cross-pin: `build_authorization_context` basis'in
+    /// revision/input-digest/measured alanlarını PROOF'TAN okur (verify
+    /// çıktısından — yeniden ölçmez). Held arm'ının AuthorizationContext'i
+    /// token'ın taşıdığı değerlerle birebir eşit olmalı.
+    #[test]
+    fn md2_w6_authorization_basis_carries_token_proof_fields() {
+        // UserLoaded vision — GlobalDefault insufficient reject edilmez (held_for_config
+        // fixture mirror); boş witness → Held.
+        let vision = crate::vision::VisionVector::with_source(
+            RawPosition {
+                x: 0.5,
+                y: 0.5,
+                z: 0.5,
+                w: 0.5,
+                v: 0.5,
+            },
+            crate::vision::VisionSource::UserLoaded,
+        );
+        let mut engine = SpaceEngine::new(
+            md1_space_two_nodes(),
+            make_measurement_engine_coordinate_system(),
+            vision,
+            EngineConfig::default_calibrated(),
+        );
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            task.id,
+            100,
+            1,
+        )
+        .unwrap();
+        let bundle = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .unwrap();
+        let carrier = draft.finalize(bundle.authority()).unwrap();
+        let token = carrier.measurement();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task.clone());
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let result = engine.commit_task_claim(crate::engine::TaskCommitInput::new(
+            &carrier,
+            &omega,
+            &registry as &dyn crate::trajectory::TaskResolver,
+            RawPosition::default(),
+            1.0,
+        ));
+        let authorization = match result {
+            Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
+            other => panic!("fixture boş witness ile Held üretmeli; got: {other:?}"),
+        };
+
+        // Basis ← proof ← token: üç alan da token'ın taşıdığı değer (cross-pin).
+        assert_eq!(
+            authorization.basis.base_space_view_revision,
+            *token.base_revision(),
+            "basis revision = token base_revision (proof'tan — yeniden okuma yok)"
+        );
+        assert_eq!(
+            authorization.basis.measurement_input_digest,
+            *token.measurement_input_digest(),
+            "basis input digest = token measurement_input_digest (proof'tan)"
+        );
+        let expected_measured =
+            crate::authorization::ProvenancedMeasuredResult::try_from(token.measured()).unwrap();
+        assert_eq!(
+            authorization.basis.measured_result, expected_measured,
+            "basis measured_result = token measured projeksiyonu (proof'tan)"
+        );
+    }
 }

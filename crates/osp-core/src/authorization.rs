@@ -15858,6 +15858,92 @@ v = 0.5
         );
     }
 
+    /// **W8-d (#96 MD-2 review tur-5 P2):** minimal provenance drift sidecar
+    /// fixture'ı — identity alanları (task_id, claim_id) parametrik; lane
+    /// içerikleri minimal (load-path identity kontrolünün konusu DEĞİL).
+    fn md2_sample_prov_drift(
+        task_id: u64,
+        claim_id: u64,
+    ) -> crate::provenance_authority::ProvenanceAuthorityDriftObservation {
+        use crate::provenance_authority::{
+            NativeLaneObservation, ProvenanceAuthorityDriftObservation,
+            ProvenanceDownstreamObservation, ProvenanceNotReachedReason, ReferenceLaneObservation,
+        };
+        use crate::subject_authority::{
+            LaneQ5Observation, Q5ObservationFailure, RawMeasurementObservation,
+        };
+        let raw = RawMeasurementObservation {
+            bits: [1, 2, 3, 4, 5],
+            sources: [crate::coords::MetricSource::Scip; 5],
+        };
+        ProvenanceAuthorityDriftObservation {
+            task_id,
+            claim_id,
+            native: NativeLaneObservation {
+                raw: raw.clone(),
+                q5: LaneQ5Observation::NotEvaluated {
+                    reason: Q5ObservationFailure::VisionUnavailable,
+                },
+            },
+            reference: ReferenceLaneObservation {
+                raw,
+                q5: LaneQ5Observation::NotEvaluated {
+                    reason: Q5ObservationFailure::VisionUnavailable,
+                },
+                downstream: None,
+            },
+            downstream: ProvenanceDownstreamObservation::NotReached {
+                reason: ProvenanceNotReachedReason::Q5Violated,
+            },
+        }
+    }
+
+    /// **W8-d (#96 MD-2 review tur-5 P2):** provenance sidecar identity-mismatch
+    /// load-path — subject tarafının mirror'ı, KENDİ typed varyantıyla
+    /// (`ProvenanceAuthorityDriftIdentityMismatch`; subject varyantının adı
+    /// yanlışlıkla kullanılmaz — diagnostic truth-surface ayrık).
+    #[test]
+    fn pending_authorization_rejects_identity_mismatched_provenance_sidecar() {
+        // sample_pending_record: task=1, claim=42.
+        let mut record = sample_pending_record();
+        record.provenance_authority_drift = Some(md2_sample_prov_drift(2, 42));
+        let err = record
+            .validate_internal()
+            .expect_err("provenance identity mismatch must fail validate_internal");
+        assert!(
+            matches!(
+                err,
+                crate::authorization::PendingAuthorizationLoadError::
+                ProvenanceAuthorityDriftIdentityMismatch { .. }
+            ),
+            "provenance sidecar kendi typed varyantıyla reddedilmeli; got: {err:?}"
+        );
+        // Subject varyantı DEĞİL (isim ayrımı pinlenir).
+        assert!(
+            !matches!(
+                err,
+                crate::authorization::PendingAuthorizationLoadError::
+                SubjectAuthorityDriftIdentityMismatch { .. }
+            ),
+            "provenance yolu subject diagnostic adını kullanmaz"
+        );
+
+        // Strict wire: matched record + mismatched provenance sidecar (claim=43)
+        // → deserialize Err (custom Deserialize + deny_unknown_fields).
+        let mut json = serde_json::to_value(sample_pending_record()).expect("to_value");
+        json.as_object_mut()
+            .expect("pending wire is an object")
+            .insert(
+                "provenance_authority_drift".to_string(),
+                serde_json::to_value(md2_sample_prov_drift(1, 43)).expect("sidecar to_value"),
+            );
+        let result: Result<PendingAuthorization, _> = serde_json::from_value(json);
+        assert!(
+            result.is_err(),
+            "strict wire must reject identity-mismatched provenance sidecar"
+        );
+    }
+
     #[test]
     fn attempt_evidence_id_alias_removed_compiles() {
         // Compile-time assertion: AttemptEvidenceId type alias tamamen kaldırıldı.
