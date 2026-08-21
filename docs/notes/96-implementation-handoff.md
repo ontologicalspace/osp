@@ -1,110 +1,146 @@
-# Handoff — #96 MD-2 Implementation (branch: feat/96-md2-native-provenance-authority)
+# Handoff — #96 MD-2 Implementation (PR AÇIK — W1-W7 kodlandı, workspace 39/39 yeşil)
 
-**Tarih:** 2026-08-18 (oturum 2 sonu). Plan v4-FİNAL APPROVED — W1-W4 kodlandı.
-**Bu dosya:** Implementation durum devri. Kalan iş + 3 test failure teşhisi + debug planı.
+**Tarih:** 2026-08-21. Plan v4-FİNAL APPROVED — W1-W7 + 3 review düzeltmesi kodlandı.
+**Bu dosya:** Implementation durum devri + kalan iş (W6 testleri + W8 + W9).
 
 ## Oturum nasıl başlamalı
 
-> Handoff: **#96 MD-2 implementation** ile devam (branch `feat/96-md2-native-provenance-authority`;
-> W1-W4 commit'li: `0e31cd3` + `caefc73`).
+> Handoff: **#96 MD-2 implementation PR review'ı + W6-W9 kalanı** ile devam.
+> Branch: `feat/96-md2-native-provenance-authority` (push edilmiş, PR açık).
 > Notlar: `docs/notes/96-implementation-handoff.md` — önce oku, durum kontrolü yap.
 
-İlk adımlar: (1) bu dosya, (2) `git log --oneline -3` (caefc73+), (3)
-`export PATH="$HOME/.cargo/bin:$PATH"` + `cargo test -p osp-core --lib` (1294 pass /
-3 fail — aşağıda teşhis), (4) kalan 3 failure'ı çöz → W5'ten devam et.
+İlk adımlar: (1) bu dosya, (2) `gh pr view` (PR numarası + review durumu),
+(3) `git log --oneline -8`, (4) `export PATH="$HOME/.cargo/bin:$PATH"` +
+`cargo test --workspace --exclude osp-desktop` (**39 binary, 0 failure** — doğrula).
 
-## Tamamlanan (W1-W4)
+## Mevcut durum — PR commit zinciri (squash öncesi)
 
-- **W1** (`0e31cd3`): `NativeLegacySubjectMeasurement` opaque token (measurement.rs) +
-  `CoreAxisEpochStamp`/`axis_epochs()` (coords.rs, atomik capture) +
-  `measure_attempt_native_with_md1_shadow` (engine.rs — TEK session; legacy subject
-  engine-internal; md1_shadow aynı session'dan) + singleton fast-path (recovered) +
-  `task_measurement.rs` (draft + validate_claim_structure/raw_finite + disposition).
-  Testler: singleton bit-parity, md1_shadow cross-pin (measure_task_delta.after ile
-  bits+sources EXACT), legacy union construction contract (Case 3 [1,9] + fallback 10_000).
-- **W4** (`caefc73`): `verify_native_legacy_measurement_binding` (5 kontrol) +
-  `VerifiedNativeLegacyMeasurementBinding` proof + `TaskCommitInput` private/new +
-  basis proof-sourcing (revision/context/measured_result proof'tan) +
-  `MeasurementBindingMismatch`+RawMismatch+AxisEpochMismatch (funnel
-  `MeasurementBindingVerification`; disposition: AxisEpoch→Regenerate, Raw→Reject).
-  `canonical_structural_delta_from_claim` pub yapıldı; `compute_measurement_input_digest`
-  pub(crate).
-- **W2/W3** (`caefc73`): navigator + MCP cutover (draft→producer→finalize; structural Q4
-  önce; disposition 17 varyant exact; loss_before/target/bootstrap DOKUNULMADI).
-  MD-1 observer re-anchor (V1=native authority; V2=md1_shadow; observe'ın kendi
-  measure_task_delta çağrısı SİLİNDİ). Axis TCB producer'a taşındı.
-- **Test göçü:** `characterization_native_token` (common/mod.rs + navigator/engine
-  crate-internal helper'lar; `new_characterization_legacy` doc-hidden pub ctor —
-  V1 reference lane'in survival'ı; **PR açıklamasında reviewer'a explicitly belirtilmeli**).
-  Fixture düzeltmeleri: navigator fixture coupling axis **Placeholder→Scip**
-  (coupling_task `required_source=Some(Scip)` — native Placeholder dürüstçe
-  SourceInsufficient→Reject üretiyordu = #96'nın expected flip'i, dogfood Run A ile
-  aynı; loop-mekaniği testleri Scip axis ile onurlanır), `make_engine` axis'siz
-  CoordinateSystem'dan gerçek axis'lere (legacy sessiz-default kaldı), md1_completed
-  V1 sources native regolden `[Scip, Placeholder, Scip, Heuristic, Heuristic]`,
-  engine fixture `measured.v 0.0 vs claim.v 0.5` tutarsızlığı (RawMismatch fence'in
-  yakaladığı gerçek fixture hatası) düzeltildi.
-- **Test durumu:** osp-core lib **1294/1297 PASS**. Workspace lib derliyor (osp-mcp dahil).
-  Integration testler (tests/) henük KAÇIRILMADI — `cargo test -p osp-core` tam paket
-  çalıştırılmalı (parity + drift + authorization testlerinde regolden beklenebilir).
+| Commit | Kapsam |
+|---|---|
+| `0e31cd3` | W1: opaque token + tek-session producer + singleton fast-path + cross-pins |
+| `54602b7` | W2-W4: navigator/MCP cutover + binding verification + proof-sourced basis |
+| `3b2dd90` | Review P1: `NativeAuthority(NativeLegacyMeasurementBindingError)` typed family |
+| `e24055d` | Review tur-2 P1: `LegacySubjectBindingDigest` + draft capture + finalize→Result |
+| `d822359` | `serde_json float_roundtrip` (inv_t9_72 kök neden!) + native-honest fixture regolden |
+| `31e1ade` | W7: CLI iki-eksen vocabulary (`engine_native_per_axis`) |
+| `120dacb` | W5: `ProvenanceAuthorityDriftObservation` + wire + navigator/MCP wiring |
+| `c101a09` | fmt (test dosyaları) |
 
-## Kalan 3 test failure (teşhisli)
+**Test:** workspace 39 binary 0 failure; fmt/clippy `-D warnings` temiz.
 
-1. **`navigator_accepts_progress_checkpoint` + `navigator_records_evidence_per_attempt`**
-   (evidence boş): make_engine tabanlı boş-space fixture'ları — gerçek ölçümle akış
-   early-exit ediyor (muhtemelen tek-proposal → Completed→Held terminal veya vision
-   authority yüzeyi; assert'e `{result:?}` ekleyip sonucu gör). Çözüm: fixture'ı
-   g2c3 pattern'ine taşı (make_balanced_engine + incremental proposals + progress
-   policy) VEYA beklentiyi yeni dürüst akışa regolden et (reason note ile).
-2. **`inv_t9_72_held_production_path_exact`** (reload `BasisDigestMismatch`) — **W6'nın
-   ana yüzeyi**: in-memory persist verify GEÇİYOR, reload verify recomputesi uyuşmuyor.
-   Bu tam #103 incident yüzeyi — ama bu sefer BENİM basis değişikliklerimle.
-   **Debug planı:** (a) persist sırasında `record.authorization_basis_digest` ile
-   reload-sonrası recompute digest'i yazdır; (b) basis field'larını serialize öncesi
-   vs deserialize sonrası field-wise karşılaştır (öncelikli şüpheliler:
-   `measurement_input_digest` [token context'ten — session descriptors vs eski
-   try_from(coord_system) üretimi; VALUE değişmiş olabilir ama internal consistency
-   bozulmamalı], `base_space_view_revision` [token'tan — Ephemeral(0) sequence],
-   `measured_result` f64 round-trip, `witness_snapshot support: -0.0` [serde "-0.0"
-   round-trip + canonical encoding normalize farkı]); (c) serialize_envelope_v2_json
-   DEĞİL — V1 pretty JSON yolu. Not: in-memory verify → persist aynı basis üzerinde
-   tutarlı; fail yalnızca wire→domain restore'da → deserialize kaybı/aradaki encoding
-   asymmetry'si ara.
-   **W6 kapsam notu:** bu test native akışta geçtiğinde (a)-(g) cross-pin'leri +
-   negatif stale/context/ABA testleri eklenecek (plan W6).
+## Tamamlanan işlerin özeti
 
-## Kalan workstream'ler (plan v4-FİNAL sırası)
+### W1 — Opaque token + tek-session producer
+`NativeLegacySubjectMeasurement` (measurement.rs): private fields; `legacy_subject_ids`'den
+türetilen `legacy_subject_binding` digest (tur-2 P1); `raw() = measured.to_raw()`.
+`CoreAxisEpochStamp` (coords.rs) atomik capture'dan. `measure_attempt_native_with_md1_shadow`
+(engine.rs): TEK BoundMeasurementSession; legacy subject `effective_legacy_measure_set`
+(draft×producer tek truth); md1_shadow aynı session; `verify_unchanged` sonunda.
+Singleton fast-path recovered (`021bd5f`).
 
-- **W5:** `provenance_authority.rs` — `ProvenanceAuthorityDriftObservation` (SAME
-  subject/value bits; native=authority vs uniform-Scip reference projection —
-  `legacy_compatibility_projection` bu modüle taşınır; üç-durum eligibility;
-  Q4SyntaxRejection arm YOK; sidecar'lar additive + digest DIŞI + identity binding
-  iki durable wire'da; MCP response sidecar).
-- **W6:** yukarıdaki inv_t9_72 debug + parity testleri.
-- **W7:** CLI iki-eksen envelope (`subject_authority: "affected_nodes"`,
-  `provenance_authority: "engine_native_per_axis"`, `provenance_native: true`,
-  `authority` alias=provenance mirror) + banner; bootstrap seed SABİT.
-  `run_envelope.rs` `legacy_projected_v1()` → native ctor; `completed_loop` pin
-  authority alanları (before pin'leri sabit; after pin'leri probe-then-freeze).
-- **W8:** integration test regolden (parity suite'i + MCP e2e + completed_loop henüz
-  koşulmadı! — drift suite'i 8/8 PASS: 002 V1 sources regolden `4d4d724`'te) + yeni
-  testler: Q4-vs-measurement yarış (nav+MCP), **commit binding verifier ×5 negatif**
-  (SystemFailure/no-budget/no-retry), disposition exhaustiveness, MD-2 observer
-  envanteri. **TESLİM EDİLDİ (tur-2 P1, `4d4d724`):** legacy-subject finalize binding
-  ×2 negative tests (farklı affected_nodes; aynı raw bits + farklı subject → yine
-  mismatch — `md2_finalize_rejects_*`). Reason-note şablonu: "provenance-driven
-  (MD-2) — frozen #88/#85 + dogfood Run A; subject-set etkisi YOK".
-- **W9:** docs/issues (#96 kapanış `feat: #96 …` scope-parens YOK; INV-T4 status;
-  migration-decisions MD-2 record; handoff refresh), CI parity ritual (fmt/clippy/
-  test --locked --all-features --exclude osp-desktop), dogfood Run A rerun.
+### W2-W4 — Caller cutover + commit-time verification
+`task_measurement.rs` (pub mod): `StructurallyValidatedClaimDraft::try_new` (probe + Q4
+structural tek adımda; `legacy_subject_binding` private capture) + `finalize(&token) →
+Result<Claim, LegacySubjectBindingMismatch>` + `MeasurementFailureDisposition` (17 varyant
+exact tablo). `TaskCommitInput` private fields + `new()` (`measured` → `measurement:
+&NativeLegacySubjectMeasurement`). `verify_native_legacy_measurement_binding` (5 kontrol:
+delta digest / raw bits / revision / context / epochs ABA) → `VerifiedNativeLegacyMeasurementBinding`
+private proof → `build_authorization_context` proof'tan okur (ikinci TOCTOU kapalı).
+Navigator + MCP: draft→producer→finalize ordering (structural Q4 önce).
 
-## Kritik notlar
+### Review düzeltmeleri
+- **P1-tur1 (ontology):** `MeasurementBindingVerificationError::NativeAuthority(
+  NativeLegacyMeasurementBindingError)` typed family; mevcut `Mismatch` (caller-authority)
+  ailesi dokunulmaz. Navigator: `NativeAuthority` → `Unknown` gate_decision.
+- **P1-tur2 (subject binding):** `LegacySubjectBindingDigest` + draft capture + finalize
+  karşılaştırması. 2 negatif test: (1) aynı delta + farklı affected → mismatch; (2) aynı
+  delta + AYNI raw bits + farklı subject → YİNE mismatch.
 
-- **Characterization ctor gözden geçirme:** `NativeLegacySubjectMeasurement::
-  new_characterization_legacy` (doc-hidden pub) — reviewer P0-tur3'ün forgeability
-  kapanışının bilinçli istisnası; PR body'de açıkça beyan edilmeli (#100'de V1 lane
-  ile silinir).
-- MCP `current_measured()` sabiti KALDI (loss_before gate girdisi — bootstrap ayrı).
-- osp-desktop build'e dokunulmadı (ritual'de exclude).
-- PR #124 (docs) hâlâ açık — merge edilmesi bekleniyor (implementation branch'inden
-  bağımsız).
+### `inv_t9_72` KÖK NEDEN — `serde_json float_roundtrip`
+serde_json default float parser **1 ULP kaybediyor** (6/13 gibi 17-hane shortest f64'de).
+Basis digest in-memory değeriyle hesaplanıyor; reload kayıplı parse → `BasisDigestMismatch`.
+**Çözüm:** workspace `serde_json`'a `float_roundtrip` feature. Mikro-probe kanıtı:
+`a=6.0/13.0 → json → parse → a ≠ a` (before) → `a == a` (after). Frozen wire değişmez.
+
+### W7 — CLI iki-eksen vocabulary
+`CliExecutionMeasurement`: `subject_authority: "affected_nodes"` (#95-A'da `task_scope`'a
+çevrilir; family-label — literal subject set DEĞİL) + `provenance_authority:
+"engine_native_per_axis"` + `provenance_native: true` + deprecated `authority` alias.
+Bootstrap `current_measured` tohumu SABİT (metadata yalnız proposal/commit authority).
+
+### W5 — MD-2 observer modülü
+`provenance_authority.rs`: `uniform_scip_reference_projection` (reference-only;
+`legacy_compatibility_projection`'ın yeni evi — fiziksel kaldırma #100) +
+`observe_provenance_authority_drift` (AYNI token; native↔uniform-Scip; counterfactual
+PredicateGate asla "production observed" değil) + `ProvenanceDownstreamObservation`
+üç-durum (`Q4SyntaxRejection` arm'ı YOK) + `provenance_downstream_from_engine_commit_error`.
+Wire: `TrajectoryEvidence.provenance_authority_drift` (serde default) +
+`PendingAuthorization` (validate_internal identity-bound) + `RevisionRequired.
+try_with_provenance_authority_drift` (checked builder) — hepsi digest preimage DIŞINDA.
+Navigator + MCP: Held/Rejected/Evaluated/retryable-Q5/Q6 tüm comparison-surviving yollarda.
+
+### Native-honest fixture regolden'ler (dogfood Run A izdüşümü)
+- Navigator fixture'ları: coupling axis Placeholder→Scip (`coupling_task`'ın
+  `required_source=Some(Scip)` native'de onurlanır); `make_engine` gerçek axis'lere.
+- CLI harness task şablonları: `required_source: Scip → None`.
+- MCP e2e Held: `required_source: None` + V1 subject `[10_000]` (fallback) + native sources.
+- MCP e2e Q4: precedence-correction beklentisi (draft-stage → sidecar YOK).
+- `navigator_accepts_progress` / `navigator_records_evidence`: HarnessAutoApprove.
+- 002 cross-pin V1 sources: `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]`.
+
+## Kalan işler (sıra ile)
+
+### W6 kalan — commit verifier ×5 negatif + basis↔token cross-pins
+`inv_t9_72` tabanında (ProcessLocalFilesystemTestStore, gerçek persist/reload):
+- **×5 negatif:** (1) StructuralDeltaMismatch — claim delta değiştir → token mismatch;
+  (2) RawMismatch — claim.computed_raw bits değiştir; (3) StaleSpaceRevision — space mutate
+  → commit → stale reject; (4) MeasurementContextMismatch — axis descriptor mutate → reject;
+  (5) **AxisEpochMismatch ABA** — A→B→A axis mutation → epoch reject (monoton fence).
+- **Cross-pin'ler:** persisted `AuthorizationBasis.base_space_view_revision` ==
+  token.base_revision; `measurement_input_digest` == token'ınki; `measured_result` ==
+  token.measured (reload sonrası bits+sources exact).
+- **Tamper ×2:** value tamper → fail-closed; source tamper → fail-closed.
+- **Null/Filesystem parity:** aynı logical Held → aynı basis digest.
+- Not: mevcut `inv_t9_72` testi zaten reload digest-parity pinliyor (float_roundtrip sonrası
+  geçiyor) — bunlar ekine get stronger kanıtlar.
+
+### W8 kalan — MD-2 observer test envanteri + yarış + exhaustiveness
+- **MD-2 observer mirror envanteri:** `ProvenanceAuthorityDriftObservation` integration
+  testleri (drift observation suite'ine ekle — SAME value bits pin, source divergence pin,
+  eligibility Q5Violated/ReachedButUnavailable/Observed, Held sidecar wire/identity).
+- **Q4-vs-measurement yarış:** structural-Q4-invalid proposal + measurement-failing task →
+  daima `SyntaxViolation`; navigator VE MCP ayrı ayrı (plan v4 acceptance'ı).
+- **Disposition exhaustiveness:** 17 varyantın hepsinin `MeasurementFailureDisposition`
+  eşlemesi doğru (wildcard-free — zaten compile-time garantili ama test pinlemesi).
+- **Navigator provenance sidecar testleri:** `md2_completed_evidence_carries_provenance_observation`
+  + `md2_held_pending_authorization_carries_provenance_observation` (mirror of MD-1).
+
+### W9 — docs/issues + dogfood + PR finalize
+- **Dogfood Run A rerun:** handoff fixture (`C:/Users/ervol/AppData/Local/Temp/osp-md1-dogfood/`)
+  ile `osp trajectory attempt` — yeni envelope iki-eksen + sidecar'lar canlı kanıt.
+- **Docs:** migration-decisions MD-2 implementation record; INV-T4 status;
+  `95-md1-cutover-handoff.md` refresh (#95-A sıradaki).
+- **Issues:** #96 close comment (`feat: #96 …` scope-parens YOK); #100'e "W5+W7 teslim"
+  yorumu (uniform-Scip reference projection `provenance_authority.rs`'te yaşıyor — fiziksel
+  kaldırma #100'de).
+- **PR body güncelle:** W5-W7 teslim listesi + characterization ctor disclosure zaten var.
+
+## Kritik notlar (PR body'de beyan edildi)
+
+- **`new_characterization_legacy` (doc-hidden pub ctor):** V1 reference lane harness'inin
+  survival'ı için bilinçli istisna — production forge edilebilirlik kapanışı `new()`'un
+  pub(crate) olmasından gelir. #100'de V1 lane kaldırılınca silinir.
+- **`serde_json float_roundtrip`:** workspace feature — parse correctly-rounded; yazım
+  tarafı (ryu shortest) ve frozen wire değişmez. Pre-existing artifact'lar etkilenmez
+  (internal-consistency her zaman doğru taraf).
+- **MCP `current_measured()` sabiti:** loss_before gate girdisi — bootstrap ayrı migration.
+- **osp-desktop** build'e dokunulmadı (ritual'de exclude).
+
+## Ortam notları (Windows)
+
+- `export PATH="$HOME/.cargo/bin:$PATH"` her shell'de.
+- `command grep`; `python` yok → `node -e`; temp `C:/Users/ervol/...`.
+- **ASLA `git add -A`** (untracked kişisel notlar var).
+- CI parity ritual (exact): `cargo fmt --all -- --check`; `cargo clippy --locked --workspace
+  --all-targets --all-features --exclude osp-desktop -- -D warnings`; `cargo test --locked
+  --workspace --all-features --exclude osp-desktop`.
