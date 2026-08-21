@@ -23,10 +23,10 @@ use common::{case_by_id, engine_from_space, engine_with_case_space};
 use osp_core::coords::{MetricSource, RawPosition};
 use osp_core::space::{Edge, EdgeKind, Node, NodeKind, Space};
 use osp_core::subject_authority::{
-    observe_subject_authority_drift,
-    v1_downstream_from_engine_commit_error, AuthoritativeDownstreamObservation, EvaluatedQ5Verdict,
-    LaneQ5Observation, Q5ObservationFailure,
-    V1DownstreamObservation, V1DownstreamUnavailableReason, V2LaneOutcome, V2MeasurementFailure,
+    observe_subject_authority_drift, v1_downstream_from_engine_commit_error,
+    AuthoritativeDownstreamObservation, EvaluatedQ5Verdict, LaneQ5Observation,
+    Q5ObservationFailure, V1DownstreamObservation, V1DownstreamUnavailableReason, V2LaneOutcome,
+    V2MeasurementFailure,
 };
 use osp_core::trajectory::{
     ComparisonOp, InMemoryTaskRegistry, MetricPredicate, MutationDecision, PredicateAxis,
@@ -382,14 +382,16 @@ fn wide_affected_scope_001_draft_characterization_and_non_surviving_drop() {
     // (b) Non-surviving drop — commit terminal VisionContextInvalid.
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(s.task.clone());
-    let result = s.engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &s.claim,
-        &WitnessSet::new(vec![]),
-        &registry as &dyn TaskResolver,
-        s.target,
-        s.loss_before,
-        s.native.authority(),
-    ));
+    let result = s
+        .engine
+        .commit_task_claim(osp_core::engine::TaskCommitInput::new(
+            &s.claim,
+            &WitnessSet::new(vec![]),
+            &registry as &dyn TaskResolver,
+            s.target,
+            s.loss_before,
+            s.native.authority(),
+        ));
     match &result {
         Err(osp_core::engine::EngineCommitError::VisionContextInvalid(_)) => {}
         other => panic!("001 commit must fail terminal VisionContextInvalid: {other:?}"),
@@ -511,7 +513,8 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
     // gözlemindeki izdüşümü kaldırıldı; provenance ekseni #96 MD-2 observer'ına
     // [provenance_authority.rs] aittir). Source PARITY pinlenir.
     assert_eq!(
-        draft.v1().raw.sources, v2.raw.sources,
+        draft.v1().raw.sources,
+        v2.raw.sources,
         "re-anchor: her iki lane native — source parity (confluence subject+provenance)"
     );
     assert_ne!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
@@ -650,8 +653,7 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(task.clone());
     let target = RawPosition::default();
-    let affected_a =
-        osp_core::subject_authority::derive_v1_legacy_measurement_subject(&proposal);
+    let affected_a = osp_core::subject_authority::derive_v1_legacy_measurement_subject(&proposal);
     let pre_raw = engine_a.compute_raw_from_delta(&[], &[], &[], &affected_a);
     let current_a = osp_core::navigator::provenanced_from_raw(pre_raw, MetricSource::Scip);
     let loss_before = osp_core::trajectory::trajectory_loss(&current_a, &target);

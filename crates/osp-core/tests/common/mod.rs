@@ -2159,8 +2159,8 @@ pub fn characterization_native_token(
         .expect("revision computation should succeed");
     let context = MeasurementInputContext::try_from(engine.coord_system())
         .expect("measurement input context should succeed");
-    let input_digest = MeasurementInputDigest::compute(&context)
-        .expect("measurement input digest should succeed");
+    let input_digest =
+        MeasurementInputDigest::compute(&context).expect("measurement input digest should succeed");
     NativeLegacySubjectMeasurement::new_characterization_legacy(
         measured,
         subject_ids,
@@ -2257,7 +2257,8 @@ pub fn evaluate_v1_case(
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(case.task.clone());
     let omega = WitnessSet::new(vec![]);
-    let v1_token = characterization_native_token(engine, &claim, measured.clone(), affected.clone());
+    let v1_token =
+        characterization_native_token(engine, &claim, measured.clone(), affected.clone());
 
     let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
         &claim,
