@@ -1,146 +1,171 @@
-# Handoff — #96 MD-2 Implementation (PR AÇIK — W1-W7 kodlandı, workspace 39/39 yeşil)
+# Handoff — #96 MD-2 PR #125 Review Düzeltmeleri (P0-tur4 SEALED CARRIER — yarım kalan refactor)
 
-**Tarih:** 2026-08-21. Plan v4-FİNAL APPROVED — W1-W7 + 3 review düzeltmesi kodlandı.
-**Bu dosya:** Implementation durum devri + kalan iş (W6 testleri + W8 + W9).
+**Tarih:** 2026-08-21 (oturum 3 sonu). PR #125 review REQUEST CHANGES (2 P0 + 2 P1 + 1 P2).
+**Bu dosya:** P0 düzeltmelerinin mevcut durumu + kalan 19 test hatası + tamamlanmamış işler.
 
 ## Oturum nasıl başlamalı
 
-> Handoff: **#96 MD-2 implementation PR review'ı + W6-W9 kalanı** ile devam.
-> Branch: `feat/96-md2-native-provenance-authority` (push edilmiş, PR açık).
-> Notlar: `docs/notes/96-implementation-handoff.md` — önce oku, durum kontrolü yap.
+> Handoff: **#96 MD-2 PR #125 P0-tur4 düzeltmelerini tamamla** (sealed carrier refactor
+> yarım kaldı — lib derliyor, 19 test hatası var).
+> Branch: `feat/96-md2-native-provenance-authority` (working tree'de COMMIT EDİLMEMİŞ değişiklikler var!).
+> Notlar: `docs/notes/96-implementation-handoff.md` — önce oku.
 
-İlk adımlar: (1) bu dosya, (2) `gh pr view` (PR numarası + review durumu),
-(3) `git log --oneline -8`, (4) `export PATH="$HOME/.cargo/bin:$PATH"` +
-`cargo test --workspace --exclude osp-desktop` (**39 binary, 0 failure** — doğrula).
+**İlk adımlar:** (1) bu dosya, (2) `git status --short` (7 modified file — commit EDİLMEMİŞ),
+(3) `export PATH="$HOME/.cargo/bin:$PATH"` + `cargo check -p osp-core` (**0 error — lib DERLİYOR**),
+(4) `cargo check -p osp-core --all-targets` → **19 error** (tamamı test kodu; lokasyonlar aşağıda).
 
-## Mevcut durum — PR commit zinciri (squash öncesi)
+## ⚠️ ÇOK ÖNEMLİ: Commit edilmemiş değişiklikler var!
 
-| Commit | Kapsam |
-|---|---|
-| `0e31cd3` | W1: opaque token + tek-session producer + singleton fast-path + cross-pins |
-| `54602b7` | W2-W4: navigator/MCP cutover + binding verification + proof-sourced basis |
-| `3b2dd90` | Review P1: `NativeAuthority(NativeLegacyMeasurementBindingError)` typed family |
-| `e24055d` | Review tur-2 P1: `LegacySubjectBindingDigest` + draft capture + finalize→Result |
-| `d822359` | `serde_json float_roundtrip` (inv_t9_72 kök neden!) + native-honest fixture regolden |
-| `31e1ade` | W7: CLI iki-eksen vocabulary (`engine_native_per_axis`) |
-| `120dacb` | W5: `ProvenanceAuthorityDriftObservation` + wire + navigator/MCP wiring |
-| `c101a09` | fmt (test dosyaları) |
+Working tree'de 7 dosya modified (P0 refactor yarım):
+```
+crates/osp-core/src/engine.rs
+crates/osp-core/src/measurement.rs
+crates/osp-core/src/navigator.rs
+crates/osp-core/src/task_measurement.rs
+crates/osp-core/tests/common/mod.rs
+crates/osp-core/tests/measurement_v1_v2_parity.rs
+crates/osp-core/tests/subject_authority_drift_observation.rs
+```
+**Önce `git stash` YAPMA** — bu değişiklikler P0 refactor'un kendisi. `git diff` ile incele,
+sonra kalan 19 test hatasını düzelt, sonra commit'le.
 
-**Test:** workspace 39 binary 0 failure; fmt/clippy `-D warnings` temiz.
+## P0 Refactor — Tamamlanan (lib derliyor, 0 error)
 
-## Tamamlanan işlerin özeti
+### P0-2 — `FinalizedNativeTaskClaim` sealed carrier
 
-### W1 — Opaque token + tek-session producer
-`NativeLegacySubjectMeasurement` (measurement.rs): private fields; `legacy_subject_ids`'den
-türetilen `legacy_subject_binding` digest (tur-2 P1); `raw() = measured.to_raw()`.
-`CoreAxisEpochStamp` (coords.rs) atomik capture'dan. `measure_attempt_native_with_md1_shadow`
-(engine.rs): TEK BoundMeasurementSession; legacy subject `effective_legacy_measure_set`
-(draft×producer tek truth); md1_shadow aynı session; `verify_unchanged` sonunda.
-Singleton fast-path recovered (`021bd5f`).
+**`task_measurement.rs`:** `finalize` artık `Result<FinalizedNativeTaskClaim, ...>` döner
+(eski: `Result<Claim, ...>`). `FinalizedNativeTaskClaim { claim, measurement }` — private
+fields; `claim()` ve `measurement()` accessor'lar. `#[cfg(test)] pub(crate) fn
+new_test_with_measured(...)` — crate-içi unit test helper (external erişilemez).
 
-### W2-W4 — Caller cutover + commit-time verification
-`task_measurement.rs` (pub mod): `StructurallyValidatedClaimDraft::try_new` (probe + Q4
-structural tek adımda; `legacy_subject_binding` private capture) + `finalize(&token) →
-Result<Claim, LegacySubjectBindingMismatch>` + `MeasurementFailureDisposition` (17 varyant
-exact tablo). `TaskCommitInput` private fields + `new()` (`measured` → `measurement:
-&NativeLegacySubjectMeasurement`). `verify_native_legacy_measurement_binding` (5 kontrol:
-delta digest / raw bits / revision / context / epochs ABA) → `VerifiedNativeLegacyMeasurementBinding`
-private proof → `build_authorization_context` proof'tan okur (ikinci TOCTOU kapalı).
-Navigator + MCP: draft→producer→finalize ordering (structural Q4 önce).
+**`engine.rs`:** `TaskCommitInput::new` artık 5 argüman alır:
+```rust
+// ESKİ (6 arg): TaskCommitInput::new(&claim, &omega, &resolver, target, loss_before, &token)
+// YENİ (5 arg): TaskCommitInput::new(&finalized_carrier, &omega, &resolver, target, loss_before)
+```
+`finalized_carrier: &FinalizedNativeTaskClaim` — ayrı claim+measurement **type-level
+unrepresentable**.
 
-### Review düzeltmeleri
-- **P1-tur1 (ontology):** `MeasurementBindingVerificationError::NativeAuthority(
-  NativeLegacyMeasurementBindingError)` typed family; mevcut `Mismatch` (caller-authority)
-  ailesi dokunulmaz. Navigator: `NativeAuthority` → `Unknown` gate_decision.
-- **P1-tur2 (subject binding):** `LegacySubjectBindingDigest` + draft capture + finalize
-  karşılaştırması. 2 negatif test: (1) aynı delta + farklı affected → mismatch; (2) aynı
-  delta + AYNI raw bits + farklı subject → YİNE mismatch.
+**`measurement.rs`:** `NativeLegacySubjectMeasurement`'a `#[derive(Clone)]` eklendi
+(sealed carrier sahiplenmesi için).
 
-### `inv_t9_72` KÖK NEDEN — `serde_json float_roundtrip`
-serde_json default float parser **1 ULP kaybediyor** (6/13 gibi 17-hane shortest f64'de).
-Basis digest in-memory değeriyle hesaplanıyor; reload kayıplı parse → `BasisDigestMismatch`.
-**Çözüm:** workspace `serde_json`'a `float_roundtrip` feature. Mikro-probe kanıtı:
-`a=6.0/13.0 → json → parse → a ≠ a` (before) → `a == a` (after). Frozen wire değişmez.
+**`navigator.rs` production kod:** Güncellendi — `finalized` değişkeni kullanıyor;
+`TaskCommitInput::new(&finalized, ...)` doğru. Observer çağrıları `finalized.claim()`
+kullanıyor.
 
-### W7 — CLI iki-eksen vocabulary
-`CliExecutionMeasurement`: `subject_authority: "affected_nodes"` (#95-A'da `task_scope`'a
-çevrilir; family-label — literal subject set DEĞİL) + `provenance_authority:
-"engine_native_per_axis"` + `provenance_native: true` + deprecated `authority` alias.
-Bootstrap `current_measured` tohumu SABİT (metadata yalnız proposal/commit authority).
+### P0-1 — `new_characterization_legacy` TAMAMEN KALDIRILDI
 
-### W5 — MD-2 observer modülü
-`provenance_authority.rs`: `uniform_scip_reference_projection` (reference-only;
-`legacy_compatibility_projection`'ın yeni evi — fiziksel kaldırma #100) +
-`observe_provenance_authority_drift` (AYNI token; native↔uniform-Scip; counterfactual
-PredicateGate asla "production observed" değil) + `ProvenanceDownstreamObservation`
-üç-durum (`Q4SyntaxRejection` arm'ı YOK) + `provenance_downstream_from_engine_commit_error`.
-Wire: `TrajectoryEvidence.provenance_authority_drift` (serde default) +
-`PendingAuthorization` (validate_internal identity-bound) + `RevisionRequired.
-try_with_provenance_authority_drift` (checked builder) — hepsi digest preimage DIŞINDA.
-Navigator + MCP: Held/Rejected/Evaluated/retryable-Q5/Q6 tüm comparison-surviving yollarda.
+**`measurement.rs`:** `pub fn new_characterization_legacy` silindi (eski `#[doc(hidden)] pub`).
+Production API'de authority tipini forge edecek YOK. `pub(crate) fn new` tek üretici
+(engine.rs `measure_attempt_native_with_md1_shadow`).
 
-### Native-honest fixture regolden'ler (dogfood Run A izdüşümü)
-- Navigator fixture'ları: coupling axis Placeholder→Scip (`coupling_task`'ın
-  `required_source=Some(Scip)` native'de onurlanır); `make_engine` gerçek axis'lere.
-- CLI harness task şablonları: `required_source: Scip → None`.
-- MCP e2e Held: `required_source: None` + V1 subject `[10_000]` (fallback) + native sources.
-- MCP e2e Q4: precedence-correction beklentisi (draft-stage → sidecar YOK).
-- `navigator_accepts_progress` / `navigator_records_evidence`: HarnessAutoApprove.
-- 002 cross-pin V1 sources: `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]`.
+**`tests/common/mod.rs` (V1 harness):** `characterization_native_token` fn'i kaldırıldı.
+V1 lane artık commit pipeline KULLANMAZ — non-authoritative evaluator:
+Q4 structural → PredicateGate direkt (motorun private metodları çağrılmıyor).
+V2 lane gerçek native flow kullanır: draft → measure → finalize → sealed carrier → commit.
 
-## Kalan işler (sıra ile)
+## Kalan 19 test hatası (lokasyonlar + düzeltme şekli)
 
-### W6 kalan — commit verifier ×5 negatif + basis↔token cross-pins
-`inv_t9_72` tabanında (ProcessLocalFilesystemTestStore, gerçek persist/reload):
-- **×5 negatif:** (1) StructuralDeltaMismatch — claim delta değiştir → token mismatch;
-  (2) RawMismatch — claim.computed_raw bits değiştir; (3) StaleSpaceRevision — space mutate
-  → commit → stale reject; (4) MeasurementContextMismatch — axis descriptor mutate → reject;
-  (5) **AxisEpochMismatch ABA** — A→B→A axis mutation → epoch reject (monoton fence).
-- **Cross-pin'ler:** persisted `AuthorizationBasis.base_space_view_revision` ==
-  token.base_revision; `measurement_input_digest` == token'ınki; `measured_result` ==
-  token.measured (reload sonrası bits+sources exact).
-- **Tamper ×2:** value tamper → fail-closed; source tamper → fail-closed.
-- **Null/Filesystem parity:** aynı logical Held → aynı basis digest.
-- Not: mevcut `inv_t9_72` testi zaten reload digest-parity pinliyor (float_roundtrip sonrası
-  geçiyor) — bunlar ekine get stronger kanıtlar.
+### navigator.rs (5 hata — unit test'ler, `characterization_carrier` var)
 
-### W8 kalan — MD-2 observer test envanteri + yarış + exhaustiveness
-- **MD-2 observer mirror envanteri:** `ProvenanceAuthorityDriftObservation` integration
-  testleri (drift observation suite'ine ekle — SAME value bits pin, source divergence pin,
-  eligibility Q5Violated/ReachedButUnavailable/Observed, Held sidecar wire/identity).
-- **Q4-vs-measurement yarış:** structural-Q4-invalid proposal + measurement-failing task →
-  daima `SyntaxViolation`; navigator VE MCP ayrı ayrı (plan v4 acceptance'ı).
-- **Disposition exhaustiveness:** 17 varyantın hepsinin `MeasurementFailureDisposition`
-  eşlemesi doğru (wildcard-free — zaten compile-time garantili ama test pinlemesi).
-- **Navigator provenance sidecar testleri:** `md2_completed_evidence_carries_provenance_observation`
-  + `md2_held_pending_authorization_carries_provenance_observation` (mirror of MD-1).
+| Satır | Hata | Düzeltme |
+|---|---|---|
+| 1719 | `TaskCommitInput::new` 6→5 arg | `&claim` yerine `&commit_token` (carrier'ı 1. arg yap) |
+| 1806 | type mismatch | `commit_token`'ı `FinalizedNativeTaskClaim` olarak geçir |
+| 1916 | type mismatch | aynı pattern |
+| 1963 | type mismatch | aynı pattern |
+| 3674 | 6→5 arg | aynı pattern |
 
-### W9 — docs/issues + dogfood + PR finalize
-- **Dogfood Run A rerun:** handoff fixture (`C:/Users/ervol/AppData/Local/Temp/osp-md1-dogfood/`)
-  ile `osp trajectory attempt` — yeni envelope iki-eksen + sidecar'lar canlı kanıt.
-- **Docs:** migration-decisions MD-2 implementation record; INV-T4 status;
-  `95-md1-cutover-handoff.md` refresh (#95-A sıradaki).
-- **Issues:** #96 close comment (`feat: #96 …` scope-parens YOK); #100'e "W5+W7 teslim"
-  yorumu (uniform-Scip reference projection `provenance_authority.rs`'te yaşıyor — fiziksel
-  kaldırma #100'de).
-- **PR body güncelle:** W5-W7 teslim listesi + characterization ctor disclosure zaten var.
+**Pattern:** Test'lerde `characterization_carrier(&engine, &claim, measured)` zaten
+`FinalizedNativeTaskClaim` döner. Eski kod `carrier.measurement()` ayrı geçiriyordu.
+**Düzeltme:** `TaskCommitInput::new(&carrier, ...)` — carrier'ı direkt ver, measurement
+ayrı verilmez.
 
-## Kritik notlar (PR body'de beyan edildi)
+### engine.rs (2 hata)
 
-- **`new_characterization_legacy` (doc-hidden pub ctor):** V1 reference lane harness'inin
-  survival'ı için bilinçli istisna — production forge edilebilirlik kapanışı `new()`'un
-  pub(crate) olmasından gelir. #100'de V1 lane kaldırılınca silinir.
-- **`serde_json float_roundtrip`:** workspace feature — parse correctly-rounded; yazım
-  tarafı (ryu shortest) ve frozen wire değişmez. Pre-existing artifact'lar etkilenmez
-  (internal-consistency her zaman doğru taraf).
-- **MCP `current_measured()` sabiti:** loss_before gate girdisi — bootstrap ayrı migration.
-- **osp-desktop** build'e dokunulmadı (ritual'de exclude).
+| Satır | Hata | Düzeltme |
+|---|---|---|
+| 4321 | 6→5 arg | `characterization_carrier_test` dönen carrier'ı 1. arg yap |
+| 8634 | observe fn arg mismatch | `observe_subject_authority_drift(..., finalized.claim(), ...)` — claim accessor kullan |
+
+### subject_authority.rs (1 hata)
+
+| Satır | Hata | Düzeltme |
+|---|---|---|
+| 1292 | `finalize` dönüş tipi | `finalized.claim()` çağır (FinalizedNativeTaskClaim → Claim) |
+
+### tests/subject_authority_drift_observation.rs (5 hata)
+
+| Satır | Hata | Düzeltme |
+|---|---|---|
+| 82 | `finalize` dönüş tipi | setup_with_engine'da `finalized.claim().clone()` |
+| 390 | `s_native_carrier` not found | `setup_with_engine`'dan carrier döndür; commit'te kullan |
+| 661 | 6→5 arg | engine A/B testinde carrier kullan |
+| 702 | `s_native_carrier` not found | aynı |
+| 873 | `s_native_carrier` not found | aynı |
+
+**Yaklaşım:** `CaseSetup`'a `carrier: FinalizedNativeTaskClaim` field ekle;
+commit çağrılarında `TaskCommitInput::new(&s.carrier, ...)`.
+
+### tests/common/mod.rs (1 hata)
+
+| Satır | Hata | Düzeltme |
+|---|---|---|
+| 2470 | V2 TaskCommitInput 6→5 | `&native_token` (artık sealed carrier) zaten 1. arg — 6. arg kaldır |
+
+### tests/measurement_v1_v2_parity.rs (1 hata)
+
+| Satır | Hata | Düzeltme |
+|---|---|---|
+| 2186 | syntax error (bozuk regex) | `commit_invalid_mixed_case` fn'inde bozuk kod — gerçek native flow ile yaz |
+
+## Henüz uygulanmamış review bulguları
+
+### P1-1 — MCP/navigator birleşik failure ontology
+MCP `NativeAuthority` hatalarını `RejectedBySyntax` JSON'u ile yayıyor; navigator
+`SystemFailure` dönüyor. Ortak typed mapper gerekli:
+- Gerçek structural/raw Q4 → `RejectedBySyntax`
+- Native binding/TCB/operational → system failure JSON
+- Agent-correctable → retry surface
+
+### P1-2 — W6/W8 test'leri merge'den önce tamamlanmalı
+(W6: ×5 negatif + ABA + cross-pin; W8: observer envanteri + yarış + exhaustiveness)
+
+### P2 — Sidecar diagnostic + accessor
+- `PendingAuthorization` provenance mismatch → `SubjectAuthorityDriftIdentityMismatch`
+  (yanlış isim — `ProvenanceAuthorityDriftIdentityMismatch` olmalı)
+- `RevisionRequired.provenance_authority_drift()` public accessor eksik
+
+### P0 test'leri (yazılmalı)
+- 3. negatif: finalize'ı bypass ederek commit → **asla mümkün olmamalı** (compile test
+  veya runtime test — `FinalizedNativeTaskClaim` sealed olduğundan artık bypass
+  type-level imkânsız; buna rağmen regression test pinlenmeli)
+- External crate'in `new_characterization_legacy`'yi çağıramadığını doğrulayan
+  compile-fail test (zaten `pub` değil — ama pin)
+
+## Düzeltme sırası (öneri)
+
+1. **navigator.rs 5 hata** — `characterization_carrier` var, sadece 1. arg'ı değiştir
+2. **engine.rs 2 hata** — `characterization_carrier_test` var, aynı pattern
+3. **subject_authority.rs 1 hata** — `finalized.claim()` accessor
+4. **drift_observation 5 hata** — `CaseSetup`'a carrier field ekle
+5. **common/mod.rs 1 hata** — V2'de zaten `native_token` (sealed carrier) var, 6. arg kaldır
+6. **parity test 1 hata** — bozuk fonksiyonu elle yaz (gerçek native flow)
+7. `cargo test --workspace --exclude osp-desktop` → yeşil
+8. `cargo fmt && cargo clippy -- -D warnings`
+9. Commit + push
+
+## PR #125 mevcut durumu
+
+- **Head:** `eb73d63` (W1-W7 + review turları) — CI yeşil
+- **Working tree:** P0-tur4 refactor (commit edilmemiş) — lib derliyor, test'ler kırık
+- **Sonra:** Test'ler düzelince commit + push → review turu → W6/W8 → merge
 
 ## Ortam notları (Windows)
 
-- `export PATH="$HOME/.cargo/bin:$PATH"` her shell'de.
-- `command grep`; `python` yok → `node -e`; temp `C:/Users/ervol/...`.
-- **ASLA `git add -A`** (untracked kişisel notlar var).
-- CI parity ritual (exact): `cargo fmt --all -- --check`; `cargo clippy --locked --workspace
-  --all-targets --all-features --exclude osp-desktop -- -D warnings`; `cargo test --locked
-  --workspace --all-features --exclude osp-desktop`.
+- `export PATH="$HOME/.cargo/bin:$PATH"` her shell'de
+- `command grep`; `python` yok → `node -e`
+- **ASLA `git add -A`** (untracked kişisel notlar var)
+- CI parity: `cargo fmt --all -- --check`; `cargo clippy --locked --workspace --all-targets
+  --all-features --exclude osp-desktop -- -D warnings`; `cargo test --locked --workspace
+  --all-features --exclude osp-desktop`
