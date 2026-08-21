@@ -1378,7 +1378,7 @@ pub(crate) fn canonicalize_node(
 ///
 /// `Claim`'in `delta_nodes`/`delta_edges`/`removed_edges` field'larından `CanonicalStructuralDelta`
 /// üretir. Duplicate/cross-list/non-finite `try_new` validation'ı ile reddedilir.
-pub(crate) fn canonical_structural_delta_from_claim(
+pub fn canonical_structural_delta_from_claim(
     claim: &crate::witness::Claim,
 ) -> Result<CanonicalStructuralDelta, CanonicalizationError> {
     let new_nodes: Vec<CanonicalNode> = claim
@@ -5356,6 +5356,12 @@ pub struct PendingAuthorization {
     /// comparison-surviving surface (witness disposition eligibility'yi etkilemez).
     #[serde(default)]
     pub subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+    /// **#96 MD-2 (additive telemetry sidecar):** Provenance authority drift —
+    /// native (otorite) ↔ uniform-Scip reference. Digest preimage’e GIRMEZ;
+    /// identity-bound (validate_internal); Held eligibility MD-1 sidecar ile aynı.
+    #[serde(default)]
+    pub provenance_authority_drift:
+        Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
 }
 
 impl PendingAuthorization {
@@ -5425,6 +5431,22 @@ impl PendingAuthorization {
             }
         }
 
+        // **#96 MD-2:** Provenance sidecar identity — aynı fail-closed sözleşme
+        // (review tur 5 P2: kendi typed varyantı — subject yanlış isimle
+        // yeniden kullanılmaz).
+        if let Some(drift) = &self.provenance_authority_drift {
+            if drift.task_id != self.task_id || drift.claim_id != self.claim_id {
+                return Err(
+                    PendingAuthorizationLoadError::ProvenanceAuthorityDriftIdentityMismatch {
+                        record_task_id: self.task_id,
+                        record_claim_id: self.claim_id,
+                        drift_task_id: drift.task_id,
+                        drift_claim_id: drift.claim_id,
+                    },
+                );
+            }
+        }
+
         // **#95 MD-1 P2-1 (EK review P1-2):** Sidecar identity — observation parent
         // record'un task/claim kimliğine bound olmalı. Hem load (custom Deserialize)
         // hem creation (Envelope::new → verify → burası) path'lerinde fail-closed.
@@ -5477,6 +5499,10 @@ impl<'de> serde::Deserialize<'de> for PendingAuthorization {
             #[serde(default)]
             subject_authority_drift:
                 Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+            /// **#96 MD-2:** upgrade-directional (eski wire → None).
+            #[serde(default)]
+            provenance_authority_drift:
+                Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
         }
         let wire = Wire::deserialize(deserializer)?;
         let record = PendingAuthorization {
@@ -5496,6 +5522,7 @@ impl<'de> serde::Deserialize<'de> for PendingAuthorization {
             evidence_digest: wire.evidence_digest,
             created_at: wire.created_at,
             subject_authority_drift: wire.subject_authority_drift,
+            provenance_authority_drift: wire.provenance_authority_drift,
         };
         record
             .validate_internal()
@@ -7691,6 +7718,12 @@ pub struct RevisionRequired {
     /// sonrası; EK review P1-2 — identity bound).
     #[serde(default)]
     subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+    /// **#96 MD-2 (additive telemetry sidecar):** Provenance authority drift —
+    /// Rejected eligibility yollarında taşınır. Digest preimage’e GIRMEZ;
+    /// `try_with_provenance_authority_drift` checked builder (identity-bound).
+    #[serde(default)]
+    provenance_authority_drift:
+        Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
 }
 
 impl RevisionRequired {
@@ -7724,6 +7757,7 @@ impl RevisionRequired {
             evidence_digest,
             suspended_attempt_evidence,
             subject_authority_drift: None,
+            provenance_authority_drift: None,
         })
     }
 
@@ -7764,6 +7798,7 @@ impl RevisionRequired {
             evidence_digest,
             suspended_attempt_evidence,
             subject_authority_drift: None,
+            provenance_authority_drift: None,
         })
     }
 
@@ -7791,11 +7826,42 @@ impl RevisionRequired {
         Ok(self)
     }
 
+    /// **#96 MD-2:** Checked provenance sidecar builder — MD-1 ile aynı sözleşme
+    /// (identity-bound; digest’e girmez; None her zaman geçerli).
+    pub fn try_with_provenance_authority_drift(
+        mut self,
+        drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
+    ) -> Result<Self, RevisionRequiredError> {
+        if let Some(d) = &drift {
+            let record_task_id = self.suspended_attempt_evidence.task_id();
+            let record_claim_id = self.suspended_attempt_evidence.claim_id();
+            if d.task_id != record_task_id || d.claim_id != record_claim_id {
+                return Err(RevisionRequiredError::DriftSidecarIdentityMismatch {
+                    record_task_id,
+                    record_claim_id,
+                    drift_task_id: d.task_id,
+                    drift_claim_id: d.claim_id,
+                });
+            }
+        }
+        self.provenance_authority_drift = drift;
+        Ok(self)
+    }
+
     /// **#95 MD-1 P2-1:** Telemetry sidecar accessor (digest-proof dışı).
     pub fn subject_authority_drift(
         &self,
     ) -> Option<&crate::subject_authority::SubjectAuthorityDriftObservation> {
         self.subject_authority_drift.as_ref()
+    }
+
+    /// **#96 MD-2 (PR review tur 5 P2):** Provenance telemetry sidecar accessor —
+    /// subject tarafıyla simetrik (`try_with_provenance_authority_drift` checked
+    /// builder'ın okuma yüzü).
+    pub fn provenance_authority_drift(
+        &self,
+    ) -> Option<&crate::provenance_authority::ProvenanceAuthorityDriftObservation> {
+        self.provenance_authority_drift.as_ref()
     }
 
     // — Accessor'lar (evidence üzerinden) —
@@ -7888,6 +7954,10 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
             #[serde(default)]
             subject_authority_drift:
                 Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+            /// **#96 MD-2:** upgrade-directional (eski wire → None).
+            #[serde(default)]
+            provenance_authority_drift:
+                Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
         }
         let wire = Wire::deserialize(deserializer)?;
         RevisionRequired::try_new_with_verified_digest(
@@ -7895,6 +7965,7 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
             wire.suspended_attempt_evidence,
         )
         .and_then(|r| r.try_with_subject_authority_drift(wire.subject_authority_drift))
+        .and_then(|r| r.try_with_provenance_authority_drift(wire.provenance_authority_drift))
         .map_err(serde::de::Error::custom)
     }
 }
@@ -8495,6 +8566,18 @@ pub enum PendingAuthorizationLoadError {
         "subject-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
     )]
     SubjectAuthorityDriftIdentityMismatch {
+        record_task_id: u64,
+        record_claim_id: u64,
+        drift_task_id: u64,
+        drift_claim_id: u64,
+    },
+    /// **#96 MD-2 (PR review tur 5 P2):** Provenance sidecar için aynı fail-closed
+    /// sözleşme — yanlış isimle `SubjectAuthorityDriftIdentityMismatch` yeniden
+    /// kullanılmaz (sidecar ailesi observable ayrışır; diagnostic truth-surface).
+    #[error(
+        "provenance-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
+    )]
+    ProvenanceAuthorityDriftIdentityMismatch {
         record_task_id: u64,
         record_claim_id: u64,
         drift_task_id: u64,
@@ -11423,6 +11506,7 @@ mod tests {
             evidence_digest,
             created_at: 1_700_000_000,
             subject_authority_drift: None,
+            provenance_authority_drift: None,
         }
     }
 

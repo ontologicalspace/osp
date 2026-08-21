@@ -4,13 +4,14 @@
 //! versioned JSON envelope olarak sunar — result kind, attempts, evidence (before/after
 //! measured positions + gate/mutation/completion decisions).
 //!
-//! ## V1 honest metadata (MD-2 deferred — #96)
+//! ## #96 MD-2 cutover — iki-eksen authority vocabulary
 //!
-//! `execution_measurement.authority: legacy_projected_v1`, `provenance_native: false`.
-//! Navigator V1 path uniform Scip projection kullanır (native 5-axis engine measurement
-//! değil). Bu envelope MD-2 cutover sonrası authority alanı güncellenebilir; schema version
-//! o migration sırasında ayrıca değerlendirilir. Analyze envelope'taki
-//! `analyzer_axis_specific` provenance'dan ayrıdır.
+//! `execution_measurement`: `subject_authority: "affected_nodes"` (legacy family
+//! label; #95-A'da değeri `"task_scope"`a çevrilir), `provenance_authority:
+//! "engine_native_per_axis"`, `provenance_native: true`; deprecated `authority`
+//! alias yalnız provenance mirror'i (#100'e kadar). Navigator ölçümü artık
+//! engine-native per-axis (`measure_attempt_native_with_md1_shadow` — opaque
+//! token). Analyze envelope'taki `analyzer_axis_specific` provenance'dan ayrıdır.
 
 #![allow(
     dead_code,
@@ -128,19 +129,40 @@ pub struct CliRunMeta {
     pub repository_head: String,
 }
 
-/// V1 execution measurement metadata — legacy projected (MD-2 native değil).
+/// V1 execution measurement metadata — **#96 MD-2 iki-eksen authority vocabulary**
+/// (PR #124 review P2-tur1: MD-1/MD-2 eksenleri tek string'de ezilmez).
+///
+/// - `subject_authority`: ölçüm subject'inin kaynağı — **#96'da girer** (legacy
+///   authority-family label `"affected_nodes"`; literal subject set DEĞİL — gerçek
+///   V1 subject `derive_v1_legacy_measurement_subject()`'in ordered union'ıdır:
+///   affected_nodes ∪ unseen removed_edges.from). **#95-A yalnız değerini**
+///   `"task_scope"`a çevirir.
+/// - `provenance_authority`: ölçüm provenance'ı — #96 ile `"engine_native_per_axis"`.
+/// - `provenance_native`: #96 ile `true`.
+/// - `authority`: **deprecated alias — yalnız `provenance_authority`'yi mirror eder**
+///   (pre-#96 `legacy_projected_v1` → post-#96 `engine_native_per_axis`; #95-A
+///   bu alana DOKUNMAZ). #100'e kadar yaşar.
+///
+/// Bootstrap `current_measured` tohumu bu metadata'ya DAHİL DEĞİL — yalnız
+/// proposal/commit measurement authority'yi anlatır (bootstrap current-state
+/// authority ayrı migration).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CliExecutionMeasurement {
-    pub authority: &'static str,
+    pub subject_authority: &'static str,
+    pub provenance_authority: &'static str,
     pub provenance_native: bool,
+    /// Deprecated alias — yalnız provenance mirror (#100'e kadar).
+    pub authority: &'static str,
 }
 
 impl CliExecutionMeasurement {
-    /// V1 legacy projected (MD-2 cutover sonrası güncellenecek).
-    pub fn legacy_projected_v1() -> Self {
+    /// **#96 MD-2 cutover:** engine-native per-axis provenance authority.
+    pub fn engine_native_per_axis() -> Self {
         Self {
-            authority: "legacy_projected_v1",
-            provenance_native: false,
+            subject_authority: "affected_nodes",
+            provenance_authority: "engine_native_per_axis",
+            provenance_native: true,
+            authority: "engine_native_per_axis",
         }
     }
 }
@@ -162,7 +184,7 @@ pub fn build_run_envelope_v1(
             task_source,
             repository_head: repository_head.to_string(),
         },
-        execution_measurement: CliExecutionMeasurement::legacy_projected_v1(),
+        execution_measurement: CliExecutionMeasurement::engine_native_per_axis(),
         result: CliRunResult::from_navigator(result),
         evidence: evidence.to_vec(),
     }
@@ -218,6 +240,7 @@ mod tests {
             token_cost: TokenCost::default(),
             duration_ms: 10,
             subject_authority_drift: None,
+            provenance_authority_drift: None,
         }
     }
 
@@ -255,7 +278,7 @@ mod tests {
     }
 
     #[test]
-    fn envelope_serializes_with_legacy_projected_authority() {
+    fn envelope_serializes_with_native_per_axis_authority() {
         let result = NavigatorResult::Completed {
             attempts: 1,
             total_tokens: TokenCost::default(),
@@ -279,11 +302,21 @@ mod tests {
         assert_eq!(v["run"]["execution_mode"], "harness");
         assert_eq!(v["run"]["witness_mode"], "harness_auto_approve");
         assert_eq!(v["run"]["task_source"], "harness_task_file");
+        // **#96 MD-2 iki-eksen vocabulary:** her eksen kendi alanında; deprecated
+        // `authority` alias yalnız provenance mirror (pre-#96: legacy_projected_v1).
+        assert_eq!(
+            v["execution_measurement"]["subject_authority"],
+            "affected_nodes"
+        );
+        assert_eq!(
+            v["execution_measurement"]["provenance_authority"],
+            "engine_native_per_axis"
+        );
+        assert_eq!(v["execution_measurement"]["provenance_native"], true);
         assert_eq!(
             v["execution_measurement"]["authority"],
-            "legacy_projected_v1"
+            "engine_native_per_axis"
         );
-        assert_eq!(v["execution_measurement"]["provenance_native"], false);
         assert_eq!(v["result"]["kind"], "completed");
         assert_eq!(v["result"]["attempts"], 1);
         assert_eq!(v["evidence"][0]["gate_decision"], "PassedAll");

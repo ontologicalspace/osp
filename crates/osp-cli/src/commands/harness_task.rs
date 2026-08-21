@@ -307,7 +307,7 @@ pub fn validate_harness_scope(task: &Task) -> Result<NodeId, HarnessTaskError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use osp_core::coords::{MetricSource, RawPosition};
+    use osp_core::coords::RawPosition;
     use osp_core::trajectory::{
         ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope, TaskPolicy,
         TaskStatus, WeightedPredicate,
@@ -341,7 +341,7 @@ mod tests {
                         operator: ComparisonOp::Le,
                         threshold: 0.55,
                         scope: PredicateScope::Node(node),
-                        required_source: Some(MetricSource::Scip),
+                        required_source: None, // #96: native-dürüst (Scip-gereklilik legacy projeksiyon kalıntısı)
                         tolerance: 0.0,
                     },
                     weight: None,
@@ -661,7 +661,7 @@ mod tests {
                             "operator": "Le",
                             "threshold": 0.55,
                             "scope": {"Node": 1},
-                            "required_source": "Scip",
+                            "required_source": null,
                             "tolerance": 0.0
                         },
                         "weight": null

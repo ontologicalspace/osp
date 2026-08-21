@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use osp_core::agent::DeltaProposal;
 use osp_core::coords::MetricSource;
-use osp_core::navigator::{build_claim_from_proposal, provenanced_from_raw, LlmClient};
+use osp_core::navigator::{provenanced_from_raw, LlmClient};
 use osp_core::trajectory::{
     InMemoryTaskRegistry, InternalTaskPlan, OperatorCapability, PredicateSetResult,
     ProvenancedRawPosition, Task, TaskId, TaskResolver, TrajectoryEvidence, TrajectoryId,
@@ -777,7 +777,7 @@ impl Workspace {
         task: &Task,
         task_id: TaskId,
     ) -> Result<JsonValue, String> {
-        use osp_core::space::{Edge, Node, NodeId};
+        use osp_core::coords::RawPosition;
         use osp_core::witness::WitnessSet;
 
         // Empty proposal check.
@@ -796,56 +796,18 @@ impl Workspace {
             }));
         }
 
-        // 1. DeltaProposal → delta_nodes + delta_edges.
-        let delta_nodes: Vec<Node> = proposal
-            .new_nodes
-            .iter()
-            .enumerate()
-            .map(|(i, spec)| Node {
-                id: (10_000 + i as NodeId),
-                kind: spec.kind,
-                mass: spec.initial_mass,
-                ..Default::default()
-            })
-            .collect();
-        let mut delta_edges: Vec<Edge> = proposal
-            .new_edges
-            .iter()
-            .map(|spec| Edge {
-                from: spec.from,
-                to: spec.to,
-                kind: spec.kind,
-                is_type_only: false,
-            })
-            .collect();
-        for (i, spec) in proposal.new_nodes.iter().enumerate() {
-            let node_id = delta_nodes[i].id;
-            for (target, kind) in &spec.connected_to {
-                delta_edges.push(Edge {
-                    from: node_id,
-                    to: *target,
-                    kind: *kind,
-                    is_type_only: false,
-                });
-            }
-        }
-
-        // 2. Engine measure (INV-T3 — agent değiştiremez). G2c-2: removed_edges +
-        // affected_nodes geçir (coupling-reducing proposals için).
-        //
-        // **#95 MD-1 P2-1 REFACTOR (işaretli — semantik değişiklik YOK):** inline
-        // affected union + `compute_raw_from_delta` → explicit compatibility producer
-        // (`osp_core::subject_authority` — bit-identical; navigator ile aynı tek truth).
-        let legacy = osp_core::subject_authority::produce_legacy_subject_measurement(
-            self.engine_mut(),
-            &delta_nodes,
-            &delta_edges,
+        // 1. **#96 MD-2 (plan v4-FİNAL):** Draft — probe Claim + Q4 STRUCTURAL
+        //    validation tek adımda (pub shared boundary `osp_core::task_measurement`;
+        //    Q4 logic KOPYALANMAZ — tek truth). Structural Q4 fallible measurement'tan
+        //    ÖNCE (Q4-vs-measurement precedence — yarış testi MCP için de pinli).
+        let draft = match osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
             proposal,
-        );
-
-        // 3. Claim build + commit_task_claim.
-        let claim = match build_claim_from_proposal(proposal, legacy.raw(), task_id, 1, 1) {
-            Ok(c) => c,
+            RawPosition::default(),
+            task_id,
+            1,
+            1,
+        ) {
+            Ok(d) => d,
             Err(e) => {
                 return Ok(serde_json::json!({
                     "attempt_outcome": {
@@ -857,42 +819,144 @@ impl Workspace {
                     "apply_target": "NotApplied",
                     "loss_after": null,
                     "measured_after": null,
-                    "message": format!("claim build: {e}"),
+                    "message": format!("claim draft: {e:?}"),
                 }))
             }
         };
-        // **#95 MD-1 P2-1 REFACTOR:** uniform-Scip measured projeksiyonu producer
-        // içinde üretilir (bit-identical).
-        let measured = legacy.measured().clone();
+
+        // 2. **#96 MD-2:** Native measurement — tek session (authority token +
+        //    md1_shadow); legacy subject engine-internal derivation. `loss_before`
+        //    DOKUNULMAZ (current_measured sabit tohumdan — bootstrap authority
+        //    ayrı migration; loss_before = gate girdisidir, değer değişmez).
+        //    **P1-1 (review tur 5):** fallible → ortak typed mapper
+        //    (`MeasurementFailureDisposition::agent_surface`) — navigator ile
+        //    TEK ontology; system failure artık `RejectedBySyntax` diye
+        //    fabricate EDİLMEZ.
+        let native = match self
+            .engine_mut()
+            .measure_attempt_native_with_md1_shadow(&draft, proposal, task)
+        {
+            Ok(n) => n,
+            Err(e) => {
+                use osp_core::task_measurement::measurement_failure_disposition;
+                let disposition = measurement_failure_disposition(&e);
+                return Ok(match disposition.agent_surface() {
+                    // Dormant branch (bugün üreticisiz — plan v5 unlock notları):
+                    // agent revize eder, budget'li retry yüzeyi.
+                    osp_core::task_measurement::NativeFailureSurface::RetryAgentProposal => {
+                        serde_json::json!({
+                            "retry_agent_proposal": { "retryable": true },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!(
+                                "measurement rejected the proposal (disposition={disposition:?}) — \
+                                 revise the delta: {e}"
+                            ),
+                        })
+                    }
+                    // TerminalTaskDeclaration / TerminalIdentityViolation /
+                    // RegenerateMeasurement (dormant) / SystemFailure — navigator
+                    // SystemFailure mirror: budget YOK, LLM retry YOK.
+                    _ => serde_json::json!({
+                        "system_failure": {
+                            "class": "NativeMeasurementFailed",
+                            "disposition": format!("{disposition:?}"),
+                            "retryable": false,
+                        },
+                        "apply_target": "NotApplied",
+                        "loss_after": null,
+                        "measured_after": null,
+                        "message": format!(
+                            "native measurement failed (disposition={disposition:?}): {e}"
+                        ),
+                    }),
+                });
+            }
+        };
+
+        // 3. Final Claim (yalnız computed_raw/Intent enjekte) + **tur-2 P1
+        //    subject-binding kontrolü** (`LegacySubjectBindingMismatch` →
+        //    NativeAuthority family kontratı: SystemFailure/no-budget/no-retry)
+        //    + Q4 FINAL-RAW finite + commit_task_claim (native binding
+        //    verification engine'de).
+        //    **P1-1 (review tur 5):** binding hatası TCB/native-authority ailesi —
+        //    wire artık `system_failure` (navigator SystemFailure mirror; eski
+        //    `RejectedBySyntax` fabrication'ı kalktı).
+        let claim = match draft.finalize(native.authority()) {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "system_failure": {
+                        "class": "NativeBindingFailed",
+                        "retryable": false,
+                    },
+                    "apply_target": "NotApplied",
+                    "loss_after": null,
+                    "measured_after": null,
+                    "message": format!("native token subject binding: {e}"),
+                }));
+            }
+        };
+        // **P1-1 not:** non-finite measured raw = gerçek syntax-sınıfı reddi —
+        // navigator parity (navigator.rs:864-886 RejectedBySyntax evidence +
+        // feedback retry). Bu dal bilinçli olarak RejectedBySyntax kalır.
+        if let Err(violation) = osp_core::task_measurement::validate_raw_position_finite(
+            claim.claim().id,
+            "measurement.after",
+            &claim.claim().computed_raw,
+        ) {
+            return Ok(serde_json::json!({
+                "attempt_outcome": {
+                    "gate_decision": "RejectedBySyntax",
+                    "predicate_completion": "NotCompleted",
+                    "mutation_decision": "Reject",
+                    "witness_status": null,
+                },
+                "apply_target": "NotApplied",
+                "loss_after": null,
+                "measured_after": null,
+                "message": format!("measured raw not finite: {violation}"),
+            }));
+        }
         let target = task
             .target_predicate_set
             .preferred_vector
             .unwrap_or_default();
         let loss_before = osp_core::trajectory::trajectory_loss(&self.current_measured(), &target);
-        // **#95 MD-1 P2-1 (additive):** Pre-commit shadow observation draft —
-        // navigator ile aynı sözleşme: finalize yalnız comparison-surviving
+        // **#96 re-anchor:** Pre-commit shadow observation draft — her iki lane AYNI
+        // native bundle'dan (tek session); finalize yalnız comparison-surviving
         // yollarda; eligibility witness disposition'tan bağımsız.
         let drift_draft = osp_core::subject_authority::observe_subject_authority_drift(
             self.engine_mut(),
-            &claim,
+            claim.claim(),
             task,
-            &legacy,
+            &native,
+            loss_before,
+            &target,
+        );
+        // #96 MD-2 W5: provenance drift draft — AYNI token; native ↔ uniform-Scip
+        // reference. Eligibility MD-1 ile aynı (Q4SyntaxRejection arm'ı YOK).
+        let prov_draft = osp_core::provenance_authority::observe_provenance_authority_drift(
+            self.engine_mut(),
+            claim.claim(),
+            task,
+            native.authority(),
             loss_before,
             &target,
         );
         let omega = WitnessSet::new(Vec::new());
         let mut tmp_reg = InMemoryTaskRegistry::new();
         tmp_reg.insert(task.clone());
-        let result = match self
-            .engine_mut()
-            .commit_task_claim(osp_core::engine::TaskCommitInput {
-                claim: &claim,
-                omega: &omega,
-                task_resolver: &tmp_reg as &dyn TaskResolver,
+        let result = match self.engine_mut().commit_task_claim(
+            osp_core::engine::TaskCommitInput::new(
+                &claim,
+                &omega,
+                &tmp_reg as &dyn TaskResolver,
                 target,
                 loss_before,
-                measured: measured.clone(),
-            }) {
+            ),
+        ) {
             Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,
             Ok(osp_core::engine::EngineCommitResult::Held {
                 authorization,
@@ -909,6 +973,13 @@ impl Workspace {
                         ),
                     ),
                 );
+                // **#96 MD-2:** Held = comparison-surviving — prov sidecar.
+                let prov = prov_draft.finalize(
+                    osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                        predicate_completion: authorization.outcome.predicate_completion,
+                        mutation_decision: authorization.outcome.mutation_decision,
+                    },
+                );
                 return Ok(serde_json::json!({
                     "commit_result": "Held",
                     "witness_hold_reason": reason.as_reason_str(),
@@ -920,9 +991,10 @@ impl Workspace {
                     },
                     "commit_state": "awaiting_witnesses",
                     "mainline_mutation": "not_applied",
-                    "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+                    "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "await_external_evidence",
                     "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
+                    "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
             Ok(osp_core::engine::EngineCommitResult::Rejected {
@@ -940,6 +1012,13 @@ impl Workspace {
                         ),
                     ),
                 );
+                // **#96 MD-2:** Rejected = comparison-surviving — prov sidecar.
+                let prov = prov_draft.finalize(
+                    osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                        predicate_completion: authorization.outcome.predicate_completion,
+                        mutation_decision: authorization.outcome.mutation_decision,
+                    },
+                );
                 let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
                 return Ok(serde_json::json!({
                     "commit_result": "Rejected",
@@ -952,37 +1031,102 @@ impl Workspace {
                     },
                     "commit_state": "rejected_by_witness",
                     "mainline_mutation": "not_applied",
-                    "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+                    "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "requires_revision",
                     "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
+                    "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
             Err(e) => {
-                // **#95 MD-1 P2-1:** Mevcut error JSON semantiği BİLİNÇLİ olarak
-                // değiştirilmez (legacy `RejectedBySyntax` davranışı ayrı issue
-                // malzemesi — plan v6 §9). Yalnız comparison-surviving retryable
-                // hatalarda (Q4/Q5/Q6) sidecar eklenir; non-surviving'de eski JSON
-                // aynen kalır.
-                let mut response = serde_json::json!({
-                    "attempt_outcome": {
-                        "gate_decision": "RejectedBySyntax",
-                        "predicate_completion": "NotCompleted",
-                        "mutation_decision": "Reject",
-                        "witness_status": null,
-                    },
-                    "apply_target": "NotApplied",
-                    "loss_after": null,
-                    "measured_after": null,
-                    "message": format!("commit_task_claim: {e}"),
-                });
-                if let Some(drift) =
-                    osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
-                        .map(|downstream| drift_draft.finalize(downstream))
-                {
-                    response["subject_authority_drift"] =
-                        serde_json::to_value(&drift).map_err(|e| e.to_string())?;
+                // **P1-1 (review tur 5):** ortak typed mapper — navigator'ın
+                // commit-error arm'ları ile TEK ontology
+                // (`task_measurement::commit_error_agent_surface`).
+                use osp_core::task_measurement::{
+                    commit_error_agent_surface, NativeFailureSurface,
+                };
+                match commit_error_agent_surface(&e) {
+                    // Retryable (Syntax/Vision/Rule) — agent-correctable: GERÇEK
+                    // gate kararı (hardcode RejectedBySyntax DEĞİL) +
+                    // comparison-surviving sidecar'lar (#95/#96 path→finalize).
+                    NativeFailureSurface::RetryAgentProposal => {
+                        let gate_decision =
+                            osp_core::navigator::gate_decision_from_engine_error(&e);
+                        let gate_str = match gate_decision {
+                            osp_core::trajectory::GateDecision::RejectedByVision => {
+                                "RejectedByVision"
+                            }
+                            osp_core::trajectory::GateDecision::RejectedByRule => "RejectedByRule",
+                            _ => "RejectedBySyntax",
+                        };
+                        let mut response = serde_json::json!({
+                            "attempt_outcome": {
+                                "gate_decision": gate_str,
+                                "predicate_completion": "NotCompleted",
+                                "mutation_decision": "Reject",
+                                "witness_status": null,
+                            },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        });
+                        // **#96 MD-2:** retryable Q5/Q6 → provenance sidecar
+                        // (Q4 arm'ı YOK — structural Q4 draft aşamasında; emission YOK).
+                        if let Some(prov) = osp_core::provenance_authority::
+                            provenance_downstream_from_engine_commit_error(&e)
+                            .map(|downstream| prov_draft.finalize(downstream))
+                        {
+                            response["provenance_authority_drift"] =
+                                serde_json::to_value(&prov).map_err(|e| e.to_string())?;
+                        }
+                        if let Some(drift) =
+                            osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
+                                .map(|downstream| drift_draft.finalize(downstream))
+                        {
+                            response["subject_authority_drift"] =
+                                serde_json::to_value(&drift).map_err(|e| e.to_string())?;
+                        }
+                        return Ok(response);
+                    }
+                    // Task binding yok — terminal (navigator TaskNotFound mirror).
+                    NativeFailureSurface::TaskNotFound => {
+                        return Ok(serde_json::json!({
+                            "error": "task_not_found",
+                            "retryable": false,
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        }));
+                    }
+                    // Witness evidence operational fault — terminal.
+                    NativeFailureSurface::WitnessEvaluationError => {
+                        return Ok(serde_json::json!({
+                            "system_failure": {
+                                "class": "WitnessEvidenceInvalid",
+                                "retryable": false,
+                            },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        }));
+                    }
+                    // System failure (operational/TCB/native-authority family) —
+                    // terminal; eski `RejectedBySyntax` fabrication'ı kalktı.
+                    NativeFailureSurface::SystemFailure | NativeFailureSurface::SyntaxRejection => {
+                        return Ok(serde_json::json!({
+                            "system_failure": {
+                                "class": "EngineCommitFailed",
+                                "retryable": false,
+                            },
+                            "apply_target": "NotApplied",
+                            "loss_after": null,
+                            "measured_after": null,
+                            "message": format!("commit_task_claim: {e}"),
+                        }));
+                    }
                 }
-                return Ok(response);
             }
         };
 
@@ -1032,6 +1176,13 @@ impl Workspace {
                 ),
             ),
         );
+        // **#96 MD-2:** Evaluated = comparison-surviving — production outcome.
+        let prov = prov_draft.finalize(
+            osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
+                predicate_completion: result.outcome.predicate_completion,
+                mutation_decision: result.outcome.mutation_decision,
+            },
+        );
 
         Ok(serde_json::json!({
             "attempt_outcome": {
@@ -1042,8 +1193,9 @@ impl Workspace {
             },
             "apply_target": apply_str,
             "loss_after": result.loss_after,
-            "measured_after": serde_json::to_value(&measured).map_err(|e| e.to_string())?,
+            "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
             "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
+            "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
         }))
     }
 }

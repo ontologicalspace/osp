@@ -28,7 +28,10 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 # INV-T9 #70 Commit 4b Faz 4 Commit 1b: raw_value feature — RawValue ile duplicate-key
 # koruması (strict wire dispatch). authorization basis wire format JSON-specific.
-serde_json = { version = "1", features = ["raw_value"] }
+# float_roundtrip (INV-T9 #96): parse correctly-rounded — f64 bit-exact persistence parity.
+# serde_json default float parser 1 ULP kaybedebilir (6/13 gibi 17-hane shortest degerlerde);
+# basis digest reload verify’i bunu kirardi (inv_t9_72 / #103 yuzeyi). Yazim tarafi (ryu) degismez.
+serde_json = { version = "1", features = ["raw_value", "float_roundtrip"] }
 # INV-T9 #70 Commit 4b Faz 4: V2 digest wire format (64 lowercase hex). authorization
 # basis digest hex encode/decode — evidence integrity.
 hex = "0.4"

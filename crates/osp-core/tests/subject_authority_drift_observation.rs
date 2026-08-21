@@ -21,13 +21,12 @@ mod common;
 
 use common::{case_by_id, engine_from_space, engine_with_case_space};
 use osp_core::coords::{MetricSource, RawPosition};
-use osp_core::navigator::build_claim_from_proposal;
 use osp_core::space::{Edge, EdgeKind, Node, NodeKind, Space};
 use osp_core::subject_authority::{
-    observe_subject_authority_drift, produce_legacy_subject_measurement,
-    v1_downstream_from_engine_commit_error, AuthoritativeDownstreamObservation, EvaluatedQ5Verdict,
-    LaneQ5Observation, LegacySubjectMeasurement, Q5ObservationFailure, V1DownstreamObservation,
-    V1DownstreamUnavailableReason, V2LaneOutcome, V2MeasurementFailure,
+    observe_subject_authority_drift, v1_downstream_from_engine_commit_error,
+    AuthoritativeDownstreamObservation, EvaluatedQ5Verdict, LaneQ5Observation,
+    Q5ObservationFailure, V1DownstreamObservation, V1DownstreamUnavailableReason, V2LaneOutcome,
+    V2MeasurementFailure,
 };
 use osp_core::trajectory::{
     ComparisonOp, InMemoryTaskRegistry, MetricPredicate, MutationDecision, PredicateAxis,
@@ -46,7 +45,10 @@ struct CaseSetup {
     engine: osp_core::engine::SpaceEngine,
     claim: osp_core::witness::Claim,
     task: Task,
-    legacy: LegacySubjectMeasurement,
+    native: osp_core::engine::NativeAttemptMeasurement,
+    /// **#96 MD-2 P0-tur4:** Sealed carrier (draft.finalize ürünü) — commit
+    /// pipeline yalnız bunu kabul eder (finalize bypass type-level imkânsız).
+    carrier: osp_core::task_measurement::FinalizedNativeTaskClaim,
     loss_before: f64,
     target: RawPosition,
 }
@@ -61,25 +63,34 @@ fn setup_with_engine(
     engine: osp_core::engine::SpaceEngine,
     case: &common::CharacterizationCase,
 ) -> CaseSetup {
-    let probe_claim =
-        build_claim_from_proposal(&case.proposal, RawPosition::default(), case.task.id, 100, 1)
-            .expect("probe claim build should succeed for corpus case");
-    let legacy = produce_legacy_subject_measurement(
-        &engine,
-        &probe_claim.delta_nodes,
-        &probe_claim.delta_edges,
+    // **#96 MD-2:** draft (probe + Q4 structural) → tek-session native bundle →
+    // finalize. Observer artık native bundle üzerinden (V1 lane = authority native;
+    // V2 lane = md1_shadow) — provenance iki lane'de native, gözlem yalnız SUBJECT
+    // farkı taşır (re-anchor).
+    let draft = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
         &case.proposal,
-    );
-    let claim = build_claim_from_proposal(&case.proposal, legacy.raw(), case.task.id, 100, 1)
-        .expect("final claim build should succeed for corpus case");
+        RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .expect("draft (probe + structural Q4) should succeed for corpus case");
+    let native = engine
+        .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
+        .expect("native measurement should succeed for corpus case");
+    let finalized = draft
+        .finalize(native.authority())
+        .expect("subject binding: draft ve token ayni proposal");
+    let claim = finalized.claim().clone();
     let target = case
         .task
         .target_predicate_set
         .preferred_vector
         .unwrap_or_default();
     // loss_before: navigator mirror (evaluate_v1_case P0-2 fix) — pre-delta
-    // affected centroid üzerinden.
-    let affected = legacy.subject_ids().to_vec();
+    // affected centroid üzerinden (running scalar — #96/#97'de DEĞİŞMEZ).
+    let affected =
+        osp_core::subject_authority::derive_v1_legacy_measurement_subject(&case.proposal);
     let pre_raw = engine.compute_raw_from_delta(&[], &[], &[], &affected);
     let current_measured = osp_core::navigator::provenanced_from_raw(pre_raw, MetricSource::Scip);
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
@@ -87,21 +98,22 @@ fn setup_with_engine(
         engine,
         claim,
         task: case.task.clone(),
-        legacy,
+        native,
+        carrier: finalized,
         loss_before,
         target,
     }
 }
 
-/// Observer sözleşmesi: `legacy.raw() == claim.computed_raw` bit-exact (production
-/// wiring — navigator claim'i `legacy.raw()` ile kurar).
+/// Observer sözleşmesi: `native.authority().raw() == claim.computed_raw` bit-exact
+/// (production wiring — navigator claim'i draft.finalize(token) ile kurar; #96).
 fn assert_legacy_claim_raw_contract(s: &CaseSetup) {
-    let legacy_bits = [
-        s.legacy.raw().x.to_bits(),
-        s.legacy.raw().y.to_bits(),
-        s.legacy.raw().z.to_bits(),
-        s.legacy.raw().w.to_bits(),
-        s.legacy.raw().v.to_bits(),
+    let token_bits = [
+        s.native.authority().raw().x.to_bits(),
+        s.native.authority().raw().y.to_bits(),
+        s.native.authority().raw().z.to_bits(),
+        s.native.authority().raw().w.to_bits(),
+        s.native.authority().raw().v.to_bits(),
     ];
     let claim_bits = [
         s.claim.computed_raw.x.to_bits(),
@@ -111,8 +123,8 @@ fn assert_legacy_claim_raw_contract(s: &CaseSetup) {
         s.claim.computed_raw.v.to_bits(),
     ];
     assert_eq!(
-        legacy_bits, claim_bits,
-        "legacy.raw() must equal claim.computed_raw bit-exact"
+        token_bits, claim_bits,
+        "authority token raw must equal claim.computed_raw bit-exact"
     );
 }
 
@@ -148,7 +160,7 @@ fn observation_does_not_mutate_engine_state() {
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -189,7 +201,7 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -229,8 +241,22 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
         "V2 raw bits must equal frozen corpus 001/002 parity goldens"
     );
 
-    // Provenance — V1 compatibility-projected uniform Scip; V2 engine-native.
-    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
+    // Provenance — **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE per-axis
+    // kaynaklar taşır (eski pin: uniform [Scip;5] compatibility projection — tarihsel;
+    // değerler/bitler yukarıdaki #92/#120 goldens'leriyle AYNEN korundu, yalnız kaynak
+    // etiketleri native). Gözlem artık yalnız SUBJECT farkı taşır; provenance ekseni
+    // #96 MD-2 observer'ına (provenance_authority.rs) aittir.
+    assert_eq!(
+        draft.v1().raw.sources,
+        [
+            MetricSource::TreeSitter,
+            MetricSource::Placeholder,
+            MetricSource::TreeSitter,
+            MetricSource::Heuristic,
+            MetricSource::Heuristic,
+        ],
+        "V1 lane native per-axis sources (fixture axis seti)"
+    );
     assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
 
     // Q5 same-context divergence — #92 engine-unit goldens.
@@ -277,7 +303,7 @@ fn removed_edge_external_source_002_observation_cross_pinned_to_92_goldens() {
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -328,7 +354,7 @@ fn wide_affected_scope_001_draft_characterization_and_non_surviving_drop() {
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -363,14 +389,13 @@ fn wide_affected_scope_001_draft_characterization_and_non_surviving_drop() {
     registry.insert(s.task.clone());
     let result = s
         .engine
-        .commit_task_claim(osp_core::engine::TaskCommitInput {
-            claim: &s.claim,
-            omega: &WitnessSet::new(vec![]),
-            task_resolver: &registry as &dyn TaskResolver,
-            target: s.target,
-            loss_before: s.loss_before,
-            measured: s.legacy.measured().clone(),
-        });
+        .commit_task_claim(osp_core::engine::TaskCommitInput::new(
+            &s.carrier,
+            &WitnessSet::new(vec![]),
+            &registry as &dyn TaskResolver,
+            s.target,
+            s.loss_before,
+        ));
     match &result {
         Err(osp_core::engine::EngineCommitError::VisionContextInvalid(_)) => {}
         other => panic!("001 commit must fail terminal VisionContextInvalid: {other:?}"),
@@ -462,7 +487,7 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -487,9 +512,16 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
         "sentinel: raw bits parity — subject aynı, ölçüm aynı"
     );
 
-    // Provenance divergent — V1 compatibility projection, V2 engine-native.
-    assert_eq!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
-    assert_ne!(v2.raw.sources, [MetricSource::Scip; 5]);
+    // **#96 MD-2 re-anchor:** provenance artık iki lane'de de NATIVE — MD-1
+    // observation provenance confound'u TAŞIMAZ (dogfood Run A senaryosunun MD-1
+    // gözlemindeki izdüşümü kaldırıldı; provenance ekseni #96 MD-2 observer'ına
+    // [provenance_authority.rs] aittir). Source PARITY pinlenir.
+    assert_eq!(
+        draft.v1().raw.sources,
+        v2.raw.sources,
+        "re-anchor: her iki lane native — source parity (confluence subject+provenance)"
+    );
+    assert_ne!(draft.v1().raw.sources, [MetricSource::Scip; 5]);
 
     // Q5 her iki lane'de açık ve Passed (role-bearing node) — downstream karşılaştırılabilir.
     assert!(matches!(
@@ -500,7 +532,10 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
         }
     ));
 
-    // Downstream divergent — required_source=Scip yalnız V1 karşılar.
+    // Downstream PARITY — required_source=Scip iki native lane'de de karşılanamaz
+    // → SourceInsufficient → NotCompleted. (Eski beklenen: V1 Completed vs V2
+    // NotCompleted = MD-2 confound — re-anchor ile MD-1 gözlemden GİTTİ; historical
+    // değer reason-note: frozen #88 matrisi + dogfood Run A.)
     let v2_downstream = v2
         .downstream
         .as_ref()
@@ -508,23 +543,30 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
     assert_eq!(
         v2_downstream.predicate_completion,
         PredicateCompletion::NotCompleted,
-        "V2 engine-native sources → SourceInsufficient → NotCompleted (MD-2 confound görünür)"
+        "V2 engine-native sources → SourceInsufficient → NotCompleted"
     );
-    // V1 authoritative: uniform-Scip → Completed (required_source karşılanır).
+    // V1 lane downstream finalize commit outcome'uyla gelir (draft'ta yok); iki lane
+    // subject+raw+sources parity'de olduğundan downstream parity yapısal olarak izler.
+    // MD-2 ekseni (reference-vs-native) hâlâ görünür — uniform-Scip REFERENCE
+    // projection'ın counterfactual'ı: aynı token değerlerinin Scip izdüşümü
+    // required_source=Scip'i KARŞILARDI. Bu karşılaştırma W5 MD-2 observer'ının
+    // malzemesidir; burada köprü olarak inline pinlenir.
     let bound = TaskBoundClaim {
         claim: &s.claim,
         task: &s.task,
     };
-    let v1_gate = PredicateGate.evaluate(PredicateGateInput {
+    let reference_measured =
+        osp_core::navigator::provenanced_from_raw(s.native.authority().raw(), MetricSource::Scip);
+    let reference_gate = PredicateGate.evaluate(PredicateGateInput {
         bound,
-        measured: s.legacy.measured(),
+        measured: &reference_measured,
         loss_before: s.loss_before,
         target: &s.target,
     });
     assert_eq!(
-        v1_gate.outcome.predicate_completion,
+        reference_gate.outcome.predicate_completion,
         PredicateCompletion::Completed,
-        "V1 compatibility-projected Scip → Completed"
+        "uniform-Scip REFERENCE projection → Completed (MD-2 axis: #96 observer malzemesi)"
     );
 }
 
@@ -596,40 +638,45 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
         proposal: proposal.clone(),
     };
 
-    // Engine A: gözlemsiz koşum (produce → claim → commit).
+    // Engine A: gözlemsiz koşum (draft → native measure → claim → commit).
     let mut engine_a = engine_from_space(case.space.clone());
-    let probe = build_claim_from_proposal(&proposal, RawPosition::default(), 1, 100, 1)
-        .expect("probe claim");
-    let legacy_a = produce_legacy_subject_measurement(
-        &engine_a,
-        &probe.delta_nodes,
-        &probe.delta_edges,
+    let draft_a = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
         &proposal,
-    );
-    let claim_a = build_claim_from_proposal(&proposal, legacy_a.raw(), 1, 100, 1).expect("claim A");
+        RawPosition::default(),
+        1,
+        100,
+        1,
+    )
+    .expect("draft A");
+    let native_a = engine_a
+        .measure_attempt_native_with_md1_shadow(&draft_a, &proposal, &task)
+        .expect("native measure A");
+    let claim_a = draft_a
+        .finalize(native_a.authority())
+        .expect("subject binding A");
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(task.clone());
     let target = RawPosition::default();
-    let pre_raw = engine_a.compute_raw_from_delta(&[], &[], &[], legacy_a.subject_ids());
+    let affected_a = osp_core::subject_authority::derive_v1_legacy_measurement_subject(&proposal);
+    let pre_raw = engine_a.compute_raw_from_delta(&[], &[], &[], &affected_a);
     let current_a = osp_core::navigator::provenanced_from_raw(pre_raw, MetricSource::Scip);
     let loss_before = osp_core::trajectory::trajectory_loss(&current_a, &target);
-    let result_a = engine_a.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &claim_a,
-        omega: &WitnessSet::new(vec![]),
-        task_resolver: &registry as &dyn TaskResolver,
+    let result_a = engine_a.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &claim_a,
+        &WitnessSet::new(vec![]),
+        &registry as &dyn TaskResolver,
         target,
         loss_before,
-        measured: legacy_a.measured().clone(),
-    });
+    ));
     let state_a = space_fingerprint(&engine_a);
 
-    // Engine B: gözlemlü koşum (produce → observe → claim → commit).
+    // Engine B: gözlemlü koşum (draft → native measure[+shadow] → claim → commit).
     let s = setup_with_engine(engine_from_space(case.space.clone()), &case);
     let draft = observe_subject_authority_drift(
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -645,22 +692,21 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
     // V1 lane ölçülmüş ve healthy.
     assert_eq!(draft.v1().subject.ids, vec![1]);
 
-    // Authoritative lane bit-identical: aynı legacy raw, aynı commit sonucu şekli,
-    // aynı engine state.
+    // Authoritative lane bit-identical: aynı native raw, aynı commit sonucu şekli,
+    // aynı engine state (shadow lane failure authority'ye sızmaz).
     assert_eq!(
-        legacy_a.raw().x.to_bits(),
-        s.legacy.raw().x.to_bits(),
-        "V1 raw unaffected by shadow observation"
+        native_a.authority().raw().x.to_bits(),
+        s.native.authority().raw().x.to_bits(),
+        "authority raw unaffected by shadow observation"
     );
     let mut engine_b = s.engine;
-    let result_b = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &s.claim,
-        omega: &WitnessSet::new(vec![]),
-        task_resolver: &registry as &dyn TaskResolver,
-        target: s.target,
-        loss_before: s.loss_before,
-        measured: s.legacy.measured().clone(),
-    });
+    let result_b = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &s.carrier,
+        &WitnessSet::new(vec![]),
+        &registry as &dyn TaskResolver,
+        s.target,
+        s.loss_before,
+    ));
     assert_eq!(
         std::format!("{result_a:?}"),
         std::format!("{result_b:?}"),
@@ -802,7 +848,7 @@ fn q6_rule_violation_finalizes_reached_but_unavailable() {
         &s.engine,
         &s.claim,
         &s.task,
-        &s.legacy,
+        &s.native,
         s.loss_before,
         &s.target,
     );
@@ -825,14 +871,13 @@ fn q6_rule_violation_finalizes_reached_but_unavailable() {
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(s.task.clone());
     let mut engine_b = s.engine;
-    let result = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &s.claim,
-        omega: &WitnessSet::new(vec![]),
-        task_resolver: &registry as &dyn TaskResolver,
-        target: s.target,
-        loss_before: s.loss_before,
-        measured: s.legacy.measured().clone(),
-    });
+    let result = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &s.carrier,
+        &WitnessSet::new(vec![]),
+        &registry as &dyn TaskResolver,
+        s.target,
+        s.loss_before,
+    ));
     let err = match result {
         Err(osp_core::engine::EngineCommitError::RuleViolation { .. }) => {
             // Beklenen yüzey.

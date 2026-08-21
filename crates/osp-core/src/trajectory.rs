@@ -1265,6 +1265,14 @@ pub struct TrajectoryEvidence {
     /// fail-closed uygulamalıdır.
     #[serde(default)]
     pub subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
+    /// **#96 MD-2:** Provenance authority drift sidecar — native (otorite) ↔
+    /// uniform-Scip reference karşılaştırması (aynı ölçüm event'i). MD-1 sidecar
+    /// ile aynı kanal sözleşmesi: outbound/untrusted telemetry; digest
+    /// preimage'lerine GIRMEZ; consumer identity kontrolünü kendi yükünde
+    /// fail-closed uygular. `#[serde(default)]` (upgrade-directional).
+    #[serde(default)]
+    pub provenance_authority_drift:
+        Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
 }
 
 /// Token maliyeti (osp-llm-runtime TokenUsage ile uyumlu).

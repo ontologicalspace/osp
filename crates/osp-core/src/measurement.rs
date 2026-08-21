@@ -84,7 +84,8 @@ impl From<CanonicalizationError> for MeasurementDigestError {
 /// Shared helper (P1-1 v4): `MeasurementInputDigest::compute` `AuthorizationBasisDigestError`
 /// döner — measurement-domain `MeasurementDigestError::MeasurementInputDigest`'e sarmalar.
 /// Hem `MeasurementRequest::try_new` hem `EngineMeasurement::new` bunu kullanır.
-fn compute_measurement_input_digest(
+/// **#96:** `NativeLegacySubjectMeasurement` producer'ı da kullanır (pub(crate)).
+pub(crate) fn compute_measurement_input_digest(
     context: &MeasurementInputContext,
 ) -> Result<MeasurementInputDigest, MeasurementDigestError> {
     MeasurementInputDigest::compute(context).map_err(|e| {
@@ -1807,6 +1808,179 @@ impl EngineMeasurement {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #96 MD-2 — LegacySubjectBindingDigest (PR #124 review tur-2 P1)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#96 MD-2 (PR #124 review tur-2 P1):** Legacy subject binding digest — effective
+/// legacy measure set'in (ordered union; boşsa delta-ids fallback) domain-separated
+/// commitment'i. `MeasurementDeltaDigest` yalnız new_nodes/new_edges/removed_edges
+/// bağlar (`affected_nodes` preimage'da YOK) ve final `Claim` `affected_nodes`
+/// taşımaz → structural-delta parity + raw parity, token'ın HANGİ legacy subject
+/// üzerinde ölçüldüğünü kanıtlamaz (raw check bağımsız DEĞİL: `finalize` computed_raw'ı
+/// token'dan enjekte eder). Bu digest, artifact'ın current proposal-derived legacy
+/// subject'ine bağlanmasını sağlar: `StructurallyValidatedClaimDraft` capture eder,
+/// `finalize` karşılaştırır (`LegacySubjectBindingMismatch`).
+///
+/// `subject_authority::MeasurementSubjectDigest` bilinçli olarak KULLANILMAZ —
+/// o modül #95-B'de silinir; bu digest bağımsız yaşar. #95-A sonrası task-scope
+/// authority'ye geçildiğinde anlamını yitirir (#100'de token ile birlikte ele alınır).
+///
+/// Construction property: token içinde `legacy_subject_ids`'den TÜRETİLİR
+/// (bağımsız ikinci truth YOK — `raw()`/`measured()` ilişkisiyle aynı disiplin).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct LegacySubjectBindingDigest([u8; 32]);
+
+impl LegacySubjectBindingDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.legacy-subject-binding.v1\0";
+
+    /// Ordered member id listesi — sıra semantiktir (aggregation sırası f64 bitlerini
+    /// etkiler, #92; union sırası korunur). `NodeId`'ler u64 LE encode edilir.
+    pub fn compute(member_ids: &[crate::space::NodeId]) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u64(
+            &mut hasher,
+            member_ids.len() as u64,
+            "legacy_subject_member_count",
+        );
+        for &id in member_ids {
+            encode_u64(&mut hasher, id, "legacy_subject_member_id");
+        }
+        Self(hasher.finalize().into())
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #96 MD-2 — NativeLegacySubjectMeasurement (opaque native provenance token)
+//
+// Plan v4-FİNAL: legacy subject (affected_nodes ordered union — #95-A'ya kadar
+// değişmez) üzerinde session-bound engine-native per-axis ölçümün authority
+// token'ı. Plain `MeasuredRawPosition` forgeability'sini kapatır: private fields
+// + tek üretici (`SpaceEngine::measure_attempt_native_with_md1_shadow`).
+// EngineMeasurement DEĞİLDİR — task-scope binding yoktur (MD-1 = #95-A);
+// baseline yoktur (MD-3 = #97'nindir).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#96 MD-2 (plan v4-FİNAL):** Opaque engine-issued native provenance token —
+/// legacy subject üzerinde session-bound native ölçüm + commit-anı geçerlilik
+/// bağlamaları (delta digest, base revision, measurement context, axis epochs).
+///
+/// `raw` bağımsız alan DEĞİL: `raw()` = `measured.to_raw()` (SAME value bits
+/// construction property). Commit-time `verify_native_legacy_measurement_binding`
+/// 5 kontrolü yapar; `AuthorizationBasis` kanıtı PROOF'TAN okur.
+///
+/// **Stale replay fence:** token, üretildiği revision/context/epoch bağlamında
+/// geçerliliğini KANITLAR; aynı bağlamda meşru yeniden sunum (ör. Held + witness
+/// evidence + resubmit) engellenmez — "token cannot be replayed" iddiası YOK
+/// (`VerifiedTaskMeasurementBinding` dokümantasyon ayrımıyla hizalı).
+#[derive(Clone)]
+pub struct NativeLegacySubjectMeasurement {
+    measured: crate::coords::MeasuredRawPosition,
+    /// Audited measurement subject — `derive_v1_legacy_measurement_subject`
+    /// ordered union (boşsa legacy delta-ids fallback uygulanmış hâli).
+    /// Canonical TASK authority DEĞİLDİR (MD-1 = #95-A).
+    legacy_subject_ids: Vec<crate::space::NodeId>,
+    /// **PR #124 review tur-2 P1:** `legacy_subject_ids`'den TÜRETİLİR (ctor
+    /// hesaplar — bağımsız ikinci truth YOK). Draft×token binding karşılaştırması
+    /// (`finalize`) bunu kullanır.
+    legacy_subject_binding: LegacySubjectBindingDigest,
+    delta_digest: MeasurementDeltaDigest,
+    base_revision: crate::authorization::SpaceViewRevision,
+    measurement_input_digest: crate::authorization::MeasurementInputDigest,
+    axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
+}
+
+impl NativeLegacySubjectMeasurement {
+    /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native_with_md1_shadow`
+    /// çağırır (engine.rs). External construction kapalı (private fields).
+    /// `legacy_subject_binding` ctor içinde `legacy_subject_ids`'den türetilir.
+    pub(crate) fn new(
+        measured: crate::coords::MeasuredRawPosition,
+        legacy_subject_ids: Vec<crate::space::NodeId>,
+        delta_digest: MeasurementDeltaDigest,
+        base_revision: crate::authorization::SpaceViewRevision,
+        measurement_input_digest: crate::authorization::MeasurementInputDigest,
+        axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
+    ) -> Self {
+        let legacy_subject_binding = LegacySubjectBindingDigest::compute(&legacy_subject_ids);
+        Self {
+            measured,
+            legacy_subject_ids,
+            legacy_subject_binding,
+            delta_digest,
+            base_revision,
+            measurement_input_digest,
+            axis_epoch_stamp,
+        }
+    }
+
+    // **P0-tur4 (PR review):** `new_characterization_legacy` TAMAMEN KALDIRILDI.
+    // Eski `#[doc(hidden)] pub` ctor external crate'lerden çağrılabiliyordu —
+    // caller-supplied MeasuredRawPosition + [0;5] epoch ile authority token
+    // mint edilebiliyordu (opaque DEĞİL). V1 characterization lane artık
+    // non-authoritative evaluator kullanır (tests/common) — authority tipi
+    // forge edilemez.
+
+    /// Native per-axis measured (5 × value+source) — commit `PredicateGate` ve
+    /// `AuthorizationBasis.measured_result` bu değerleri bağlar.
+    pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
+        &self.measured
+    }
+
+    /// `measured.to_raw()` — bağımsız ikinci truth YOK (construction property).
+    pub fn raw(&self) -> crate::coords::RawPosition {
+        self.measured.to_raw()
+    }
+
+    /// Audited legacy measurement subject (ordered union + delta-ids fallback).
+    pub fn legacy_subject_ids(&self) -> &[crate::space::NodeId] {
+        &self.legacy_subject_ids
+    }
+
+    /// **PR #124 review tur-2 P1:** Legacy subject binding digest —
+    /// `legacy_subject_ids`'den türetilmiş; draft×token karşılaştırması
+    /// (`StructurallyValidatedClaimDraft::finalize`) kullanır.
+    pub fn legacy_subject_binding(&self) -> &LegacySubjectBindingDigest {
+        &self.legacy_subject_binding
+    }
+
+    /// Claim structural delta identity — mevcut tek canonicalization truth
+    /// (`canonical_structural_delta_from_claim` → `MeasurementDeltaDigest`).
+    pub fn delta_digest(&self) -> &MeasurementDeltaDigest {
+        &self.delta_digest
+    }
+
+    /// Ölçüm anındaki space revision (commit-time stale fence karşılaştırması).
+    pub fn base_revision(&self) -> &crate::authorization::SpaceViewRevision {
+        &self.base_revision
+    }
+
+    /// Ölçüm anındaki axis context digest (commit-time context fence).
+    pub fn measurement_input_digest(&self) -> &crate::authorization::MeasurementInputDigest {
+        &self.measurement_input_digest
+    }
+
+    /// Captured axis epoch stamp — commit-time ABA fence (pub(crate): yalnız
+    /// engine verification; wire'e çıkmaz).
+    pub(crate) fn axis_epoch_stamp(&self) -> crate::coords::CoreAxisEpochStamp {
+        self.axis_epoch_stamp
+    }
+}
+
+impl std::fmt::Debug for NativeLegacySubjectMeasurement {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeLegacySubjectMeasurement")
+            .field("measured", &self.measured)
+            .field("legacy_subject_ids", &self.legacy_subject_ids)
+            .field("delta_digest", &self.delta_digest)
+            .field("base_revision", &self.base_revision)
+            .field("measurement_input_digest", &self.measurement_input_digest)
+            .field("axis_epoch_stamp", &self.axis_epoch_stamp.as_u64s())
+            .finish()
+    }
+}
 // NOT: Deserialize intentionally absent — `EngineMeasurement` authority token, wire'dan
 // restore edilemez. Commit 4'te `UnverifiedWire + verify_against` iki aşamalı model.
 
@@ -1907,9 +2081,92 @@ pub enum MeasurementBindingMismatch {
     },
 }
 
+/// **#96 MD-2 (PR #124 review P1 — ontology düzeltmesi):** Engine-issued
+/// `NativeLegacySubjectMeasurement` token'ının commit-anı doğrulama hataları —
+/// **presented-authority DEĞİL**. Opaque token + private `TaskCommitInput` sonrası
+/// caller authority forge edemez; bu hataların görülmesi engine invariant
+/// violation / tamper / reality drift demek. Bu yüzden mevcut
+/// `MeasurementBindingMismatch` (caller-authority) ailesinden AYRI typed family'de
+/// yaşar: `MeasurementBindingVerificationError::NativeAuthority`.
+///
+/// Navigator kontratı (#96): hepsi → SystemFailure | budget yok | LLM retry yok
+/// (`AxisEpochMismatch` drift-kökenlidir — İLERİDE bounded regeneration düşünülebilir,
+/// #96'da DEĞİL). #100'de EngineMeasurement authoritative olduğunda bu family
+/// presented-authority ile karışmaz — bilgi kaybı yok, `gate_decision` etiketi
+/// `RejectedByMeasurementBinding` DEĞİL.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum NativeLegacyMeasurementBindingError {
+    /// Claim structural delta digest, token'ın taşıdığı digest ile uyuşmuyor
+    /// (shared producer recompute — tek canonicalization truth).
+    #[error("native token structural delta digest does not match claim: expected={expected:?}, presented={presented:?}")]
+    StructuralDeltaMismatch {
+        expected: MeasurementDeltaDigest,
+        presented: MeasurementDeltaDigest,
+    },
+
+    /// **PR #124 review tur-2 P1:** Token'ın legacy subject binding digest'i
+    /// draft'ın (current proposal) capture ettiği digest ile uyuşmuyor — aynı
+    /// structural delta + farklı `affected_nodes` artifact mix'i. `MeasurementDeltaDigest`
+    /// affected_nodes içermez ve `Claim` affected_nodes taşımaz; raw parity de
+    /// bağımsız kanıt DEĞİLDİR (finalize computed_raw'ı token'dan enjekte eder).
+    /// Kontrol `draft.finalize(&token)`'da yaşar (draft×token — proposal identity'sinin
+    /// yaşadığı tek nokta); commit verifier claim'den subject türetemez. İsim
+    /// bilinçli olarak "Binding": MD-1 canonical task authority ile KARIŞMAZ.
+    #[error("native token legacy subject binding mismatch: expected={expected:?}, presented={presented:?}")]
+    LegacySubjectBindingMismatch {
+        expected: LegacySubjectBindingDigest,
+        presented: LegacySubjectBindingDigest,
+    },
+
+    /// `claim.computed_raw` bit'leri token `measured.to_raw()` bit'leri ile uyuşmuyor —
+    /// half-merge fence (final Claim token dışında üretilmiş = invariant violation).
+    /// expected/presented = (x,y,z,w,v) `to_bits()` sırası.
+    #[error(
+        "claim computed_raw bits do not match token measured bits: expected={expected:?}, presented={presented:?}"
+    )]
+    RawMismatch {
+        expected: [u64; 5],
+        presented: [u64; 5],
+    },
+
+    /// Current `SpaceViewRevision` token'ın base revision'ı ile uyuşmuyor —
+    /// stale replay fence. expected = current, presented = token'ınki.
+    #[error("native token base revision is stale: expected={expected:?}, presented={presented:?}")]
+    StaleSpaceRevision {
+        expected: SpaceViewRevision,
+        presented: SpaceViewRevision,
+    },
+
+    /// Current axis descriptor context digest'i token'ın captured context digest'i
+    /// ile uyuşmuyor — measurement-context TOCTOU fence.
+    #[error(
+        "native token measurement context digest does not match current: expected={expected:?}, presented={presented:?}"
+    )]
+    MeasurementContextMismatch {
+        expected: crate::authorization::MeasurementInputDigest,
+        presented: crate::authorization::MeasurementInputDigest,
+    },
+
+    /// Current axis epoch'ları token'ın captured epoch stamp'ı ile uyuşmuyor —
+    /// A→B→A descriptor revert fence (epoch monoton). Drift-kökenli.
+    /// expected/presented = `CoreAxisEpochStamp::as_u64s()` sırası
+    /// (coupling, cohesion, instability, entropy, witness_depth).
+    #[error(
+        "native token axis epoch stamp does not match current epochs: expected={expected:?}, presented={presented:?}"
+    )]
+    AxisEpochMismatch {
+        expected: [u64; 5],
+        presented: [u64; 5],
+    },
+}
+
 impl MeasurementBindingMismatch {
     /// **INV-T9 #70 Commit 4b (reviewer v4 P1-3):** Retry/reject disposition.
     /// Navigator sonuç/retry davranışını bu değere göre belirler.
+    ///
+    /// **#96 not:** Bu disposition YALNIZ presented-authority (caller) ailesi içindir;
+    /// engine-issued native token hataları (`NativeLegacyMeasurementBindingError`)
+    /// bu kontrata GİRMEZ — navigator onları SystemFailure olarak işler.
     pub fn disposition(&self) -> MeasurementBindingDisposition {
         match self {
             // Stale measurement — yeni token üretilebilir, LLM retry yok, budget yok.
@@ -2094,6 +2351,12 @@ pub enum MeasurementBindingVerificationError {
     /// Verification epoch drift — gerçeklik değişti (reviewer v4 P2-4).
     #[error(transparent)]
     Drift(#[from] MeasurementBindingDriftError),
+    /// **#96 MD-2 (PR #124 review P1):** Engine-issued native token doğrulama
+    /// hatası — presented-authority DEĞİL (opaque token forge edilemez; invariant
+    /// violation / tamper / reality drift). Mevcut Mismatch ailesinin semantiği
+    /// yeniden anlamlandırılmaz; ayrı typed family.
+    #[error(transparent)]
+    NativeAuthority(#[from] NativeLegacyMeasurementBindingError),
 }
 
 // Not: VerifiedMeasurementBinding engine.rs'te tanımlı (reviewer Faz 2 scoped P1-3) —

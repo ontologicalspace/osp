@@ -1898,6 +1898,10 @@ impl MeasurementFailureClass {
 /// Pipeline (commit_task_claim) sonucu — stage-aware erken duruşlar dahil.
 ///
 /// **Review tur 6/7:** `PartialEq` derive + Held/Rejected outcome authoritative okuma.
+/// **P1-tur6 (review):** `CommitReached` YALNIZ gerçek `commit_task_claim` yüzeyinde
+/// kullanılır — V1 non-authoritative reference evaluation kendi variant'ında
+/// (`ReferenceEvaluation`) temsil edilir; production pipeline reachability
+/// fabricate EDİLMEZ.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineObservation {
     /// commit_task_claim tam çalıştı (Evaluated/Held/Rejected dahil).
@@ -1918,6 +1922,19 @@ pub enum PipelineObservation {
         apply_target: Option<osp_core::trajectory::ApplyTarget>,
         witness_reachability: WitnessReachability,
     },
+    /// **#96 MD-2 P1-tur6 (review — truth-surface):** Production commit pipeline
+    /// ÇALIŞTIRILMADI — V1 non-authoritative reference evaluation yüzeyi. Yalnız
+    /// PredicateGate GERÇEK case girdileriyle DOĞRUDAN çalıştırıldı; karar alanları
+    /// gate'in gerçek çıktısıdır. Production reachability iddiası YOK: Q5 vision /
+    /// TaskValidation / Q6 / witness gözlenmedi (variant'ın kendisi bunu belirtir —
+    /// `CommitReached` "commit_task_claim tam çalıştı" demektir, bu yüzey için DEĞİL).
+    ReferenceEvaluation {
+        /// PredicateGate gerçek çıktısı (gate gerçekten koştu — fabrication değil;
+        /// counterfactual olan yalnızca "production bunu tüketirdi" iddiasıdır).
+        predicate_completion: Option<osp_core::trajectory::PredicateCompletion>,
+        mutation_decision: Option<osp_core::trajectory::MutationDecision>,
+        apply_target: Option<osp_core::trajectory::ApplyTarget>,
+    },
     /// commit_task_claim Q5/commit'e ulaşmadan error verdi (early stop).
     StoppedBeforeCommit {
         stage: PipelineStage,
@@ -1932,6 +1949,11 @@ pub enum PipelineObservation {
 pub enum Q5Observation {
     /// Q5 çalışmadı (commit stopped before Q5).
     NotReached,
+    /// **#96 MD-2 P0-tur5 (review P1 — truth-surface):** Q5 gözlenMEDİ — V1
+    /// non-authoritative evaluator vision'ı çalıştıramaz (motor-private) ve
+    /// gözlenmeyen yüzeyi `Passed`/`Rejected` diye kodlamaz (fabrication YOK).
+    /// `Passed`/`Rejected` yalnız gerçek pipeline çalışmasından gelir.
+    NotObserved,
     /// Q5 passed (theta <= bound). Exact theta bits bilinmez — engine-unit gerek.
     Passed,
     /// Q5 rejected (theta > bound). theta observable via VisionViolation.
@@ -2044,6 +2066,17 @@ impl MutationDecisionObservation {
                 mutation_decision: None,
                 ..
             } => Self::ReachedButUnsurfaced,
+            // **P1-tur6:** ReferenceEvaluation'da gate GERÇEKTEN koştu — karar
+            // observable. Production-reachability ayrımı PipelineObservation
+            // seviyesinde yaşar (CommitReached ≠ ReferenceEvaluation).
+            PipelineObservation::ReferenceEvaluation {
+                mutation_decision: Some(md),
+                ..
+            } => Self::Observed(*md),
+            PipelineObservation::ReferenceEvaluation {
+                mutation_decision: None,
+                ..
+            } => Self::ReachedButUnsurfaced,
             PipelineObservation::StoppedBeforeCommit { .. } => Self::NotReached,
         }
     }
@@ -2124,23 +2157,29 @@ pub fn engine_with_case_space(case: &CharacterizationCase) -> osp_core::engine::
 }
 
 /// V1 evaluation: compute_raw_from_delta → build Claim → current_measured/loss_before
-/// → commit_task_claim. compute_raw_from_delta infallible → measurement NotAttempted
-/// (V1 measurement tracking yapmaz; measured = provenanced_from_raw(computed_raw)).
+/// → **non-authoritative evaluator** (Q4 structural + raw finite → PredicateGate
+/// direkt; commit pipeline YOK). compute_raw_from_delta infallible → measurement
+/// NotAttempted (V1 measurement tracking yapmaz; measured = provenanced_from_raw
+/// (computed_raw)).
 ///
-/// **İsimlendirme:** "V1 production path" — bu mevcut navigator/MCP yolu.
+/// **İsimlendirme:** "V1 production path" — eski navigator/MCP legacy yüzeyinin
+/// characterization'ı.
 ///
 /// **Review P0-2 fix:** `loss_before` navigator.rs:618/879'daki gibi `current_measured`
 /// (pre-delta engine space centroid) üzerinden hesaplanır — `measured` (post-delta after)
 /// üzerinden DEĞİL. Önceki kod `trajectory_loss(&measured, &target)` ile loss_before =
 /// loss_after yapıyordu; bu sistematik improved=false üretirdi ve V1/V2 baseline
 /// karşılaştırmasını bozardı.
+/// **#96 MD-2 P0-tur4:** V1 lane commit pipeline KULLANMAZ — `characterization_native_token`
+/// ve `new_characterization_legacy` kaldırıldı; authority tipi dışarıdan forge edilemez.
+/// Vision/witness/TaskValidation motor-private aşamalar olduğundan bu evaluator onları
+/// gözlemleyemez (yalnız Q4 + PredicateGate karar yüzeyi). Epoch'lar [0;5] — corpus
+/// axis'leri immutable (monoton epoch ZERO).
 pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
 ) -> CharacterizationObservation {
     use osp_core::navigator::{build_claim_from_proposal, provenanced_from_raw};
-    use osp_core::trajectory::{InMemoryTaskRegistry, TaskResolver};
-    use osp_core::witness::WitnessSet;
 
     // affected = proposal.affected_nodes ∪ removed_edges.from (navigator.rs:810-815 mirror).
     let mut affected: Vec<u64> = case.proposal.affected_nodes.clone();
@@ -2214,30 +2253,55 @@ pub fn evaluate_v1_case(
     // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
-    // Registry + commit.
-    let mut registry = InMemoryTaskRegistry::new();
-    registry.insert(case.task.clone());
-    let omega = WitnessSet::new(vec![]);
+    // **P1-tur6 (review — truth-surface):** V1 characterization — commit
+    // pipeline YOK; evaluator sentetik `EngineCommitResult` da ÜRETMEZ. Eski
+    // synthetic-Evaluated yolu Q5'i `Passed`, witness'ı `Evaluated` diye
+    // kodluyordu — hiç çalışmamış aşamaların sonucunu gözlenmiş gibi sunmak
+    // fabrication'dı. Artık yalnız GERÇEKTEN çalışan yüzeyler gözlemlenir
+    // (Q4 structural + raw finite + PredicateGate); sonuç `ReferenceEvaluation`
+    // variant'ında taşınır — production pipeline reachability (CommitReached)
+    // iddiası BU yüzeyde asla yapılmaz; Q5/Q6/witness/TaskValidation gözlenmez.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError inline (measurement.rs layout decision)"
+    )]
+    let evaluation =
+        (|| {
+            // Q4 structural
+            osp_core::task_measurement::validate_claim_structure(&claim)?;
+            // Q4 raw finite
+            osp_core::task_measurement::validate_raw_position_finite(
+                claim.id,
+                "computed_raw",
+                &claim.computed_raw,
+            )?;
+            // Task binding
+            let bound = osp_core::trajectory::TaskBoundClaim {
+                claim: &claim,
+                task: &case.task,
+            };
+            // Q5 vision / Q6 / witness / TaskValidation: motor-private — evaluator
+            // ÇALIŞTIRAMAZ (aşağıda NotObserved/NotReached olarak temsil edilir).
+            // PredicateGate — V1 lane'in gözlemleyebildiği tek karar yüzeyi.
+            Ok(osp_core::trajectory::PredicateGate.evaluate(
+                osp_core::trajectory::PredicateGateInput {
+                    bound,
+                    measured: &measured,
+                    loss_before,
+                    target: &target,
+                },
+            ))
+        })();
 
-    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &claim,
-        omega: &omega,
-        task_resolver: &registry as &dyn TaskResolver,
-        target,
-        loss_before,
-        measured: measured.clone(),
-    });
-
-    // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
-    // V1 loss_before = trajectory_loss(current_measured, target) (yukarıda baseline loss_bits
-    // ile aynı kaynak). loss_after = trajectory_loss(measured_after, target).
+    // **PR #91 review P1:** decision-input scalar'ları. V1 loss_before =
+    // trajectory_loss(current_measured, target) (yukarıda baseline loss_bits ile
+    // aynı kaynak). loss_after = trajectory_loss(measured_after, target).
     //
-    // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate decision yoluna
-    // ulaşıldığında (commit_task_claim Ok) Some — Err (StoppedBeforeCommit) olsa bile engine
-    // çağrıldıysa scalar'lar gönderildi, ama decision yolu tamamlanmadı. Doc contract: Some ⟺
-    // PredicateGate'e ulaşıldı (EngineCommitResult üretildi).
+    // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate
+    // decision yoluna ulaşıldığında Some. Doc contract: Some ⟺ PredicateGate'e
+    // ulaşıldı (gate gerçekten çalıştı).
     let loss_after = osp_core::trajectory::trajectory_loss(&measured, &target);
-    let decision_input = result.as_ref().ok().map(|_| DecisionInputObservation {
+    let decision_input = evaluation.as_ref().ok().map(|_| DecisionInputObservation {
         loss_before_bits: loss_before.to_bits(),
         loss_after_bits: loss_after.to_bits(),
     });
@@ -2256,11 +2320,19 @@ pub fn evaluate_v1_case(
         baseline: baseline_observation,
     };
 
-    let pipeline = match result {
-        Ok(commit_result) => finalize_pipeline_observation_commit_reached(&commit_result),
+    let pipeline = match &evaluation {
+        // **P1-tur6:** ReferenceEvaluation — production commit pipeline ÇALIŞMADI;
+        // yalnız PredicateGate gerçek girdilerle doğrudan koştu. `CommitReached`
+        // ("commit_task_claim tam çalıştı") burada KULLANILMAZ — production
+        // reachability fabricate edilmez.
+        Ok(gate_out) => PipelineObservation::ReferenceEvaluation {
+            predicate_completion: Some(gate_out.outcome.predicate_completion),
+            mutation_decision: Some(gate_out.outcome.mutation_decision),
+            apply_target: Some(gate_out.outcome.mutation_decision.apply_target()),
+        },
         Err(e) => PipelineObservation::StoppedBeforeCommit {
-            stage: PipelineStage::from_engine_commit_error(&e),
-            error: PipelineFailureClass::from_engine_commit_error(&e),
+            stage: PipelineStage::from_engine_commit_error(e),
+            error: PipelineFailureClass::from_engine_commit_error(e),
         },
     };
 
@@ -2326,7 +2398,6 @@ pub fn evaluate_v2_candidate_case(
 
     // Measurement başarılı — observation üret + commit için değerleri çıkar.
     let measured_for_commit = token.after().clone();
-    let computed_raw_for_final_claim = token.after().to_raw();
     let target = case
         .task
         .target_predicate_set
@@ -2383,16 +2454,6 @@ pub fn evaluate_v2_candidate_case(
         baseline: baseline_observation,
     };
 
-    // Final Claim: computed_raw = measurement.after().to_raw().
-    let final_claim = build_claim_from_proposal(
-        &case.proposal,
-        computed_raw_for_final_claim,
-        case.task.id,
-        100,
-        1,
-    )
-    .expect("final claim build should succeed for characterization case");
-
     // V1 compatibility projection: loss_before measurement token'ından türe.
     let target = case
         .task
@@ -2405,14 +2466,33 @@ pub fn evaluate_v2_candidate_case(
     registry.insert(case.task.clone());
     let omega = WitnessSet::new(vec![]);
 
-    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput {
-        claim: &final_claim,
-        omega: &omega,
-        task_resolver: &registry as &dyn TaskResolver,
+    // V2: gerçek native flow (P0-tur4) — draft → measure → finalize → sealed carrier.
+    let draft = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .expect("V2 draft");
+    let v2_native = engine
+        .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
+        .expect("V2 native measurement");
+    let finalized = draft
+        .finalize(v2_native.authority())
+        .expect("V2 finalize (subject binding)");
+    let native_token = finalized;
+
+    // **P0-tur4:** commit yalnız sealed carrier kabul eder — ayrı claim +
+    // measurement artifact mix'i (eski `&final_claim + &native_token`) artık
+    // type-level unrepresentable; claim carrier'dan gelir (finalize product).
+    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
+        &native_token,
+        &omega,
+        &registry as &dyn TaskResolver,
         target,
         loss_before,
-        measured: measured_for_commit,
-    });
+    ));
 
     // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
     // V2 candidate fail-closed projection: loss_before = project_v1_loss_before_compatibility_v2
