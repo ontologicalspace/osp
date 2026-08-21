@@ -200,22 +200,19 @@ fn matching_scope_baseline_case_shows_parity() {
         "matching V2: Q5 Vision NotReached; case {}",
         case.id
     );
-    // **Review tur 6 P1-1:** exact pipeline stage pin. V1 (P0-tur5): evaluator
-    // CommitReached{NotObserved, Completed, AcceptAsCompleted, Mainline,
-    // NotReached} — gözlenmeyen yüzeyler dürüstçe temsil edilir. V2:
-    // StoppedBeforeCommit{Vision, Vision}.
+    // **Review tur 6 P1-1:** exact pipeline pin. V1 (P1-tur6): ReferenceEvaluation
+    // — production pipeline ÇALIŞMADI, yalnız PredicateGate koştu (karar alanları
+    // gerçek gate çıktısı). V2: StoppedBeforeCommit{Vision, Vision}.
     assert_eq!(
         obs_v1.pipeline,
-        common::PipelineObservation::CommitReached {
-            q5: common::Q5Observation::NotObserved,
+        common::PipelineObservation::ReferenceEvaluation {
             predicate_completion: Some(osp_core::trajectory::PredicateCompletion::Completed),
             mutation_decision: Some(osp_core::trajectory::MutationDecision::AcceptAsCompleted),
             apply_target: Some(osp_core::trajectory::ApplyTarget::Lane(
                 osp_core::trajectory::CommitLane::Mainline
             )),
-            witness_reachability: common::WitnessReachability::NotReached,
         },
-        "matching V1 exact pipeline (evaluator; #96 P0-tur5 honest-encoding); case {}",
+        "matching V1 exact pipeline (ReferenceEvaluation; #96 P1-tur6); case {}",
         case.id
     );
     assert_eq!(
@@ -354,6 +351,9 @@ fn q5_disposition(obs: &CharacterizationObservation) -> Q5Disposition {
             // **P0-tur5:** evaluator Q5'i çalıştıramadı — gözlenmedi (fabrication YOK).
             common::Q5Observation::NotObserved => Q5Disposition::NotObserved,
         },
+        // **P1-tur6:** reference evaluation — production pipeline çalışmadı;
+        // Q5 gözlenmedi (variant'ın kendisi bunu belirtir).
+        PipelineObservation::ReferenceEvaluation { .. } => Q5Disposition::NotObserved,
         PipelineObservation::StoppedBeforeCommit { stage, .. } => match stage {
             common::PipelineStage::Vision => Q5Disposition::Rejected,
             _ => Q5Disposition::NotReached,
@@ -392,23 +392,43 @@ enum Q5Disposition {
     NotObserved,
 }
 
+/// **P1-tur6:** Karar yüzeyi extractor — hem gerçek commit yüzeyinden
+/// (`CommitReached`) hem reference evaluation'dan (`ReferenceEvaluation`)
+/// karar alanlarını çıkarır. Stopped → None (parity N/A). Bu sayede parity
+/// assertion'ları V1 evaluator/V2 pipeline şeklini ayırt ederken karar
+/// karşılaştırması yaşamaya devam eder.
+fn decision_surface(
+    obs: &CharacterizationObservation,
+) -> Option<(
+    Option<osp_core::trajectory::PredicateCompletion>,
+    Option<osp_core::trajectory::MutationDecision>,
+    Option<osp_core::trajectory::ApplyTarget>,
+)> {
+    match &obs.pipeline {
+        PipelineObservation::CommitReached {
+            predicate_completion,
+            mutation_decision,
+            apply_target,
+            ..
+        }
+        | PipelineObservation::ReferenceEvaluation {
+            predicate_completion,
+            mutation_decision,
+            apply_target,
+        } => Some((*predicate_completion, *mutation_decision, *apply_target)),
+        PipelineObservation::StoppedBeforeCommit { .. } => None,
+    }
+}
+
 fn assert_predicate_completion_parity(
     case_id: &str,
     obs_v1: &CharacterizationObservation,
     obs_v2: &CharacterizationObservation,
 ) {
-    let (pc_v1, pc_v2) = match (&obs_v1.pipeline, &obs_v2.pipeline) {
-        (
-            PipelineObservation::CommitReached {
-                predicate_completion: a,
-                ..
-            },
-            PipelineObservation::CommitReached {
-                predicate_completion: b,
-                ..
-            },
-        ) => (a, b),
-        _ => return, // en az biri stopped → Q5.b çalışmadı, parity N/A
+    let (Some((pc_v1, _, _)), Some((pc_v2, _, _))) =
+        (decision_surface(obs_v1), decision_surface(obs_v2))
+    else {
+        return; // en az biri stopped → Q5.b çalışmadı, parity N/A
     };
     assert_eq!(
         pc_v1, pc_v2,
@@ -421,18 +441,10 @@ fn assert_mutation_decision_parity(
     obs_v1: &CharacterizationObservation,
     obs_v2: &CharacterizationObservation,
 ) {
-    let (md_v1, md_v2) = match (&obs_v1.pipeline, &obs_v2.pipeline) {
-        (
-            PipelineObservation::CommitReached {
-                mutation_decision: a,
-                ..
-            },
-            PipelineObservation::CommitReached {
-                mutation_decision: b,
-                ..
-            },
-        ) => (a, b),
-        _ => return,
+    let (Some((_, md_v1, _)), Some((_, md_v2, _))) =
+        (decision_surface(obs_v1), decision_surface(obs_v2))
+    else {
+        return;
     };
     assert_eq!(
         md_v1, md_v2,
@@ -445,16 +457,10 @@ fn assert_apply_target_parity(
     obs_v1: &CharacterizationObservation,
     obs_v2: &CharacterizationObservation,
 ) {
-    let (at_v1, at_v2) = match (&obs_v1.pipeline, &obs_v2.pipeline) {
-        (
-            PipelineObservation::CommitReached {
-                apply_target: a, ..
-            },
-            PipelineObservation::CommitReached {
-                apply_target: b, ..
-            },
-        ) => (a, b),
-        _ => return,
+    let (Some((_, _, at_v1)), Some((_, _, at_v2))) =
+        (decision_surface(obs_v1), decision_surface(obs_v2))
+    else {
+        return;
     };
     assert_eq!(
         at_v1, at_v2,
@@ -468,6 +474,8 @@ fn witness_reachability(obs: &CharacterizationObservation) -> WitnessReachabilit
             witness_reachability,
             ..
         } => witness_reachability.clone(),
+        // **P1-tur6:** reference evaluation — witness aşamasına hiç gidilmedi.
+        PipelineObservation::ReferenceEvaluation { .. } => WitnessReachability::NotReached,
         PipelineObservation::StoppedBeforeCommit { .. } => WitnessReachability::NotReached,
     }
 }
@@ -621,21 +629,19 @@ fn wide_affected_scope_shows_subject_authority_divergence() {
         "wide-affected V2: Q5 Vision NotReached; case {}",
         case.id
     );
-    // **Review tur 6 P1-1:** exact pipeline stage pin. V1 (P0-tur5): evaluator
-    // CommitReached{NotObserved, ..., NotReached} — gözlenmeyen yüzeyler dürüst.
-    // V2: StoppedBeforeCommit{Vision, Vision}.
+    // **Review tur 6 P1-1:** exact pipeline pin. V1 (P1-tur6): ReferenceEvaluation
+    // — production pipeline çalışmadı, yalnız PredicateGate koştu. V2:
+    // StoppedBeforeCommit{Vision, Vision}.
     assert_eq!(
         obs_v1.pipeline,
-        common::PipelineObservation::CommitReached {
-            q5: common::Q5Observation::NotObserved,
+        common::PipelineObservation::ReferenceEvaluation {
             predicate_completion: Some(osp_core::trajectory::PredicateCompletion::Completed),
             mutation_decision: Some(osp_core::trajectory::MutationDecision::AcceptAsCompleted),
             apply_target: Some(osp_core::trajectory::ApplyTarget::Lane(
                 osp_core::trajectory::CommitLane::Mainline
             )),
-            witness_reachability: common::WitnessReachability::NotReached,
         },
-        "wide-affected V1 exact pipeline (evaluator; #96 P0-tur5 honest-encoding); case {}",
+        "wide-affected V1 exact pipeline (ReferenceEvaluation; #96 P1-tur6); case {}",
         case.id
     );
     assert_eq!(
@@ -820,21 +826,19 @@ fn removed_edge_external_source_shows_affected_contamination() {
         "removed-edge V2: Q5 Vision NotReached; case {}",
         case.id
     );
-    // **Review tur 6 P1-1:** exact pipeline stage pin. V1 (P0-tur5): evaluator
-    // CommitReached{NotObserved, ..., NotReached} — gözlenmeyen yüzeyler dürüst.
-    // V2: StoppedBeforeCommit{Vision, Vision}.
+    // **Review tur 6 P1-1:** exact pipeline pin. V1 (P1-tur6): ReferenceEvaluation
+    // — production pipeline çalışmadı, yalnız PredicateGate koştu. V2:
+    // StoppedBeforeCommit{Vision, Vision}.
     assert_eq!(
         obs_v1.pipeline,
-        common::PipelineObservation::CommitReached {
-            q5: common::Q5Observation::NotObserved,
+        common::PipelineObservation::ReferenceEvaluation {
             predicate_completion: Some(osp_core::trajectory::PredicateCompletion::Completed),
             mutation_decision: Some(osp_core::trajectory::MutationDecision::AcceptAsCompleted),
             apply_target: Some(osp_core::trajectory::ApplyTarget::Lane(
                 osp_core::trajectory::CommitLane::Mainline
             )),
-            witness_reachability: common::WitnessReachability::NotReached,
         },
-        "removed-edge V1 exact pipeline (evaluator; #96 P0-tur5 honest-encoding); case {}",
+        "removed-edge V1 exact pipeline (ReferenceEvaluation; #96 P1-tur6); case {}",
         case.id
     );
     assert_eq!(
@@ -1087,21 +1091,19 @@ fn delta_introduced_subject_shows_baseline_epistemic_availability_divergence() {
     // V2 Unavailable — value/source/loss N/A (review tur 8 P0-2: Unavailable tarafında
     // bu alanlar yoktur; divergence availability düzeyindedir, value düzeyinde DEĞİL).
 
-    // === Pipeline observation golden (review tur 6 P0-1; #96 MD-2 P0-tur5) ===
+    // === Pipeline observation golden (review tur 6 P0-1; #96 MD-2 P1-tur6) ===
     // Case 4 karar yüzeyi (completion/mutation/apply) lane'ler arasında parity.
-    // **P0-tur5:** V1 evaluator Q5 vision'ı gözleyemez (NotObserved) ve witness
-    // aşamasına gitmez (NotReached) — gözlenmeyen yüzey fabrication YOK. V2
-    // gerçek pipeline: Q5 Passed + boş witness ile Held
-    // (authorization.outcome gerçek AttemptOutcome — fabrication DEĞİL).
+    // **P1-tur6:** V1 = ReferenceEvaluation — production pipeline çalışmadı,
+    // yalnız PredicateGate koştu (reachability fabrication YOK). V2 gerçek
+    // pipeline: Q5 Passed + boş witness ile Held (authorization.outcome gerçek
+    // AttemptOutcome — fabrication DEĞİL).
     eprintln!("  delta-introduced V1 pipeline: {:?}", obs_v1.pipeline);
     eprintln!("  delta-introduced V2 pipeline: {:?}", obs_v2.pipeline);
     use osp_core::trajectory::{ApplyTarget, CommitLane, MutationDecision, PredicateCompletion};
-    let expected_case4_pipeline_v1 = common::PipelineObservation::CommitReached {
-        q5: common::Q5Observation::NotObserved,
+    let expected_case4_pipeline_v1 = common::PipelineObservation::ReferenceEvaluation {
         predicate_completion: Some(PredicateCompletion::Completed),
         mutation_decision: Some(MutationDecision::AcceptAsCompleted),
         apply_target: Some(ApplyTarget::Lane(CommitLane::Mainline)),
-        witness_reachability: common::WitnessReachability::NotReached,
     };
     let expected_case4_pipeline_v2 = common::PipelineObservation::CommitReached {
         q5: common::Q5Observation::Passed,
@@ -1112,7 +1114,7 @@ fn delta_introduced_subject_shows_baseline_epistemic_availability_divergence() {
     };
     assert_eq!(
         obs_v1.pipeline, expected_case4_pipeline_v1,
-        "delta-introduced V1 exact pipeline (NotObserved+AcceptAsCompleted+Mainline; evaluator honest); case {}",
+        "delta-introduced V1 exact pipeline (ReferenceEvaluation; gate gerçekten koştu); case {}",
         case.id
     );
     assert_eq!(
@@ -1384,18 +1386,16 @@ fn delta_introduced_policy_shows_v1_v2_decision_divergence() {
     );
 
     // === EXACT V1 pipeline — AcceptAsProgress → TrajectoryCheckpoint (INV-T8) ===
-    // **P0-tur5:** V1 evaluator Q5'i gözleyemez (NotObserved), witness'a gitmez
-    // (NotReached) — gerçek pipeline V1'in eski Held pin'ine aitti.
-    let expected_v1 = common::PipelineObservation::CommitReached {
-        q5: common::Q5Observation::NotObserved,
+    // **P1-tur6:** V1 = ReferenceEvaluation — production pipeline çalışmadı;
+    // yalnız gate koştu (gerçek pipeline V1'in eski Held pin'ine aitti).
+    let expected_v1 = common::PipelineObservation::ReferenceEvaluation {
         predicate_completion: Some(PredicateCompletion::NotCompleted),
         mutation_decision: Some(MutationDecision::AcceptAsProgress),
         apply_target: Some(ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint)),
-        witness_reachability: common::WitnessReachability::NotReached,
     };
     assert_eq!(
         obs_v1.pipeline, expected_v1,
-        "V1 AcceptAsProgress → TrajectoryCheckpoint → NotReached witness (INV-T8; evaluator honest); case {}",
+        "V1 AcceptAsProgress → TrajectoryCheckpoint (INV-T8; reference evaluation); case {}",
         case.id
     );
 
@@ -1516,17 +1516,15 @@ fn counter_fixture_min_delta_blocks_v1_accept_as_progress() {
         case.id
     );
 
-    // === EXACT counter pipeline — Reject → NotApplied (INV-T8; P0-tur5 honest) ===
+    // === EXACT counter pipeline — Reject → NotApplied (INV-T8; P1-tur6) ===
     assert_eq!(
         obs_v1_counter.pipeline,
-        common::PipelineObservation::CommitReached {
-            q5: common::Q5Observation::NotObserved,
+        common::PipelineObservation::ReferenceEvaluation {
             predicate_completion: Some(PredicateCompletion::NotCompleted),
             mutation_decision: Some(MutationDecision::Reject),
             apply_target: Some(ApplyTarget::NotApplied),
-            witness_reachability: common::WitnessReachability::NotReached,
         },
-        "counter V1: min_delta=1.0 → improved=false → Reject (evaluator honest-encoding); case {}",
+        "counter V1: min_delta=1.0 → improved=false → Reject (reference evaluation); case {}",
         case.id
     );
 
@@ -2078,23 +2076,22 @@ fn mixed_cohesion_required_source_matrix_rejects_concrete_authority_claims() {
             invalid_case.id
         ),
     }
-    // **P0-tur4 re-anchor:** V1 evaluator commit pipeline KULLANMAZ → motorun
-    // validate_for_commit'ı (InvalidRequiredMetricSource üreten aşama) harness'te
-    // ÇALIŞMAZ. Eski StoppedBeforeCommit(TaskValidation) pin'i gerçek-pipeline V1'e
-    // aitti; TaskValidation reject artık yalnız V2'de (ve aşağıdaki gerçek commit
-    // çağrısında — commit_invalid_mixed_case exact error chain) gözlemlenir. V1
-    // PredicateGate'e ulaşır: Mixed required_source ile predicate karşılanamaz →
-    // NotCompleted → Reject → NotApplied (INV-T8), decision_input Some.
+    // **P1-tur6 re-anchor:** V1 = ReferenceEvaluation — production pipeline
+    // ÇALIŞMAZ → motorun validate_for_commit'ı (InvalidRequiredMetricSource üreten
+    // aşama) harness'te koşmaz; production reachability iddiası YAPILMAZ. Eski
+    // StoppedBeforeCommit(TaskValidation) pin'i gerçek-pipeline V1'e aitti;
+    // TaskValidation reject artık yalnız V2'de (ve aşağıdaki gerçek commit
+    // çağrısında — commit_invalid_mixed_case exact error chain) gözlemlenir.
+    // Gözlenen: PredicateGate(case inputs) — Mixed required_source ile predicate
+    // karşılanamaz → NotCompleted → Reject → NotApplied (INV-T8); decision_input Some.
     assert_eq!(
         obs_v1.pipeline,
-        common::PipelineObservation::CommitReached {
-            q5: common::Q5Observation::NotObserved,
+        common::PipelineObservation::ReferenceEvaluation {
             predicate_completion: Some(osp_core::trajectory::PredicateCompletion::NotCompleted),
             mutation_decision: Some(osp_core::trajectory::MutationDecision::Reject),
             apply_target: Some(osp_core::trajectory::ApplyTarget::NotApplied),
-            witness_reachability: common::WitnessReachability::NotReached,
         },
-        "{} V1 exact pipeline (evaluator honest; TaskValidation çalışmaz → PredicateGate Reject); got {:?}",
+        "{} V1 exact pipeline (ReferenceEvaluation; TaskValidation gözlenmez → gate Reject — production reachability iddiası YOK); got {:?}",
         invalid_case.id,
         obs_v1.pipeline
     );
@@ -2771,46 +2768,29 @@ fn q92_assert_exact_downstream_snapshot(
     obs: &CharacterizationObservation,
     lane: &str,
 ) {
-    match &obs.pipeline {
-        PipelineObservation::CommitReached {
-            q5,
-            predicate_completion,
-            mutation_decision,
-            apply_target,
-            witness_reachability,
-        } => {
-            use osp_core::trajectory::{ApplyTarget, MutationDecision, PredicateCompletion};
-            // **#96 MD-2 P0-tur5 (review P1 — truth-surface):** V1 evaluator Q5
-            // vision'ı gözleyemez (NotObserved) ve witness aşamasına gitmez
-            // (NotReached) — gözlenmeyen yüzey fabrication YOK. V2 gerçek native
-            // flow (sealed carrier → commit): Q5 Passed + boş witness ile Held.
-            // Authorization yüzeyi lane'ler arasında divergent; KARAR yüzeyi
-            // (q5/predicate/mutation/apply'dan predicate/mutation/apply) exact
-            // parity olarak pinlenmeye devam eder.
-            let q5_exact = if lane == "V1" {
-                common::Q5Observation::NotObserved
-            } else {
-                common::Q5Observation::Passed
-            };
-            assert_eq!(
-                *q5,
-                q5_exact,
-                "{case_id} {lane}: Q5 exact = {}",
-                if lane == "V1" {
-                    "NotObserved (evaluator)"
-                } else {
-                    "Passed (gerçek pipeline)"
-                }
-            );
+    use osp_core::trajectory::{ApplyTarget, MutationDecision, PredicateCompletion};
+    match (&obs.pipeline, lane) {
+        // **P1-tur6 (review — truth-surface):** V1 = ReferenceEvaluation —
+        // production pipeline ÇALIŞMADI; yalnız PredicateGate gerçek girdilerle
+        // doğrudan koştu (Q5/witness gözlenmez; CommitReached fabrication'ı kapanır).
+        // Karar yüzeyi (predicate/mutation/apply) gerçek gate çıktısı.
+        (
+            PipelineObservation::ReferenceEvaluation {
+                predicate_completion,
+                mutation_decision,
+                apply_target,
+            },
+            "V1",
+        ) => {
             assert_eq!(
                 *predicate_completion,
                 Some(PredicateCompletion::Completed),
-                "{case_id} {lane}: predicate exact = Some(Completed)"
+                "{case_id} V1: predicate exact = Some(Completed) (reference evaluation)"
             );
             assert_eq!(
                 *mutation_decision,
                 Some(MutationDecision::AcceptAsCompleted),
-                "{case_id} {lane}: mutation exact = Some(AcceptAsCompleted)"
+                "{case_id} V1: mutation exact = Some(AcceptAsCompleted) (reference evaluation)"
             );
             // P2-1: enum equality (ApplyTarget PartialEq/Eq derive'lu) — Debug
             // representation semantic contract değildir.
@@ -2819,21 +2799,52 @@ fn q92_assert_exact_downstream_snapshot(
                 Some(ApplyTarget::Lane(
                     osp_core::trajectory::CommitLane::Mainline
                 )),
-                "{case_id} {lane}: apply exact = Some(Lane(Mainline))"
-            );
-            let witness_exact = if lane == "V1" {
-                common::WitnessReachability::NotReached
-            } else {
-                common::WitnessReachability::Held
-            };
-            assert_eq!(
-                *witness_reachability,
-                witness_exact,
-                "{case_id} {lane}: witness exact = {}",
-                if lane == "V1" { "NotReached" } else { "Held" }
+                "{case_id} V1: apply exact = Some(Lane(Mainline)) (reference evaluation)"
             );
         }
-        other => panic!("{case_id} {lane}: expected CommitReached, got {other:?}"),
+        // V2 = gerçek commit_task_claim yüzeyi: Q5 Passed + boş witness ile Held
+        // (authorization.outcome gerçek AttemptOutcome — fabrication DEĞİL).
+        (
+            PipelineObservation::CommitReached {
+                q5,
+                predicate_completion,
+                mutation_decision,
+                apply_target,
+                witness_reachability,
+            },
+            "V2",
+        ) => {
+            assert_eq!(
+                *q5,
+                common::Q5Observation::Passed,
+                "{case_id} V2: Q5 exact = Passed (gerçek pipeline)"
+            );
+            assert_eq!(
+                *predicate_completion,
+                Some(PredicateCompletion::Completed),
+                "{case_id} V2: predicate exact = Some(Completed)"
+            );
+            assert_eq!(
+                *mutation_decision,
+                Some(MutationDecision::AcceptAsCompleted),
+                "{case_id} V2: mutation exact = Some(AcceptAsCompleted)"
+            );
+            assert_eq!(
+                *apply_target,
+                Some(ApplyTarget::Lane(
+                    osp_core::trajectory::CommitLane::Mainline
+                )),
+                "{case_id} V2: apply exact = Some(Lane(Mainline))"
+            );
+            assert_eq!(
+                *witness_reachability,
+                common::WitnessReachability::Held,
+                "{case_id} V2: witness exact = Held"
+            );
+        }
+        (other, lane) => {
+            panic!("{case_id} {lane}: unexpected pipeline shape: {other:?}")
+        }
     }
 }
 
@@ -2879,8 +2890,15 @@ fn q92_drift_matrix(
     // ── Reachability + exact downstream snapshot (P1-3 + P2-1 + P2-2) ──
     // q5/predicate/mutation/apply/witness EXACT dondurulur (discard yok);
     // karar sınıflandırması yalnız BothReached'te — exact snapshot'tan gelir.
+    // **P1-tur6:** karar yüzeyine ulaşma = CommitReached (gerçek commit) VEYA
+    // ReferenceEvaluation (yalnız gate koştu) — iki şekil de karar sınıflandırılır.
     let (reachability, decision_drift_class) = match (&obs_v1.pipeline, &obs_v2.pipeline) {
-        (PipelineObservation::CommitReached { .. }, PipelineObservation::CommitReached { .. }) => {
+        (
+            PipelineObservation::CommitReached { .. }
+            | PipelineObservation::ReferenceEvaluation { .. },
+            PipelineObservation::CommitReached { .. }
+            | PipelineObservation::ReferenceEvaluation { .. },
+        ) => {
             q92_assert_exact_downstream_snapshot(case_id, &obs_v1, "V1");
             q92_assert_exact_downstream_snapshot(case_id, &obs_v2, "V2");
             // Exact snapshot pinlendikten sonra parity construction-by-design:

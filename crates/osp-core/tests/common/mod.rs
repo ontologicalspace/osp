@@ -1898,6 +1898,10 @@ impl MeasurementFailureClass {
 /// Pipeline (commit_task_claim) sonucu — stage-aware erken duruşlar dahil.
 ///
 /// **Review tur 6/7:** `PartialEq` derive + Held/Rejected outcome authoritative okuma.
+/// **P1-tur6 (review):** `CommitReached` YALNIZ gerçek `commit_task_claim` yüzeyinde
+/// kullanılır — V1 non-authoritative reference evaluation kendi variant'ında
+/// (`ReferenceEvaluation`) temsil edilir; production pipeline reachability
+/// fabricate EDİLMEZ.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PipelineObservation {
     /// commit_task_claim tam çalıştı (Evaluated/Held/Rejected dahil).
@@ -1917,6 +1921,19 @@ pub enum PipelineObservation {
         /// Evaluated: TaskCommitResult.apply_target; Held/Rejected: authorization.apply_target.
         apply_target: Option<osp_core::trajectory::ApplyTarget>,
         witness_reachability: WitnessReachability,
+    },
+    /// **#96 MD-2 P1-tur6 (review — truth-surface):** Production commit pipeline
+    /// ÇALIŞTIRILMADI — V1 non-authoritative reference evaluation yüzeyi. Yalnız
+    /// PredicateGate GERÇEK case girdileriyle DOĞRUDAN çalıştırıldı; karar alanları
+    /// gate'in gerçek çıktısıdır. Production reachability iddiası YOK: Q5 vision /
+    /// TaskValidation / Q6 / witness gözlenmedi (variant'ın kendisi bunu belirtir —
+    /// `CommitReached` "commit_task_claim tam çalıştı" demektir, bu yüzey için DEĞİL).
+    ReferenceEvaluation {
+        /// PredicateGate gerçek çıktısı (gate gerçekten koştu — fabrication değil;
+        /// counterfactual olan yalnızca "production bunu tüketirdi" iddiasıdır).
+        predicate_completion: Option<osp_core::trajectory::PredicateCompletion>,
+        mutation_decision: Option<osp_core::trajectory::MutationDecision>,
+        apply_target: Option<osp_core::trajectory::ApplyTarget>,
     },
     /// commit_task_claim Q5/commit'e ulaşmadan error verdi (early stop).
     StoppedBeforeCommit {
@@ -2046,6 +2063,17 @@ impl MutationDecisionObservation {
                 ..
             } => Self::Observed(*md),
             PipelineObservation::CommitReached {
+                mutation_decision: None,
+                ..
+            } => Self::ReachedButUnsurfaced,
+            // **P1-tur6:** ReferenceEvaluation'da gate GERÇEKTEN koştu — karar
+            // observable. Production-reachability ayrımı PipelineObservation
+            // seviyesinde yaşar (CommitReached ≠ ReferenceEvaluation).
+            PipelineObservation::ReferenceEvaluation {
+                mutation_decision: Some(md),
+                ..
+            } => Self::Observed(*md),
+            PipelineObservation::ReferenceEvaluation {
                 mutation_decision: None,
                 ..
             } => Self::ReachedButUnsurfaced,
@@ -2225,14 +2253,14 @@ pub fn evaluate_v1_case(
     // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
-    // **P0-tur5 (review P1 — truth-surface):** V1 characterization — commit
+    // **P1-tur6 (review — truth-surface):** V1 characterization — commit
     // pipeline YOK; evaluator sentetik `EngineCommitResult` da ÜRETMEZ. Eski
     // synthetic-Evaluated yolu Q5'i `Passed`, witness'ı `Evaluated` diye
     // kodluyordu — hiç çalışmamış aşamaların sonucunu gözlenmiş gibi sunmak
     // fabrication'dı. Artık yalnız GERÇEKTEN çalışan yüzeyler gözlemlenir
-    // (Q4 structural + raw finite + PredicateGate); motor-private aşamalar
-    // (Q5 vision, Q6, witness, TaskValidation) açıkça `NotObserved`/`NotReached`
-    // ile temsil edilir.
+    // (Q4 structural + raw finite + PredicateGate); sonuç `ReferenceEvaluation`
+    // variant'ında taşınır — production pipeline reachability (CommitReached)
+    // iddiası BU yüzeyde asla yapılmaz; Q5/Q6/witness/TaskValidation gözlenmez.
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError inline (measurement.rs layout decision)"
@@ -2293,15 +2321,14 @@ pub fn evaluate_v1_case(
     };
 
     let pipeline = match &evaluation {
-        Ok(gate_out) => PipelineObservation::CommitReached {
-            // Q5 vision motor-private — çalışTIRILAMADI (fabrication YOK:
-            // `Passed` yalnız gerçek pipeline'dan gözlemlenir).
-            q5: Q5Observation::NotObserved,
+        // **P1-tur6:** ReferenceEvaluation — production commit pipeline ÇALIŞMADI;
+        // yalnız PredicateGate gerçek girdilerle doğrudan koştu. `CommitReached`
+        // ("commit_task_claim tam çalıştı") burada KULLANILMAZ — production
+        // reachability fabricate edilmez.
+        Ok(gate_out) => PipelineObservation::ReferenceEvaluation {
             predicate_completion: Some(gate_out.outcome.predicate_completion),
             mutation_decision: Some(gate_out.outcome.mutation_decision),
             apply_target: Some(gate_out.outcome.mutation_decision.apply_target()),
-            // Witness aşamasına hiç gidilmedi (commit pipeline yok).
-            witness_reachability: WitnessReachability::NotReached,
         },
         Err(e) => PipelineObservation::StoppedBeforeCommit {
             stage: PipelineStage::from_engine_commit_error(e),

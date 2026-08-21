@@ -1016,13 +1016,14 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     return NavigatorResult::TaskNotFound;
                 }
                 Err(e) => {
-                    // **INV-T9 exhaustive taxonomy** — her varyant explicit handle.
-                    use crate::engine::EngineCommitError;
-                    match e {
+                    // **P2-tur6 (review — tek ontology):** sınıflandırma SHARED
+                    // mapper'dan — `task_measurement::commit_error_agent_surface`
+                    // (MCP aynı tabloyu tüketir; iki truth YOK). Inner match
+                    // yalnızca payload/mesaj çıkarımı için — sınıflandırma değil.
+                    use crate::task_measurement::commit_error_agent_surface;
+                    match commit_error_agent_surface(&e) {
                         // Retryable (agent-correctable) — budget tüketir, continue.
-                        EngineCommitError::SyntaxViolation { .. }
-                        | EngineCommitError::VisionViolation { .. }
-                        | EngineCommitError::RuleViolation { .. } => {
+                        crate::task_measurement::NativeFailureSurface::RetryAgentProposal => {
                             let gd = gate_decision_from_engine_error(&e);
                             let hall = crate::agent::HallucinationType::from_engine_error(&e);
                             // **#95 MD-1 P2-1:** Retryable commit error =
@@ -1078,60 +1079,63 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                             continue;
                         }
                         // Terminal — operational fault, retry YOK, budget tüketmez.
-                        EngineCommitError::InvalidWitnessEvidence(msg) => {
-                            return NavigatorResult::WitnessEvaluationError(msg);
+                        crate::task_measurement::NativeFailureSurface::WitnessEvaluationError => {
+                            let crate::engine::EngineCommitError::InvalidWitnessEvidence(msg) = &e
+                            else {
+                                unreachable!(
+                                    "mapper contract: WitnessEvaluationError ⟺ InvalidWitnessEvidence"
+                                )
+                            };
+                            return NavigatorResult::WitnessEvaluationError(msg.clone());
                         }
-                        EngineCommitError::PermissionDenied(_msg) => {
+                        // Terminal — task binding yok (task not found / standalone).
+                        crate::task_measurement::NativeFailureSurface::TaskNotFound => {
+                            let crate::engine::EngineCommitError::PermissionDenied(_msg) = &e
+                            else {
+                                unreachable!("mapper contract: TaskNotFound ⟺ PermissionDenied")
+                            };
                             return NavigatorResult::TaskNotFound;
                         }
-                        EngineCommitError::NoPersistence
-                        | EngineCommitError::Persistence(_)
-                        | EngineCommitError::Internal(_) => {
-                            return NavigatorResult::SystemFailure(
-                                "engine system failure (persistence/internal)".to_string(),
-                            );
-                        }
-                        // AuthorizationContextFailed = fail-closed system failure —
-                        // basis üretilemedi, sıfır digest'e düşülmedi, terminal.
-                        EngineCommitError::AuthorizationContextFailed(msg) => {
-                            return NavigatorResult::SystemFailure(msg);
-                        }
-                        // **INV-T9 Step 4b (reviewer P0-4):** VisionContextInvalid =
-                        // terminal — maneuver budget tüketmez, yeni LLM attempt
-                        // başlatmaz, witness'a ulaşmaz. SystemFailure olarak map'lenir.
-                        EngineCommitError::VisionContextInvalid(err) => {
-                            return NavigatorResult::SystemFailure(err.to_string());
-                        }
-                        // **INV-T9 #70 Commit 4b (reviewer v2 karar 2):** TaskValidation
-                        // = terminal — geçersiz task declaration (Mixed source, non-finite
-                        // threshold/tolerance, geçersiz policy). Agent retry değil — task
-                        // config düzeltilmeli. Maneuver budget tüketmez, witness'a ulaşmaz.
-                        // Faz 8: disposition-aware navigation refine (şimdilik SystemFailure).
-                        EngineCommitError::TaskValidation(err) => {
-                            return NavigatorResult::SystemFailure(err.to_string());
-                        }
-                        // **INV-T9 #70 Commit 4b (reviewer v4 P1-3):** MeasurementBindingMismatch
-                        // — disposition: RegenerateMeasurement (stale → retry without LLM)
-                        // veya RejectPresentedAuthority (replay/tamper → terminal). Faz 8'de
-                        // disposition-aware retry; şimdilik terminal SystemFailure.
-                        EngineCommitError::MeasurementBindingMismatch(err) => {
-                            return NavigatorResult::SystemFailure(err.to_string());
-                        }
-                        // **INV-T9 #70 Commit 4b (reviewer v3 P1-4):** MeasurementBindingFailed
-                        // = engine derivation failure (operational fault) — terminal SystemFailure.
-                        EngineCommitError::MeasurementBindingFailed(err) => {
-                            return NavigatorResult::SystemFailure(err.to_string());
-                        }
-                        // **INV-T9 #70 Commit 4b Faz 3 (reviewer v6 #1):** Tek kapsayıcı
-                        // measurement binding verification error. Mismatch (tag 8 —
-                        // disposition Regenerate/Reject), Derivation (system failure),
-                        // Drift (system failure — retry gerekebilir),
-                        // **#96: NativeAuthority (engine-issued native token invariant/
-                        // tamper/drift — kontrat gereği SystemFailure | budget yok |
-                        // LLM retry yok)**. Faz 8'de disposition-aware navigation refine;
-                        // şimdilik terminal SystemFailure.
-                        EngineCommitError::MeasurementBindingVerification(err) => {
-                            return NavigatorResult::SystemFailure(err.to_string());
+                        // Terminal system failure — operational/TCB/native-authority
+                        // family. Payload'a özel mesaj yüzü (sınıflandırma mapper'da):
+                        // - AuthorizationContextFailed: fail-closed — basis üretilmedi,
+                        //   sıfır digest'e düşülmedi, terminal.
+                        // - VisionContextInvalid (INV-T9 Step 4b): terminal — budget
+                        //   yok, yeni LLM attempt yok, witness'a ulaşmaz.
+                        // - TaskValidation (#70 Commit 4b): geçersiz task declaration —
+                        //   agent retry değil, task config düzeltilmeli.
+                        // - MeasurementBindingMismatch: disposition Regenerate/Reject
+                        //   (Faz 8'de disposition-aware refine).
+                        // - MeasurementBindingFailed: engine derivation failure.
+                        // - MeasurementBindingVerification (Faz 3 / #96): Mismatch/
+                        //   Derivation/Drift/NativeAuthority — kontrat gereği
+                        //   SystemFailure | budget yok | LLM retry yok.
+                        crate::task_measurement::NativeFailureSurface::SystemFailure
+                        | crate::task_measurement::NativeFailureSurface::SyntaxRejection => {
+                            use crate::engine::EngineCommitError;
+                            let message = match &e {
+                                EngineCommitError::NoPersistence
+                                | EngineCommitError::Persistence(_)
+                                | EngineCommitError::Internal(_) => {
+                                    "engine system failure (persistence/internal)".to_string()
+                                }
+                                EngineCommitError::AuthorizationContextFailed(msg) => msg.clone(),
+                                EngineCommitError::VisionContextInvalid(err) => err.to_string(),
+                                EngineCommitError::TaskValidation(err) => err.to_string(),
+                                EngineCommitError::MeasurementBindingMismatch(err) => {
+                                    err.to_string()
+                                }
+                                EngineCommitError::MeasurementBindingFailed(err) => err.to_string(),
+                                EngineCommitError::MeasurementBindingVerification(err) => {
+                                    err.to_string()
+                                }
+                                // Mapper contract: bu yüzeye yalnız yukarıdaki
+                                // system-failure varyantları sınıflanır.
+                                _ => unreachable!(
+                                    "mapper contract: system-failure surface ⟺ terminal variants"
+                                ),
+                            };
+                            return NavigatorResult::SystemFailure(message);
                         }
                     }
                 }
