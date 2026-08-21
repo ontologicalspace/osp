@@ -1272,8 +1272,9 @@ impl CoreAxisEpochStamp {
         ]
     }
 
-    /// Characterization-only token construction (measurement.rs
-    /// `new_characterization_legacy`) — epoch'lar u64 dizisinden.
+    /// Crate-internal test helper (`FinalizedNativeTaskClaim::new_test_with_measured`)
+    /// — epoch'lar u64 dizisinden. Production build'de kullanılmaz.
+    #[cfg(test)]
     pub(crate) fn from_u64s(v: [u64; 5]) -> Self {
         Self {
             coupling: AxisStateEpoch::from(v[0]),

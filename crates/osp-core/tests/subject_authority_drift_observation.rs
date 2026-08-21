@@ -46,6 +46,9 @@ struct CaseSetup {
     claim: osp_core::witness::Claim,
     task: Task,
     native: osp_core::engine::NativeAttemptMeasurement,
+    /// **#96 MD-2 P0-tur4:** Sealed carrier (draft.finalize ürünü) — commit
+    /// pipeline yalnız bunu kabul eder (finalize bypass type-level imkânsız).
+    carrier: osp_core::task_measurement::FinalizedNativeTaskClaim,
     loss_before: f64,
     target: RawPosition,
 }
@@ -75,9 +78,10 @@ fn setup_with_engine(
     let native = engine
         .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
         .expect("native measurement should succeed for corpus case");
-    let claim = draft
+    let finalized = draft
         .finalize(native.authority())
         .expect("subject binding: draft ve token ayni proposal");
+    let claim = finalized.claim().clone();
     let target = case
         .task
         .target_predicate_set
@@ -95,6 +99,7 @@ fn setup_with_engine(
         claim,
         task: case.task.clone(),
         native,
+        carrier: finalized,
         loss_before,
         target,
     }
@@ -385,12 +390,11 @@ fn wide_affected_scope_001_draft_characterization_and_non_surviving_drop() {
     let result = s
         .engine
         .commit_task_claim(osp_core::engine::TaskCommitInput::new(
-            &s.claim,
+            &s.carrier,
             &WitnessSet::new(vec![]),
             &registry as &dyn TaskResolver,
             s.target,
             s.loss_before,
-            s.native.authority(),
         ));
     match &result {
         Err(osp_core::engine::EngineCommitError::VisionContextInvalid(_)) => {}
@@ -663,7 +667,6 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
         &registry as &dyn TaskResolver,
         target,
         loss_before,
-        native_a.authority(),
     ));
     let state_a = space_fingerprint(&engine_a);
 
@@ -698,12 +701,11 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
     );
     let mut engine_b = s.engine;
     let result_b = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &s.claim,
+        &s.carrier,
         &WitnessSet::new(vec![]),
         &registry as &dyn TaskResolver,
         s.target,
         s.loss_before,
-        s.native.authority(),
     ));
     assert_eq!(
         std::format!("{result_a:?}"),
@@ -870,12 +872,11 @@ fn q6_rule_violation_finalizes_reached_but_unavailable() {
     registry.insert(s.task.clone());
     let mut engine_b = s.engine;
     let result = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &s.claim,
+        &s.carrier,
         &WitnessSet::new(vec![]),
         &registry as &dyn TaskResolver,
         s.target,
         s.loss_before,
-        s.native.authority(),
     ));
     let err = match result {
         Err(osp_core::engine::EngineCommitError::RuleViolation { .. }) => {

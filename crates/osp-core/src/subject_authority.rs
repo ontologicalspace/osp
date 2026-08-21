@@ -1289,7 +1289,8 @@ mod tests {
             .expect("subject binding: draft ve token ayni proposal");
         let target = RawPosition::default();
 
-        let draft = observe_subject_authority_drift(&engine, &claim, &task, &native, 0.0, &target);
+        let draft =
+            observe_subject_authority_drift(&engine, claim.claim(), &task, &native, 0.0, &target);
 
         // Her iki lane de Evaluated olmalı (UserLoaded authority) ve Violated
         // (ölçüm vision'dan uzak) — aynı captured context altında.

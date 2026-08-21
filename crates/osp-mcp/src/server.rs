@@ -877,9 +877,9 @@ impl Workspace {
             }
         };
         if let Err(violation) = osp_core::task_measurement::validate_raw_position_finite(
-            claim.id,
+            claim.claim().id,
             "measurement.after",
-            &claim.computed_raw,
+            &claim.claim().computed_raw,
         ) {
             return Ok(serde_json::json!({
                 "attempt_outcome": {
@@ -904,7 +904,7 @@ impl Workspace {
         // yollarda; eligibility witness disposition'tan bağımsız.
         let drift_draft = osp_core::subject_authority::observe_subject_authority_drift(
             self.engine_mut(),
-            &claim,
+            claim.claim(),
             task,
             &native,
             loss_before,
@@ -914,7 +914,7 @@ impl Workspace {
         // reference. Eligibility MD-1 ile aynı (Q4SyntaxRejection arm'ı YOK).
         let prov_draft = osp_core::provenance_authority::observe_provenance_authority_drift(
             self.engine_mut(),
-            &claim,
+            claim.claim(),
             task,
             native.authority(),
             loss_before,
@@ -930,7 +930,6 @@ impl Workspace {
                 &tmp_reg as &dyn TaskResolver,
                 target,
                 loss_before,
-                native.authority(),
             ),
         ) {
             Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,

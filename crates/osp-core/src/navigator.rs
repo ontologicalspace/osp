@@ -848,14 +848,13 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 }
             };
 
-            // 6. Final Claim — draft.consume: YALNIZ computed_raw/Intent enjekte
-            //    (structural fields + claim_id aynı object — probe↔final TOCTOU
-            //    type-level kapalı) + **tur-2 P1 subject-binding kontrolü**
-            //    (`LegacySubjectBindingMismatch` → NativeAuthority family →
-            //    SystemFailure kontratı) + Q4 FINAL-RAW finite validation
-            //    (measurement gerçeği; engine defensively tekrar kontrol eder).
-            let claim = match draft.finalize(native.authority()) {
-                Ok(c) => c,
+            // 6. Finalized sealed carrier — draft.consume: YALNIZ computed_raw/Intent
+            //    enjekte (structural + claim_id aynı object) + **subject-binding kontrolü**
+            //    (`LegacySubjectBindingMismatch`) + Q4 FINAL-RAW finite validation.
+            //    **P0-tur4:** finalize `FinalizedNativeTaskClaim` döner (sealed —
+            //    claim+measurement ayrılamaz; TaskCommitInput yalnız bunu kabul eder).
+            let finalized = match draft.finalize(native.authority()) {
+                Ok(f) => f,
                 Err(e) => {
                     return NavigatorResult::SystemFailure(format!(
                         "native token subject binding: {e}"
@@ -863,9 +862,9 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 }
             };
             if let Err(violation) = crate::task_measurement::validate_raw_position_finite(
-                claim.id,
+                finalized.claim().id,
                 "measurement.after",
-                &claim.computed_raw,
+                &finalized.claim().computed_raw,
             ) {
                 let before_raw = self.current_measured.to_raw();
                 self.evidence.push(TrajectoryEvidence {
@@ -895,7 +894,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             // yalnızca comparison-surviving yollarda (eligibility contract).
             let drift_draft = crate::subject_authority::observe_subject_authority_drift(
                 self.engine,
-                &claim,
+                finalized.claim(),
                 &task,
                 &native,
                 loss_before,
@@ -906,7 +905,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             // Q4SyntaxRejection arm'ı YOK (precedence correction).
             let prov_draft = crate::provenance_authority::observe_provenance_authority_drift(
                 self.engine,
-                &claim,
+                finalized.claim(),
                 &task,
                 native.authority(),
                 loss_before,
@@ -925,12 +924,11 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             };
             let task_result = match self.engine.commit_task_claim(
                 crate::engine::TaskCommitInput::new(
-                    &claim,
+                    &finalized,
                     &omega,
                     self.resolver as &dyn TaskResolver,
                     self.target_vector,
                     loss_before,
-                    native.authority(),
                 ),
             ) {
                 Ok(crate::engine::EngineCommitResult::Evaluated { result, .. }) => result,
@@ -1717,9 +1715,9 @@ mod tests {
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
-        let commit_token = characterization_token(&engine, &claim, measured);
+        let commit_token = characterization_carrier(&engine, &claim, measured);
         let result = engine.commit_task_claim(TaskCommitInput::new(
-            &claim,
+            &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
             RawPosition {
@@ -1730,7 +1728,6 @@ mod tests {
                 v: 0.3,
             },
             1.0,
-            &commit_token,
         ));
         // Q5.b çalıştı — Reject (witness yok) veya Ok (predicate reject NotApplied).
         // İkisi de Q5.b'nin çalıştığını gösterir. Witness boş → INV-T9 Held beklenir.
@@ -1803,14 +1800,13 @@ mod tests {
         let space_digest_before =
             crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         let t_c_before = engine.t_c();
-        let commit_token = characterization_token(&engine, &claim, measured.clone());
+        let commit_token = characterization_carrier(&engine, &claim, measured.clone());
         let result = engine.commit_task_claim(TaskCommitInput::new(
-            &claim,
+            &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
             target,
             1.0,
-            &commit_token,
         ));
 
         // Ayrı olarak aynı girdilerle PredicateGate.evaluate → gate_out.
@@ -1914,14 +1910,13 @@ mod tests {
             w: 0.5,
             v: 0.3,
         };
-        let commit_token = characterization_token(&engine, &claim, measured.clone());
+        let commit_token = characterization_carrier(&engine, &claim, measured.clone());
         let result = engine.commit_task_claim(TaskCommitInput::new(
-            &claim,
+            &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
             target,
             1.0,
-            &commit_token,
         ));
         let resolved_task = resolver.resolve(TaskId::from(1u64)).unwrap();
         let gate_out = PredicateGate.evaluate(PredicateGateInput {
@@ -1962,14 +1957,13 @@ mod tests {
         let claim = test_claim_with_task(1, None, 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let commit_token = characterization_token(&engine, &claim, measured);
+        let commit_token = characterization_carrier(&engine, &claim, measured);
         let result = engine.commit_task_claim(TaskCommitInput::new(
-            &claim,
+            &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
             RawPosition::default(),
             1.0,
-            &commit_token,
         ));
         assert!(
             result.is_err(),
@@ -2008,28 +2002,28 @@ mod tests {
     /// `TaskCommitInput::new` test fixture'ları (tests/common mirror'i ile aynı
     /// kurulum; audit subject = claim delta node id'leri; epoch [0;5] — fixture
     /// axis'leri immutable).
-    fn characterization_token(
+    fn characterization_carrier(
         engine: &SpaceEngine,
         claim: &Claim,
         measured: ProvenancedRawPosition,
-    ) -> crate::measurement::NativeLegacySubjectMeasurement {
+    ) -> crate::task_measurement::FinalizedNativeTaskClaim {
         use crate::authorization::{
             canonical_structural_delta_from_claim, MeasurementInputContext, MeasurementInputDigest,
         };
-        use crate::measurement::{MeasurementDeltaDigest, NativeLegacySubjectMeasurement};
+        use crate::measurement::MeasurementDeltaDigest;
         let canonical = canonical_structural_delta_from_claim(claim).unwrap();
         let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical).unwrap();
         let revision = engine.current_space_view_revision().unwrap();
         let ctx = MeasurementInputContext::try_from(engine.coord_system()).unwrap();
         let input_digest = MeasurementInputDigest::compute(&ctx).unwrap();
         let subject = claim.delta_nodes.iter().map(|n| n.id).collect();
-        NativeLegacySubjectMeasurement::new_characterization_legacy(
+        crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
+            claim.clone(),
             measured,
             subject,
             delta_digest,
             revision,
             input_digest,
-            [0; 5],
         )
     }
 
@@ -2046,14 +2040,13 @@ mod tests {
         omega: &crate::witness::WitnessSet,
         measured: ProvenancedRawPosition,
     ) -> Result<crate::engine::EngineCommitResult, crate::engine::EngineCommitError> {
-        let token = characterization_token(engine, claim, measured);
+        let carrier = characterization_carrier(engine, claim, measured);
         engine.commit_task_claim(TaskCommitInput::new(
-            claim,
+            &carrier,
             omega,
             resolver,
             RawPosition::default(),
             1.0,
-            &token,
         ))
     }
 
@@ -3676,9 +3669,9 @@ mod tests {
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
 
-        let commit_token = characterization_token(&engine, &claim, measured);
+        let commit_token = characterization_carrier(&engine, &claim, measured);
         let result = engine.commit_task_claim(TaskCommitInput::new(
-            &claim,
+            &commit_token,
             &omega,
             &resolver as &dyn crate::trajectory::TaskResolver,
             crate::coords::RawPosition {
@@ -3689,7 +3682,6 @@ mod tests {
                 v: 0.3,
             },
             1.0,
-            &commit_token,
         ));
 
         // **reviewer P2 (test sıkılaştırma):** Fixture kesin Held üretmeli (boş witness →

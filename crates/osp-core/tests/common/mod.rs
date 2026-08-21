@@ -2124,60 +2124,29 @@ pub fn engine_with_case_space(case: &CharacterizationCase) -> osp_core::engine::
 }
 
 /// V1 evaluation: compute_raw_from_delta → build Claim → current_measured/loss_before
-/// → commit_task_claim. compute_raw_from_delta infallible → measurement NotAttempted
-/// (V1 measurement tracking yapmaz; measured = provenanced_from_raw(computed_raw)).
+/// → **non-authoritative evaluator** (Q4 structural + raw finite → PredicateGate
+/// direkt; commit pipeline YOK). compute_raw_from_delta infallible → measurement
+/// NotAttempted (V1 measurement tracking yapmaz; measured = provenanced_from_raw
+/// (computed_raw)).
 ///
-/// **İsimlendirme:** "V1 production path" — bu mevcut navigator/MCP yolu.
+/// **İsimlendirme:** "V1 production path" — eski navigator/MCP legacy yüzeyinin
+/// characterization'ı.
 ///
 /// **Review P0-2 fix:** `loss_before` navigator.rs:618/879'daki gibi `current_measured`
 /// (pre-delta engine space centroid) üzerinden hesaplanır — `measured` (post-delta after)
 /// üzerinden DEĞİL. Önceki kod `trajectory_loss(&measured, &target)` ile loss_before =
 /// loss_after yapıyordu; bu sistematik improved=false üretirdi ve V1/V2 baseline
 /// karşılaştırmasını bozardı.
-/// **#96 MD-2 (plan v4-FİNAL):** Characterization-native commit token — V1/V2
-/// harness lane'lerinin `commit_task_claim` (private-field `TaskCommitInput::new`)
-/// üzerinden geçebilmesi. `new_characterization_legacy` (doc-hidden) production
-/// forge-edilebilirlik kapanışının AÇIKÇA İSİMLENDİRİLMİŞ istisnasıdır — yalnız
-/// Faz 8-P2 characterization machinery; #100'de V1 lane kaldırılınca silinir.
-/// Epoch'lar [0;5] — corpus axis'leri immutable (monoton epoch ZERO).
-pub fn characterization_native_token(
-    engine: &osp_core::engine::SpaceEngine,
-    claim: &osp_core::witness::Claim,
-    measured: osp_core::coords::MeasuredRawPosition,
-    subject_ids: Vec<u64>,
-) -> osp_core::measurement::NativeLegacySubjectMeasurement {
-    use osp_core::authorization::{
-        canonical_structural_delta_from_claim, MeasurementInputContext, MeasurementInputDigest,
-    };
-    use osp_core::measurement::{MeasurementDeltaDigest, NativeLegacySubjectMeasurement};
-    let canonical = canonical_structural_delta_from_claim(claim)
-        .expect("canonical structural delta should succeed for characterization claim");
-    let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical)
-        .expect("delta digest computation should succeed");
-    let revision = engine
-        .current_space_view_revision()
-        .expect("revision computation should succeed");
-    let context = MeasurementInputContext::try_from(engine.coord_system())
-        .expect("measurement input context should succeed");
-    let input_digest =
-        MeasurementInputDigest::compute(&context).expect("measurement input digest should succeed");
-    NativeLegacySubjectMeasurement::new_characterization_legacy(
-        measured,
-        subject_ids,
-        delta_digest,
-        revision,
-        input_digest,
-        [0; 5],
-    )
-}
-
+/// **#96 MD-2 P0-tur4:** V1 lane commit pipeline KULLANMAZ — `characterization_native_token`
+/// ve `new_characterization_legacy` kaldırıldı; authority tipi dışarıdan forge edilemez.
+/// Vision/witness/TaskValidation motor-private aşamalar olduğundan bu evaluator onları
+/// gözlemleyemez (yalnız Q4 + PredicateGate karar yüzeyi). Epoch'lar [0;5] — corpus
+/// axis'leri immutable (monoton epoch ZERO).
 pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
 ) -> CharacterizationObservation {
     use osp_core::navigator::{build_claim_from_proposal, provenanced_from_raw};
-    use osp_core::trajectory::{InMemoryTaskRegistry, TaskResolver};
-    use osp_core::witness::WitnessSet;
 
     // affected = proposal.affected_nodes ∪ removed_edges.from (navigator.rs:810-815 mirror).
     let mut affected: Vec<u64> = case.proposal.affected_nodes.clone();
@@ -2251,23 +2220,55 @@ pub fn evaluate_v1_case(
     // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
-    // Registry + commit.
-    // **#96 MD-2:** private-field TaskCommitInput::new — V1 lane characterization
-    // token (uniform-Scip projected measured KORUNUR — historical reference lane).
-    let mut registry = InMemoryTaskRegistry::new();
-    registry.insert(case.task.clone());
-    let omega = WitnessSet::new(vec![]);
-    let v1_token =
-        characterization_native_token(engine, &claim, measured.clone(), affected.clone());
-
-    let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &claim,
-        &omega,
-        &registry as &dyn TaskResolver,
-        target,
-        loss_before,
-        &v1_token,
-    ));
+    // **P0-tur4 (PR review):** V1 characterization — commit pipeline YOK.
+    // Non-authoritative evaluator: Q4 structural + raw finite → vision → PredicateGate
+    // direkt değerlendirme. Authority tipi forge EDİLEMEZ (token yok).
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError inline (measurement.rs layout decision)"
+    )]
+    let result: Result<
+        osp_core::engine::EngineCommitResult,
+        osp_core::engine::EngineCommitError,
+    > = (|| {
+        // Q4 structural
+        osp_core::task_measurement::validate_claim_structure(&claim)?;
+        // Q4 raw finite
+        osp_core::task_measurement::validate_raw_position_finite(
+            claim.id,
+            "computed_raw",
+            &claim.computed_raw,
+        )?;
+        // Task binding
+        let bound = osp_core::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &case.task,
+        };
+        // Q5 vision: motor private — characterization için atlanır
+        // PredicateGate
+        let gate_out = osp_core::trajectory::PredicateGate.evaluate(
+            osp_core::trajectory::PredicateGateInput {
+                bound,
+                measured: &measured,
+                loss_before,
+                target: &target,
+            },
+        );
+        let outcome = gate_out.outcome.clone();
+        let apply_target = outcome.mutation_decision.apply_target();
+        // Q6: corpus fixture'larında rule yok — skip
+        // Witness: boş set — HarnessAutoApprove olmadan Held beklenir ama
+        // characterization için predicate/decision yeterli; mutation uygulanmaz.
+        Ok(osp_core::engine::EngineCommitResult::Evaluated {
+            result: osp_core::engine::TaskCommitResult {
+                outcome,
+                apply_target,
+                loss_after: gate_out.loss_after,
+                witness: None,
+            },
+            authorization: None,
+        })
+    })();
 
     // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
     // V1 loss_before = trajectory_loss(current_measured, target) (yukarıda baseline loss_bits
@@ -2367,7 +2368,6 @@ pub fn evaluate_v2_candidate_case(
 
     // Measurement başarılı — observation üret + commit için değerleri çıkar.
     let measured_for_commit = token.after().clone();
-    let computed_raw_for_final_claim = token.after().to_raw();
     let target = case
         .task
         .target_predicate_set
@@ -2424,16 +2424,6 @@ pub fn evaluate_v2_candidate_case(
         baseline: baseline_observation,
     };
 
-    // Final Claim: computed_raw = measurement.after().to_raw().
-    let final_claim = build_claim_from_proposal(
-        &case.proposal,
-        computed_raw_for_final_claim,
-        case.task.id,
-        100,
-        1,
-    )
-    .expect("final claim build should succeed for characterization case");
-
     // V1 compatibility projection: loss_before measurement token'ından türe.
     let target = case
         .task
@@ -2446,33 +2436,32 @@ pub fn evaluate_v2_candidate_case(
     registry.insert(case.task.clone());
     let omega = WitnessSet::new(vec![]);
 
-    // **#96 MD-2:** V2 candidate characterization token — native measured
-    // (`token.after()`) ile; audit subject = task scope members.
-    let v2_subject: Vec<u64> = case
-        .task
-        .target_predicate_set
-        .predicates
-        .iter()
-        .flat_map(|wp| match &wp.predicate.scope {
-            osp_core::trajectory::PredicateScope::Node(n) => vec![*n],
-            osp_core::trajectory::PredicateScope::Subgraph(ns) => ns.clone(),
-            osp_core::trajectory::PredicateScope::Module(_) => vec![],
-        })
-        .collect();
-    let native_token = characterization_native_token(
-        engine,
-        &final_claim,
-        measured_for_commit.clone(),
-        v2_subject,
-    );
+    // V2: gerçek native flow (P0-tur4) — draft → measure → finalize → sealed carrier.
+    let draft = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
+        &case.proposal,
+        osp_core::coords::RawPosition::default(),
+        case.task.id,
+        100,
+        1,
+    )
+    .expect("V2 draft");
+    let v2_native = engine
+        .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
+        .expect("V2 native measurement");
+    let finalized = draft
+        .finalize(v2_native.authority())
+        .expect("V2 finalize (subject binding)");
+    let native_token = finalized;
 
+    // **P0-tur4:** commit yalnız sealed carrier kabul eder — ayrı claim +
+    // measurement artifact mix'i (eski `&final_claim + &native_token`) artık
+    // type-level unrepresentable; claim carrier'dan gelir (finalize product).
     let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &final_claim,
+        &native_token,
         &omega,
         &registry as &dyn TaskResolver,
         target,
         loss_before,
-        &native_token,
     ));
 
     // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.

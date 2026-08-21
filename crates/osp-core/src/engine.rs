@@ -101,11 +101,10 @@ pub struct CommitOutcome {
 ///
 /// **#96 MD-2 (plan v4-FİNAL — P0-tur3):** Public field'lar KALDIRILDI (private
 /// fields + `new()` smart ctor — external crate literal bypass kapalı). `measured`
-/// alanı gitti → **opaque `measurement: &NativeLegacySubjectMeasurement`** (engine-
-/// issued; caller native kaynak forge edemez). `target`/`loss_before` KALIR
-/// (semantik authority #97 MD-3; **fiziksel** removal #100 smart ctor tamamlaması).
-/// (Eski TODO'daki `measurement: EngineMeasurement` şekli task-scope binding gerekçesiyle
-/// #100'e devredildi — #96'nin token'ı legacy-subject native'dir; plan v4 keşfi.)
+/// alanı gitti → **sealed `FinalizedNativeTaskClaim` carrier** kabul eder (P0-tur4:
+/// ayrı `&Claim + &token` kombinasyonu type-level unrepresentable — artifact mix
+/// bypass imkânsız). `target`/`loss_before` KALIR (semantik authority #97 MD-3;
+/// **fiziksel** removal #100 smart ctor tamamlaması).
 pub struct TaskCommitInput<'a> {
     claim: &'a crate::witness::Claim,
     omega: &'a crate::witness::WitnessSet,
@@ -117,26 +116,29 @@ pub struct TaskCommitInput<'a> {
     /// **#96:** değişmez (MD-3 #97); fiziksel removal #100.
     loss_before: f64,
     /// **#96 MD-2:** Opaque engine-issued native provenance token (legacy subject).
+    /// Sealed carrier'dan gelir — finalize proof'u commit boundary'ye taşınır.
     measurement: &'a crate::measurement::NativeLegacySubjectMeasurement,
 }
 
 impl<'a> TaskCommitInput<'a> {
-    /// Smart constructor — private field'lara tek giriş (struct literal bypass kapalı).
+    /// Smart constructor — **sealed carrier** kabul eder (P0-tur4).
+    /// Ayrı `&Claim + &token` kombinasyonu type-level unrepresentable:
+    /// `FinalizedNativeTaskClaim` yalnız `finalize(&token)` ile üretilir
+    /// (subject-binding kontrolü burada yapılır; bypass imkânsız).
     pub fn new(
-        claim: &'a crate::witness::Claim,
+        finalized: &'a crate::task_measurement::FinalizedNativeTaskClaim,
         omega: &'a crate::witness::WitnessSet,
         task_resolver: &'a dyn crate::trajectory::TaskResolver,
         target: crate::coords::RawPosition,
         loss_before: f64,
-        measurement: &'a crate::measurement::NativeLegacySubjectMeasurement,
     ) -> Self {
         Self {
-            claim,
+            claim: finalized.claim(),
             omega,
             task_resolver,
             target,
             loss_before,
-            measurement,
+            measurement: finalized.measurement(),
         }
     }
 }
@@ -4150,28 +4152,28 @@ v = 0.5
     /// **#96 MD-2:** Crate-internal characterization token — private-field
     /// `TaskCommitInput::new` test fixture'ları (commit-time verification'ın
     /// geçebilmesi için claim ile tutarlı delta digest/revision/context/epoch).
-    fn characterization_native_token_test(
+    fn characterization_carrier_test(
         engine: &SpaceEngine,
         claim: &Claim,
         measured: crate::trajectory::ProvenancedRawPosition,
-    ) -> crate::measurement::NativeLegacySubjectMeasurement {
+    ) -> crate::task_measurement::FinalizedNativeTaskClaim {
         use crate::authorization::{
             canonical_structural_delta_from_claim, MeasurementInputContext, MeasurementInputDigest,
         };
-        use crate::measurement::{MeasurementDeltaDigest, NativeLegacySubjectMeasurement};
+        use crate::measurement::MeasurementDeltaDigest;
         let canonical = canonical_structural_delta_from_claim(claim).unwrap();
         let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical).unwrap();
         let revision = engine.current_space_view_revision().unwrap();
         let ctx = MeasurementInputContext::try_from(engine.coord_system()).unwrap();
         let input_digest = MeasurementInputDigest::compute(&ctx).unwrap();
         let subject = claim.delta_nodes.iter().map(|n| n.id).collect();
-        NativeLegacySubjectMeasurement::new_characterization_legacy(
+        crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
+            claim.clone(),
             measured,
             subject,
             delta_digest,
             revision,
             input_digest,
-            [0; 5],
         )
     }
 
@@ -4315,9 +4317,9 @@ v = 0.5
         // Omega: boş WitnessSet → kendi min_approvers=2/quorum=1.5 taşır → Held.
         let omega = WitnessSet::new(vec![]);
 
-        let commit_token = characterization_native_token_test(&engine, &claim, measured);
+        let commit_token = characterization_carrier_test(&engine, &claim, measured);
         let input = TaskCommitInput::new(
-            &claim,
+            &commit_token,
             &omega,
             &resolver,
             RawPosition {
@@ -4328,7 +4330,6 @@ v = 0.5
                 v: 0.5,
             },
             1.0,
-            &commit_token,
         );
 
         match engine.commit_task_claim(input) {
@@ -8629,7 +8630,12 @@ v = 0.5
         let descriptors_before = session.axis_descriptors();
 
         let observation = crate::subject_authority::observe_subject_authority_drift(
-            &engine, &claim, &task, &native, 0.0, &target,
+            &engine,
+            claim.claim(),
+            &task,
+            &native,
+            0.0,
+            &target,
         );
         let _finalized =
             observation.finalize(crate::subject_authority::V1DownstreamObservation::Observed(

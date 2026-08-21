@@ -311,7 +311,8 @@ impl StructurallyValidatedClaimDraft {
     pub fn finalize(
         self,
         measurement: &NativeLegacySubjectMeasurement,
-    ) -> Result<Claim, crate::measurement::NativeLegacyMeasurementBindingError> {
+    ) -> Result<FinalizedNativeTaskClaim, crate::measurement::NativeLegacyMeasurementBindingError>
+    {
         if self.legacy_subject_binding != *measurement.legacy_subject_binding() {
             return Err(
                 crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch {
@@ -324,7 +325,68 @@ impl StructurallyValidatedClaimDraft {
         let mut claim = self.claim;
         claim.computed_raw = raw;
         claim.intent = Intent::new(claim.author, raw);
-        Ok(claim)
+        Ok(FinalizedNativeTaskClaim::new(claim, measurement.clone()))
+    }
+}
+
+/// **P0-tur3 (PR review):** Sealed carrier — finalize'ın proof'unu commit boundary'ye
+/// kadar taşır. `TaskCommitInput::new` YALNIZ bu tipi kabul eder; ayrı `&Claim +
+/// &token` kombinasyonu **type-level unrepresentable** (artifact mix bypass imkânsız).
+///
+/// Construction: `StructurallyValidatedClaimDraft::finalize(&token)` — tek üretici.
+/// Private fields: external construction kapalı; `claim()`/`measurement()` accessors
+/// read-only.
+pub struct FinalizedNativeTaskClaim {
+    claim: Claim,
+    measurement: NativeLegacySubjectMeasurement,
+}
+
+impl FinalizedNativeTaskClaim {
+    pub(crate) fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
+        Self { claim, measurement }
+    }
+
+    /// **Crate-internal test helper (P0-tur4):** Specific measured değeri ile
+    /// sealed carrier üretir — YALNIZ `#[cfg(test)]` unit test'lerde (engine.rs,
+    /// navigator.rs). External crate'ler (integration tests) erişemez (`pub(crate)`).
+    /// Authority tipi forge edilemez dışarıdan.
+    #[cfg(test)]
+    pub(crate) fn new_test_with_measured(
+        claim: Claim,
+        measured: crate::coords::MeasuredRawPosition,
+        legacy_subject_ids: Vec<u64>,
+        delta_digest: crate::measurement::MeasurementDeltaDigest,
+        base_revision: crate::authorization::SpaceViewRevision,
+        measurement_input_digest: crate::authorization::MeasurementInputDigest,
+    ) -> Self {
+        let measurement = crate::measurement::NativeLegacySubjectMeasurement::new(
+            measured,
+            legacy_subject_ids,
+            delta_digest,
+            base_revision,
+            measurement_input_digest,
+            crate::coords::CoreAxisEpochStamp::from_u64s([0; 5]),
+        );
+        Self { claim, measurement }
+    }
+
+    /// Finalized Claim (computed_raw = measurement.raw(); structural aynı object'ten).
+    pub fn claim(&self) -> &Claim {
+        &self.claim
+    }
+
+    /// Authority token (finalize'den gelen — subject-bound).
+    pub fn measurement(&self) -> &NativeLegacySubjectMeasurement {
+        &self.measurement
+    }
+}
+
+impl std::fmt::Debug for FinalizedNativeTaskClaim {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FinalizedNativeTaskClaim")
+            .field("claim", &self.claim)
+            .field("measurement", &self.measurement)
+            .finish()
     }
 }
 

@@ -1875,6 +1875,7 @@ impl LegacySubjectBindingDigest {
 /// geçerliliğini KANITLAR; aynı bağlamda meşru yeniden sunum (ör. Held + witness
 /// evidence + resubmit) engellenmez — "token cannot be replayed" iddiası YOK
 /// (`VerifiedTaskMeasurementBinding` dokümantasyon ayrımıyla hizalı).
+#[derive(Clone)]
 pub struct NativeLegacySubjectMeasurement {
     measured: crate::coords::MeasuredRawPosition,
     /// Audited measurement subject — `derive_v1_legacy_measurement_subject`
@@ -1915,33 +1916,12 @@ impl NativeLegacySubjectMeasurement {
         }
     }
 
-    /// **Characterization-only (doc-hidden):** Faz 8-P2 V1 reference lane harness'i
-    /// (`tests/common/mod.rs::evaluate_v1_case`) ve test fixture'ları için — V1
-    /// lane'in legacy uniform-Scip projected measured'ı commit edebilmesi. Üretim
-    /// çağıranı OLMAZ (production forge edilebilirlik kapanışı `new()`'un pub(crate)
-    /// olmasından gelir; bu ctor açıkça isimlendirilmiş istisnadır — #100'de V1
-    /// lane kaldırıldığında silinir). Epoch'lar u64 dizisi olarak alınır
-    /// (`CoreAxisEpochStamp` pub(crate)). Binding digest ctor içinde türetilir.
-    #[doc(hidden)]
-    pub fn new_characterization_legacy(
-        measured: crate::coords::MeasuredRawPosition,
-        legacy_subject_ids: Vec<crate::space::NodeId>,
-        delta_digest: MeasurementDeltaDigest,
-        base_revision: crate::authorization::SpaceViewRevision,
-        measurement_input_digest: crate::authorization::MeasurementInputDigest,
-        axis_epoch_u64s: [u64; 5],
-    ) -> Self {
-        let legacy_subject_binding = LegacySubjectBindingDigest::compute(&legacy_subject_ids);
-        Self {
-            measured,
-            legacy_subject_ids,
-            legacy_subject_binding,
-            delta_digest,
-            base_revision,
-            measurement_input_digest,
-            axis_epoch_stamp: crate::coords::CoreAxisEpochStamp::from_u64s(axis_epoch_u64s),
-        }
-    }
+    // **P0-tur4 (PR review):** `new_characterization_legacy` TAMAMEN KALDIRILDI.
+    // Eski `#[doc(hidden)] pub` ctor external crate'lerden çağrılabiliyordu —
+    // caller-supplied MeasuredRawPosition + [0;5] epoch ile authority token
+    // mint edilebiliyordu (opaque DEĞİL). V1 characterization lane artık
+    // non-authoritative evaluator kullanır (tests/common) — authority tipi
+    // forge edilemez.
 
     /// Native per-axis measured (5 × value+source) — commit `PredicateGate` ve
     /// `AuthorizationBasis.measured_result` bu değerleri bağlar.
