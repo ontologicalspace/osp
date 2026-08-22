@@ -1,0 +1,52 @@
+warning: unreachable statement
+  --> tests/compile_fail/md2_carrier_external_construct.rs:12:5
+   |
+11 |     let claim: osp_core::witness::Claim = unimplemented!();
+   |                                           ---------------- any code following this expression is unreachable
+12 |     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0624]: associated function `new` is private
+  --> tests/compile_fail/md2_carrier_external_construct.rs:18:67
+   |
+18 |     let _ = osp_core::task_measurement::FinalizedNativeTaskClaim::new(
+   |                                                                   ^^^ private associated function
+   |
+  ::: src/task_measurement.rs
+   |
+   |     fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
+   |     ------------------------------------------------------------------------- private associated function defined here
+
+error[E0061]: this function takes 2 arguments but 6 arguments were supplied
+  --> tests/compile_fail/md2_carrier_external_construct.rs:18:13
+   |
+18 |     let _ = osp_core::task_measurement::FinalizedNativeTaskClaim::new(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+19 |         claim,
+20 |         measured,
+   |         -------- expected `NativeLegacySubjectMeasurement`, found `MeasuredRawPosition`
+21 |         ids,
+   |         --- unexpected argument #3 of type `Vec<u64>`
+22 |         delta,
+   |         ----- unexpected argument #4 of type `MeasurementDeltaDigest`
+23 |         revision,
+   |         -------- unexpected argument #5 of type `SpaceViewRevision`
+24 |         input,
+   |         ----- unexpected argument #6 of type `osp_core::authorization::MeasurementInputDigest`
+   |
+note: associated function defined here
+  --> src/task_measurement.rs
+   |
+   |     fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
+   |        ^^^
+help: remove the extra arguments
+   |
+20 -         measured,
+21 -         ids,
+22 -         delta,
+23 -         revision,
+24 -         input,
+20 +         /* NativeLegacySubjectMeasurement */,
+   |

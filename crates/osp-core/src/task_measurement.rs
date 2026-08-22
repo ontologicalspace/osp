@@ -471,6 +471,52 @@ impl MeasurementFailureDisposition {
     }
 }
 
+/// **W8-c (review tur-7 P1):** Agent yüzeyinin LLM wire ailesi — MCP JSON
+/// şekli bu sınıfla ayrışır (navigator+MCP ortak contract). Bir arm'ın wire
+/// anlamının SESSİZCE değişmesi compiler exhaustive-match ile yakalanamaz;
+/// bu tablo + `native_failure_surface_wire_shape_table` test'i yakalar.
+///
+/// **Rol notu (review tur-8 tasarım notu):** MCP wire producer bu tipi henüz
+/// TÜKETMİYOR — tip contract/table pin'dir (MCP arm'ları surface'a göre
+/// dispatch eder; stage'e özgü class string'leri osp-core'a taşınmadığı için
+/// consume etmek yanlış yönde bağlanma üretirdi). Gerçek consume ya da
+/// `pub(crate)`'ye daraltma kararı bilinçli olarak #100/W-lane sürecine
+/// bırakılmıştır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFailureWireShape {
+    /// Gerçek structural Q4 (draft aşaması) — `attempt_outcome{gate_decision:
+    /// "RejectedBySyntax"}`; measurement gerçekleşmedi (sidecar yok).
+    SyntaxRejectionOutcome,
+    /// Agent-correctable retry — `attempt_outcome` + GERÇEK gate kararı
+    /// (`RejectedByVision`/`RejectedByRule`; hardcode `RejectedBySyntax`
+    /// DEĞİL — eski ontology bug'ının en hassas kolu).
+    RetryableRealGateOutcome,
+    /// `system_failure` JSON (class: `NativeMeasurementFailed`/
+    /// `NativeBindingFailed`/`EngineCommitFailed` — stage'e göre);
+    /// `attempt_outcome` ÜRETİLMEZ (fabrication YOK).
+    SystemFailureJson,
+    /// `error: "task_not_found"` JSON — terminal, agent başka task seçer.
+    TaskNotFoundJson,
+    /// `system_failure{class: "WitnessEvidenceInvalid"}` JSON — terminal.
+    WitnessEvidenceSystemFailureJson,
+}
+
+impl NativeFailureSurface {
+    /// Surface → wire ailesi (5/5). Yeni surface varyanti bu match'i derleme
+    /// hatasına zorlar; anlam ataması table-test ile pinli.
+    pub fn wire_shape(self) -> NativeFailureWireShape {
+        match self {
+            Self::SyntaxRejection => NativeFailureWireShape::SyntaxRejectionOutcome,
+            Self::RetryAgentProposal => NativeFailureWireShape::RetryableRealGateOutcome,
+            Self::SystemFailure => NativeFailureWireShape::SystemFailureJson,
+            Self::TaskNotFound => NativeFailureWireShape::TaskNotFoundJson,
+            Self::WitnessEvaluationError => {
+                NativeFailureWireShape::WitnessEvidenceSystemFailureJson
+            }
+        }
+    }
+}
+
 /// `EngineCommitError` → agent yüzeyi — navigator'ın production commit-error
 /// arm'ları ile birebir sınıflandırma (navigator.rs exhaustive match'in
 /// sınıflandırma yüzüi; side-effect'ler navigator'da kalır). MCP bu mapper'ı
@@ -637,6 +683,212 @@ mod tests {
         assert_eq!(
             commit_error_agent_surface(&EngineCommitError::Internal("x".into())),
             S::SystemFailure
+        );
+    }
+
+    /// **W8-a (#96 MD-2 review tur-5/6 — P1 kapanışı):** 17-varyant disposition
+    /// tablosunun TAM envanter pin'i. Mapping fn zaten compiler-exhaustive; bu
+    /// test MEVCUT atamaların (plan v5/#96 v4-FİNAL frozen tablo) sessizce
+    /// değişmediğini pinler — yanlış satır taşırması regression olarak yakalanır.
+    ///
+    /// **Dormant producer envanteri:** `RetryAgentProposal` ve
+    /// `RegenerateMeasurement` disposition'larına BUGÜN hiçbir MeasurementError
+    /// üreticisi YOK (bilinçli — unlock koşulları plan v5 tablo notlarında:
+    /// node-removal op / explicit ID allocation / typed structural origin /
+    /// atomik baseline-refresh kontratı). Bu dormant durum testin bir parçası
+    /// olarak pinlenir: tablo SADECE Terminal*/SystemFailure üretir.
+    #[test]
+    fn measurement_failure_disposition_full_inventory() {
+        use crate::measurement::MeasurementError as E;
+        use MeasurementFailureDisposition as D;
+
+        let revision = || crate::authorization::SpaceViewRevision {
+            view_id: crate::authorization::SpaceViewId::Ephemeral(0),
+            sequence: 0,
+            content_digest: crate::authorization::SpaceDigest::compute(
+                &crate::space::Space::default(),
+            )
+            .unwrap(),
+        };
+        let input_digest = {
+            let cs = crate::coords::CoordinateSystem::default_raw_five(
+                crate::coords::MetricSource::Placeholder,
+                crate::axes::CohesionAxis::new(),
+                crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+            )
+            .unwrap();
+            let ctx = crate::authorization::MeasurementInputContext::try_from(&cs).unwrap();
+            crate::authorization::MeasurementInputDigest::compute(&ctx).unwrap()
+        };
+
+        // (variant, expected disposition) — 17/17.
+        let table: Vec<(E, D)> =
+            vec![
+            (
+                E::CoordinateMeasurement(crate::coords::CoordinateMeasurementError::EmptySourceSet),
+                D::SystemFailure,
+            ),
+            (
+                E::MeasurementContext(
+                    crate::authorization::CanonicalizationError::DuplicateNodeId(1),
+                ),
+                D::SystemFailure,
+            ),
+            (
+                E::RevisionComputationFailed { detail: "x".into() },
+                D::SystemFailure,
+            ),
+            (
+                E::MeasurementContextDrift {
+                    before: input_digest.clone(),
+                    after: input_digest.clone(),
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::Digest(crate::measurement::MeasurementDigestError::NonFiniteRejected),
+                D::SystemFailure,
+            ),
+            (E::MeasurementContextDigestMismatch, D::SystemFailure),
+            (E::ClaimNotTaskBound { claim_id: 1 }, D::TerminalIdentityViolation),
+            (
+                E::TaskBindingMismatch {
+                    claim_task_id: 1,
+                    bound_task_id: 2,
+                },
+                D::TerminalIdentityViolation,
+            ),
+            (
+                E::RevisionMismatch {
+                    expected: revision(),
+                    current: revision(),
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::HeterogeneousPredicateScopes { scopes: vec![] },
+                D::TerminalTaskDeclaration,
+            ),
+            (E::EmptySubjectScope, D::TerminalTaskDeclaration),
+            (
+                E::SubjectScopeResolutionFailed(
+                    crate::measurement::SubjectScopeResolutionError::ModuleResolutionUnavailable {
+                        module: "core".into(),
+                    },
+                ),
+                D::TerminalTaskDeclaration,
+            ),
+            (
+                E::SubjectMemberUnresolvable { missing: vec![7] },
+                D::TerminalTaskDeclaration,
+            ),
+            (
+                E::SubjectMemberMissingAfterDelta { node_id: 7 },
+                D::SystemFailure,
+            ),
+            (
+                E::SubjectScopeHintMismatch {
+                    hint_members: vec![1],
+                    derived_members: vec![2],
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::InvalidSubjectMass {
+                    node_id: 7,
+                    mass: -1.0,
+                },
+                D::SystemFailure,
+            ),
+            (
+                E::InvalidTotalSubjectMass { total_mass: 0.0 },
+                D::SystemFailure,
+            ),
+        ];
+        assert_eq!(table.len(), 17, "17 varyantın TAMAMI envanterde");
+        for (err, expected) in &table {
+            assert_eq!(
+                &measurement_failure_disposition(err),
+                expected,
+                "disposition table drift: {err:?} → {expected:?} bekleniyordu"
+            );
+        }
+        // Dormant pin: envanterde RetryAgentProposal/RegenerateMeasurement YOK —
+        // bu disposition'lar bugün üreticisiz (yukarıdaki not).
+        assert!(
+            !table
+                .iter()
+                .any(|(_, d)| matches!(d, D::RetryAgentProposal | D::RegenerateMeasurement)),
+            "dormant disposition'lara üretici eklendiyse bu pin + plan v5 unlock notları güncellenmeli"
+        );
+    }
+
+    /// **W8-c (review tur-7 P1):** surface → wire ailesi tablosu 5/5 — bir
+    /// arm'ın JSON anlamının sessizce değişmesi bu pinle yakalanır (compiler
+    /// yalnız YENİ variant eklenmesini yakalar, mevcut atamanın drift'ini değil).
+    /// Reachability notu: `TaskNotFound`/`WitnessEvaluationError` MCP
+    /// `submit_delta_attempt` yüzeyinden bugün unreachable (tmp_reg her zaman
+    /// task'ı içerir; witness evidence inject edilemez) — wire anlamları BU
+    /// tabloda pinli, e2e karşılıkları dormant.
+    #[test]
+    fn native_failure_surface_wire_shape_table() {
+        use NativeFailureSurface as S;
+        use NativeFailureWireShape as W;
+        assert_eq!(S::SyntaxRejection.wire_shape(), W::SyntaxRejectionOutcome);
+        assert_eq!(
+            S::RetryAgentProposal.wire_shape(),
+            W::RetryableRealGateOutcome
+        );
+        assert_eq!(S::SystemFailure.wire_shape(), W::SystemFailureJson);
+        assert_eq!(S::TaskNotFound.wire_shape(), W::TaskNotFoundJson);
+        assert_eq!(
+            S::WitnessEvaluationError.wire_shape(),
+            W::WitnessEvidenceSystemFailureJson
+        );
+    }
+
+    /// **W8-c:** retryable ailenin GERÇEK gate kararı — eski ontology bug'ının
+    /// en hassas kolu (hardcode `RejectedBySyntax` fabrication'ı). VisionViolation
+    /// MCP yüzeyinden e2e tetiklenemiyor (vision vector fixture'ı MCP'de
+    /// konfigüre edilemez); mapping burada pinlenir, RuleViolation karşılığı
+    /// MCP e2e'de (`w8_retryable_rule_violation_emits_real_gate_decision`).
+    #[test]
+    fn retryable_errors_map_to_real_gate_decisions() {
+        use crate::engine::EngineCommitError;
+        // VisionViolation → RejectedByVision (RejectedBySyntax DEĞİL).
+        let vision_err = EngineCommitError::VisionViolation {
+            violation: crate::engine::VisionViolation {
+                claim_id: 1,
+                theta: 0.9,
+                raw: crate::coords::RawPosition::default(),
+            },
+            bound: 0.1,
+        };
+        assert_eq!(
+            crate::navigator::gate_decision_from_engine_error(&vision_err),
+            crate::trajectory::GateDecision::RejectedByVision
+        );
+        // RuleViolation → RejectedByRule.
+        let rule_err = EngineCommitError::RuleViolation {
+            violation: crate::rule::RuleViolation {
+                rule_id: "test.pin".into(),
+                detail: "pin".into(),
+                severity: crate::rule::RuleSeverity::Hard,
+            },
+        };
+        assert_eq!(
+            crate::navigator::gate_decision_from_engine_error(&rule_err),
+            crate::trajectory::GateDecision::RejectedByRule
+        );
+        // İkisi de retryable surface (wire: RetryableRealGateOutcome).
+        assert_eq!(
+            commit_error_agent_surface(&vision_err),
+            NativeFailureSurface::RetryAgentProposal
+        );
+        assert_eq!(
+            commit_error_agent_surface(&rule_err),
+            NativeFailureSurface::RetryAgentProposal
         );
     }
 

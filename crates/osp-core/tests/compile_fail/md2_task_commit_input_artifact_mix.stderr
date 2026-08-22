@@ -1,0 +1,52 @@
+warning: unreachable statement
+ --> tests/compile_fail/md2_task_commit_input_artifact_mix.rs:9:5
+  |
+8 |     let claim: osp_core::witness::Claim = unimplemented!();
+  |                                           ---------------- any code following this expression is unreachable
+9 |     let omega: osp_core::witness::WitnessSet = unimplemented!();
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0061]: this function takes 5 arguments but 6 arguments were supplied
+  --> tests/compile_fail/md2_task_commit_input_artifact_mix.rs:14:13
+   |
+14 |     let _ = osp_core::engine::TaskCommitInput::new(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+15 |         &claim,
+   |         ------ expected `&FinalizedNativeTaskClaim`, found `&Claim`
+...
+20 |         &token,
+   |         ------ unexpected argument #6 of type `&NativeLegacySubjectMeasurement`
+   |
+   = note: expected reference `&FinalizedNativeTaskClaim`
+              found reference `&osp_core::witness::Claim`
+note: associated function defined here
+  --> src/engine.rs
+   |
+   |     pub fn new(
+   |            ^^^
+help: remove the extra argument
+   |
+15 ~         /* &FinalizedNativeTaskClaim */,
+16 |         &omega,
+17 |         resolver,
+18 |         target,
+19 ~         1.0,
+   |
+
+error[E0308]: mismatched types
+  --> tests/compile_fail/md2_task_commit_input_artifact_mix.rs:23:52
+   |
+23 |     let _ = osp_core::engine::TaskCommitInput::new(&claim, &omega, resolver, target, 1.0);
+   |             -------------------------------------- ^^^^^^ expected `&FinalizedNativeTaskClaim`, found `&Claim`
+   |             |
+   |             arguments to this function are incorrect
+   |
+   = note: expected reference `&FinalizedNativeTaskClaim`
+              found reference `&osp_core::witness::Claim`
+note: associated function defined here
+  --> src/engine.rs
+   |
+   |     pub fn new(
+   |            ^^^
