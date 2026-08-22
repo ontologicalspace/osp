@@ -273,3 +273,98 @@ fn w8_commit_task_validation_maps_to_engine_commit_failed_wire() {
         "commit funnel mesajı: {msg}"
     );
 }
+
+/// **W8-c (review tur-7 P1) — retryable aile: GERÇEK gate kararı.** Eski
+/// ontology bug'ının en hassas kolu: retryable commit error eskiden hardcode
+/// `RejectedBySyntax` idi. Bu test Q6 `RuleViolation`'ı e2e tetikler ve
+/// `attempt_outcome.gate_decision == "RejectedByRule"` pinler —
+/// `system_failure` DEĞİL (agent-correctable: budget'li retry yüzeyi),
+/// comparison-surviving sidecar'lar taşınır.
+///
+/// VisionViolation → `RejectedByVision` eşlemesi MCP yüzeyinden bugün
+/// tetiklenemiyor (vision vector fixture'ı MCP'de konfigüre edilemez) —
+/// osp-core'da `retryable_errors_map_to_real_gate_decisions` pinler.
+struct AlwaysViolateRule {
+    id: String,
+}
+
+impl osp_core::rule::Rule for AlwaysViolateRule {
+    fn id(&self) -> &osp_core::rule::RuleId {
+        &self.id
+    }
+    fn descriptor(&self) -> osp_core::authorization::RuleDescriptor {
+        osp_core::authorization::RuleDescriptor {
+            rule_id: self.id.clone(),
+            semantics_version: 1,
+            canonical_parameters: vec![],
+        }
+    }
+    fn evaluate(
+        &self,
+        _new_nodes: &[osp_core::space::Node],
+        _new_edges: &[osp_core::space::Edge],
+        _space: &osp_core::space::Space,
+    ) -> Option<osp_core::rule::RuleViolation> {
+        Some(osp_core::rule::RuleViolation {
+            rule_id: self.id.clone(),
+            detail: "w8 ontology sentinel — always violates".to_string(),
+            severity: osp_core::rule::RuleSeverity::Hard,
+        })
+    }
+}
+
+#[test]
+fn w8_retryable_rule_violation_emits_real_gate_decision() {
+    let handle = make_server_handle();
+    let task = node_scope_coupling_task();
+
+    // Q6 sentinel rule (production register_rule API) — md1 sidecar test
+    // pattern mirror'u; orada sidecar contract, BURADA gate kararı pinlenir.
+    {
+        let mut ws = handle.lock().unwrap();
+        ws.engine_mut()
+            .register_rule(Box::new(AlwaysViolateRule {
+                id: "test.w8_always_violate".to_string(),
+            }))
+            .expect("rule registration");
+    }
+
+    let proposal = osp_core::agent::DeltaProposal {
+        new_nodes: vec![osp_core::agent::NewNodeSpec {
+            kind: osp_core::space::NodeKind::Module,
+            initial_mass: 100.0,
+            connected_to: vec![],
+        }],
+        new_edges: vec![],
+        modified_entities: vec![],
+        position_hints: vec![],
+        reasoning: "Q6 sentinel fixture".into(),
+        ..Default::default()
+    };
+
+    let mut ws = handle.lock().unwrap();
+    let outcome = ws
+        .submit_delta_attempt(&proposal, &task, 1)
+        .expect("attempt");
+
+    // Retryable → attempt_outcome GERÇEK gate kararı ile (hardcode syntax DEĞİL).
+    assert_eq!(
+        outcome["attempt_outcome"]["gate_decision"], "RejectedByRule",
+        "RuleViolation → gerçek gate kararı (eski hardcode RejectedBySyntax fabrication'ı pin dışı)"
+    );
+    assert_eq!(outcome["attempt_outcome"]["mutation_decision"], "Reject");
+    // System failure DEĞİL — agent-correctable retry yüzeyi.
+    assert!(
+        outcome.get("system_failure").is_none(),
+        "retryable commit error system failure DEĞİL: {outcome}"
+    );
+    // Comparison-surviving → sidecar'lar taşınır.
+    assert!(
+        outcome.get("subject_authority_drift").is_some(),
+        "RuleViolation retryable = surviving → subject sidecar: {outcome}"
+    );
+    assert!(
+        outcome.get("provenance_authority_drift").is_some(),
+        "RuleViolation retryable = surviving → provenance sidecar: {outcome}"
+    );
+}

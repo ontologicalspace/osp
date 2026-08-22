@@ -24,4 +24,9 @@ fn md2_sealed_carrier_compile_fail_boundaries() {
     t.compile_fail("tests/compile_fail/md2_characterization_ctor_removed.rs");
     // Artifact-mix çağrı şekli temsil edilemez (P0-2 fence).
     t.compile_fail("tests/compile_fail/md2_task_commit_input_artifact_mix.rs");
+    // MEVCUT token ctor pub(crate) — external mint kapalı (review tur-7 P1:
+    // `pub` genişletilirse yalnız BU fixture yakalar; diğerleri yeşil kalırdı).
+    t.compile_fail("tests/compile_fail/md2_native_token_external_new.rs");
+    // Token struct literal — private fields (ikinci katman).
+    t.compile_fail("tests/compile_fail/md2_native_token_external_literal.rs");
 }

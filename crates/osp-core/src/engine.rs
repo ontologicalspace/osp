@@ -8802,17 +8802,25 @@ v = 0.5
     // (3) stale space revision + (4) context TOCTOU + (5) A→B→A epoch revert.
     // ═════════════════════════════════════════════════════════════════════════════
 
+    /// W6 sentinel davranış modu — descriptor byte'ının generation'la ilişkisi.
+    enum W6DescriptorBehaviour {
+        /// generation'ı byte'a yansıtır (0→0, 1→1, ...) — check-4 TOCTOU:
+        /// descriptor ölçümden sonra DEĞİŞİR → context digest fence yakalar.
+        FollowsGeneration,
+        /// **Gerçek A→B→A revert** (review tur-7 P2): gen 0→A(0), 1→B(1),
+        /// 2→A(0) — descriptor BAŞA DÖNER (final digest == ölçüm anı digest'i;
+        /// check-4 fence kör) ve yalnız monoton epoch (0→2, geri dönmez)
+        /// yakalar → check-5 ABA fence.
+        AbaRevert,
+    }
+
     /// W6 sentinel: ölçüm sırasında DEĞİL, ölçüm ile commit-verify ARASINDA
     /// değişen axis. `generation` test'in elinde; `measure()` non-mutating
-    /// (producer session pre/post verify geçer). Test generation'ı ilerletir:
-    /// - `descriptor_follows_generation=true` → descriptor byte'ı değişir →
-    ///   check-4 context digest fence (TOCTOU).
-    /// - `descriptor_follows_generation=false` → descriptor SABİT kalır, yalnız
-    ///   epoch ilerler → check-5 monoton epoch ABA fence (digest göremez).
+    /// (producer session pre/post verify geçer).
     struct W6DeferredAxis {
         name: &'static str,
         generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-        descriptor_follows_generation: bool,
+        behaviour: W6DescriptorBehaviour,
     }
 
     impl crate::coords::Axis for W6DeferredAxis {
@@ -8824,10 +8832,15 @@ v = 0.5
         ) -> Result<crate::coords::AxisDescriptor, crate::coords::AxisDescriptorError> {
             use std::sync::atomic::Ordering;
             let generation = self.generation.load(Ordering::SeqCst) as u8;
-            let descriptor_byte = if self.descriptor_follows_generation {
-                generation
-            } else {
-                0
+            let descriptor_byte = match self.behaviour {
+                W6DescriptorBehaviour::FollowsGeneration => generation,
+                W6DescriptorBehaviour::AbaRevert => {
+                    if generation == 1 {
+                        1 // B
+                    } else {
+                        0 // A (gen 0 ve gen 2)
+                    }
+                }
             };
             let mut params = crate::coords::AxisParameterEncoder::new();
             params.push_u8(descriptor_byte);
@@ -8850,14 +8863,14 @@ v = 0.5
     }
 
     fn w6_engine_with_deferred_coupling(
-        descriptor_follows_generation: bool,
+        behaviour: W6DescriptorBehaviour,
         generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     ) -> SpaceEngine {
         let cs = CoordinateSystem::empty()
             .try_with_axis(W6DeferredAxis {
                 name: "coupling",
                 generation,
-                descriptor_follows_generation,
+                behaviour,
             })
             .expect("coupling axis")
             .try_with_axis(Md1ConstAxis {
@@ -9124,7 +9137,10 @@ v = 0.5
     fn md2_w6_verifier_rejects_axis_descriptor_toctou() {
         use std::sync::atomic::Ordering;
         let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let engine = w6_engine_with_deferred_coupling(true, generation.clone());
+        let engine = w6_engine_with_deferred_coupling(
+            W6DescriptorBehaviour::FollowsGeneration,
+            generation.clone(),
+        );
         let task = md1_task_node1();
         let proposal = md1_edge_proposal();
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
@@ -9157,13 +9173,17 @@ v = 0.5
         );
     }
 
-    /// W6 check-5: A→B→A revert — descriptor SABİT (digest fence göremez),
-    /// yalnız monoton epoch farkı yakalar (`AxisEpochMismatch`).
+    /// W6 check-5: **gerçek A→B→A revert** (review tur-7 P2) — descriptor A→B'ye
+    /// değişip A'ya DÖNER (final digest == ölçüm anı digest'i → check-4 context
+    /// fence bu revert'u GÖREMEZ, kanıtlanır); yalnız monoton epoch (0→2,
+    /// geri dönmez) yakalar (`AxisEpochMismatch`).
     #[test]
     fn md2_w6_verifier_rejects_aba_epoch_revert() {
         use std::sync::atomic::Ordering;
+        // gen 0 → descriptor A; gen 1 → B; gen 2 → A (AbaRevert modu).
         let generation = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let engine = w6_engine_with_deferred_coupling(false, generation.clone());
+        let engine =
+            w6_engine_with_deferred_coupling(W6DescriptorBehaviour::AbaRevert, generation.clone());
         let task = md1_task_node1();
         let proposal = md1_edge_proposal();
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
@@ -9178,12 +9198,24 @@ v = 0.5
             .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
+        let digest_at_measure = carrier.measurement().measurement_input_digest().clone();
 
-        // A→B→A: descriptor byte SABİT (0) → context digest EŞİT kalır; epoch
-        // monoton ilerler (0→1). Digest fence bu revert'u göremez — yalnız
-        // epoch fence yakalar.
+        // A→B (gen 1: descriptor B), B→A (gen 2: descriptor A'ya DÖNDÜ).
         generation.store(1, Ordering::SeqCst);
+        generation.store(2, Ordering::SeqCst);
 
+        // **Digest-körlük kanıtı:** A→B→A sonrası current context digest ==
+        // ölçüm anı digest'i — check-4 fence'in bu revert'u görmesi İMKÂNSIZ.
+        let ctx = crate::authorization::MeasurementInputContext::try_from(engine.coord_system())
+            .expect("context");
+        let current_digest =
+            crate::authorization::MeasurementInputDigest::compute(&ctx).expect("digest");
+        assert_eq!(
+            current_digest, digest_at_measure,
+            "A→B→A revert'te descriptor başa döner — context digest fence KÖR (kanıt)"
+        );
+
+        // Yalnız monoton epoch fence yakalar (epoch 0→2 — ABA'da bile geri dönmez).
         let err = engine
             .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("ABA epoch revert reddedilmeli");
@@ -9194,7 +9226,7 @@ v = 0.5
                     crate::measurement::NativeLegacyMeasurementBindingError::AxisEpochMismatch { .. }
                 )
             ),
-            "check-5 AxisEpochMismatch bekleniyordu; got: {err:?}"
+            "check-5 AxisEpochMismatch bekleniyordu (digest eşitken yalnız epoch yakalar); got: {err:?}"
         );
     }
 

@@ -15944,6 +15944,69 @@ v = 0.5
         );
     }
 
+    /// **W8-d (review tur-7 önerisi — simetri):** `RevisionRequired` tarafının
+    /// provenance load-path mirror'ı — subject testleri hem `RevisionRequired`
+    /// (checked builder + wire) hem `PendingAuthorization` yollarını kapsıyordu;
+    /// provenance tarafında da iki yol simetrik pinlenir.
+    #[test]
+    fn revision_required_rejects_identity_mismatched_provenance_sidecar() {
+        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
+
+        fn rejected_evidence(basis_hex: &str) -> SuspendedAttemptEvidence {
+            SuspendedAttemptEvidence::try_new(
+                TaskId::from(1u64),
+                ClaimId::from(42u64),
+                AuthorizationBasisDigest::from_hex(basis_hex).unwrap(),
+                AttemptNumber::try_from(5u64).unwrap(),
+                SuspendedAttemptDisposition::Rejected {
+                    reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
+                        witness: 7u64,
+                        rationale: None,
+                    }),
+                    snapshot: WitnessQuorumSnapshot {
+                        approvers: 0,
+                        required_approvers: 2,
+                        support: 0.0,
+                        required_support: 1.5,
+                    },
+                },
+            )
+            .unwrap()
+        }
+
+        // Checked builder: mismatched provenance sidecar (task=2) → typed Err.
+        let rev = RevisionRequired::try_new(rejected_evidence(
+            "5555555555555555555555555555555555555555555555555555555555555555",
+        ))
+        .unwrap();
+        let err = rev
+            .try_with_provenance_authority_drift(Some(md2_sample_prov_drift(2, 42)))
+            .expect_err("provenance identity mismatch must be rejected");
+        assert!(matches!(
+            err,
+            crate::authorization::RevisionRequiredError::DriftSidecarIdentityMismatch { .. }
+        ));
+
+        // Strict wire load path: identity-mismatched sidecar'lı JSON → Err.
+        let base = RevisionRequired::try_new(rejected_evidence(
+            "6666666666666666666666666666666666666666666666666666666666666666",
+        ))
+        .unwrap();
+        let mut json_value = serde_json::to_value(base).expect("to_value");
+        json_value
+            .as_object_mut()
+            .expect("revision wire is an object")
+            .insert(
+                "provenance_authority_drift".to_string(),
+                serde_json::to_value(md2_sample_prov_drift(1, 43)).expect("sidecar to_value"),
+            );
+        let result: Result<RevisionRequired, _> = serde_json::from_value(json_value);
+        assert!(
+            result.is_err(),
+            "strict wire must reject identity-mismatched provenance sidecar"
+        );
+    }
+
     #[test]
     fn attempt_evidence_id_alias_removed_compiles() {
         // Compile-time assertion: AttemptEvidenceId type alias tamamen kaldırıldı.

@@ -1,0 +1,29 @@
+error[E0603]: struct `CoreAxisEpochStamp` is private
+  --> tests/compile_fail/md2_native_token_external_literal.rs:11:34
+   |
+11 |     let stamp: osp_core::coords::CoreAxisEpochStamp = unimplemented!();
+   |                                  ^^^^^^^^^^^^^^^^^^ private struct
+   |
+note: the struct `CoreAxisEpochStamp` is defined here
+  --> src/coords.rs
+   |
+   | pub(crate) struct CoreAxisEpochStamp {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unreachable statement
+ --> tests/compile_fail/md2_native_token_external_literal.rs:6:5
+  |
+5 |     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
+  |                                                           ---------------- any code following this expression is unreachable
+6 |     let ids: Vec<u64> = unimplemented!();
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+  |
+  = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `measured`
+ --> tests/compile_fail/md2_native_token_external_literal.rs:5:9
+  |
+5 |     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
+  |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_measured`
+  |
+  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
