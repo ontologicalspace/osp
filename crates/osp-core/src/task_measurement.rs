@@ -475,6 +475,13 @@ impl MeasurementFailureDisposition {
 /// şekli bu sınıfla ayrışır (navigator+MCP ortak contract). Bir arm'ın wire
 /// anlamının SESSİZCE değişmesi compiler exhaustive-match ile yakalanamaz;
 /// bu tablo + `native_failure_surface_wire_shape_table` test'i yakalar.
+///
+/// **Rol notu (review tur-8 tasarım notu):** MCP wire producer bu tipi henüz
+/// TÜKETMİYOR — tip contract/table pin'dir (MCP arm'ları surface'a göre
+/// dispatch eder; stage'e özgü class string'leri osp-core'a taşınmadığı için
+/// consume etmek yanlış yönde bağlanma üretirdi). Gerçek consume ya da
+/// `pub(crate)`'ye daraltma kararı bilinçli olarak #100/W-lane sürecine
+/// bırakılmıştır.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeFailureWireShape {
     /// Gerçek structural Q4 (draft aşaması) — `attempt_outcome{gate_decision:
