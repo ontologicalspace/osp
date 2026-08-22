@@ -23,25 +23,38 @@ INV-T4 spec status + #96/#103 kapanış-supersession yorumları.
 `export PATH="$HOME/.cargo/bin:$PATH"` + `cargo test --locked --workspace
 --all-features --exclude osp-desktop` (yeşil başlangıç).
 
-## W9 kaydı (bu branch)
+## W9 kapanışı — PR #127 (Completed)
 
 ### Dogfood Run A rerun (2026-08-22) — confound kapanışı CANLI kanıt
 
 Aynı fixture (main.rs→a,b; RemoveImport 2→1; deterministic git HEAD
 `da637fbed`), gerçek analyze + navigator + mock LLM, harness mode:
-- **Regolden task (`required_source: null`)**: **Completed** (1 attempt). İki
-  lane subject [2] PARITY, sources engine-native
-  `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]` PARITY (v1
-  lane artık compat [Scip;5] DEĞİL — re-anchor), aynı θ bits, downstream
-  `Completed/AcceptAsCompleted` PARITY. `provenance_authority_drift` sidecar
-  canlı: native vs uniform-Scip reference, value-bits parity (construction
-  property). Envelope: `provenance_authority: "engine_native_per_axis"`,
-  `provenance_native: true`.
+
+**Lane adlandırması (net ayrım):**
+- **MD-1 subject-observer lane'leri (V1/V2):** subject + native sources +
+  downstream **PARITY** — V1 lane authority token'ın native provenance'ını,
+  V2 lane aynı session'ın native `md1_shadow`'unu kullanır (re-anchor; V1
+  lane artık compat [Scip;5] projeksiyonu DEĞİL).
+- **MD-2 provenance observer (native/reference):** aynı value bits;
+  **bilinçli** source-label farkı — native authority vs uniform-Scip
+  **reference** (non-authoritative, karar ÜRETMEZ; fark intentional
+  telemetry olarak kalır).
+
+- **Regolden task (`required_source: null`)**: **Completed** (1 attempt).
+  MD-1 lane'leri: subject [2] + engine-native sources
+  `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]` + aynı θ
+  bits + downstream `Completed/AcceptAsCompleted` — hepsi PARITY.
+  `provenance_authority_drift` sidecar canlı: native vs uniform-Scip
+  reference, value-bits parity (construction property). Envelope:
+  `provenance_authority: "engine_native_per_axis"`, `provenance_native: true`.
 - **Run A senaryosu (`required_source: Scip`)**: expected semantic change
   MATERIALIZED — native TreeSitter coupling Scip şartını karşılamaz →
-  `NotCompleted/Reject` (legacy uniform projeksiyonda Completed olurdu); iki
-  lane downstream PARITY — farkın nedeni task tanımı, gözlem confound'u değil.
-  Run `llm_error` (NoMoreProposals; mock tek proposal) ile sonlandı.
+  `NotCompleted/Reject` (legacy uniform projeksiyonda Completed olurdu);
+  MD-1 lane'leri downstream PARITY (Reject) — farkın nedeni task tanımı,
+  gözlem confound'u değil. Termination: `llm_error(NoMoreProposals)` — tek
+  scripted proposal tüketildi; ikinci LLM çağrısında mock kuyruğu boştu.
+  **Maneuver limit exhaustion DEĞİL** (limit 3'e ulaşılmadı); tek attempt
+  evidence'da iki sidecar'la kayıtlı.
 - 2026-08-18 Run A kaydı (konfund kanıtı): `95-md1-cutover-handoff.md` —
   tarihsel bağ korunur; kapanış kaydı migration-decisions MD-2 bölümünde.
 - Prosedür notları: fixture `C:/Users/ervol/AppData/Local/Temp/osp-md2-w9/`
@@ -50,14 +63,15 @@ Aynı fixture (main.rs→a,b; RemoveImport 2→1; deterministic git HEAD
 
 ### Docs/issues
 - `faz8-p2-migration-decisions.md`: MD-2 implementation record + Required
-  implementation durumları + Karar Özeti tablosu + follow-up listesi (#95-A
-  sıradaki; #100 compatibility kaldırımı; #103 transferred).
+  implementation durumları (**madde 3: taxonomy SUPERSEDED — raw observation
+  modeli; gerekçe supersession kaydında**) + Karar Özeti tablosu + follow-up
+  listesi (#95-A sıradaki; #100 compatibility kaldırımı; #103 transferred).
 - `docs/spec/invariants.md` INV-T4 MD-2 notu: planned → **implemented**.
 - GitHub: #96 kapanış kaydı + #103 supersession yorumu (link'ler issue'larda).
 
-## W6/W8 envanteri (bu branch'te eklenen test'ler)
+## W6/W8 kabul kanıtı — PR #126 (merged)
 
-### W6 — authority boundary kabul kanıtı
+### W6 — authority boundary
 - **trybuild compile-fail ×6** (`tests/md2_authority_typelevel.rs` +
   `tests/compile_fail/md2_*.rs`): carrier elle kurulum (private ctor + struct
   literal), kaldırılan `new_characterization_legacy` (P0-1 fence — geri
@@ -107,11 +121,11 @@ Aynı fixture (main.rs→a,b; RemoveImport 2→1; deterministic git HEAD
   wire reject) + RevisionRequired subject + **provenance mirror** (review
   tur-7 önerisi: checked builder `DriftSidecarIdentityMismatch` + strict wire).
 
-## Kalan (W9 — plan v5)
+## Sıradaki
 
-1. Dogfood Run A rerun (native authority ile; fixture regolden'ler PR #125'te).
-2. docs/issues + migration-decisions MD-2 record.
-3. (Opsiyonel, reviewer tur-6 notu) `#100` öncesi V1 lane kaldırım planı.
+#95-A (MD-1 subject cutover) → #95-B (MD-1 cleanup) → #97 (MD-3) → #100
+(Faz 8a engine cutover — MD-2 compatibility fiziksel kaldırımı dahil;
+reviewer tur-6 notu: #100 öncesi V1 lane kaldırım planı ayrıca değerlendirilir).
 
 ## PR #125'te (merged) kapananlar — özet
 

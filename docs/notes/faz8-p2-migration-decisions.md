@@ -240,9 +240,34 @@ Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a tem
    ProvenanceAuthorityDriftObservation. Candidate yol mutation authority değil. **TAMAMLANDI
    (W5, #96).**
 3. **Drift sınıflandırması:** NoDrift / SourceLabelOnly / PredicateResultDrift /
-   PolicyDecisionDrift / MutationDecisionDrift / UnexpectedContextDrift. **TAMAMLANDI (W5+#92
-   downstream üç-durumu — UnexpectedContextDrift dışındaki sınıflar frozen corpus +
-   drift-matrix test'lerinde observable).**
+   PolicyDecisionDrift / MutationDecisionDrift / UnexpectedContextDrift. **SUPERSEDED (W5
+   tasarım kararı — bkz. aşağıdaki supersession kaydı):** altı-sınıflı explicit classifier
+   tipi ÜRETİLMEDİ; yerine raw observation + downstream üç-durum modeli implement edildi.
+   Sınıflar türetilebilir ve frozen corpus instance'larıyla pinli; materialize edilmemiş
+   classifier, consumer doğmadan dead vocabulary üretirdi.
+
+### Supersession — MD-2 drift taxonomy (W5 tasarım evrimi; PR #127 review P1)
+
+Orijinal requirement, cutover acceptance için altı-sınıflı **explicit classification**
+(tip/seviyesinde classifier) öngörüyordu. W5 implementation sırasında tasarım bilinçli
+olarak **raw observation + downstream state** modeline evrildi (`ProvenanceAuthorityDriftObservation`:
+native/reference lane raw value-bits + per-axis sources + Q5 + `ProvenanceDownstreamObservation`
+üç-durum). Gerekçe:
+
+- Sınıflandırma, raw observation'lardan **türetilebilir** — ayrı tip bilgi eklemez;
+  consumer'ı (policy/navigation) yokken materialize etmek dead vocabulary üretir (test-only
+  `DecisionDriftClass`'ın `#[allow(dead_code)]` varyantları bunun kanıtıydı).
+- Evidence-first ilke: karar yüzeyi ham gözlem taşır; yorum (sınıf etiketi) türetme,
+  ihtiyaç duyan yüzeyde yapılır.
+- Sınıfların gözlemlenebilirliği korunur: `NoDrift` #92 drift-matrix'inde canlı; kaynak
+  etiketi farkı (`SourceLabelOnly` semantiği) MD-2 sidecar'ında **intentional telemetry**
+  olarak yaşar (native authority vs uniform-Scip reference — reference non-authoritative);
+  downstream karar farkları frozen corpus + W9 dogfood rerun'da instance bazlı pinli.
+- `UnexpectedContextDrift`: fail-closed context hataları W5'te observation ÜRETİMİ
+  dışında tutuldu (eligibility: comparison-surviving yüzeyler) — ayrı sınıf gerekmedi.
+
+Explicit classifier, bir consumer (ör. migration raporlama policy'si) doğduğunda ayrı
+kararla eklenir; #96 kapanışını bloklamaz.
 4. **Native provenance authoritative** (#88 + dual-evaluation kanıtı sonrası). **TAMAMLANDI
    (W2-W4, #96): navigator + MCP native flow'a cut over; uniform-Scip yalnız reference
    projection.**
@@ -291,16 +316,24 @@ Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a tem
 - **Dogfood Run A rerun (W9, 2026-08-22):** 2026-08-18 confound kanıtının (subject+θ parity,
   provenance divergence → downstream divergence) kapanışı CANLI doğrulandı — aynı fixture
   (main.rs→a,b; RemoveImport 2→1), gerçek analyze + navigator + mock LLM:
-  - **Regolden task (`required_source: null`):** Completed (1 attempt). İki lane subject [2]
-    PARITY, sources engine-native `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]`
-    PARITY (v1 lane artık compat [Scip;5] projeksiyonu DEĞİL — re-anchor), aynı θ bits,
-    downstream `Completed/AcceptAsCompleted` PARITY. `provenance_authority_drift` sidecar canlı:
+  - **Lane adlandırması (net ayrım):** **MD-1 subject-observer lane'leri (V1/V2)** — subject +
+    native sources + downstream **PARITY** (V1 lane authority token'ın native provenance'ını,
+    V2 lane aynı session'ın native `md1_shadow`'unu kullanır — re-anchor). **MD-2 provenance
+    observer (native/reference)** — aynı value bits; **bilinçli** source-label farkı: native
+    authority vs uniform-Scip **reference** (non-authoritative, karar üretmez; fark
+    intentional telemetry).
+  - **Regolden task (`required_source: null`):** Completed (1 attempt). MD-1 lane'leri:
+    subject [2] + engine-native `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]`
+    + aynı θ bits + downstream `Completed/AcceptAsCompleted` — hepsi PARITY (v1 lane artık
+    compat [Scip;5] projeksiyonu DEĞİL). `provenance_authority_drift` sidecar canlı:
     native vs uniform-Scip reference, value-bits parity (construction property).
   - **Run A senaryosu (`required_source: Scip`):** expected semantic change MATERIALIZED —
     native TreeSitter coupling Scip şartını karşılamaz → `NotCompleted/Reject` (legacy uniform
-    projeksiyonda `Completed` olurdu); iki lane downstream PARITY ( Reject) — farkın nedeni
-    artık yalnızız görev tanımı, gözlem confound'u değil. Run `llm_error` (NoMoreProposals —
-    mock tek proposal, budget tükendi) ile sonlandı; tek attempt evidence'da sidecar'larla.
+    projeksiyonda `Completed` olurdu); MD-1 lane'leri downstream PARITY (Reject) — farkın
+    nedeni artık yalnız görev tanımı, gözlem confound'u değil. Termination:
+    `llm_error(NoMoreProposals)` — tek scripted proposal tüketildi; ikinci LLM çağrısında
+    mock kuyruğu boştu. **Maneuver limit exhaustion DEĞİL** (limit 3'e ulaşılmadı); tek
+    attempt evidence'da iki sidecar'la kayıtlı.
   - Envelope: `provenance_authority: "engine_native_per_axis"`, `provenance_native: true`.
 
 ### Gelecekte `Mixed(BTreeSet)` (#78)
