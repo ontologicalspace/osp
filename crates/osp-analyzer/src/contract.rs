@@ -11,6 +11,8 @@ use std::path::PathBuf;
 
 use osp_core::space::{NodeId, Space};
 
+use crate::language::AnalysisCompleteness;
+
 // Re-export: MetricValue/MetricSource/MetricValueError canonical kaynak osp_core::coords.
 // Downstream kod `crate::contract::MetricValue` path'inde çalışmaya devam eder (backward compat).
 pub use osp_core::coords::{MetricSource, MetricValue, MetricValueError};
@@ -152,6 +154,11 @@ pub struct AnalysisResult {
     pub semantic_coverage: SemanticCoverage,
     /// Diagnostic mesajları.
     pub diagnostics: Vec<AnalysisDiagnostic>,
+    /// Katalogda bilinen ama registry'de adapter'ı olmayan dosyalar var mı
+    /// (`AdapterRegistry` kısmi olabilir — Cargo feature-gating'den bağımsız,
+    /// `AdapterRegistry::new().with(...)` ile bugün de mümkün). `Complete` ise
+    /// hiçbir catalog-known dosya atlanmadı.
+    pub completeness: AnalysisCompleteness,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
