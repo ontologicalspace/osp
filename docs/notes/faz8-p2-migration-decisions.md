@@ -27,9 +27,9 @@ Issue'lar kararın kanıt ve uygulama geçmişidir, kararın kendisi değildir.
 
 | Karar | Normatif hedef | Compatibility (geçici) | Cutover |
 |---|---|---|---|
-| **MD-1** Subject | task scope authority | Yol 1 compat producer (affected_nodes) | Faz 8a caller cutover |
-| **MD-2** Provenance | engine-native per-axis | V1 uniform Scip projection | engine-internal, Faz 8a öncesi |
-| **MD-3** Baseline Policy | typed Unavailable + fail-closed | V1 DefaultFallback (legacy) | policy implementation |
+| **MD-1** Subject | task scope authority | Yol 1 compat producer (affected_nodes) | Faz 8a caller cutover (#95-A/B) |
+| **MD-2** Provenance | engine-native per-axis | V1 uniform Scip projection (yalnız reference — #100 fiziksel kaldırım) | **TAMAMLANDI (#96)** — engine-internal cutover yapıldı |
+| **MD-3** Baseline Policy | typed Unavailable + fail-closed | V1 DefaultFallback (legacy) | policy implementation (#97) |
 
 Deployment sırası: Normatif karar sırası MD-1 → MD-2 → MD-3'tür (nedensel bağımlılık);
 deployment sırası seri DEĞİLDİR. Her karar aşağıdaki "Migration ordering" dependency DAG
@@ -237,11 +237,104 @@ Authority cutover Faz 8a öncesi mümkün; compatibility code removal Faz 8a tem
    PredicateAxisTag, CanonicalPredicateScope, CanonicalSubjectScope, CanonicalStructuralDelta).
    Normative evidence mainline after merge.
 2. **Dual evaluation** (shadow comparison): compat (V1 uniform) vs native (V2 per-axis),
-   ProvenanceAuthorityDriftObservation. Candidate yol mutation authority değil.
+   ProvenanceAuthorityDriftObservation. Candidate yol mutation authority değil. **TAMAMLANDI
+   (W5, #96).**
 3. **Drift sınıflandırması:** NoDrift / SourceLabelOnly / PredicateResultDrift /
-   PolicyDecisionDrift / MutationDecisionDrift / UnexpectedContextDrift.
-4. **Native provenance authoritative** (#88 + dual-evaluation kanıtı sonrası).
-5. **Compatibility kaldırma** (Faz 8a temizlik).
+   PolicyDecisionDrift / MutationDecisionDrift / UnexpectedContextDrift. **SUPERSEDED (W5
+   tasarım kararı — bkz. aşağıdaki supersession kaydı):** altı-sınıflı explicit classifier
+   tipi ÜRETİLMEDİ; yerine raw observation + downstream üç-durum modeli implement edildi.
+   Sınıflar türetilebilir ve frozen corpus instance'larıyla pinli; materialize edilmemiş
+   classifier, consumer doğmadan dead vocabulary üretirdi.
+
+### Supersession — MD-2 drift taxonomy (W5 tasarım evrimi; PR #127 review P1)
+
+Orijinal requirement, cutover acceptance için altı-sınıflı **explicit classification**
+(tip/seviyesinde classifier) öngörüyordu. W5 implementation sırasında tasarım bilinçli
+olarak **raw observation + downstream state** modeline evrildi (`ProvenanceAuthorityDriftObservation`:
+native/reference lane raw value-bits + per-axis sources + Q5 + `ProvenanceDownstreamObservation`
+üç-durum). Gerekçe:
+
+- Sınıflandırma, raw observation'lardan **türetilebilir** — ayrı tip bilgi eklemez;
+  consumer'ı (policy/navigation) yokken materialize etmek dead vocabulary üretir (test-only
+  `DecisionDriftClass`'ın `#[allow(dead_code)]` varyantları bunun kanıtıydı).
+- Evidence-first ilke: karar yüzeyi ham gözlem taşır; yorum (sınıf etiketi) türetme,
+  ihtiyaç duyan yüzeyde yapılır.
+- Sınıfların gözlemlenebilirliği korunur: `NoDrift` #92 drift-matrix'inde canlı; kaynak
+  etiketi farkı (`SourceLabelOnly` semantiği) MD-2 sidecar'ında **intentional telemetry**
+  olarak yaşar (native authority vs uniform-Scip reference — reference non-authoritative);
+  downstream karar farkları frozen corpus + W9 dogfood rerun'da instance bazlı pinli.
+- `UnexpectedContextDrift`: fail-closed context hataları W5'te observation ÜRETİMİ
+  dışında tutuldu (eligibility: comparison-surviving yüzeyler) — ayrı sınıf gerekmedi.
+
+Explicit classifier, bir consumer (ör. migration raporlama policy'si) doğduğunda ayrı
+kararla eklenir; #96 kapanışını bloklamaz.
+4. **Native provenance authoritative** (#88 + dual-evaluation kanıtı sonrası). **TAMAMLANDI
+   (W2-W4, #96): navigator + MCP native flow'a cut over; uniform-Scip yalnız reference
+   projection.**
+5. **Compatibility kaldırma** (Faz 8a temizlik). **AÇIK — #100** (`uniform_scip_reference_
+   projection` fiziksel kaldırım + V1 lane).
+
+### MD-2 implementation (Tamamlandı — #96; PR #125 W1-W7 + PR #126 W6/W8 + W9)
+
+**Modüller:** `crates/osp-core/src/task_measurement.rs` (shared authority surface) +
+`crates/osp-core/src/provenance_authority.rs` (observer) — MD-2'nin tek evi.
+
+- **Opaque token + tek-session producer (W1):** `NativeLegacySubjectMeasurement` private
+  fields + `pub(crate)` ctor (tek üretici `measure_attempt_native_with_md1_shadow` — authority
+  + md1_shadow TEK `BoundMeasurementSession` altında, `verify_unchanged` fail-closed);
+  `CoreAxisEpochStamp` session begin'in atomik capture'ı; singleton fast-path bit-identical.
+  PR #124 review: `MeasurementFailureDisposition` 17-varyant exact tablo (navigator+MCP ortak).
+- **Caller cutover + commit-time verification (W2-W4):** navigator + MCP `draft::try_new →
+  producer → finalize → Q4 final-raw → commit` (structural Q4 fallible measurement'tan ÖNCE).
+  `FinalizedNativeTaskClaim` sealed carrier (private ctor + fields; artifact mix type-level
+  unrepresentable — `TaskCommitInput::new` yalnız carrier kabul eder). Commit-anı verifier 5
+  gerçeklik fence'i: structural delta digest / raw bits / stale space revision / context
+  TOCTOU / A→B→A monoton epoch. Basis proof'tan okur (yeniden ölçüm yok).
+- **Observer (W5):** `ProvenanceAuthorityDriftObservation` — AYNI token üzerinde
+  native↔uniform-Scip reference; value-bits PARITY construction property (reference, token
+  raw'ının izdüşümü — ikinci truth yok); `ProvenanceDownstreamObservation` üç-durum
+  (`Q4SyntaxRejection` arm'ı YOK — precedence correction); counterfactual gate asla
+  "production observed" değil. Wire: `TrajectoryEvidence.provenance_authority_drift` +
+  `PendingAuthorization`/`RevisionRequired` telemetry sidecar'ları (digest preimage DIŞINDA;
+  identity-bound + strict wire reject — subject/provenance × Pending/Revision dört yol simetrik
+  pinli).
+- **Failure ontology (PR #125 review turları):** `NativeFailureSurface` shared mapper
+  (navigator+MCP tek tablo): gerçek structural Q4 → `RejectedBySyntax`; native
+  authority/TCB/operational → `system_failure` JSON (fabrication YOK — gözlenmeyen gate kararı
+  üretilmez); agent-correctable → retry yüzeyi GERÇEK gate kararı ile
+  (`RejectedByVision`/`RejectedByRule`).
+- **CLI vocabulary (W7):** run envelope `execution_measurement`: `subject_authority:
+  "affected_nodes"` (legacy — #95-A flip pending), `provenance_authority:
+  "engine_native_per_axis"`, `provenance_native: true`, deprecated `authority` mirror (#100'e
+  kadar).
+- **Authority boundary kabul kanıtı (W6/W8, PR #126):** trybuild compile-fail ×6 (carrier
+  ctor/literal, kaldırılan `new_characterization_legacy`, artifact-mix, MEVCUT token
+  `pub(crate)` ctor + literal) + verifier ×5 runtime negatifi (stale replay gerçek commit
+  funnel'ından; gerçek A→B→A — digest-kör kanıtlı) + basis↔token cross-pin + 17-varyant
+  disposition envanteri (dormant producer notları) + MCP Q4-vs-measurement yarışı +
+  `NativeFailureWireShape` 5/5 wire contract + retryable gerçek-gate e2e.
+- **Dogfood Run A rerun (W9, 2026-08-22):** 2026-08-18 confound kanıtının (subject+θ parity,
+  provenance divergence → downstream divergence) kapanışı CANLI doğrulandı — aynı fixture
+  (main.rs→a,b; RemoveImport 2→1), gerçek analyze + navigator + mock LLM:
+  - **Lane adlandırması (net ayrım):** **MD-1 subject-observer lane'leri (V1/V2)** — subject +
+    native sources + downstream **PARITY** (V1 lane authority token'ın native provenance'ını,
+    V2 lane aynı session'ın native `md1_shadow`'unu kullanır — re-anchor). **MD-2 provenance
+    observer (native/reference)** — aynı value bits; **bilinçli** source-label farkı: native
+    authority vs uniform-Scip **reference** (non-authoritative, karar üretmez; fark
+    intentional telemetry).
+  - **Regolden task (`required_source: null`):** Completed (1 attempt). MD-1 lane'leri:
+    subject [2] + engine-native `[TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic]`
+    + aynı θ bits + downstream `Completed/AcceptAsCompleted` — hepsi PARITY (v1 lane artık
+    compat [Scip;5] projeksiyonu DEĞİL). `provenance_authority_drift` sidecar canlı:
+    native vs uniform-Scip reference, value-bits parity (construction property).
+  - **Run A senaryosu (`required_source: Scip`):** expected semantic change MATERIALIZED —
+    native TreeSitter coupling Scip şartını karşılamaz → `NotCompleted/Reject` (legacy uniform
+    projeksiyonda `Completed` olurdu); MD-1 lane'leri downstream PARITY (Reject) — farkın
+    nedeni artık yalnız görev tanımı, gözlem confound'u değil. Termination:
+    `llm_error(NoMoreProposals)` — tek scripted proposal tüketildi; ikinci LLM çağrısında
+    mock kuyruğu boştu. **Maneuver limit exhaustion DEĞİL** (limit 3'e ulaşılmadı); tek
+    attempt evidence'da iki sidecar'la kayıtlı.
+  - Envelope: `provenance_authority: "engine_native_per_axis"`, `provenance_native: true`.
 
 ### Gelecekte `Mixed(BTreeSet)` (#78)
 
@@ -456,14 +549,21 @@ Status: `planned — MD-x accepted, implementation pending`. Production Rust kod
 
 ## Follow-up issues
 
-- **Subject-authority caller migration** (MD-1 implementation — Faz 8a).
-- **Provenance enforcement** (MD-2 implementation — engine-internal cutover).
-- **Baseline policy implementation** (MD-3 implementation — AcceptAsColdStart + ColdStartPolicy).
+- **Subject-authority caller migration** (MD-1 implementation — Faz 8a). **SIRADAKİ: #95-A**
+  (subject_authority `"affected_nodes"` → `"task_scope"` flip; typed draft temeli #96'dan hazır)
+  → #95-B (MD-1 cleanup).
+- **Provenance enforcement** (MD-2 implementation — engine-internal cutover). **TAMAMLANDI
+  (#96 — PR #125 W1-W7 + PR #126 W6/W8 + W9 dogfood rerun).**
+- **Baseline policy implementation** (MD-3 implementation — AcceptAsColdStart + ColdStartPolicy)
+  — #97.
 - **#88** mixed_per_axis_sources matrisi (MD-2 evidence gate).
 - **#92** subject-authority → raw → Q5 theta downstream (MD-1 cutover gate).
 - **#96** MD-2 implementation — navigator native measurement migration + singleton
   fast-path + digest parity + Completed-loop exact pin (review B-3 P1-3 versioned JSON
-  envelope).
+  envelope). **TAMAMLANDI.**
+- **#100** Faz 8a engine cutover — MD-2 compatibility fiziksel kaldırımı dahil
+  (`uniform_scip_reference_projection`, V1 lane, deprecated `authority` alias absorbe).
+- **#103** digest incident supersession record (W9'da transferred).
 
 ## Faz 8 test-project Completed-loop — V1 compatibility harness deferral
 

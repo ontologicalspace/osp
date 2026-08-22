@@ -1,3 +1,12 @@
+//! **HISTORICAL PRE-#96 CHARACTERIZATION CONTRACT.**
+//! Bu dosya bilinçli olarak legacy/reference karşılaştırmasını korur — #96 MD-2
+//! production cutover SONRASI üretim authority truth'u DEĞİLDİR (post-#96:
+//! engine-native per-axis = mutation authority; production native flow
+//! draft → measure → finalize → sealed carrier → commit kullanır; bkz.
+//! `docs/notes/faz8-p2-migration-decisions.md` MD-2 implementation).
+//! V1 lane non-authoritative reference evaluation'dır (commit pipeline yok —
+//! `PipelineObservation::ReferenceEvaluation`).
+//!
 //! Faz 8-P2 P2-0B — V1/V2 semantic divergence characterization (Yüzey 1: core).
 //!
 //! Bu integration test, V1 (`compute_raw_from_delta` + `provenanced_from_raw`) ile
