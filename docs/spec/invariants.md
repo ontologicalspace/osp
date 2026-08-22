@@ -240,8 +240,10 @@ normatif evidence DEĞİL; yalnız geçici versioned compatibility observation. 
 gereksinimi değerlendirilen eksenin kendi provenance'ına uygulanır — aggregate veya synthetic
 source etiketi per-axis evidence'ın yerine geçemez. Hedef axis `Mixed` ise hiçbir `Exact(X)`
 şartını karşılamaz (fail-closed `SourceInsufficient`). Axis'ler arası heterojenlik güvenilmez
-DEĞİL — predicate yalnız kendi axis'ini kontrol eder. (Status: planned — MD-2 accepted,
-authority cutover engine-internal Faz 8a öncesi; `docs/notes/faz8-p2-migration-decisions.md`.)
+DEĞİL — predicate yalnız kendi axis'ini kontrol eder. (Status: **implemented — #96 cutover
+tamamlandı (2026-08)**: engine-native per-axis = mutation authority; uniform-Scip artık yalnız
+reference projection — fiziksel kaldırım #100. Kanıt + dogfood rerun:
+`docs/notes/faz8-p2-migration-decisions.md` MD-2 implementation bölümü.)
 
 ### INV-T5 — Task ≠ Claim (Aşama B güncelleme: static Claim taskless olabilir)
 **Status:** planned (Aşama A) + **implemented (Aşama B — Claim.task_id + TaskBoundClaim)**
