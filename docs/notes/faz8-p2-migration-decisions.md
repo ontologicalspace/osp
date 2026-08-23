@@ -27,7 +27,7 @@ Issue'lar kararın kanıt ve uygulama geçmişidir, kararın kendisi değildir.
 
 | Karar | Normatif hedef | Compatibility (geçici) | Cutover |
 |---|---|---|---|
-| **MD-1** Subject | task scope authority | Yol 1 compat producer (affected_nodes) | Faz 8a caller cutover (#95-A/B) |
+| **MD-1** Subject | task scope authority | Yol 1 compat producer (affected_nodes) | **#95-A TAMAMLANDI (2026-08)** — authority cutover; cleanup #95-B |
 | **MD-2** Provenance | engine-native per-axis | V1 uniform Scip projection (yalnız reference — #100 fiziksel kaldırım) | **TAMAMLANDI (#96)** — engine-internal cutover yapıldı |
 | **MD-3** Baseline Policy | typed Unavailable + fail-closed | V1 DefaultFallback (legacy) | policy implementation (#97) |
 
@@ -136,7 +136,56 @@ regolden (tarihsel bağ korunarak — sessiz overwrite değil) + compatibility y
   - **MD-2 separation:** `RawMeasurementObservation.sources` V1 compatibility-projected [Scip;5] vs V2 engine-native per-axis olarak ayrı görünür — downstream farkının provenance kaynaklı olduğu sentinel testle pinli (subject/raw parity + provenance/downstream divergent).
   - **Eligibility (comparison-surviving surface):** Evaluated · Held · Rejected · retryable Q4/Q5/Q6 → observation emit; TaskValidation · VisionContextInvalid · SystemFailure → emit yok. Witness disposition eligibility'yi etkilemez.
   - **Digest ayrımı:** observation `PendingAuthorization`/`RevisionRequired` telemetry sidecar'ları ile `TrajectoryEvidence.subject_authority_drift` alanında taşınır; digest preimage'lerine (SuspendedAttemptEvidence, AuthorizationBasis, evidence_digest) **asla** girmez (test pinli). Wire upgrade-directional: new reader old wire'ı kabul eder (`#[serde(default)]` + strict `deny_unknown_fields` korunur).
-- **Held/Rejected kaybı yok:** navigator Held → `PendingAuthorization.subject_authority_drift`; Rejected → `RevisionRequired.with_subject_authority_drift()`; MCP Held/Rejected/Evaluated/retryable-Err response JSON'larına additive sidecar (mevcut error JSON semantiği bilinçli olarak değiştirilmez).
+- Held/Rejected kaybı yok: navigator Held → `PendingAuthorization.subject_authority_drift`; Rejected → `RevisionRequired.with_subject_authority_drift()`; MCP Held/Rejected/Evaluated/retryable-Err response JSON'larına additive sidecar (mevcut error JSON semantiği bilinçli olarak değiştirilmez).
+
+### #95-A implementation (Tamamlandı — MD-1 subject cutover, 2026-08)
+
+**Ontolojik sınır:** Task neyin ölçüleceğini söyler (subject authority). Delta neyin
+değiştiğini söyler (structural authority). `affected_nodes` neyin etkilenmiş
+olabileceğini söyler (advisory impact metadata — authority DEĞİL).
+
+- **Tek truth scope türetimi:** `measurement::canonical_task_subject_scope(task)`
+  (saf free fn; engine metodu delegate). Draft binding capture, engine authority
+  lane VE commit-time MD-1 fence aynı fonksiyondan türetir.
+- **Draft:** `StructurallyValidatedClaimDraft::try_new(proposal, raw, task, …)` —
+  Q4 structural ÖNCE, sonra task-scope binding capture. Scope türetim hataları →
+  `ClaimDraftError::TaskSubjectScope(MeasurementError)` (TerminalTaskDeclaration
+  — terminal, retry yok; navigator/MCP shared disposition ile mapler).
+- **Producer (capability reduction):** `measure_attempt_native_with_md1_shadow
+  (draft, task)` — **`proposal` parametresi YOK**: structural truth yalnız sealed
+  draft/claim'den, subject truth yalnız canonical task scope'tan. `affected_nodes`
+  authority producer'ın erişim yüzeyinden FİZİKSEL olarak çıktı.
+- **Token:** `subject_scope: CanonicalSubjectScope` (illegal durumlar — `[]`/
+  duplicate/noncanonical — construction'da temsil edilemez; re-canonicalization
+  YOK). Fiziksel "legacy" isimler compat accessor'larla #95-B'ye kadar.
+- **Commit-time MD-1 fence (P0, review tur-2):** `commit_task_claim`:
+  resolve → validate_for_commit → `canonical_task_subject_scope(current_task)`
+  == token scope? Derivation Err → `Derivation(SubjectDerivationFailed)`;
+  drift → `NativeAuthority(TaskSubjectBindingMismatch{expected, presented})`;
+  eşit → #96 5-fence (DOKUNULMADI). Registry-overwrite negatif e2e ×2 pinli
+  (Q5/witness/mutation'a ulaşmaz).
+- **Affected-irrelevance (executable theorem):** A(delta D, affected [1]) vs
+  B(delta D, affected [1,7,9]), aynı scope [2] → subject/bits/sources/input-digest/
+  delta-digest/finalize/PredicateGate/MutationDecision/`AuthorizationBasis.measured`
+  HEPSİ exact eşit (full-path metamorphic test).
+- **CLI:** `subject_authority: "task_scope"` (yalnız bu eksen; provenance üçlüsü
+  sabit); LLM prompt dili advisory-hint'e çevrildi.
+- **Dogfood Run C (2026-08, divergent fixture):** task scope Node(3), `affected_
+  nodes [3,2]` (legacy union ≠ scope — centroid'i etkiler): envelope
+  `subject_authority: "task_scope"`; authority subject **[3]** (≠ legacy [3,2]);
+  MD-1 lane'leri subject/raw digest + bits PARITY; MD-2 observer native vs
+  uniform-Scip reference value-parity (intentional divergence intact). Completed
+  (1 attempt). Etiket vocabulary değişikliği DEĞİL — gerçek mutation authority
+  değişimi kanıtlandı.
+- **Regolden (eski+yeni+reason):** subject-divergence golden'ları (Case 2/3:
+  V1 affected-union vs V2 task-scope) → **parity**'ye döndü (reason:
+  `subject-cutover (#95-A)`); finalize mix-negatifleri → affected-irrelevance
+  pozitifi + scope-mismatch negatifi; Module-scope shadow-failure → draft-stage
+  terminal (senaryo temsili kalmadı — iki lane aynı scope'tan türetilir).
+- **Kalan (#95-B cleanup):** observer + `SubjectAuthorityDriftObservation` +
+  legacy subject producer + MD-1 sidecar alanları + legacy fiziksel isimler +
+  `effective_legacy_measure_set` (yalnız compat producer'da yaşıyor) —
+  construction-parity witness olarak bugün yaşıyorlar.
 
 ### Cutover acceptance criteria (Faz 8a gate, Issue #92 kanıtı sonrası)
 
@@ -549,9 +598,9 @@ Status: `planned — MD-x accepted, implementation pending`. Production Rust kod
 
 ## Follow-up issues
 
-- **Subject-authority caller migration** (MD-1 implementation — Faz 8a). **SIRADAKİ: #95-A**
-  (subject_authority `"affected_nodes"` → `"task_scope"` flip; typed draft temeli #96'dan hazır)
-  → #95-B (MD-1 cleanup).
+- **Subject-authority caller migration** (MD-1 implementation — Faz 8a). **#95-A
+  (authority cutover) TAMAMLANDI** — bkz. "#95-A implementation" bölümü. Kalan:
+  **#95-B** MD-1 cleanup (observer + compat producer + legacy isimler).
 - **Provenance enforcement** (MD-2 implementation — engine-internal cutover). **TAMAMLANDI
   (#96 — PR #125 W1-W7 + PR #126 W6/W8 + W9 dogfood rerun).**
 - **Baseline policy implementation** (MD-3 implementation — AcceptAsColdStart + ColdStartPolicy)

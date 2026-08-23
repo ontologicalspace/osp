@@ -1574,10 +1574,42 @@ impl SpaceEngine {
         // source requirement, geçersiz policy.
         //
         // Guard order: Q4 syntax → task bind → **validate_for_commit** →
-        // **#96: verify_native_legacy_measurement_binding** → Q5 vision →
-        // Q5.b gate → Q6 rule → witness.
+        // **#95-A: MD-1 subject fence** → **#96: verify_native_legacy_measurement_
+        // binding** → Q5 vision → Q5.b gate → Q6 rule → witness.
         // Terminal — maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
         bound.task.validate_for_commit()?;
+
+        // **#95-A (MD-1 subject cutover — tur-2 P0):** Commit-anı subject fence —
+        // resolve edilen CURRENT task'ın canonical predicate scope'u, token'ın
+        // ölçtüğü subject scope ile EŞİT olmalı. Registry overwrite senaryosu:
+        // draft/measure Task(id=42, Node(1)) → registry.insert(Task(id=42,
+        // Node(2))) → 5-fence geçerdi AMA Node(1) ölçümü Node(2) predicate'inde
+        // tüketilirdi (MD-1 invariant ihlali). Epistemik ayrım:
+        // - scope türetileMEdi → `Derivation(SubjectDerivationFailed)` (expected
+        //   authority gerçeği kurulamadı — heterojen/Module/empty);
+        // - türetildi ≠ token → `NativeAuthority(TaskSubjectBindingMismatch)`
+        //   (gerçekliği karşılaştırdık, drift gördük);
+        // - eşit → #96 5-fence ile devam.
+        let current_scope = crate::measurement::canonical_task_subject_scope(bound.task)
+            .map_err(|e| {
+                EngineCommitError::MeasurementBindingVerification(
+                    crate::measurement::MeasurementBindingVerificationError::Derivation(
+                        crate::measurement::MeasurementBindingDerivationError::SubjectDerivationFailed {
+                            detail: e.to_string(),
+                        },
+                    ),
+                )
+            })?;
+        if current_scope != *input.measurement.subject_scope() {
+            return Err(EngineCommitError::MeasurementBindingVerification(
+                crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                    crate::measurement::NativeLegacyMeasurementBindingError::TaskSubjectBindingMismatch {
+                        expected: current_scope,
+                        presented: input.measurement.subject_scope().clone(),
+                    },
+                ),
+            ));
+        }
 
         // **#96 MD-2 (plan v4 P0-tur3):** Opaque token'ın commit-anı geçerlilik kanıtı
         // (5 kontrol: delta digest / raw bits / revision / context / epoch — ABA fence).
@@ -2711,38 +2743,44 @@ impl SpaceEngine {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // #96 MD-2 (plan v4-FİNAL) — Native legacy-subject provenance authority
+    // #96 MD-2 → #95-A (MD-1 subject cutover) — Native task-scope provenance
+    // authority
     //
-    // EngineMeasurement DEĞİLDİR: task-scope binding yok (MD-1 = #95-A), baseline yok
-    // (MD-3 = #97). Legacy subject (ordered union) SABİT; yalnız provenance engine-native
-    // olur. Tek BoundMeasurementSession: authority ölçümü + MD-1 shadow material AYNI
-    // captured descriptor/epoch snapshot'ı altında (md1_shadow #95-B'de silinir).
-    // Tipler top-level (`NativeAttemptMeasurement` / `TaskScopeNativeMaterial`).
+    // EngineMeasurement DEĞİLDİR: baseline yok (MD-3 = #97). #95-A sonrası
+    // measurement subject = canonical task predicate scope; provenance
+    // engine-native (#96 — değişmez). Tek BoundMeasurementSession: authority +
+    // MD-1 shadow AYNI captured snapshot altında (shadow #95-B'de silinir —
+    // cutover sonrası construction-parity witness).
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// **#96 MD-2 (plan v4-FİNAL):** Legacy subject üzerinde session-bound native
-    /// ölçüm — authority token + MD-1 shadow, TEK `BoundMeasurementSession` altında.
+    /// **#95-A (MD-1 subject cutover):** Canonical task scope üzerinde
+    /// session-bound native ölçüm — authority token + MD-1 shadow, TEK
+    /// `BoundMeasurementSession` altında. Provenance engine-native (#96).
+    ///
+    /// **Capability reduction (tur-3 P1-1):** `proposal` parametresi YOK —
+    /// hypothetical structural truth yalnız sealed draft/claim'den, subject
+    /// truth yalnız canonical task scope'tan. `affected_nodes` (advisory
+    /// impact metadata) authority producer'ın erişim yüzeyinden FİZİKSEL
+    /// olarak çıkmıştır.
     ///
     /// Sözleşmeler:
-    /// - **P1-tur-approve:** legacy subject producer İÇİNDE türetilir
-    ///   (`derive_v1_legacy_measurement_subject(proposal)` + legacy delta-ids
-    ///   fallback) — serbest `Vec<NodeId>` parametresi YOK.
-    /// - **Stale replay fence:** token `base_revision` ölçüm anında capture edilir;
-    ///   commit-time verification `current == token.base_revision` karşılaştırır.
-    ///   Aynı context'te meşru yeniden sunum engellenmez.
-    /// - **Context/epoch:** `MeasurementInputContext` + `CoreAxisEpochStamp`
-    ///   session'ın ATOMİK captured snapshot'ından — measurement sonrası
-    ///   CoordinateSystem yeniden dolaşılmaz (ikinci observation TOCTOU açar).
+    /// - **Subject authority:** `canonical_task_subject_scope(task)` (tek truth
+    ///   — draft capture + commit MD-1 fence aynı fonksiyondan). Presence/
+    ///   unresolvable matrisi md1_shadow lane ile aynı.
+    /// - **Stale replay fence:** token `base_revision` ölçüm anında capture
+    ///   edilir; commit-time `current == token.base_revision`. Aynı context'te
+    ///   meşru yeniden sunum engellenmez.
+    /// - **Context/epoch:** session'ın ATOMİK captured snapshot'ından —
+    ///   measurement sonrası CoordinateSystem yeniden dolaşılmaz.
     /// - **Half-merge YASAK:** gate'in gördüğü değerler ile final Claim'in
     ///   `computed_raw`'ı AYNI token'dan (`finalize` + `raw()`).
-    /// - **Fail-closed boş subject:** legacy `compute_raw_from_delta`'nın empty
-    ///   `RawPosition::default()` fallback'i YOK (dürüst provenance yoktur);
-    ///   `EmptySubjectScope` — expected-change reason-note ile dokümante.
+    /// - **Fail-closed:** empty/duplicate scope `CanonicalSubjectScope::try_new`
+    ///   tarafından construction'da reddedilir; `EmptySubjectScope` /
+    ///   `HeterogeneousPredicateScopes` / Module → typed MeasurementError.
     #[allow(clippy::result_large_err)]
     pub fn measure_attempt_native_with_md1_shadow(
         &self,
         draft: &crate::task_measurement::StructurallyValidatedClaimDraft,
-        proposal: &crate::agent::DeltaProposal,
         task: &crate::trajectory::Task,
     ) -> Result<NativeAttemptMeasurement, crate::measurement::MeasurementError> {
         use crate::measurement::{
@@ -2771,15 +2809,28 @@ impl SpaceEngine {
         let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
-        // 4. Legacy subject — engine-internal derivation (P1-tur-approve).
-        //    **tur-2 P1:** draft ile TEK truth — `effective_legacy_measure_set`
-        //    (ordered union; boşsa delta node id'leri fallback). Token ctor,
-        //    `legacy_subject_binding` digest'ini bu set'ten türetir; draft'ın
-        //    capture'ı ile hizalı (finalize karşılaştırır).
-        let measure_set =
-            crate::task_measurement::effective_legacy_measure_set(proposal, &claim.delta_nodes);
+        // 4. **#95-A (MD-1):** Subject authority — canonical task predicate
+        //    scope (tek truth free fn; draft capture'ı ile hizalı — finalize
+        //    karşılaştırır). Unresolvable matrisi md1_shadow ile aynı (base +
+        //    delta-introduced'e karşı).
+        let subject_scope = crate::measurement::canonical_task_subject_scope(task)?;
+        let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
+            claim.delta_nodes.iter().map(|n| n.id).collect();
+        let mut unresolvable: Vec<crate::space::NodeId> = Vec::new();
+        for &id in subject_scope.member_ids() {
+            if !self.space.nodes.contains_key(&id) && !delta_introduced.contains(&id) {
+                unresolvable.push(id);
+            }
+        }
+        if !unresolvable.is_empty() {
+            return Err(MeasurementError::SubjectMemberUnresolvable {
+                missing: unresolvable,
+            });
+        }
 
-        // 5. Hypothetical (measure_task_delta P2-3 sırası: removed → nodes → edges).
+        // 5. Hypothetical (measure_task_delta P2-3 sırası: removed → nodes → edges)
+        //    — structural truth YALNIZ sealed draft/claim'den (proposal YOK —
+        //    capability reduction, reviewer tur-3 P1-1).
         let mut hypothetical = self.space.clone();
         for er in &claim.removed_edges {
             hypothetical.remove_edge(er.from, er.to, er.kind);
@@ -2790,11 +2841,19 @@ impl SpaceEngine {
         for edge in &claim.delta_edges {
             hypothetical.insert_edge(*edge);
         }
+        // Hypothetical'ta subject mevcudiyeti (md1_shadow adım 8 pre-check ile aynı).
+        for &id in subject_scope.member_ids() {
+            if !hypothetical.nodes.contains_key(&id) {
+                return Err(MeasurementError::SubjectMemberMissingAfterDelta { node_id: id });
+            }
+        }
 
-        // 6. Authority measured — native per-axis, session-bound.
-        let measured = self.measured_centroid_in_session(&session, &hypothetical, &measure_set)?;
+        // 6. Authority measured — native per-axis, session-bound, task scope.
+        let measured =
+            self.measured_centroid_in_session(&session, &hypothetical, subject_scope.member_ids())?;
 
-        // 7. MD-1 shadow — task scope, AYNI session; failure → telemetry sınıflandırma.
+        // 7. MD-1 shadow — AYNI session'da bağımsız türetim; cutover sonrası
+        //    construction-parity witness (failure → telemetry sınıflandırma).
         let md1_shadow = self.measure_md1_shadow_in_session(&session, &hypothetical, claim, task);
 
         // 8. Session-sonu verify (authority + shadow ölçümleri aynı fences altında).
@@ -2813,10 +2872,11 @@ impl SpaceEngine {
             })?;
         let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)?;
 
-        // 10. Opaque token — tek üretici burası (measurement.rs ctor pub(crate)).
+        // 10. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
+        //     subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
         let authority = NativeLegacySubjectMeasurement::new(
             measured,
-            measure_set,
+            subject_scope,
             delta_digest,
             base_revision,
             measurement_input_digest,
@@ -3041,53 +3101,10 @@ impl SpaceEngine {
         task: &crate::trajectory::Task,
     ) -> Result<crate::measurement::CanonicalSubjectScope, crate::measurement::MeasurementError>
     {
-        use crate::measurement::{
-            CanonicalSubjectScope, MeasurementError, SubjectScopeResolutionError,
-        };
-        use crate::trajectory::PredicateScope;
-
-        // **Reviewer v5 P1-3:** Her predicate scope doğrudan CanonicalSubjectScope::try_new
-        // üzerinden geçer — sort dedup YOK. Duplicate Subgraph scope (örn [1, 1, 2])
-        // sessizce düzeltilmez, typed error ile reddedilir (authorization
-        // CanonicalSubgraphScope ile aynı sözleşme).
-        let canonical_scopes: Vec<CanonicalSubjectScope> = task
-            .target_predicate_set
-            .predicates
-            .iter()
-            .map(|wp| {
-                let ids = match &wp.predicate.scope {
-                    PredicateScope::Node(id) => vec![*id],
-                    PredicateScope::Subgraph(member_ids) => member_ids.clone(),
-                    PredicateScope::Module(name) => {
-                        return Err(MeasurementError::SubjectScopeResolutionFailed(
-                            SubjectScopeResolutionError::ModuleResolutionUnavailable {
-                                module: name.clone(),
-                            },
-                        ));
-                    }
-                };
-                CanonicalSubjectScope::try_new(ids).map_err(MeasurementError::Digest)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        if canonical_scopes.is_empty() {
-            return Err(MeasurementError::EmptySubjectScope);
-        }
-
-        // P1-4 (v2): Heterojen predicate scope fail-closed. canonical_scopes[0]
-        // referans; diğerleri eşit olmalı. Diagnostic için tüm canonical scope'lar taşınır.
-        let mut iter = canonical_scopes.into_iter();
-        let first = iter.next().expect("non-empty checked above");
-        for other in iter {
-            if other != first {
-                return Err(MeasurementError::HeterogeneousPredicateScopes {
-                    // Reviewer v5 P2-3: diagnostic kanıtı — ilk iki farklı scope.
-                    // Tüm liste yerine iki temsilci yeterli (hata mesajı okunabilir kalır).
-                    scopes: vec![first.clone(), other],
-                });
-            }
-        }
-        Ok(first)
+        // **#95-A:** saf free fn'a delegate — tek truth
+        // `measurement::canonical_task_subject_scope` (draft capture / authority
+        // lane / commit fence aynı fonksiyondan türetir).
+        crate::measurement::canonical_task_subject_scope(task)
     }
 
     /// **INV-T9 #70 Commit 3 (P1-1 v3 + P1-4 v3):** Claim → impact scope türetme (canonical).
@@ -4166,7 +4183,10 @@ v = 0.5
         let revision = engine.current_space_view_revision().unwrap();
         let ctx = MeasurementInputContext::try_from(engine.coord_system()).unwrap();
         let input_digest = MeasurementInputDigest::compute(&ctx).unwrap();
-        let subject = claim.delta_nodes.iter().map(|n| n.id).collect();
+        let subject = crate::measurement::CanonicalSubjectScope::try_new(
+            claim.delta_nodes.iter().map(|n| n.id).collect(),
+        )
+        .expect("canonical subject scope");
         crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
             claim.clone(),
             measured,
@@ -8144,6 +8164,19 @@ v = 0.5
         )
     }
 
+    fn user_loaded_vision() -> VisionVector {
+        crate::vision::VisionVector::with_source(
+            RawPosition {
+                x: 0.5,
+                y: 0.5,
+                z: 0.5,
+                w: 0.5,
+                v: 0.5,
+            },
+            crate::vision::VisionSource::UserLoaded,
+        )
+    }
+
     fn md1_task_node1() -> crate::trajectory::Task {
         use crate::trajectory::{
             ComparisonOp, MetricPredicate, PredicateAxis, PredicateMode, PredicateScope,
@@ -8278,14 +8311,14 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             1,
             1,
         )
         .unwrap();
 
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .unwrap();
 
         // Karşılaştırma yüzeyi: production `measure_task_delta` (kendi session'ı).
@@ -8337,13 +8370,14 @@ v = 0.5
         );
     }
 
-    /// **#96 MD-2 (plan v4 P1-tur-approve construction contract):** audited legacy
-    /// subject producer İÇİNDE türetilir — serbest `Vec<NodeId>` parametresi YOK.
-    /// Case 3 shape (removed-edge external source): affected [1] + removed_edges.from=9
-    /// → ordered union [1, 9]; plain case affected [1] → [1]; boş affected →
-    /// legacy delta-ids fallback (10_000+index).
+    /// **#95-A (MD-1 subject cutover):** authority subject = canonical task
+    /// predicate scope — producer İÇİNDE türetilir (serbest Vec parametresi YOK;
+    /// affected_nodes erişim yüzeyinden FİZİKSEL çıktı — producer imzasında
+    /// proposal YOK). Üç vaka + authority↔shadow construction-parity pin'i
+    /// (subject/bits/sources exact).
+    /// *(Historical pre-#95-A golden: legacy affected-union — reason: `subject-cutover (#95-A)`)*
     #[test]
-    fn md2_native_attempt_subject_is_engine_derived_legacy_union() {
+    fn md95a_authority_subject_is_canonical_task_scope() {
         // Case 3: node 9 mevcut (corpus mirror — removed-edge-external-source shape).
         let mut space = md1_space_two_nodes();
         space.insert_node(crate::space::Node {
@@ -8360,22 +8394,25 @@ v = 0.5
         );
         let task = md1_task_node1();
 
-        // (a) Plain: affected [1] → [1].
+        // (a) Plain: affected [1], task scope Node(1) → authority subject [1].
         let proposal = md1_edge_proposal();
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             1,
             1,
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .unwrap();
         assert_eq!(bundle.authority().legacy_subject_ids(), &[1u64]);
 
-        // (b) Case 3: affected [1] + removed_edges.from=9 → ordered union [1, 9].
+        // (b) **#95-A regolden:** affected [1] + removed_edges.from=9 → authority
+        // subject YİNE [1] (task scope). *(Historical pre-#95-A golden: legacy
+        // ordered union [1, 9] — affected_nodes artık subject authority DEĞİL;
+        // eski golden tarihsel bağla korunur.)*
         let mut case3 = md1_edge_proposal();
         case3.new_edges = vec![];
         case3.removed_edges = vec![crate::agent::EdgeRef {
@@ -8386,21 +8423,22 @@ v = 0.5
         let draft3 = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &case3,
             RawPosition::default(),
-            task.id,
+            &task,
             1,
             2,
         )
         .unwrap();
         let bundle3 = engine
-            .measure_attempt_native_with_md1_shadow(&draft3, &case3, &task)
+            .measure_attempt_native_with_md1_shadow(&draft3, &task)
             .unwrap();
         assert_eq!(
             bundle3.authority().legacy_subject_ids(),
-            &[1u64, 9],
-            "ordered union: affected order korunur, unseen removed_edges.from eklenir"
+            &[1u64],
+            "#95-A: authority subject = canonical task scope (affected union DEĞİL)"
         );
 
-        // (c) Fallback: affected boş + removed yok → delta node id'leri (10_000+index).
+        // (c) **#95-A regolden:** affected BOŞ + delta node → authority subject
+        // YİNE task scope [1]. *(Historical: delta-ids fallback [10_000].)*
         let mut fallback = md1_edge_proposal();
         fallback.affected_nodes = vec![];
         fallback.new_nodes = vec![crate::agent::NewNodeSpec {
@@ -8411,96 +8449,123 @@ v = 0.5
         let draft_fb = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &fallback,
             RawPosition::default(),
-            task.id,
+            &task,
             1,
             3,
         )
         .unwrap();
         let bundle_fb = engine
-            .measure_attempt_native_with_md1_shadow(&draft_fb, &fallback, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_fb, &task)
             .unwrap();
-        assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[10_000u64]);
+        assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[1u64]);
+
+        // **#95-A construction-parity pin (W2):** authority ↔ md1_shadow —
+        // subject/bits/sources exact eşit (cutover sonrası shadow bağımsız
+        // alternatif teori değil, construction-parity witness).
+        for bundle in [&bundle, &bundle3, &bundle_fb] {
+            let shadow = bundle
+                .md1_shadow()
+                .as_ref()
+                .expect("task-scope shadow başarılı olmalı (authority ile aynı scope)");
+            assert_eq!(
+                bundle.authority().legacy_subject_ids(),
+                shadow.subject_ids(),
+                "authority↔shadow subject parity"
+            );
+            let auth_bits = bundle.authority().raw();
+            let shadow_bits = shadow.measured().to_raw();
+            assert_eq!(
+                [
+                    auth_bits.x.to_bits(),
+                    auth_bits.y.to_bits(),
+                    auth_bits.z.to_bits(),
+                    auth_bits.w.to_bits(),
+                    auth_bits.v.to_bits(),
+                ],
+                [
+                    shadow_bits.x.to_bits(),
+                    shadow_bits.y.to_bits(),
+                    shadow_bits.z.to_bits(),
+                    shadow_bits.w.to_bits(),
+                    shadow_bits.v.to_bits(),
+                ],
+                "authority↔shadow value-bits parity"
+            );
+            let sources = |m: &crate::coords::MeasuredRawPosition| {
+                [
+                    m.coupling.source,
+                    m.cohesion.source,
+                    m.instability.source,
+                    m.entropy.source,
+                    m.witness_depth.source,
+                ]
+            };
+            assert_eq!(
+                sources(bundle.authority().measured()),
+                sources(shadow.measured()),
+                "authority↔shadow per-axis sources parity"
+            );
+        }
     }
 
-    /// **#96 MD-2 (PR #124 review tur-2 P1 — negatif test 1):** aynı structural
-    /// delta + farklı `affected_nodes` → token artifact mix'i `finalize`'da
-    /// `LegacySubjectBindingMismatch` ile reddedilir. `MeasurementDeltaDigest`
-    /// affected_nodes içermez; structural-delta parity subject identity kanıtlamaz.
+    /// **#95-A (MD-1) — affected-irrelevance (finalize seviyesi):** aynı task
+    /// scope + FARKLI `affected_nodes` → finalize **OK** — affected_nodes
+    /// subject binding'e GIRMEZ (advisory impact metadata; MD-1 normatif kuralı).
+    ///
+    /// *(Historical: pre-#95-A'da `md2_finalize_rejects_same_delta_different_
+    /// affected_nodes_token_mix` — affected union binding'e giriyordu ve mismatch
+    /// üretiyordu. Regolden reason: `subject-cutover (#95-A)`; eski negatif
+    /// senaryo tarihsel bağla geçersiz.)*
     #[test]
-    fn md2_finalize_rejects_same_delta_different_affected_nodes_token_mix() {
+    fn md95a_finalize_affected_nodes_do_not_bind_subject() {
         let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
-        let task = md1_task_node1();
-        // A ve B: AYNI structural delta (edge 1→2), FARKLI affected_nodes.
+        let task = md1_task_node1(); // scope Node(1)
         let proposal_a = md1_edge_proposal(); // affected [1]
         let mut proposal_b = md1_edge_proposal();
-        proposal_b.affected_nodes = vec![2];
+        proposal_b.affected_nodes = vec![2, 7, 9]; // affected serbestçe farklı
 
-        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal_a,
-            RawPosition::default(),
-            task.id,
-            1,
-            1,
-        )
-        .unwrap();
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal_b,
             RawPosition::default(),
-            task.id,
+            &task,
             1,
             2,
         )
         .unwrap();
-
-        // Structural delta digest'leri EŞİT (precondition — delta affected_nodes
-        // içermez; review senaryosunun ta kendisi).
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal_a, &task)
-            .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal_b, &task)
-            .unwrap();
-        assert_eq!(
-            bundle_a.authority().delta_digest(),
-            bundle_b.authority().delta_digest(),
-            "precondition: aynı structural delta → aynı delta digest"
-        );
-        assert_ne!(
-            bundle_a.authority().legacy_subject_ids(),
-            bundle_b.authority().legacy_subject_ids(),
-            "precondition: farklı affected_nodes → farklı legacy subject"
-        );
-
-        // Pozitif kontrol: kendi draft'ı ile finalize OK.
-        let draft_a2 = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal_a,
             RawPosition::default(),
-            task.id,
+            &task,
             1,
             1,
         )
         .unwrap();
-        assert!(draft_a2.finalize(bundle_a.authority()).is_ok());
+        let bundle_a = engine
+            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
+            .unwrap();
 
-        // Negatif: B'nin draft'ı + A'nın token'ı → mismatch (enum equality).
-        let err = draft_b
-            .finalize(bundle_a.authority())
-            .expect_err("subject binding mismatch beklenir");
+        // Structural delta aynı (affected digest'e girmez) — precondition.
+        let bundle_b = engine
+            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
+            .unwrap();
+        assert_eq!(
+            bundle_a.authority().delta_digest(),
+            bundle_b.authority().delta_digest()
+        );
+
+        // POZİTİF: farklı affected'li draft + token → finalize OK (scope eşit).
         assert!(
-            matches!(
-                err,
-                crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch { .. }
-            ),
-            "LegacySubjectBindingMismatch: {err:?}"
+            draft_b.finalize(bundle_a.authority()).is_ok(),
+            "affected_nodes subject binding'e girmez — MD-1: advisory impact metadata"
         );
     }
 
-    /// **#96 MD-2 (PR #124 review tur-2 P1 — negatif test 2):** aynı structural
-    /// delta + AYNI sonuç raw bitleri + farklı legacy subject → YİNE mismatch.
-    /// Raw parity binding hatasını MASKELEMEZ (finalize computed_raw'ı token'dan
-    /// enjekte eder — bağımsız kanıt DEĞİL; subject binding bağımsız kalandır).
+    /// **#95-A — scope-mismatch negatifi (finalize seviyesi):** farklı task
+    /// scope'lu draft×token → `LegacySubjectBindingMismatch`. Simetrik uzayda
+    /// raw bits EŞİT olsa bile (raw parity bağımsız kanıt DEĞİL — eski test 2'nin
+    /// #95-A karşılığı; scope artık binding'in kendisi).
     #[test]
-    fn md2_finalize_rejects_same_raw_bits_different_legacy_subject() {
+    fn md95a_finalize_rejects_different_task_scope_same_raw_bits() {
         // Simetrik uzay: node 5 ve 6 izole, özdeş kütle → ölçümleri bit-exact eşit.
         let mut space = crate::space::Space::new();
         for id in [5u64, 6u64] {
@@ -8517,44 +8582,44 @@ v = 0.5
             VisionVector::new(RawPosition::default()),
             EngineConfig::default_calibrated(),
         );
-        let task = md1_task_node1();
-
-        // AYNI structural delta (aynı new_nodes spec'i); farklı affected_nodes.
-        let mk_proposal = |affected: u64| {
-            let mut p = md1_edge_proposal();
-            p.new_edges = vec![];
-            p.new_nodes = vec![crate::agent::NewNodeSpec {
-                kind: crate::space::NodeKind::Module,
-                initial_mass: 1.0,
-                connected_to: vec![],
-            }];
-            p.affected_nodes = vec![affected];
-            p
+        // İki task: scope Node(5) vs Node(6) — AYNI structural delta ile ölçülür.
+        let mk_task = |node: u64| {
+            let mut t = md1_task_node1();
+            t.target_predicate_set.predicates[0].predicate.scope =
+                crate::trajectory::PredicateScope::Node(node);
+            t
         };
-        let proposal_a = mk_proposal(5);
-        let proposal_b = mk_proposal(6);
+        let task_a = mk_task(5);
+        let task_b = mk_task(6);
+        let mut proposal = md1_edge_proposal();
+        proposal.new_edges = vec![];
+        proposal.new_nodes = vec![crate::agent::NewNodeSpec {
+            kind: crate::space::NodeKind::Module,
+            initial_mass: 1.0,
+            connected_to: vec![],
+        }];
 
         let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal_a,
+            &proposal,
             RawPosition::default(),
-            task.id,
+            &task_a,
             1,
             1,
         )
         .unwrap();
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal_b,
+            &proposal,
             RawPosition::default(),
-            task.id,
+            &task_b,
             1,
             2,
         )
         .unwrap();
         let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal_a, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_a, &task_a)
             .unwrap();
         let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal_b, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_b, &task_b)
             .unwrap();
 
         // Precondition 1: structural delta aynı.
@@ -8562,7 +8627,7 @@ v = 0.5
             bundle_a.authority().delta_digest(),
             bundle_b.authority().delta_digest()
         );
-        // Precondition 2: sonuç raw bitleri EŞİT (simetrik subject'ler).
+        // Precondition 2: raw bits EŞİT (simetrik node'lar).
         let bits = |r: crate::coords::RawPosition| {
             [
                 r.x.to_bits(),
@@ -8574,25 +8639,306 @@ v = 0.5
         };
         assert_eq!(
             bits(bundle_a.authority().raw()),
-            bits(bundle_b.authority().raw()),
-            "precondition: simetrik subject'ler → aynı raw bits"
+            bits(bundle_b.authority().raw())
         );
-        // Precondition 3: subject'ler farklı.
+        // Precondition 3: scope'lar farklı.
         assert_ne!(
-            bundle_a.authority().legacy_subject_ids(),
-            bundle_b.authority().legacy_subject_ids()
+            bundle_a.authority().subject_scope(),
+            bundle_b.authority().subject_scope()
         );
 
-        // Negatif: aynı raw bits + farklı subject → YİNE mismatch.
+        // Negatif: aynı raw bits + farklı scope → mismatch.
         let err = draft_b
             .finalize(bundle_a.authority())
-            .expect_err("raw parity subject binding'i maskelememeli");
+            .expect_err("farklı task scope → subject binding mismatch");
         assert!(
             matches!(
                 err,
                 crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch { .. }
             ),
-            "LegacySubjectBindingMismatch (aynı raw bits): {err:?}"
+            "LegacySubjectBindingMismatch (scope): {err:?}"
+        );
+    }
+
+    /// **#95-A W3 — commit-time MD-1 subject fence (negatif e2e 1):** registry
+    /// overwrite senaryosu. draft/measure/finalize Task(id=42, Node(1)) →
+    /// resolver'a Task(id=42, Node(2)) yazılır → commit `TaskSubjectBindingMismatch`
+    /// ile RED — Q5'e ulaşmaz, witness'a ulaşmaz, mutation YOK. 5-fence'in
+    /// GÖREMEDİĞİ gerçeklik (reviewer tur-2 P0): delta/raw/revision/context/epoch
+    /// hepsi geçerli, yalnız subject authority drift etmiş.
+    #[test]
+    fn md95a_commit_rejects_registry_overwritten_task_scope() {
+        let mut engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        let mut task_a = md1_task_node1(); // id=1, scope Node(1)
+        task_a.id = 42;
+        let mut task_b = md1_task_node1(); // id=42, scope Node(2) — OVERWRITE
+        task_b.id = 42;
+        task_b.target_predicate_set.predicates[0].predicate.scope =
+            crate::trajectory::PredicateScope::Node(2);
+
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task_a,
+            1,
+            1,
+        )
+        .unwrap();
+        let bundle = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &task_a)
+            .unwrap();
+        let carrier = draft.finalize(bundle.authority()).unwrap();
+
+        // Registry overwrite: aynı task_id, FARKLI scope.
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task_b);
+
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let err = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                1.0,
+            ))
+            .expect_err("registry-overwritten scope → commit reddetmeli");
+        assert!(
+            matches!(
+                &err,
+                crate::engine::EngineCommitError::MeasurementBindingVerification(
+                    crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
+                        crate::measurement::NativeLegacyMeasurementBindingError::TaskSubjectBindingMismatch { .. }
+                    )
+                )
+            ),
+            "TaskSubjectBindingMismatch bekleniyordu; got: {err:?}"
+        );
+        // Terminallik: mutation YOK — space fingerprint değişmedi.
+        let digest_before = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        let digest_after = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        assert_eq!(digest_before, digest_after, "fence terminal — mutation yok");
+    }
+
+    /// **#95-A W3 — derivation-failure yolu (negatif e2e 2):** overwrite →
+    /// heterojen scope'lu task → `canonical_task_subject_scope(current)` Err →
+    /// `Derivation(SubjectDerivationFailed)` (expected authority gerçeği
+    /// kurulamadı — `TaskSubjectBindingMismatch`'tan epistemik olarak AYRI).
+    #[test]
+    fn md95a_commit_scope_derivation_failure_is_derivation_error() {
+        let mut engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
+        let mut task_a = md1_task_node1();
+        task_a.id = 42;
+        // Overwrite task: heterojen scope'lar (Node(1) + Node(2)) → türetilemez.
+        let mut task_b = md1_task_node1();
+        task_b.id = 42;
+        task_b
+            .target_predicate_set
+            .predicates
+            .push(crate::trajectory::WeightedPredicate {
+                predicate: crate::trajectory::MetricPredicate {
+                    metric: crate::trajectory::PredicateAxis::Coupling,
+                    operator: crate::trajectory::ComparisonOp::Le,
+                    threshold: 1.0,
+                    scope: crate::trajectory::PredicateScope::Node(2),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            });
+
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task_a,
+            1,
+            1,
+        )
+        .unwrap();
+        let bundle = engine
+            .measure_attempt_native_with_md1_shadow(&draft, &task_a)
+            .unwrap();
+        let carrier = draft.finalize(bundle.authority()).unwrap();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task_b);
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let err = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                1.0,
+            ))
+            .expect_err("heterojen scope overwrite → derivation failure");
+        assert!(
+            matches!(
+                &err,
+                crate::engine::EngineCommitError::MeasurementBindingVerification(
+                    crate::measurement::MeasurementBindingVerificationError::Derivation(
+                        crate::measurement::MeasurementBindingDerivationError::SubjectDerivationFailed { .. }
+                    )
+                )
+            ),
+            "Derivation(SubjectDerivationFailed) bekleniyordu; got: {err:?}"
+        );
+    }
+
+    /// **#95-A W4 — affected-irrelevance TAM YOL (executable theorem):** Δ
+    /// affected_nodes → subject/measurement/decision = invariant. A(delta D,
+    /// affected [1]) vs B(delta D, affected [1,7,9]), aynı task scope [2] —
+    /// decision-producing yüzey BİREBİR aynı olmalı:
+    /// authority subject / measured bits / per-axis sources /
+    /// measurement_input_digest / delta_digest / finalize / PredicateGate sonucu /
+    /// MutationDecision / AuthorizationBasis.measured.
+    #[test]
+    fn md95a_affected_nodes_are_advisory_full_path_metamorphic() {
+        // Uzay: node 1, 2, 7, 9 mevcut (affected farklılığı ölçüm etkilemesin
+        // diye hepsi mevcut; ölçülen subject YALNIZ task scope [2]).
+        let mut space = crate::space::Space::new();
+        for id in [1u64, 2, 7, 9] {
+            space.insert_node(crate::space::Node {
+                id,
+                kind: crate::space::NodeKind::Module,
+                mass: 1.0,
+                ..Default::default()
+            });
+        }
+        let mut engine = SpaceEngine::new(
+            space,
+            make_measurement_engine_coordinate_system(),
+            user_loaded_vision(),
+            EngineConfig::default_calibrated(),
+        );
+        let mut task = md1_task_node1();
+        task.target_predicate_set.predicates[0].predicate.scope =
+            crate::trajectory::PredicateScope::Node(2);
+
+        let mk = |affected: Vec<u64>| {
+            let mut p = md1_edge_proposal();
+            p.affected_nodes = affected;
+            p
+        };
+        let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &mk(vec![1]),
+            RawPosition::default(),
+            &task,
+            1,
+            1,
+        )
+        .unwrap();
+        let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &mk(vec![1, 7, 9]),
+            RawPosition::default(),
+            &task,
+            1,
+            2,
+        )
+        .unwrap();
+        let bundle_a = engine
+            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
+            .unwrap();
+        let bundle_b = engine
+            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
+            .unwrap();
+
+        // (1) authority subject exact eşit (= task scope [2]).
+        assert_eq!(
+            bundle_a.authority().legacy_subject_ids(),
+            bundle_b.authority().legacy_subject_ids()
+        );
+        assert_eq!(bundle_a.authority().legacy_subject_ids(), &[2u64]);
+        // (2) measured bits exact.
+        let bits = |r: crate::coords::RawPosition| {
+            [
+                r.x.to_bits(),
+                r.y.to_bits(),
+                r.z.to_bits(),
+                r.w.to_bits(),
+                r.v.to_bits(),
+            ]
+        };
+        assert_eq!(
+            bits(bundle_a.authority().raw()),
+            bits(bundle_b.authority().raw())
+        );
+        // (3) per-axis sources exact.
+        let sources = |m: &crate::coords::MeasuredRawPosition| {
+            [
+                m.coupling.source,
+                m.cohesion.source,
+                m.instability.source,
+                m.entropy.source,
+                m.witness_depth.source,
+            ]
+        };
+        assert_eq!(
+            sources(bundle_a.authority().measured()),
+            sources(bundle_b.authority().measured())
+        );
+        // (4) input digest + (5) delta digest exact.
+        assert_eq!(
+            bundle_a.authority().measurement_input_digest(),
+            bundle_b.authority().measurement_input_digest()
+        );
+        assert_eq!(
+            bundle_a.authority().delta_digest(),
+            bundle_b.authority().delta_digest()
+        );
+
+        // (6)-(9) full-path: her ikisi de Held'e kadar commit → authorization
+        // basis measured + PredicateGate outcome karşılaştır.
+        let commit_held = |engine: &mut SpaceEngine,
+                           carrier: &crate::task_measurement::FinalizedNativeTaskClaim|
+         -> crate::authorization::AuthorizationContext {
+            let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+            registry.insert(task.clone());
+            let omega = crate::witness::WitnessSet::new(vec![]);
+            match engine.commit_task_claim(crate::engine::TaskCommitInput::new(
+                carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                1.0,
+            )) {
+                Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
+                other => panic!("fixture Held üretmeli; got: {other:?}"),
+            }
+        };
+        let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
+        let carrier_b = draft_b.finalize(bundle_b.authority()).unwrap();
+        let mut engine_x = SpaceEngine::new(
+            crate::space::Space::new(), // temiz engine — aynı space'i yeniden kur
+            make_measurement_engine_coordinate_system(),
+            user_loaded_vision(),
+            EngineConfig::default_calibrated(),
+        );
+        for id in [1u64, 2, 7, 9] {
+            engine_x.space.insert_node(crate::space::Node {
+                id,
+                kind: crate::space::NodeKind::Module,
+                mass: 1.0,
+                ..Default::default()
+            });
+        }
+        let auth_a = commit_held(&mut engine, &carrier_a);
+        let auth_b = commit_held(&mut engine_x, &carrier_b);
+        // (7) PredicateGate sonucu + (8) MutationDecision exact.
+        assert_eq!(
+            auth_a.basis.predicate_completion,
+            auth_b.basis.predicate_completion
+        );
+        assert_eq!(
+            auth_a.basis.mutation_decision,
+            auth_b.basis.mutation_decision
+        );
+        // (9) AuthorizationBasis.measured exact.
+        assert_eq!(
+            auth_a.basis.measured_result, auth_b.basis.measured_result,
+            "Δ affected_nodes → measured invariant (MD-1 executable theorem)"
         );
     }
 
@@ -8612,13 +8958,13 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .expect("draft (probe + structural Q4)");
         let native = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .expect("native measurement");
         let claim = draft
             .finalize(native.authority())
@@ -8770,7 +9116,7 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
@@ -8780,7 +9126,7 @@ v = 0.5
         // producer'ın TEK session'ı pre/post epoch verify ile mutating axis'i yakalar
         // (eski yüzey: yalnız observer V2 lane'i fail-closed idi; authority legacy
         // compute path session'sızdı. Re-anchor ile TCB güçlendi — reason note).
-        let result = engine.measure_attempt_native_with_md1_shadow(&draft, &proposal, &task);
+        let result = engine.measure_attempt_native_with_md1_shadow(&draft, &task);
         assert!(
             matches!(
                 result,
@@ -8915,26 +9261,26 @@ v = 0.5
         let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal_a,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .unwrap();
         let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal_a, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
             .unwrap();
         let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
 
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal_b,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             2,
         )
         .unwrap();
         let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal_b, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
             .unwrap();
 
         // Precondition: farklı delta → farklı digest (senaryonun ta kendisi).
@@ -8998,26 +9344,26 @@ v = 0.5
         let draft_a = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .unwrap();
         let bundle_a = engine_a
-            .measure_attempt_native_with_md1_shadow(&draft_a, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
             .unwrap();
         let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
 
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             2,
         )
         .unwrap();
         let bundle_b = engine_b
-            .measure_attempt_native_with_md1_shadow(&draft_b, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
             .unwrap();
 
         // Precondition: aynı delta (aynı proposal), farklı raw (farklı mass →
@@ -9066,13 +9412,13 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
         assert!(
@@ -9146,13 +9492,13 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
@@ -9189,13 +9535,13 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
         let digest_at_measure = carrier.measurement().measurement_input_digest().clone();
@@ -9259,13 +9605,13 @@ v = 0.5
         let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft, &task)
             .unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
         let token = carrier.measurement();

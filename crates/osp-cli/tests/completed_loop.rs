@@ -792,12 +792,13 @@ fn completed_loop_exact_pin_via_json_envelope() {
         "envelope repository_head == fixture HEAD"
     );
 
-    // **#96 MD-2 cutover — iki-eksen authority vocabulary** (eski pin:
-    // authority=legacy_projected_v1 / provenance_native=false — tarihsel; her eksen
-    // artık kendi alanında, deprecated `authority` alias yalnız provenance mirror).
+    // **#96 iki-eksen + #95-A MD-1 subject cutover** (eski pin'ler tarihsel:
+    // #96 öncesi authority=legacy_projected_v1; #95-A öncesi
+    // subject_authority=affected_nodes — reason: `subject-cutover (#95-A)`;
+    // deprecated `authority` alias yalnız provenance mirror).
     assert_eq!(
-        envelope["execution_measurement"]["subject_authority"], "affected_nodes",
-        "subject_authority: legacy family label (#95-A'da task_scope'a çevrilir)"
+        envelope["execution_measurement"]["subject_authority"], "task_scope",
+        "subject_authority: #95-A canonical task-scope cutover"
     );
     assert_eq!(
         envelope["execution_measurement"]["provenance_authority"], "engine_native_per_axis",

@@ -11,19 +11,57 @@ note: the struct `CoreAxisEpochStamp` is defined here
    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 warning: unreachable statement
- --> tests/compile_fail/md2_native_token_external_literal.rs:6:5
+ --> tests/compile_fail/md2_native_token_external_literal.rs:7:5
   |
 5 |     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
   |                                                           ---------------- any code following this expression is unreachable
-6 |     let ids: Vec<u64> = unimplemented!();
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+6 |
+7 |     let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented();
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
   |
   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
 
-warning: unused variable: `measured`
- --> tests/compile_fail/md2_native_token_external_literal.rs:5:9
+error[E0423]: expected function, found macro `unimplemented`
+ --> tests/compile_fail/md2_native_token_external_literal.rs:7:63
   |
-5 |     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
-  |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_measured`
+7 |     let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented();
+  |                                                               ^^^^^^^^^^^^^ not a function
   |
-  = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+help: use `!` to invoke the macro
+  |
+7 |     let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented!();
+  |                                                                            +
+
+error: cannot construct `NativeLegacySubjectMeasurement` with struct literal syntax due to private fields
+  --> tests/compile_fail/md2_native_token_external_literal.rs:13:18
+   |
+13 |     let _token = osp_core::measurement::NativeLegacySubjectMeasurement {
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+14 |         measured,
+   |         -------- private field
+15 |         subject_scope: scope,
+   |         -------------------- private field
+16 |
+17 |         delta_digest: delta,
+   |         ------------------- private field
+18 |         base_revision: revision,
+   |         ----------------------- private field
+19 |         measurement_input_digest: input,
+   |         ------------------------------- private field
+20 |         axis_epoch_stamp: stamp,
+   |         ----------------------- private field
+   |
+   = note: ...and other private field `legacy_subject_binding` that was not provided
+help: you might have meant to use the `new` associated function
+   |
+13 -     let _token = osp_core::measurement::NativeLegacySubjectMeasurement {
+14 -         measured,
+15 -         subject_scope: scope,
+16 -
+17 -         delta_digest: delta,
+18 -         base_revision: revision,
+19 -         measurement_input_digest: input,
+20 -         axis_epoch_stamp: stamp,
+21 -     };
+13 +     let _token = osp_core::measurement::NativeLegacySubjectMeasurement::new(_, _, _, _, _, _);
+   |

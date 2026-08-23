@@ -817,12 +817,12 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         );
         let json = serde_json::to_string_pretty(&envelope)?;
         // Diagnostics stderr'e — stdout JSON-only.
-        // **#96 MD-2 cutover:** navigator ölçümü engine-native per-axis (opaque
-        // NativeLegacySubjectMeasurement token); subject authority legacy affected_nodes
-        // (#95-A'da task_scope'a çevrilir). Envelope iki-eksen vocabulary taşır.
+        // **#96 MD-2 + #95-A MD-1 cutover:** navigator ölçümü engine-native
+        // per-axis (opaque NativeLegacySubjectMeasurement token) + canonical
+        // task-scope subject. Envelope iki-eksen vocabulary taşır.
         eprintln!(
             "osp trajectory attempt: #96 MD-2 engine_native_per_axis provenance authority \
-             (provenance_native=true; subject_authority=affected_nodes legacy — #95-A flip pending)"
+             (provenance_native=true) + #95-A MD-1 task_scope subject authority"
         );
         println!("{json}");
     } else {

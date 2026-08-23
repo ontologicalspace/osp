@@ -71,17 +71,18 @@ fn node_scope_coupling_task() -> osp_core::trajectory::Task {
     }
 }
 
-/// `task_id` param ≠ `task.id` → native measurement `TaskBindingMismatch` →
-/// disposition `TerminalIdentityViolation` → wire: typed system failure
-/// (navigator SystemFailure mirror). Eski davranış: `RejectedBySyntax`
-/// attempt_outcome — gözlenmeyen gate kararını gözlenmiş gibi sunmak
-/// (fabrication) idi.
+/// Task scope Node(42) uzayda çözülemez (base'de yok, delta-introduced değil)
+/// → native measurement `SubjectMemberUnresolvable` → disposition
+/// `SystemFailure` → wire: typed system failure (navigator mirror). Eski
+/// davranış: `RejectedBySyntax` attempt_outcome — gözlenmeyen gate kararını
+/// gözlenmiş gibi sunmak (fabrication) idi. *(#95-A not: eski tetikleyici
+/// task_id≠task.id artık ölçüm aşamasına ulaşamaz — draft task kimliğini
+/// aynı nesneden türetir.)*
 #[test]
 fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() {
     let handle = make_server_handle();
-    // Geçerli Node-scope task; failure KAYNAĞI identity wiring — draft claim'i
-    // task_id=999'a bağlar, measurement defensive check'i task.id=1 ile
-    // karşılaştırır → TaskBindingMismatch (TerminalIdentityViolation).
+    // Geçerli structural task ama scope Node(42) çözülemez → authority lane
+    // SubjectMemberUnresolvable (SystemFailure — operational/veri bozukluğu).
     let task = osp_core::trajectory::Task {
         id: 1,
         milestone_id: 1,
@@ -93,7 +94,7 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
                     metric: osp_core::trajectory::PredicateAxis::Coupling,
                     operator: osp_core::trajectory::ComparisonOp::Le,
                     threshold: 0.55,
-                    scope: osp_core::trajectory::PredicateScope::Node(0),
+                    scope: osp_core::trajectory::PredicateScope::Node(42),
                     required_source: None,
                     tolerance: 0.0,
                 },
@@ -120,9 +121,8 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
     };
 
     let mut ws = handle.lock().unwrap();
-    // task_id=999 ≠ task.id=1 → measurement defensive binding check.
     let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 999)
+        .submit_delta_attempt(&proposal, &task, 1)
         .expect("attempt");
 
     // Typed system failure yüzeyi.
@@ -134,7 +134,7 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
         "failure class typed — navigator ile ortak ontology"
     );
     assert_eq!(
-        sys["disposition"], "TerminalIdentityViolation",
+        sys["disposition"], "TerminalTaskDeclaration",
         "typed disposition wire'da (string inference YOK)"
     );
     assert_eq!(
@@ -155,7 +155,7 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
     assert_eq!(outcome["apply_target"], "NotApplied");
     let msg = outcome["message"].as_str().expect("message");
     assert!(
-        msg.contains("TerminalIdentityViolation"),
+        msg.contains("TerminalTaskDeclaration"),
         "message typed disposition içerir: {msg}"
     );
 }
