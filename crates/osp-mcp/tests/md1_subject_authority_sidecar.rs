@@ -123,11 +123,10 @@ fn md1_held_response_carries_drift_sidecar_additively() {
         serde_json::from_value(sidecar.clone()).expect("sidecar deserializes to typed observation");
     assert_eq!(obs.task_id, task.id);
 
-    // V1 lane audited subject — **#96:** effective measure set (derive_v1 ordered
-    // union; boşsa delta-ids fallback). Eski pin [] (yalnız derive çıktısı) —
-    // token audited subject'i fallback dahil taşır (engine construction-contract
-    // testiyle hizalı: affected/removed boş → [10_000]).
-    assert_eq!(obs.v1.subject.ids, vec![10_000u64]);
+    // V1 lane audited subject — **#95-A (MD-1):** canonical task scope (fixture
+    // task'ı Node(0) scope'lu). *(Historical #96 pin: legacy affected-union
+    // fallback [10_000]; reason: 'subject-cutover (#95-A)'.)*
+    assert_eq!(obs.v1.subject.ids, vec![0u64]);
     // **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE kaynaklar taşır
     // (eski pin: uniform [Scip;5] compatibility projection — tarihsel).
     // Fixture repo analyze axis seti: [TreeSitter, Placeholder, TreeSitter, Heuristic, Heuristic].

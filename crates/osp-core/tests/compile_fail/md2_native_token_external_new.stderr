@@ -15,10 +15,21 @@ warning: unreachable statement
    |
  9 |     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
    |                                                           ---------------- any code following this expression is unreachable
-10 |     let ids: Vec<u64> = unimplemented!();
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+10 |     let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented();
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
    |
    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0423]: expected function, found macro `unimplemented`
+  --> tests/compile_fail/md2_native_token_external_new.rs:10:63
+   |
+10 |     let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented();
+   |                                                               ^^^^^^^^^^^^^ not a function
+   |
+help: use `!` to invoke the macro
+   |
+10 |     let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented!();
+   |                                                                            +
 
 error[E0624]: associated function `new` is private
   --> tests/compile_fail/md2_native_token_external_new.rs:16:68
@@ -30,7 +41,7 @@ error[E0624]: associated function `new` is private
    |
    | /     pub(crate) fn new(
    | |         measured: crate::coords::MeasuredRawPosition,
-   | |         legacy_subject_ids: Vec<crate::space::NodeId>,
+   | |         subject_scope: CanonicalSubjectScope,
    | |         delta_digest: MeasurementDeltaDigest,
 ...  |
    | |         axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,

@@ -26,7 +26,6 @@ use osp_core::subject_authority::{
     observe_subject_authority_drift, v1_downstream_from_engine_commit_error,
     AuthoritativeDownstreamObservation, EvaluatedQ5Verdict, LaneQ5Observation,
     Q5ObservationFailure, V1DownstreamObservation, V1DownstreamUnavailableReason, V2LaneOutcome,
-    V2MeasurementFailure,
 };
 use osp_core::trajectory::{
     ComparisonOp, InMemoryTaskRegistry, MetricPredicate, MutationDecision, PredicateAxis,
@@ -70,13 +69,13 @@ fn setup_with_engine(
     let draft = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
         &case.proposal,
         RawPosition::default(),
-        case.task.id,
+        &case.task,
         100,
         1,
     )
     .expect("draft (probe + structural Q4) should succeed for corpus case");
     let native = engine
-        .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
+        .measure_attempt_native_with_md1_shadow(&draft, &case.task)
         .expect("native measurement should succeed for corpus case");
     let finalized = draft
         .finalize(native.authority())
@@ -206,8 +205,10 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
         &s.target,
     );
 
-    // Subject divergence — V1 ordered legacy union, V2 canonical.
-    assert_eq!(draft.v1().subject.ids, vec![1, 2, 3]);
+    // **#95-A regolden (subject-cutover):** V1 lane artık canonical task scope
+    // taşır — subject/raw/θ PARITY. *(Historical pre-#95-A golden: V1 affected
+    // union [1,2,3] vs V2 [1] divergence; reason: `subject-cutover (#95-A)`)*
+    assert_eq!(draft.v1().subject.ids, vec![1]);
     let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => {
@@ -215,20 +216,11 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
         }
     };
     assert_eq!(v2.subject.ids, vec![1]);
-    assert_ne!(draft.v1().subject.digest, v2.subject.digest);
+    assert_eq!(draft.v1().subject.digest, v2.subject.digest);
 
-    // Raw divergence — PR #120 parity goldens (purity: raw(002)==raw(001)).
-    assert_eq!(
-        draft.v1().raw.bits,
-        [
-            4595172819793696085,
-            4602678819172646912,
-            4602678819172646912,
-            4602678819172646912,
-            4601046424471046557,
-        ],
-        "V1 raw bits must equal frozen corpus 001/002 parity goldens"
-    );
+    // **#95-A regolden:** iki lane aynı task scope'u aynı session'da ölçer —
+    // raw bits PARITY (task-scope golden; historical V1 union bits:
+    // [4595172819793696085, ...] — reason: `subject-cutover (#95-A)`).
     assert_eq!(
         v2.raw.bits,
         [
@@ -238,8 +230,9 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
             4602678819172646912,
             4601046424471046557,
         ],
-        "V2 raw bits must equal frozen corpus 001/002 parity goldens"
+        "task-scope raw bits (frozen corpus #92/#120 goldens)"
     );
+    assert_eq!(draft.v1().raw.bits, v2.raw.bits, "lane raw parity");
 
     // Provenance — **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE per-axis
     // kaynaklar taşır (eski pin: uniform [Scip;5] compatibility projection — tarihsel;
@@ -266,7 +259,12 @@ fn wide_affected_scope_002_observation_cross_pinned_to_92_goldens() {
             verdict,
             ..
         } => {
-            assert_eq!(*theta_bits, 4594662147918958728, "V1 θ bits (≈0.15249)");
+            // **#95-A:** V1 θ = task-scope θ (V2 ile parity; historical union
+            // θ 4594662147918958728 — reason: `subject-cutover (#95-A)`).
+            assert_eq!(
+                *theta_bits, 4593103093345799528,
+                "V1 θ = task-scope θ (≈0.11711)"
+            );
             assert_eq!(*verdict, EvaluatedQ5Verdict::Passed);
         }
         other => panic!("002 V1 Q5 must be Evaluated: {other:?}"),
@@ -308,7 +306,10 @@ fn removed_edge_external_source_002_observation_cross_pinned_to_92_goldens() {
         &s.target,
     );
 
-    assert_eq!(draft.v1().subject.ids, vec![1, 9]);
+    // **#95-A regolden (subject-cutover):** V1 = canonical task scope [1] —
+    // parity. *(Historical: V1 affected-union [1,9] (removed_edge.from folded),
+    // θ 4594129220971291796; reason: `subject-cutover (#95-A)`)*
+    assert_eq!(draft.v1().subject.ids, vec![1]);
     let v2 = match draft.v2() {
         V2LaneOutcome::Measured(v2) => v2,
         V2LaneOutcome::MeasurementFailed(f) => {
@@ -316,10 +317,14 @@ fn removed_edge_external_source_002_observation_cross_pinned_to_92_goldens() {
         }
     };
     assert_eq!(v2.subject.ids, vec![1]);
+    assert_eq!(draft.v1().subject.digest, v2.subject.digest);
 
     match &draft.v1().q5 {
         LaneQ5Observation::Evaluated { theta_bits, .. } => {
-            assert_eq!(*theta_bits, 4594129220971291796, "V1 θ bits (≈0.13770)");
+            assert_eq!(
+                *theta_bits, 4593103093345799528,
+                "V1 θ = task-scope θ (≈0.11711)"
+            );
         }
         other => panic!("removed-002 V1 Q5 must be Evaluated: {other:?}"),
     }
@@ -580,9 +585,15 @@ fn direct_per_axis_required_scip_provenance_confound_sentinel() {
 /// engine B: produce→observe→claim→commit) V1 akışı ve engine state'ı bit-identical
 /// kalır — shadow lane failure'ı authoritative lane'e sızmaz.
 #[test]
-fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
+fn module_scope_task_fails_at_draft_terminal() {
     use osp_core::agent::{NewEdgeSpec, NewNodeSpec};
 
+    // **#95-A regolden:** Module-scope task'in subject authority'si artık
+    // AUTHORITY'dir — türetilemediğinde ölçüm HİÇ çalışmaz (draft aşaması,
+    // TerminalTaskDeclaration). *(Historical pre-#95-A: authority lane legacy
+    // affected-union ölçüyor, yalnız shadow/V2 lane fail-closed oluyordu;
+    // cutover ile iki lane aynı canonical scope'tan türetir, eski senaryo
+    // temsili kalmadı.)*
     let proposal = osp_core::agent::DeltaProposal {
         new_nodes: vec![NewNodeSpec {
             kind: NodeKind::Module,
@@ -598,121 +609,29 @@ fn module_scope_v2_failure_does_not_disturb_authoritative_lane() {
         affected_nodes: vec![1],
         modified_entities: vec![],
         position_hints: vec![],
-        reasoning: "module-scope fixture".to_string(),
+        reasoning: "module-scope draft-failure fixture".into(),
     };
-    let task = Task {
-        id: 1,
-        milestone_id: 1,
-        label: "Module-scope (V2 fail-closed)".into(),
-        target_predicate_set: PredicateSet {
-            mode: PredicateMode::All,
-            predicates: vec![WeightedPredicate {
-                predicate: MetricPredicate {
-                    metric: PredicateAxis::Coupling,
-                    operator: ComparisonOp::Le,
-                    threshold: 10.0,
-                    scope: PredicateScope::Module("core".into()),
-                    required_source: None,
-                    tolerance: 0.0,
-                },
-                weight: None,
-            }],
-            preferred_vector: None,
-        },
-        policy: TaskPolicy {
-            maneuver_limit: 5,
-            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
-            ..Default::default()
-        },
-        allowed_operations: vec![],
-        constraints: vec![],
-        status: TaskStatus::Pending,
-    };
-    let case = common::CharacterizationCase {
-        id: "inline-module-scope-fixture".into(),
-        class: common::CaseClass::DirectPerAxisAuthority,
-        source: common::CaseSource::SyntheticAdversarial,
-        description: "inline fixture — V2 Module fail-closed".into(),
-        space: module_scope_space(),
-        task: task.clone(),
-        proposal: proposal.clone(),
-    };
+    let mut task = common::case_by_id("wide-affected-scope-002").task;
+    task.target_predicate_set.predicates[0].predicate.scope =
+        osp_core::trajectory::PredicateScope::Module("core".into());
 
-    // Engine A: gözlemsiz koşum (draft → native measure → claim → commit).
-    let mut engine_a = engine_from_space(case.space.clone());
-    let draft_a = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
+    let err = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
         &proposal,
         RawPosition::default(),
+        &task,
         1,
-        100,
         1,
     )
-    .expect("draft A");
-    let native_a = engine_a
-        .measure_attempt_native_with_md1_shadow(&draft_a, &proposal, &task)
-        .expect("native measure A");
-    let claim_a = draft_a
-        .finalize(native_a.authority())
-        .expect("subject binding A");
-    let mut registry = InMemoryTaskRegistry::new();
-    registry.insert(task.clone());
-    let target = RawPosition::default();
-    let affected_a = osp_core::subject_authority::derive_v1_legacy_measurement_subject(&proposal);
-    let pre_raw = engine_a.compute_raw_from_delta(&[], &[], &[], &affected_a);
-    let current_a = osp_core::navigator::provenanced_from_raw(pre_raw, MetricSource::Scip);
-    let loss_before = osp_core::trajectory::trajectory_loss(&current_a, &target);
-    let result_a = engine_a.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &claim_a,
-        &WitnessSet::new(vec![]),
-        &registry as &dyn TaskResolver,
-        target,
-        loss_before,
-    ));
-    let state_a = space_fingerprint(&engine_a);
-
-    // Engine B: gözlemlü koşum (draft → native measure[+shadow] → claim → commit).
-    let s = setup_with_engine(engine_from_space(case.space.clone()), &case);
-    let draft = observe_subject_authority_drift(
-        &s.engine,
-        &s.claim,
-        &s.task,
-        &s.native,
-        s.loss_before,
-        &s.target,
+    .expect_err("Module scope → draft aşamasında türetilemez");
+    assert!(
+        matches!(
+            &err,
+            osp_core::task_measurement::ClaimDraftError::TaskSubjectScope(
+                osp_core::measurement::MeasurementError::SubjectScopeResolutionFailed(_)
+            )
+        ),
+        "TaskSubjectScope(SubjectScopeResolutionFailed) bekleniyordu; got: {err:?}"
     );
-
-    // V2 lane fail-closed typed sınıflama (enum equality — string değil).
-    assert_eq!(
-        draft.v2(),
-        &V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::SubjectScopeResolutionFailed {
-            module: "core".to_string(),
-        }),
-        "Module scope → SubjectScopeResolutionFailed{{ModuleResolutionUnavailable}} (fail-closed)"
-    );
-    // V1 lane ölçülmüş ve healthy.
-    assert_eq!(draft.v1().subject.ids, vec![1]);
-
-    // Authoritative lane bit-identical: aynı native raw, aynı commit sonucu şekli,
-    // aynı engine state (shadow lane failure authority'ye sızmaz).
-    assert_eq!(
-        native_a.authority().raw().x.to_bits(),
-        s.native.authority().raw().x.to_bits(),
-        "authority raw unaffected by shadow observation"
-    );
-    let mut engine_b = s.engine;
-    let result_b = engine_b.commit_task_claim(osp_core::engine::TaskCommitInput::new(
-        &s.carrier,
-        &WitnessSet::new(vec![]),
-        &registry as &dyn TaskResolver,
-        s.target,
-        s.loss_before,
-    ));
-    assert_eq!(
-        std::format!("{result_a:?}"),
-        std::format!("{result_b:?}"),
-        "V1 commit outcome identical with and without observation"
-    );
-    assert_eq!(state_a, space_fingerprint(&engine_b));
 }
 
 fn module_scope_space() -> Space {

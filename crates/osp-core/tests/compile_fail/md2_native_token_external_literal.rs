@@ -3,8 +3,8 @@
 // producer" garantisi; ctor private olmasa bile literal yolu kapalı).
 fn main() {
     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
-    let ids: Vec<u64> = unimplemented!();
-    let binding: osp_core::measurement::LegacySubjectBindingDigest = unimplemented!();
+
+    let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented();
     let delta: osp_core::measurement::MeasurementDeltaDigest = unimplemented!();
     let revision: osp_core::authorization::SpaceViewRevision = unimplemented!();
     let input: osp_core::authorization::MeasurementInputDigest = unimplemented!();
@@ -12,8 +12,8 @@ fn main() {
     // Bu satır derlenmemeli: tüm field'lar private.
     let _token = osp_core::measurement::NativeLegacySubjectMeasurement {
         measured,
-        legacy_subject_ids: ids,
-        legacy_subject_binding: binding,
+        subject_scope: scope,
+
         delta_digest: delta,
         base_revision: revision,
         measurement_input_digest: input,

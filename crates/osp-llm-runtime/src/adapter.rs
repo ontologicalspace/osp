@@ -130,7 +130,8 @@ INSTRUCTIONS:\n\
 1. Analyze the target_predicate - what architectural change moves toward satisfying it?\n\
 2. Produce a DeltaProposal with structural changes.\n\
 3. To REDUCE coupling, use removed_edges to remove outgoing Imports from the focus_node_id.\n\
-   List the focus_node_id in affected_nodes so the engine re-measures it.\n\
+   The engine measures the TASK's predicate scope; affected_nodes is an ADVISORY impact\n\
+   hint only (it does NOT control what is measured — #95-A MD-1).\n\
 4. Use ONLY operations from allowed_operations.\n\
 5. DO NOT declare positions - the engine measures. position_hints are advisory only (INV-T4).\n\
 6. Provide clear reasoning for your proposed changes.\n\

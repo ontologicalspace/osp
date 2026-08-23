@@ -151,6 +151,65 @@ impl<'de> serde::Deserialize<'de> for CanonicalSubjectScope {
     }
 }
 
+/// **#95-A (MD-1 subject cutover):** Task'ın canonical predicate scope'u —
+/// measurement subject authority'nin TEK truth kaynağı. Draft binding capture,
+/// engine authority lane ve commit-time MD-1 fence'in ÜÇÜ de aynı fonksiyondan
+/// türetir (bağımsız ikinci türetim yok — digest karşılaştırmalarının anlamı
+/// buna bağlı).
+///
+/// Pure (engine-state bağımsız — reviewer tur-3 doğrulaması): her predicate
+/// scope'u `CanonicalSubjectScope::try_new` üzerinden geçer (sort; duplicate
+/// fail-closed); `Module(name)` → `SubjectScopeResolutionFailed`; boş →
+/// `EmptySubjectScope`; heterojen canonical scope'lar → fail-closed.
+///
+/// **Ontoloji (#95-A):** Task neyin ölçüleceğini söyler (bu fonksiyon);
+/// Delta neyin değiştiğini (structural, draft/claim'den); `affected_nodes`
+/// neyin etkilenmiş olabileceğini (advisory — authority DEĞİL).
+#[allow(
+    clippy::result_large_err,
+    reason = "MeasurementError inline (intentional — see layout decision above)"
+)]
+pub fn canonical_task_subject_scope(
+    task: &crate::trajectory::Task,
+) -> Result<CanonicalSubjectScope, MeasurementError> {
+    use crate::trajectory::PredicateScope;
+    let canonical_scopes: Vec<CanonicalSubjectScope> = task
+        .target_predicate_set
+        .predicates
+        .iter()
+        .map(|wp| {
+            let ids = match &wp.predicate.scope {
+                PredicateScope::Node(id) => vec![*id],
+                PredicateScope::Subgraph(member_ids) => member_ids.clone(),
+                PredicateScope::Module(name) => {
+                    return Err(MeasurementError::SubjectScopeResolutionFailed(
+                        SubjectScopeResolutionError::ModuleResolutionUnavailable {
+                            module: name.clone(),
+                        },
+                    ));
+                }
+            };
+            CanonicalSubjectScope::try_new(ids).map_err(MeasurementError::Digest)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if canonical_scopes.is_empty() {
+        return Err(MeasurementError::EmptySubjectScope);
+    }
+    // Heterojen predicate scope fail-closed — diagnostic için ilk iki farklı
+    // temsilci scope taşınır (okunabilirlik; tüm liste gereksiz).
+    let mut iter = canonical_scopes.into_iter();
+    let first = iter.next().expect("non-empty checked above");
+    for other in iter {
+        if other != first {
+            return Err(MeasurementError::HeterogeneousPredicateScopes {
+                scopes: vec![first.clone(), other],
+            });
+        }
+    }
+    Ok(first)
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // P1-4 (reviewer v3): CanonicalImpactScope — CanonicalEdgeIdentity taşır (raw EdgeRef DEĞİL)
 //
@@ -1819,16 +1878,23 @@ impl EngineMeasurement {
 /// bağlar (`affected_nodes` preimage'da YOK) ve final `Claim` `affected_nodes`
 /// taşımaz → structural-delta parity + raw parity, token'ın HANGİ legacy subject
 /// üzerinde ölçüldüğünü kanıtlamaz (raw check bağımsız DEĞİL: `finalize` computed_raw'ı
-/// token'dan enjekte eder). Bu digest, artifact'ın current proposal-derived legacy
-/// subject'ine bağlanmasını sağlar: `StructurallyValidatedClaimDraft` capture eder,
-/// `finalize` karşılaştırır (`LegacySubjectBindingMismatch`).
+/// token'dan enjekte eder). Bu digest, artifact'ın ölçüm subject'ine bağlanmasını
+/// sağlar: `StructurallyValidatedClaimDraft` capture eder, `finalize` karşılaştırır
+/// (`LegacySubjectBindingMismatch`).
+///
+/// **Semantik tablo (#95-A subject cutover):**
+/// - pre-#95-A: proposal-derived legacy subject (affected-union) binding'i.
+/// - **post-#95-A: canonical task-scope subject binding'i** — draft capture ve
+///   token türetimi `canonical_task_subject_scope(task)` üyelerinden yapar.
+/// - Fiziksel "legacy" adı bilinçli olarak #95-B'ye kadar kalır (eksen
+///   izolasyonu — isim değişikliği kozmetik ekseni bulandırır).
 ///
 /// `subject_authority::MeasurementSubjectDigest` bilinçli olarak KULLANILMAZ —
-/// o modül #95-B'de silinir; bu digest bağımsız yaşar. #95-A sonrası task-scope
-/// authority'ye geçildiğinde anlamını yitirir (#100'de token ile birlikte ele alınır).
+/// o modül #95-B'de silinir; bu digest bağımsız yaşar.
 ///
-/// Construction property: token içinde `legacy_subject_ids`'den TÜRETİLİR
-/// (bağımsız ikinci truth YOK — `raw()`/`measured()` ilişkisiyle aynı disiplin).
+/// Construction property: token içinde `subject_scope.member_ids()`'den
+/// TÜRETİLİR (bağımsız ikinci truth YOK — `raw()`/`measured()` ilişkisiyle
+/// aynı disiplin).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LegacySubjectBindingDigest([u8; 32]);
 
@@ -1878,13 +1944,17 @@ impl LegacySubjectBindingDigest {
 #[derive(Clone)]
 pub struct NativeLegacySubjectMeasurement {
     measured: crate::coords::MeasuredRawPosition,
-    /// Audited measurement subject — `derive_v1_legacy_measurement_subject`
-    /// ordered union (boşsa legacy delta-ids fallback uygulanmış hâli).
-    /// Canonical TASK authority DEĞİLDİR (MD-1 = #95-A).
-    legacy_subject_ids: Vec<crate::space::NodeId>,
-    /// **PR #124 review tur-2 P1:** `legacy_subject_ids`'den TÜRETİLİR (ctor
-    /// hesaplar — bağımsız ikinci truth YOK). Draft×token binding karşılaştırması
-    /// (`finalize`) bunu kullanır.
+    /// **#95-A (MD-1 subject cutover):** measurement subject = **canonical task
+    /// predicate scope** (`canonical_task_subject_scope`). İçsel temsil
+    /// `CanonicalSubjectScope` (illegal durumlar — `[]`/duplicate/noncanonical
+    /// order — construction'da temsil EDİLEMEZ; reviewer tur-3 P2 kabulü).
+    /// *Fiziksel "legacy" isimlendirme #95-B'ye kadar kalır:* pre-#95-A'da
+    /// proposal-affected-union taşınırdı; compat accessor `legacy_subject_ids()`.
+    subject_scope: CanonicalSubjectScope,
+    /// Subject binding digest'i — `subject_scope.member_ids()`'den TÜRETİLİR
+    /// (ctor hesaplar — bağımsız ikinci truth YOK). Draft×token binding
+    /// karşılaştırması (`finalize`) bunu kullanır. *(Fiziksel "legacy" adı
+    /// #95-B; pre-#95-A semantiği: proposal-affected-union binding.)*
     legacy_subject_binding: LegacySubjectBindingDigest,
     delta_digest: MeasurementDeltaDigest,
     base_revision: crate::authorization::SpaceViewRevision,
@@ -1895,19 +1965,21 @@ pub struct NativeLegacySubjectMeasurement {
 impl NativeLegacySubjectMeasurement {
     /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native_with_md1_shadow`
     /// çağırır (engine.rs). External construction kapalı (private fields).
-    /// `legacy_subject_binding` ctor içinde `legacy_subject_ids`'den türetilir.
+    /// `legacy_subject_binding` ctor içinde `subject_scope.member_ids()`'den
+    /// türetilir.
     pub(crate) fn new(
         measured: crate::coords::MeasuredRawPosition,
-        legacy_subject_ids: Vec<crate::space::NodeId>,
+        subject_scope: CanonicalSubjectScope,
         delta_digest: MeasurementDeltaDigest,
         base_revision: crate::authorization::SpaceViewRevision,
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
         axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
     ) -> Self {
-        let legacy_subject_binding = LegacySubjectBindingDigest::compute(&legacy_subject_ids);
+        let legacy_subject_binding =
+            LegacySubjectBindingDigest::compute(subject_scope.member_ids());
         Self {
             measured,
-            legacy_subject_ids,
+            subject_scope,
             legacy_subject_binding,
             delta_digest,
             base_revision,
@@ -1934,14 +2006,22 @@ impl NativeLegacySubjectMeasurement {
         self.measured.to_raw()
     }
 
-    /// Audited legacy measurement subject (ordered union + delta-ids fallback).
+    /// Audited measurement subject (#95-A sonrası: canonical task scope
+    /// üyeleri). Compat accessor — fiziksel ad #95-B'ye kadar legacy.
     pub fn legacy_subject_ids(&self) -> &[crate::space::NodeId] {
-        &self.legacy_subject_ids
+        self.subject_scope.member_ids()
     }
 
-    /// **PR #124 review tur-2 P1:** Legacy subject binding digest —
-    /// `legacy_subject_ids`'den türetilmiş; draft×token karşılaştırması
-    /// (`StructurallyValidatedClaimDraft::finalize`) kullanır.
+    /// **#95-A:** Measurement subject authority — canonical task predicate
+    /// scope (commit-time MD-1 fence canonical-to-canonical karşılaştırır;
+    /// re-canonicalization YOK).
+    pub fn subject_scope(&self) -> &CanonicalSubjectScope {
+        &self.subject_scope
+    }
+
+    /// Subject binding digest — `subject_scope.member_ids()`'den türetilmiş;
+    /// draft×token karşılaştırması (`StructurallyValidatedClaimDraft::finalize`)
+    /// kullanır. *(Fiziksel "legacy" adı #95-B.)*
     pub fn legacy_subject_binding(&self) -> &LegacySubjectBindingDigest {
         &self.legacy_subject_binding
     }
@@ -1973,7 +2053,7 @@ impl std::fmt::Debug for NativeLegacySubjectMeasurement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeLegacySubjectMeasurement")
             .field("measured", &self.measured)
-            .field("legacy_subject_ids", &self.legacy_subject_ids)
+            .field("subject_scope", &self.subject_scope)
             .field("delta_digest", &self.delta_digest)
             .field("base_revision", &self.base_revision)
             .field("measurement_input_digest", &self.measurement_input_digest)
@@ -2127,6 +2207,20 @@ pub enum NativeLegacyMeasurementBindingError {
     RawMismatch {
         expected: [u64; 5],
         presented: [u64; 5],
+    },
+
+    /// **#95-A (MD-1 subject cutover — tur-2 P0):** Commit-anında resolve edilen
+    /// CURRENT task'ın canonical predicate scope'u, token'ın ölçtüğü subject
+    /// scope ile uyuşmuyor — task-definition drift (registry overwrite: aynı
+    /// task_id, farklı scope). `LegacySubjectBindingMismatch` (draft×token
+    /// artifact integrity — finalize aşaması) ile KARIŞMAZ: bu, current task
+    /// reality ↔ measurement authority karşılaştırmasıdır (commit aşaması).
+    #[error(
+        "task subject binding mismatch: current task scope={expected:?}, measured token scope={presented:?}"
+    )]
+    TaskSubjectBindingMismatch {
+        expected: CanonicalSubjectScope,
+        presented: CanonicalSubjectScope,
     },
 
     /// Current `SpaceViewRevision` token'ın base revision'ı ile uyuşmuyor —
