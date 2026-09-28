@@ -19,9 +19,14 @@ review: onaylanabilir, P2+P3'ler düzeltildi, thread'ler resolve edildi). #95-B 
 
 - **MD-2 ayrışması temiz:** `provenance_authority.rs` (MD-2 observer) `NativeAttemptMeasurement`
   / `md1_shadow`'a referans ETMİYOR — MD-1 siliniyor, MD-2 yüzeyine dokunma.
-- **`produce_legacy_subject_measurement` üretim çağrıcısız** (grep: yalnız subject_authority.rs
-  tanımı + drift-observation test) — mekanik silme; navigator/MCP #95-A'da
-  `measure_attempt_native_with_md1_shadow`'a geçmiş.
+- **`produce_legacy_subject_measurement` tamamen çağrıcısız** (PR #129 review P3
+  düzeltmesi: grep'te test referansı da yok — yalnız tanım) — mekanik silme;
+  navigator/MCP #95-A'da `measure_attempt_native_with_md1_shadow`'a geçmiş.
+  **Ancak `derive_v1_legacy_measurement_subject` için durum TERSİ:** engine.rs'te
+  W1/W4 kapsamı DIŞINDA q92 çağrıcıları var (`:7865` `q92_observe_divergent_pair`
+  helper, `:7971` `q92_001_raws` helper; besleyen test
+  `q5_theta_subject_divergent_same_context_shows_theta_divergence` ≈`:7990`) —
+  bkz. W5 disposal kararı.
 - **Kullanım haritası:** observer/`SubjectAuthorityDriftObservation` 16 dosyada;
   `md1_shadow` lane engine.rs'te (`NativeAttemptMeasurement.md1_shadow:717`,
   `measure_md1_shadow_in_session:2900`, cross-pin testleri `:8302-8460`); navigator
@@ -45,18 +50,42 @@ review: onaylanabilir, P2+P3'ler düzeltildi, thread'ler resolve edildi). #95-B 
   Rejected → `RevisionRequired.with_subject_authority_drift()`) kaldır; eligibility
   sözleşmesi (`v1_downstream_from_engine_commit_error`) kullanımdan düşer.
 - **W3 wire sidecar:** `TrajectoryEvidence.subject_authority_drift` + `PendingAuthorization`/
-  `RevisionRequired` sidecar alanları — **durable wire üç-epoch typed rejection** kurallarına
-  göre kaldır (yeni reader eski wire'ı kabul eder; eski reader yeni wire'ı reddeder —
-  serde epoch makinesine uygun yön). MCP response JSON additive sidecar'ları (error
-  semantiği değişmeden eklenmişti) kaldır — additive geri alma non-breaking.
+  `RevisionRequired` sidecar alanları. **Yön mekaniği face-face FARKLI (PR #129 review P2
+  düzeltmesi — eski "üç-epoch typed rejection" ifadesi repo'da kanonik tanımsızdı, kaldırıldı):**
+  - `TrajectoryEvidence` (trajectory.rs `:1233`): `deny_unknown_fields` YOK + alan
+    `#[serde(default)]` Option → silme sonrası **iki yön de kabul** (eski reader yeni
+    kaydı default-None ile, yeni reader eski kaydı unknown-field-ignore ile) — sorun yok.
+  - `PendingAuthorization`/`RevisionRequired` **durable record** yüzeyi
+    (authorization.rs `:5358`; custom Deserialize + `deny_unknown_fields`,
+    yorum `:5316`): silme sonrası **yeni reader eski kayıtları unknown-field REJECT
+    eder** (yazılan yönün tersi). Digest etkisi YOK (alan preimage'e girmiyor — pinned).
+  - **W3'ün ilk adımı (zorunlu):** face-by-face kısa karar notu — hangi yüzeyler durable,
+    hangi yön reject, reject bilinçli epoch ilerlemesiyse reason `md1-cleanup (#95-B)`.
+    Dogfood durable kayıtları yeniden üretilebilirse (Temp fixture'lar — doğrula)
+    epoch ilerlemesi kabul edilebilir; edilemezse eski kayıtları okuyacak tolerasyon
+    yolunun (ör. serde alias/ignore) W3'te mi #100'de mi çözüleceği yazılır.
+  - MCP response JSON additive sidecar'ları (error semantiği değişmeden eklenmişti)
+    kaldır — additive geri alma non-breaking.
 - **W4 modül silme:** `subject_authority.rs` tamamı + `lib.rs` mod deklarasyonu +
   `tests/subject_authority_drift_observation.rs` + `tests/md1_subject_authority_sidecar.rs`
   (MCP) sil. `MeasurementSubjectDigest`/`RawMeasurementObservation` vb. başka yerde
   kullanılıyorsa (MD-2 observer kendi tiplerini kullanıyor — doğrula) taşınmadan sil.
-- **W5 legacy producer:** `produce_legacy_subject_measurement` +
-  `LegacySubjectMeasurement` + `legacy_compatibility_projection` +
-  `derive_v1_legacy_measurement_subject` sil (çağrıcısız — W4 sonrası kalan test
-  referanslarıyla birlikte).
+  Comment cleanup (PR #129 review P3): `navigator.rs:149`'daki
+  `derive_v1_legacy_measurement_subject` atfı W4/W5 sonrası bayat kalır — aynı stage'de
+  güncelle.
+- **W5 legacy producer + q92 disposal kararı (PR #129 review P1):**
+  `produce_legacy_subject_measurement` + `LegacySubjectMeasurement` +
+  `legacy_compatibility_projection` sil (tamamen çağrıcısız).
+  `derive_v1_legacy_measurement_subject` silinirken engine.rs'teki **q92 kanıt testleri**
+  (`q92_observe_divergent_pair` `:7865`, `q92_001_raws` `:7971`,
+  `q5_theta_subject_divergent_same_context_shows_theta_divergence` ≈`:7990`) da silinir —
+  **karar: sil**; gerekçe: bunlar MD-1 comparison'un ta kendisi (#92 evidence — V1
+  legacy-union ↔ V2 task-scope θ diverjansı) ve live test deleted production koduna
+  bağımlı olamaz. Tarihçe değeri KAYBOLMAZ: karar kaydı
+  (`faz8-p2-migration-decisions.md` #92/MD-1 bölümleri) + frozen goldens + regolden
+  disiplini (reason: `md1-cleanup (#95-B)`) taşır. Alternatif (testi koru + legacy
+  producer'sız yeniden ifade et) W5 silmeyle çelişir — bilinçli olarak reddedildi.
+  Bu karar W1 başlamadan mimar onayına sunulmalı (review'da açık karar istendi).
 - **W6 isimler:** `NativeLegacySubjectMeasurement` → `NativeSubjectMeasurement`
   (subject artık canonical task scope — "legacy" yanıltıcı); `legacy_subject_binding`
   alanı → `subject_binding`; `LegacySubjectBindingDigest` → `SubjectBindingDigest`;
@@ -98,15 +127,15 @@ commit_task_claim
   `LegacySubjectBindingDigest/Mismatch`) BILİNÇLİ kaldı — doc truth-surface
   pre/post-#95-A tablosuyla; yeniden adlandırma #95-B.
 
-## #95-B scope (sıradaki)
+## #95-B scope (özet — yetkili kaynak W1-W8 stage planıdır)
 
 Silinir: `subject_authority.rs` observer + `SubjectAuthorityDriftObservation` +
-`produce_legacy_subject_measurement`/`derive_v1_legacy_measurement_subject` +
-`effective_legacy_measure_set` (çağrıcısız — PR #128 review P3 notu) + MD-1 sidecar
-alanları (wire üç-epoch typed rejection yalnız durable wires) + MD-1 comparison
-testleri + legacy fiziksel isimler + `osp_mcp` `submit_delta_attempt`'ın kullanılmayan
-`_task_id: TaskId` parametresi (PR #128 review P3 — task kimliği `task` nesnesinden
-türetiliyor; imza değişikliği cleanup PR'ına ait).
+`produce_legacy_subject_measurement`/`derive_v1_legacy_measurement_subject`
+(üretim çağrıcısız; q92 test çağrıcıları W5 disposal kararıyla) + ~~`effective_legacy_measure_set`~~
+(**W0'da silindi — tamam**) + MD-1 sidecar alanları (yön mekaniği W3'te face-face) +
+MD-1 comparison testleri (q92 dahil — W5 kararı) + legacy fiziksel isimler (W6) +
+`osp_mcp` `submit_delta_attempt`'ın kullanılmayan `_task_id: TaskId` parametresi (W7;
+PR #128 review P3 — task kimliği `task` nesnesinden türetiliyor).
 Kalır: uniform-Scip reference projection (#96'nın evi — #100), `compute_raw_from_delta`
 (#100 machinery), MD-3 yüzeyleri (#97). "Compatibility code tamamen kaldırılmış"
 kriteri **MD-1 compatibility code** olarak okunur.
