@@ -579,6 +579,9 @@ fn run_one_experiment(
             "RequiresRevision".to_string(),
             rev.attempt_num().get() as usize,
         ),
+        NavigatorResult::AwaitingColdStartApproval { attempts, .. } => {
+            ("AwaitingColdStartApproval".to_string(), *attempts)
+        }
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, .. } => (
             "PendingAuthorizationPersistenceFailure".to_string(),
             pending.attempt_num.get() as usize,
@@ -889,6 +892,9 @@ fn run_synthetic_rq9(
             "RequiresRevision".to_string(),
             rev.attempt_num().get() as usize,
         ),
+        NavigatorResult::AwaitingColdStartApproval { attempts, .. } => {
+            ("AwaitingColdStartApproval".to_string(), *attempts)
+        }
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, .. } => (
             "PendingAuthorizationPersistenceFailure".to_string(),
             pending.attempt_num.get() as usize,

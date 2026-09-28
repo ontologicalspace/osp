@@ -1237,6 +1237,18 @@ impl SpaceEngine {
     }
 }
 
+/// **#97 MD-3 S2:** Commit-time baseline availability sınıfı — değer YOK
+/// (`MeasurementBaseline::Available(MeasuredRawPosition)` değer taşır; commit
+/// karar matrisi synthetic değere hiç ihtiyaç duymaz, INV-T6 extension gereği
+/// üretilmesi de yasaklanmıştır).
+#[derive(Debug, Clone, PartialEq)]
+pub enum BaselineAvailabilityClass {
+    /// Tüm subject üyeleri base space'te mevcut (improvement değerlendirilebilir).
+    Available,
+    /// Before-state typed kullanılamıyor — neden normatif evidence.
+    Unavailable(crate::measurement::BaselineUnavailableReason),
+}
+
 /// **INV-T9** — `commit_task_claim` expected domain outcome (HATA DEĞİL).
 ///
 /// `Evaluated` = commit pipeline tamamlandı (AcceptAsCompleted Mainline'e, AcceptAsProgress
@@ -1272,6 +1284,23 @@ pub enum EngineCommitResult {
         authorization: crate::authorization::AuthorizationContext,
         reasons: crate::witness::NonEmptyWitnessRejections,
         snapshot: crate::witness::WitnessQuorumSnapshot,
+    },
+    /// **#97 MD-3 (INV-T9 extension):** Cold-start operator onayı bekleme —
+    /// tanık bekleme (`Held`) DEĞİL, AYRI otorite (operatör ≠ witness). Yalnız
+    /// `BaselineUnavailableReason::AllMembersIntroducedByDelta` +
+    /// `ColdStartPolicy::RequireOperatorApproval` + `PredicateSetResult::NotCompleted`
+    /// altında üretilir. Mutation UYGULANMAZ; maneuver budget tüketilmez; agent
+    /// retry başlatılmaz. Onay sonrası `approve_cold_start` →
+    /// `MutationDecision::AcceptAsColdStart` → `ApplyTarget::Lane(Sandbox)`.
+    /// `PartialNewSubject` bu varyanta ASLA düşmez (matris: terminal Reject).
+    SuspendedColdStart {
+        task_id: crate::trajectory::TaskId,
+        claim_id: crate::witness::ClaimId,
+        /// Typed unavailable nedeni — normatif evidence (synthetic baseline'a
+        /// dönüştürülemez; INV-T6 extension).
+        baseline_reason: crate::measurement::BaselineUnavailableReason,
+        /// Onayı gerektiren politika anlık görüntüsü (audit).
+        policy: crate::trajectory::ColdStartPolicy,
     },
 }
 
@@ -1495,6 +1524,63 @@ impl SpaceEngine {
         })
     }
 
+    /// **#97 MD-3 S2:** Subject-scope baseline availability sınıflandırması —
+    /// commit Phase 0d karar girdisi. `measure_task_delta`'daki baseline
+    /// matrisi ile AYNI partition mantığı (existing/introduced/unresolvable);
+    /// centroid HESAPLANMAZ ve değer TAŞINMAZ — karar matrisi yalnız sınıfa
+    /// bakar (INV-T6 extension: Unavailable altında improvement
+    /// değerlendirilemez, synthetic numeric baseline'a dönüşüm YASAK — bu tip
+    /// değerin kendisinde de temsil edilemez).
+    ///
+    /// Unresolvable üye → ölçüm yolundaki gibi fail-closed typed hata
+    /// (`SubjectMemberUnresolvable`).
+    #[allow(
+        clippy::result_large_err,
+        reason = "MeasurementError carry's the measurement-ontology family (intentional inline); see measurement.rs layout decision"
+    )]
+    fn classify_baseline_availability(
+        &self,
+        claim: &crate::witness::Claim,
+        subject: &crate::measurement::CanonicalSubjectScope,
+    ) -> Result<crate::engine::BaselineAvailabilityClass, crate::measurement::MeasurementError>
+    {
+        let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
+            claim.delta_nodes.iter().map(|n| n.id).collect();
+        let mut existing: Vec<crate::space::NodeId> = Vec::new();
+        let mut introduced: Vec<crate::space::NodeId> = Vec::new();
+        let mut unresolvable: Vec<crate::space::NodeId> = Vec::new();
+        for &id in subject.member_ids() {
+            if self.space.nodes.contains_key(&id) {
+                existing.push(id);
+            } else if delta_introduced.contains(&id) {
+                introduced.push(id);
+            } else {
+                unresolvable.push(id);
+            }
+        }
+        if !unresolvable.is_empty() {
+            return Err(
+                crate::measurement::MeasurementError::SubjectMemberUnresolvable {
+                    missing: unresolvable,
+                },
+            );
+        }
+        Ok(match (existing.is_empty(), introduced.is_empty()) {
+            (_, true) => crate::engine::BaselineAvailabilityClass::Available,
+            (true, false) => crate::engine::BaselineAvailabilityClass::Unavailable(
+                crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                    members: introduced,
+                },
+            ),
+            (false, false) => crate::engine::BaselineAvailabilityClass::Unavailable(
+                crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+                    existing,
+                    introduced,
+                },
+            ),
+        })
+    }
+
     /// Aşama D2 — Task-bound Claim commit. Atomic pipeline: Q4 → bind → Q5 → Q5.b
     /// (PredicateGate) → Q6 → MutationDecision → ApplyTarget → Q1-Q3 witness.
     ///
@@ -1510,6 +1596,7 @@ impl SpaceEngine {
     /// 4. Q5.b PredicateGate (task predicate, loss/policy → MutationDecision)
     /// 5. Q6 Rule (check_claim_rules)
     /// 6. MutationDecision → ApplyTarget (INV-T8: Reject→NotApplied, Progress→Checkpoint)
+    /// 7. Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress ise — apply_delta)
     /// 7. Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress ise — apply_delta)
     /// 8. TaskCommitResult (outcome + apply_target + witness)
     #[allow(
@@ -1607,14 +1694,82 @@ impl SpaceEngine {
         // Phase 0d: Q5.b PredicateGate (soft gate — task completion + policy).
         // **#96 MD-2:** measured artık native token'dan (proof-verified) — caller
         // supplied plain measured YOK.
+        // **#97 MD-3:** cold-start policy `bound` taşınmadan ÖNCE kopyalanır
+        // (aşağıdaki MD-3 karar matrisi kullanır; ColdStartPolicy: Copy).
+        let cold_start_policy = bound.task.policy.cold_start_policy;
         let gate_out = PredicateGate.evaluate(PredicateGateInput {
             bound,
             measured: verified_binding.measured(),
             loss_before: input.loss_before,
             target: &input.target,
         });
-        let outcome = gate_out.outcome.clone();
+        let mut outcome = gate_out.outcome.clone();
         let loss_after = gate_out.loss_after;
+
+        // **#97 MD-3 (INV-T6 extension — S2):** Typed baseline kullanılabilirliği
+        // commit karar noktasında ZORLANIR. Caller-supplied running scalar
+        // (`loss_before`) improvement iddiası KANITI OLAMAZ — sınıflandırma
+        // motor tarafından base space + claim delta + subject scope'tan yeniden
+        // türetilir (ölçüm yolu partition mantığıyla aynı):
+        // - `Unavailable{AllMembers}` + `RequireOperatorApproval` + NotCompleted →
+        //   `SuspendedColdStart` (improvement değerlendirmesi YAPILMAZ; INV-T9
+        //   extension — mutation yok, witness yok);
+        // - `Unavailable{..}` altında `AcceptAsProgress` ÜRETİLEMEZ — gate skaler
+        //   improvement önerse bile motor REDDEDER (Reject'e düşürür);
+        // - `PartialNewSubject` → cold-start override YOK (matris: terminal Reject,
+        //   reason evidence'da korunur — SuspendedColdStart ASLA);
+        // - `Completed` baseline'tan BAĞIMSIZ (rule 3 — AcceptAsCompleted kalır).
+        let baseline_class = self
+            .classify_baseline_availability(input.claim, &current_scope)
+            .map_err(|e| {
+                // Pratikte unreachable savunma yolu: ölçüm yolu aynı partition'ı
+                // daha önce fail-closed koştu; space POST-measure değişseydi #96
+                // 5-fence (revision/epoch) bunu commit'ten önce yakalardı.
+                EngineCommitError::Internal(format!(
+                    "MD-3 baseline availability classification failed: {e:?}"
+                ))
+            })?;
+        if let BaselineAvailabilityClass::Unavailable(reason) = &baseline_class {
+            use crate::trajectory::PredicateCompletion;
+            if outcome.predicate_completion == PredicateCompletion::NotCompleted {
+                match (reason, cold_start_policy, outcome.mutation_decision) {
+                    (
+                        crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta { .. },
+                        crate::trajectory::ColdStartPolicy::RequireOperatorApproval,
+                        _,
+                    ) => {
+                        return Ok(EngineCommitResult::SuspendedColdStart {
+                            task_id,
+                            claim_id: input.claim.id,
+                            baseline_reason: reason.clone(),
+                            policy: cold_start_policy,
+                        });
+                    }
+                    (
+                        crate::measurement::BaselineUnavailableReason::PartialNewSubject { .. },
+                        crate::trajectory::ColdStartPolicy::RequireOperatorApproval,
+                        _,
+                    ) => {
+                        // Matris: PartialNewSubject + herhangi policy → terminal
+                        // Reject. Cold-start override PAYLAŞILMAZ. Reason zaten
+                        // sınıflandırmada typed taşınıyor; decision Reject'e iner
+                        // (aşağıdaki INV-T6 düşürmesi kapsar).
+                    }
+                    _ => {}
+                }
+                // **INV-T6 extension:** Unavailable altında progress kanıtlanamaz —
+                // gate'in skaler improvement'ı REDDEDİLİR (AcceptAsProgress → Reject).
+                // `gate_decision` DOKUNULMAZ (binding doğrulaması geçti; düşürme
+                // yalnızca mutasyon kararı — epistemik ayrım).
+                if matches!(
+                    outcome.mutation_decision,
+                    MutationDecision::AcceptAsProgress
+                ) {
+                    outcome.mutation_decision = MutationDecision::Reject;
+                }
+            }
+        }
+
         let apply_target = outcome.mutation_decision.apply_target();
 
         // **INV-T9 Step 4a:** Rule evaluation context — Q6 ve digest tarafından PAYLAŞILAN
@@ -8238,6 +8393,331 @@ v = 0.5
             ),
             "Derivation(SubjectDerivationFailed) bekleniyordu; got: {err:?}"
         );
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════════
+    // #97 MD-3 S2 — reason-aware policy matrisi (exact tests)
+    // Karar kaydı: faz8-p2-migration-decisions.md MD-3; INV-T6/T8/T9 extensions.
+    // ═══════════════════════════════════════════════════════════════════════════════
+
+    /// MD-3 fixture: tek delta-introduced node (id 10_000 — `node_from_spec`
+    /// 10_000+index sözleşmesi) + node 1'den edge. affected_nodes advisory.
+    fn md3_cold_start_proposal() -> crate::agent::DeltaProposal {
+        crate::agent::DeltaProposal {
+            new_nodes: vec![crate::agent::NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }],
+            new_edges: vec![crate::agent::NewEdgeSpec {
+                from: 1,
+                to: 10_000,
+                kind: crate::space::EdgeKind::Imports,
+            }],
+            removed_edges: vec![],
+            affected_nodes: vec![10_000],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "md3 cold-start fixture".to_string(),
+        }
+    }
+
+    /// MD-3 fixture: scope'u verilen node kümesi olan task (Coupling Le threshold).
+    fn md3_task_scoped(
+        scope: crate::trajectory::PredicateScope,
+        threshold: f64,
+        policy: crate::trajectory::TaskPolicy,
+    ) -> crate::trajectory::Task {
+        crate::trajectory::Task {
+            id: 1,
+            milestone_id: 1,
+            label: "md3 matrix fixture".into(),
+            target_predicate_set: crate::trajectory::PredicateSet {
+                mode: crate::trajectory::PredicateMode::All,
+                predicates: vec![crate::trajectory::WeightedPredicate {
+                    predicate: crate::trajectory::MetricPredicate {
+                        metric: crate::trajectory::PredicateAxis::Coupling,
+                        operator: crate::trajectory::ComparisonOp::Le,
+                        threshold,
+                        scope,
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                }],
+                preferred_vector: None,
+            },
+            policy,
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: crate::trajectory::TaskStatus::Pending,
+        }
+    }
+
+    /// MD-3 fixture: UserLoaded vision'lı engine (Q5 context açılır — GlobalDefault
+    /// değil; Completed yolunun Q5/witness'a ulaşması için).
+    fn md3_engine_user_vision() -> SpaceEngine {
+        SpaceEngine::new(
+            md1_space_two_nodes(),
+            make_measurement_engine_coordinate_system(),
+            user_loaded_vision(),
+            EngineConfig::default_calibrated(),
+        )
+    }
+
+    /// **Matris satırı: NotCompleted + AllMembersIntroduced + Disallow (default) →
+    /// fail-closed Reject.** INV-T6 extension pin'i: caller-supplied running scalar
+    /// (`loss_before` = 5.0 — improvement ÖNERİR) bile progress kanıtı OLAMAZ; motor
+    /// AcceptAsProgress'ı REDDEDER (gate skaleri decision-producing değildir).
+    #[test]
+    fn md3_all_members_disallow_rejects_even_with_scalar_improvement() {
+        use crate::trajectory::ColdStartPolicy;
+        let mut engine = md3_engine_user_vision();
+        let task = md3_task_scoped(
+            crate::trajectory::PredicateScope::Node(10_000),
+            -1.0, // Coupling ≥ 0 > -1 → predicate DAIMA NotCompleted
+            crate::trajectory::TaskPolicy {
+                predicate_failure_policy:
+                    crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+                allow_progress_checkpoint: true,
+                min_improvement_delta: 0.02,
+                cold_start_policy: ColdStartPolicy::Disallow,
+                ..Default::default()
+            },
+        );
+        let proposal = md3_cold_start_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            100,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        let carrier = draft.finalize(native.authority()).unwrap();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task);
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let result = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                5.0, // skaler "improvement" önerir — INV-T6: kanıt DEĞİL
+            ))
+            .expect("Disallow → Evaluated (Reject), suspension yok");
+        match result {
+            crate::engine::EngineCommitResult::Evaluated { result, .. } => {
+                assert_eq!(
+                    result.outcome.predicate_completion,
+                    crate::trajectory::PredicateCompletion::NotCompleted
+                );
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::Reject,
+                    "INV-T6 extension: Unavailable altında AcceptAsProgress ÜRETİLEMEZ"
+                );
+                assert_eq!(
+                    result.apply_target,
+                    crate::trajectory::ApplyTarget::NotApplied
+                );
+            }
+            other => panic!("Disallow default → Evaluated bekleniyordu; got: {other:?}"),
+        }
+    }
+
+    /// **Matris satırı: NotCompleted + AllMembersIntroduced + RequireOperatorApproval
+    /// → SuspendedColdStart.** INV-T9 extension: mutation UYGULANMAZ (space digest
+    /// değişmez), witness'a ulaşılmaz, typed reason taşınır.
+    #[test]
+    fn md3_all_members_require_operator_approval_suspends_cold_start() {
+        use crate::trajectory::ColdStartPolicy;
+        let mut engine = md3_engine_user_vision();
+        let task = md3_task_scoped(
+            crate::trajectory::PredicateScope::Node(10_000),
+            -1.0,
+            crate::trajectory::TaskPolicy {
+                predicate_failure_policy:
+                    crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+                allow_progress_checkpoint: true,
+                cold_start_policy: ColdStartPolicy::RequireOperatorApproval,
+                ..Default::default()
+            },
+        );
+        let proposal = md3_cold_start_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            100,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        let carrier = draft.finalize(native.authority()).unwrap();
+
+        let digest_before = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task);
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let result = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                5.0,
+            ))
+            .expect("SuspendedColdStart Ok kanalı — domain outcome");
+        match result {
+            crate::engine::EngineCommitResult::SuspendedColdStart {
+                task_id,
+                claim_id,
+                baseline_reason,
+                policy,
+            } => {
+                assert_eq!(task_id, 1);
+                assert_eq!(claim_id, carrier.claim().id);
+                assert_eq!(policy, ColdStartPolicy::RequireOperatorApproval);
+                assert!(matches!(
+                    baseline_reason,
+                    crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta { ref members }
+                        if members == &vec![10_000]
+                ));
+            }
+            other => panic!("SuspendedColdStart bekleniyordu; got: {other:?}"),
+        }
+        // INV-T9 extension — mutation YOK: space fingerprint değişmedi.
+        let digest_after = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        assert_eq!(
+            digest_before, digest_after,
+            "cold-start askısı mutation uygulamaz"
+        );
+    }
+
+    /// **Matris satırı: NotCompleted + PartialNewSubject + RequireOperatorApproval →
+    /// terminal Reject.** Cold-start override PAYLAŞILMAZ (before/after subject
+    /// identity karşılaştırılamaz). SuspendedColdStart ASLA üretilmez.
+    #[test]
+    fn md3_partial_new_subject_terminal_reject_even_with_cold_start_optin() {
+        use crate::trajectory::ColdStartPolicy;
+        let mut engine = md3_engine_user_vision();
+        // Subgraph [1 (base'de), 10_000 (delta-introduced)] → PartialNewSubject.
+        let task = md3_task_scoped(
+            crate::trajectory::PredicateScope::Subgraph(vec![1, 10_000]),
+            -1.0,
+            crate::trajectory::TaskPolicy {
+                predicate_failure_policy:
+                    crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+                allow_progress_checkpoint: true,
+                cold_start_policy: ColdStartPolicy::RequireOperatorApproval,
+                ..Default::default()
+            },
+        );
+        let proposal = md3_cold_start_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            100,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        let carrier = draft.finalize(native.authority()).unwrap();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task);
+        let omega = crate::witness::WitnessSet::new(vec![]);
+        let result = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                5.0,
+            ))
+            .expect("PartialNew → Evaluated (terminal Reject)");
+        match result {
+            crate::engine::EngineCommitResult::Evaluated { result, .. } => {
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::Reject,
+                    "PartialNewSubject + cold-start opt-in → terminal Reject (override yok)"
+                );
+                assert_eq!(
+                    result.apply_target,
+                    crate::trajectory::ApplyTarget::NotApplied
+                );
+            }
+            crate::engine::EngineCommitResult::SuspendedColdStart { .. } => {
+                panic!("PartialNewSubject SuspendedColdStart ÜRETMEZ (matris)")
+            }
+            other => panic!("terminal Reject bekleniyordu; got: {other:?}"),
+        }
+    }
+
+    /// **Matris satırı: Completed + AllMembersIntroduced → AcceptAsCompleted
+    /// (baseline'tan bağımsız — rule 3).** Improvement iddiası taşımaz; after-state
+    /// doğrudan predicate'i karşılar. Cold-start policy fark etmez.
+    #[test]
+    fn md3_completed_with_all_members_still_completes() {
+        use crate::trajectory::ColdStartPolicy;
+        let mut engine = md3_engine_user_vision();
+        let task = md3_task_scoped(
+            crate::trajectory::PredicateScope::Node(10_000),
+            10.0, // Coupling ≤ 10 her zaman geçer → Completed
+            crate::trajectory::TaskPolicy {
+                predicate_failure_policy:
+                    crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+                allow_progress_checkpoint: true,
+                cold_start_policy: ColdStartPolicy::RequireOperatorApproval,
+                ..Default::default()
+            },
+        );
+        let proposal = md3_cold_start_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            100,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        let carrier = draft.finalize(native.authority()).unwrap();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task);
+        // Harness quorum-0 (witness auto-approve) — Mainline apply'e izin verir.
+        let omega = crate::witness::WitnessSet::new(vec![]).with_quorum(0, 0.0);
+        let result = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                5.0,
+            ))
+            .expect("Completed → Evaluated");
+        match result {
+            crate::engine::EngineCommitResult::Evaluated { result, .. } => {
+                assert_eq!(
+                    result.outcome.predicate_completion,
+                    crate::trajectory::PredicateCompletion::Completed
+                );
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::AcceptAsCompleted,
+                    "rule 3: completion baseline availability'den bağımsız"
+                );
+            }
+            other => panic!("AcceptAsCompleted bekleniyordu; got: {other:?}"),
+        }
     }
 
     /// **#95-A W4 — affected-irrelevance TAM YOL (executable theorem):** Δ

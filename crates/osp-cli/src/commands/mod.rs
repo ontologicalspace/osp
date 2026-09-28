@@ -34,6 +34,9 @@ pub mod exit_codes {
     pub const EXCEEDED_MANEUVER_LIMIT: i32 = 12;
     /// Critical domain — insan review gerekli.
     pub const REQUIRES_OPERATOR_APPROVAL: i32 = 13;
+    /// **#97 MD-3:** cold-start operatör onayı (INV-T9 extension — witness'den
+    /// ayrı otorite; expected domain outcome, hata DEĞİL).
+    pub const AWAITING_COLD_START_APPROVAL: i32 = 14;
     /// Invalid witness evidence — operational fault (malformed/author-self/duplicate).
     pub const WITNESS_EVALUATION_ERROR: i32 = 20;
     /// Pending authorization persistence failure — terminal (non-retryable).
@@ -880,6 +883,17 @@ fn print_human_result(
                 rev.claim_id()
             );
         }
+        NavigatorResult::AwaitingColdStartApproval {
+            attempts,
+            task_id,
+            claim_id,
+            ..
+        } => {
+            println!(
+                "❄ Awaiting cold-start operator approval (INV-T9 ext) — task {}, claim {}, attempt {}",
+                task_id, claim_id, attempts
+            );
+        }
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
             println!(
                 "✗ Pending authorization persistence failed — task {}, claim {}: {error}",
@@ -918,6 +932,9 @@ fn navigator_exit_code(result: &osp_core::navigator::NavigatorResult, _task_id: 
         NavigatorResult::ExceededManeuverLimit { .. } => exit_codes::EXCEEDED_MANEUVER_LIMIT,
         NavigatorResult::AwaitingWitnesses { .. } => exit_codes::AWAITING_WITNESSES,
         NavigatorResult::RequiresRevision(_) => exit_codes::REQUIRES_REVISION,
+        NavigatorResult::AwaitingColdStartApproval { .. } => {
+            exit_codes::AWAITING_COLD_START_APPROVAL
+        }
         NavigatorResult::PendingAuthorizationPersistenceFailure { .. } => {
             exit_codes::PENDING_AUTHORIZATION_PERSISTENCE_FAILURE
         }

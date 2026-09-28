@@ -275,6 +275,17 @@ pub enum NavigatorResult {
     /// + `evidence_digest` (INV-T9 #72 — attempt_evidence_id kaldırıldı, dangling
     ///   reference yok; accessor'lar evidence üzerinden).
     RequiresRevision(crate::authorization::RevisionRequired),
+    /// **#97 MD-3 (INV-T9 extension):** Cold-start operator onayı bekleme —
+    /// `AwaitingWitnesses`'ten AYRI otorite (operatör ≠ witness). Mutation
+    /// uygulanmadı; maneuver budget TÜKETİLMEDİ; LLM retry YOK. Onay akışı:
+    /// S3 `approve_cold_start` → AcceptAsColdStart → Sandbox.
+    AwaitingColdStartApproval {
+        attempts: usize,
+        task_id: TaskId,
+        claim_id: crate::witness::ClaimId,
+        /// Typed unavailable nedeni — normatif evidence (INV-T6 extension).
+        baseline_reason: crate::measurement::BaselineUnavailableReason,
+    },
     /// Pending authorization persistence failure — terminal (non-retryable).
     PendingAuthorizationPersistenceFailure {
         pending: crate::authorization::PendingAuthorization,
@@ -918,6 +929,22 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 ),
             ) {
                 Ok(crate::engine::EngineCommitResult::Evaluated { result, .. }) => result,
+                Ok(crate::engine::EngineCommitResult::SuspendedColdStart {
+                    task_id: cs_task,
+                    claim_id: cs_claim,
+                    baseline_reason,
+                    ..
+                }) => {
+                    // **#97 MD-3 (INV-T9 extension):** cold-start operator onayı —
+                    // agent retry DEĞİL, budget tüketilmez, mutation uygulanmaz.
+                    // Onay akışı S3 (`approve_cold_start` → Sandbox).
+                    return NavigatorResult::AwaitingColdStartApproval {
+                        attempts: attempt_num,
+                        task_id: cs_task,
+                        claim_id: cs_claim,
+                        baseline_reason,
+                    };
+                }
                 Ok(crate::engine::EngineCommitResult::Held {
                     authorization,
                     reason,
@@ -1729,6 +1756,10 @@ mod tests {
             Ok(crate::engine::EngineCommitResult::Held { .. }) => {
                 // **INV-T9** — Witness Q1 fail (MinApproversNotMet) → Held (expected authorization
                 // bekleme). Artık Err DEĞİL Ok kanalında. Predicate çalıştı, witness aşamasında hold.
+            }
+            Ok(crate::engine::EngineCommitResult::SuspendedColdStart { .. }) => {
+                // **#97 MD-3:** fixture subject'i base'de mevcut — bu kol
+                // practical-unreachable; exhaustiveness için explicit.
             }
             Ok(crate::engine::EngineCommitResult::Rejected { .. }) => {
                 // Explicit witness rejection (Q3 honest-reject).

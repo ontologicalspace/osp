@@ -681,6 +681,21 @@ fn serialize_navigator_result(result: &osp_core::navigator::NavigatorResult) -> 
             "commit_state": "rejected_by_witness",
             "next_action": "requires_revision",
         }),
+        // **#97 MD-3:** cold-start operatör onayı — typed JSON (INV-T9 extension).
+        NavigatorResult::AwaitingColdStartApproval {
+            attempts,
+            task_id,
+            claim_id,
+            baseline_reason,
+        } => serde_json::json!({
+            "outcome": "AwaitingColdStartApproval",
+            "attempts": attempts,
+            "task_id": task_id,
+            "claim_id": claim_id,
+            "baseline_unavailable_reason": format!("{baseline_reason:?}"),
+            "commit_state": "cold_start_suspended",
+            "next_action": "operator_approval",
+        }),
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
             serde_json::json!({
                 "outcome": "PendingAuthorizationPersistenceFailure",
@@ -1023,6 +1038,24 @@ impl Workspace {
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "requires_revision",
                     "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
+                }));
+            }
+            Ok(osp_core::engine::EngineCommitResult::SuspendedColdStart {
+                task_id,
+                claim_id,
+                baseline_reason,
+                ..
+            }) => {
+                // **#97 MD-3 (INV-T9 extension):** cold-start operatör onayı —
+                // witness DEĞİL, ayrı otorite. Mutation uygulanmadı.
+                return Ok(serde_json::json!({
+                    "commit_result": "SuspendedColdStart",
+                    "task_id": task_id,
+                    "claim_id": claim_id,
+                    "baseline_unavailable_reason": format!("{baseline_reason:?}"),
+                    "commit_state": "cold_start_suspended",
+                    "mainline_mutation": "not_applied",
+                    "next_action": "operator_approval",
                 }));
             }
             Err(e) => {
