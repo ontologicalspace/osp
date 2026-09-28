@@ -763,16 +763,26 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     let mut task_registry = InMemoryTaskRegistry::new();
     task_registry.insert(task);
     // 5. Navigator.
-    let current_measured = osp_core::navigator::provenanced_from_raw(
-        osp_core::coords::RawPosition {
-            x: 0.7,
-            y: 0.5,
-            z: 0.5,
-            w: 0.5,
-            v: 0.3,
-        },
-        osp_core::coords::MetricSource::Scip,
-    );
+    // #100 (S5): synthetic bootstrap seed — uniform Scip damgası kalktı (source
+    // laundering); dürüst etiket Placeholder (ölçüm DEĞİL, G1 bootstrap telemetry).
+    let seed = osp_core::coords::RawPosition {
+        x: 0.7,
+        y: 0.5,
+        z: 0.5,
+        w: 0.5,
+        v: 0.3,
+    };
+    let stamp = |v: f64| osp_core::trajectory::AxisMetric {
+        value: v,
+        source: osp_core::coords::MetricSource::Placeholder,
+    };
+    let current_measured = osp_core::trajectory::ProvenancedRawPosition {
+        coupling: stamp(seed.x),
+        cohesion: stamp(seed.y),
+        instability: stamp(seed.z),
+        entropy: stamp(seed.w),
+        witness_depth: stamp(seed.v),
+    };
     let mut evidence = vec![];
     let mut nav = AgentNavigator {
         llm,

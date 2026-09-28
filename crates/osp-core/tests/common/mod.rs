@@ -2180,12 +2180,138 @@ pub fn engine_with_case_space(case: &CharacterizationCase) -> osp_core::engine::
 /// ve `new_characterization_legacy` kaldırıldı; authority tipi dışarıdan forge edilemez.
 /// Vision/witness/TaskValidation motor-private aşamalar olduğundan bu evaluator onları
 /// gözlemleyemez (yalnız Q4 + PredicateGate karar yüzeyi). Epoch'lar [0;5] — corpus
+/// **#100 (S5):** V1 raw projeksiyonu — production `compute_raw_from_delta`
+/// (DefaultFallback dahil) üretimden silindi; karakterizasyon V1 lane'i frozen V1
+/// semantiğini pub engine API'leri üzerinden test-lokal yeniden ifade eder
+/// (`space()` + `coord_system().raw_position_of()` — ölçüm üretimi değil, V1
+/// projeksiyonunun tarihsel kopyası; goldens bu kopyayla kararlı kalır).
+pub fn v1_compute_raw_from_delta(
+    engine: &osp_core::engine::SpaceEngine,
+    delta_nodes: &[osp_core::space::Node],
+    delta_edges: &[osp_core::space::Edge],
+    delta_removed: &[osp_core::agent::EdgeRef],
+    affected_nodes: &[osp_core::space::NodeId],
+) -> osp_core::coords::RawPosition {
+    use osp_core::coords::RawPosition;
+    if delta_nodes.is_empty() && affected_nodes.is_empty() {
+        return RawPosition::default();
+    }
+    let mut hypothetical = engine.space().clone();
+    for er in delta_removed {
+        hypothetical.remove_edge(er.from, er.to, er.kind);
+    }
+    for node in delta_nodes {
+        hypothetical.insert_node(node.clone());
+    }
+    for edge in delta_edges {
+        hypothetical.insert_edge(*edge);
+    }
+    let measure_ids: Vec<osp_core::space::NodeId> = if !affected_nodes.is_empty() {
+        affected_nodes.to_vec()
+    } else {
+        delta_nodes.iter().map(|n| n.id).collect()
+    };
+    let positions: Vec<(f64, RawPosition)> = measure_ids
+        .iter()
+        .filter_map(|&id| {
+            let node = hypothetical.nodes.get(&id)?;
+            let raw = engine.coord_system().raw_position_of(node, &hypothetical);
+            Some((node.mass.max(0.01), raw))
+        })
+        .collect();
+    if positions.is_empty() {
+        return RawPosition::default();
+    }
+    let total_mass: f64 = positions.iter().map(|(m, _)| m).sum();
+    RawPosition {
+        x: positions.iter().map(|(m, r)| m * r.x).sum::<f64>() / total_mass,
+        y: positions.iter().map(|(m, r)| m * r.y).sum::<f64>() / total_mass,
+        z: positions.iter().map(|(m, r)| m * r.z).sum::<f64>() / total_mass,
+        w: positions.iter().map(|(m, r)| m * r.w).sum::<f64>() / total_mass,
+        v: positions.iter().map(|(m, r)| m * r.v).sum::<f64>() / total_mass,
+    }
+}
+
+/// **#100 (S5):** uniform-source V1 projeksiyonu — production
+/// `navigator::provenanced_from_raw` silindi (uniform Scip = source laundering,
+/// MD-2); karakterizasyon V1 lane'i frozen semantik kopyasını kullanır.
+pub fn v1_provenanced_from_raw(
+    raw: osp_core::coords::RawPosition,
+    source: osp_core::coords::MetricSource,
+) -> osp_core::trajectory::ProvenancedRawPosition {
+    let mk = |v: f64| osp_core::trajectory::AxisMetric { value: v, source };
+    osp_core::trajectory::ProvenancedRawPosition {
+        coupling: mk(raw.x),
+        cohesion: mk(raw.y),
+        instability: mk(raw.z),
+        entropy: mk(raw.w),
+        witness_depth: mk(raw.v),
+    }
+}
+
+/// **#100 (S4):** V1 reference gate — production `PredicateGate` silindi;
+/// karakterizasyon V1 lane'i V1 scalar-loss semantiğini shared core üzerinden
+/// test-lokal yeniden ifade eder (`trajectory_loss` + `evaluate_completion` +
+/// `assess_improvement_v1` + `evaluate_decision_core` — V2 evaluator'ın de
+/// kullandığı machinery; iki paralel karar implementasyonu YOK).
+pub struct V1GateOutcome {
+    pub outcome: osp_core::trajectory::AttemptOutcome,
+    pub loss_after: f64,
+    pub improvement_policy: osp_core::trajectory::EffectiveImprovementPolicy,
+}
+
+pub fn v1_reference_gate(
+    bound: &osp_core::trajectory::TaskBoundClaim<'_>,
+    measured: &osp_core::trajectory::ProvenancedRawPosition,
+    loss_before: f64,
+    target: &osp_core::coords::RawPosition,
+) -> V1GateOutcome {
+    use osp_core::trajectory::{
+        assess_improvement_v1, evaluate_decision_core, trajectory_loss, AttemptOutcome,
+        EffectiveImprovementPolicy, GateDecision, PredicateCompletion, PredicateSetResult,
+    };
+    let policy = &bound.task.policy;
+    let loss_after = trajectory_loss(measured, target);
+    let improvement_policy = EffectiveImprovementPolicy::current_semantics();
+    let completion = bound
+        .task
+        .target_predicate_set
+        .evaluate_completion(measured);
+    let improved = assess_improvement_v1(
+        loss_before,
+        loss_after,
+        measured,
+        policy,
+        &improvement_policy,
+    );
+    let (_, mutation_decision) = evaluate_decision_core(
+        completion,
+        improved,
+        policy.predicate_failure_policy,
+        policy.allow_progress_checkpoint,
+    );
+    let predicate_completion = match completion {
+        PredicateSetResult::Completed => PredicateCompletion::Completed,
+        _ => PredicateCompletion::NotCompleted,
+    };
+    V1GateOutcome {
+        outcome: AttemptOutcome {
+            gate_decision: GateDecision::PassedAll,
+            predicate_completion,
+            mutation_decision,
+            witness_status: None,
+        },
+        loss_after,
+        improvement_policy,
+    }
+}
 /// axis'leri immutable (monoton epoch ZERO).
 pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
 ) -> CharacterizationObservation {
-    use osp_core::navigator::{build_claim_from_proposal, provenanced_from_raw};
+    // P3-3 (review #132): self-import kaldırıldı — aynı modülün öğeleri doğrudan.
+    use osp_core::navigator::build_claim_from_proposal;
 
     // affected = proposal.affected_nodes ∪ removed_edges.from (navigator.rs:810-815 mirror).
     let mut affected: Vec<u64> = case.proposal.affected_nodes.clone();
@@ -2210,7 +2336,8 @@ pub fn evaluate_v1_case(
 
     // V1: compute_raw_from_delta (infallible) — post-delta hypothetical centroid.
     // claim'in structural delta'sını kullan (mapping duplicate YOK).
-    let computed_raw = engine.compute_raw_from_delta(
+    let computed_raw = v1_compute_raw_from_delta(
+        engine,
         &probe_claim.delta_nodes,
         &probe_claim.delta_edges,
         &probe_claim.removed_edges,
@@ -2220,9 +2347,9 @@ pub fn evaluate_v1_case(
     // **P0-2 fix:** loss_before için current_measured (pre-delta) — navigator.rs:618
     // `trajectory_loss(&self.current_measured, &self.target_vector)` mirror. Pre-delta
     // engine space üzerinden affected centroid hesapla (delta uygulamadan).
-    let current_measured_raw = engine.compute_raw_from_delta(&[], &[], &[], &affected);
+    let current_measured_raw = v1_compute_raw_from_delta(engine, &[], &[], &[], &affected);
     let current_measured =
-        provenanced_from_raw(current_measured_raw, osp_core::coords::MetricSource::Scip);
+        v1_provenanced_from_raw(current_measured_raw, osp_core::coords::MetricSource::Scip);
 
     // **Review tur 7 P0:** V1 baseline derivation — affected node'ları base space'te
     // var mı? Yoksa compute_raw_from_delta empty positions → RawPosition::default()
@@ -2255,7 +2382,8 @@ pub fn evaluate_v1_case(
     // Final claim: computed_raw = compute_raw_from_delta sonucu (V1 production path).
     let claim = build_claim_from_proposal(&case.proposal, computed_raw, case.task.id, 100, 1)
         .expect("V1 final claim build should succeed for characterization case");
-    let measured = provenanced_from_raw(claim.computed_raw, osp_core::coords::MetricSource::Scip);
+    let measured =
+        v1_provenanced_from_raw(claim.computed_raw, osp_core::coords::MetricSource::Scip);
     // **P0-2 fix:** loss_before current_measured (pre-delta) üzerinden — measured DEĞİL.
     let loss_before = osp_core::trajectory::trajectory_loss(&current_measured, &target);
 
@@ -2271,33 +2399,27 @@ pub fn evaluate_v1_case(
         clippy::result_large_err,
         reason = "EngineCommitError inline (measurement.rs layout decision)"
     )]
-    let evaluation =
-        (|| {
-            // Q4 structural
-            osp_core::task_measurement::validate_claim_structure(&claim)?;
-            // Q4 raw finite
-            osp_core::task_measurement::validate_raw_position_finite(
-                claim.id,
-                "computed_raw",
-                &claim.computed_raw,
-            )?;
-            // Task binding
-            let bound = osp_core::trajectory::TaskBoundClaim {
-                claim: &claim,
-                task: &case.task,
-            };
-            // Q5 vision / Q6 / witness / TaskValidation: motor-private — evaluator
-            // ÇALIŞTIRAMAZ (aşağıda NotObserved/NotReached olarak temsil edilir).
-            // PredicateGate — V1 lane'in gözlemleyebildiği tek karar yüzeyi.
-            Ok(osp_core::trajectory::PredicateGate.evaluate(
-                osp_core::trajectory::PredicateGateInput {
-                    bound,
-                    measured: &measured,
-                    loss_before,
-                    target: &target,
-                },
-            ))
-        })();
+    let evaluation = (|| {
+        // Q4 structural
+        osp_core::task_measurement::validate_claim_structure(&claim)?;
+        // Q4 raw finite
+        osp_core::task_measurement::validate_raw_position_finite(
+            claim.id,
+            "computed_raw",
+            &claim.computed_raw,
+        )?;
+        // Task binding
+        let bound = osp_core::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &case.task,
+        };
+        // Q5 vision / Q6 / witness / TaskValidation: motor-private — evaluator
+        // ÇALIŞTIRAMAZ (aşağıda NotObserved/NotReached olarak temsil edilir).
+        // #100 (S4): V1 reference evaluator — production `PredicateGate` silindi;
+        // V1 scalar-loss semantiği shared core üzerinden test-lokal yeniden ifade
+        // (non-authoritative; V1 lane'in gözlemleyebildiği tek karar yüzeyi).
+        Ok(v1_reference_gate(&bound, &measured, loss_before, &target))
+    })();
 
     // **PR #91 review P1:** decision-input scalar'ları. V1 loss_before =
     // trajectory_loss(current_measured, target) (yukarıda baseline loss_bits ile
@@ -2352,9 +2474,9 @@ pub fn evaluate_v1_case(
 /// V2-candidate evaluation: probe Claim → measure_task_delta → final Claim
 /// (measurement.after().to_raw()) → V1 compatibility projection → commit_task_claim.
 ///
-/// **İsimlendirme:** "V2 **candidate projection**" — production V2 consumer henüz yok
-/// (commit_task_claim hala V1). Bu harness, P2-1 implementation'ının üreteceği
-/// gözlemlenebilir davranışı characterize eder.
+/// **#100 Faz 8a:** commit_task_claim artık GERÇEK V2 consumer (engine cutover
+/// tamamlandı) — "candidate projection" adlandırması tarihsel; lane artık production
+/// V2 yolunu characterize eder.
 pub fn evaluate_v2_candidate_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
@@ -2461,6 +2583,9 @@ pub fn evaluate_v2_candidate_case(
     };
 
     // V1 compatibility projection: loss_before measurement token'ından türe.
+    // **#100 Faz 8a:** commit artık bu skalerleri ALMAZ (V2 evaluator artifact'tan
+    // derive eder); değerler yalnız observation kaydı için hesaplanır — formül
+    // engine'in V1 wire projection'ıyla aynı (compat projection).
     let target = case
         .task
         .target_predicate_set
@@ -2492,22 +2617,20 @@ pub fn evaluate_v2_candidate_case(
     // **P0-tur4:** commit yalnız sealed carrier kabul eder — ayrı claim +
     // measurement artifact mix'i (eski `&final_claim + &native_token`) artık
     // type-level unrepresentable; claim carrier'dan gelir (finalize product).
+    // **#100:** target/loss_before parametreleri kalktı (V2 artifact-derived).
     let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
         &native_token,
         &omega,
         &registry as &dyn TaskResolver,
-        target,
-        loss_before,
     ));
 
-    // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
-    // V2 candidate fail-closed projection: loss_before = project_v1_loss_before_compatibility_v2
-    // (Unavailable dalı → loss_after). loss_after = trajectory_loss(token.after(), target).
-    // token move edilmedi (clone ile extracted), loss_after helper projection ile aynı after.
+    // **PR #91 review P1:** V2 commit'in kullandığı decision-input scalar'larının
+    // compat-projection kaydı (engine wire projection formülüyle aynı: Available →
+    // trajectory_loss(before, target); Unavailable → loss_after).
     //
     // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate decision yoluna
     // ulaşıldığında (commit_task_claim Ok) Some — Err (StoppedBeforeCommit) scalar'lar gönderildi
-    // ama decision yolu tamamlanmadı. Doc contract: Some ⟺ PredicateGate'e ulaşıldı.
+    // ama decision yolu tamamlanmadı. Doc contract: Some ⟺ gate'e ulaşıldı.
     let loss_after = osp_core::trajectory::trajectory_loss(token.after(), &target);
     let decision_input = result.as_ref().ok().map(|_| DecisionInputObservation {
         loss_before_bits: loss_before.to_bits(),

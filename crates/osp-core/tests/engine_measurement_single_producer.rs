@@ -263,6 +263,39 @@ fn engine_measurement_new_has_single_production_issuer() {
     );
 }
 
+/// **#100 Faz 8a (TD-2):** Artifact rekonstrüksiyonu ayrı pin — ölçüm üretimi ile
+/// rekonstrüksiyon ayrımı source-level açık. `EngineMeasurement::
+/// reassemble_from_verified_parts` tam 1 üretim çağrısı: `verify_task_measurement_
+/// binding` (commit/approve V2 wiring). Yeni çağrı sitesi bu testi düşürür —
+/// bilinçli mimari karar gerektirir.
+#[test]
+fn engine_measurement_reassembly_has_single_production_issuer() {
+    let src =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/engine.rs"))
+            .expect("engine.rs okunabilir");
+    let normalized: String = src.chars().filter(|c| !c.is_whitespace()).collect();
+    let needle_normalized: String = "EngineMeasurement::reassemble_from_verified_parts"
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    let count = normalized.matches(&needle_normalized).count();
+    assert_eq!(
+        count, 1,
+        "reassemble_from_verified_parts tam 1 üretim çağrısı olmalı (verify_task_measurement_binding), bulunan: {count}"
+    );
+    // Çağrı doğru fonksiyonun içinde mi.
+    let call_pos = normalized
+        .find(&needle_normalized)
+        .expect("reassemble çağrısı bulunmalı");
+    let fn_pos = normalized
+        .find("fnverify_task_measurement_binding(")
+        .expect("verify_task_measurement_binding fn'i bulunmalı");
+    assert!(
+        call_pos > fn_pos,
+        "reassemble çağrısı verify_task_measurement_binding içinde olmalı"
+    );
+}
+
 #[test]
 fn guard_detects_additional_production_call_in_synthetic_source() {
     let synthetic = r#"

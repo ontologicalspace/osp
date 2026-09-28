@@ -149,7 +149,6 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
         "gözlenmeyen gate kararı gözlenmiş gibi sunulmaz: {outcome}"
     );
     // Sidecar yok — measurement tamamlanmadı (comparison-surviving değil).
-    assert!(outcome.get("provenance_authority_drift").is_none());
     // apply_target yansız kalır; message typed disposition taşır.
     assert_eq!(outcome["apply_target"], "NotApplied");
     let msg = outcome["message"].as_str().expect("message");
@@ -208,7 +207,6 @@ fn w8_q4_syntax_precedes_measurement_failure_on_mcp_surface() {
         outcome.get("system_failure").is_none(),
         "Q4 precedence: measurement failure yüzeye çıkmaz: {outcome}"
     );
-    assert!(outcome.get("provenance_authority_drift").is_none());
 }
 
 /// **W8-c — NativeFailureSurface wire exhaustiveness (commit ailesi):**
@@ -259,7 +257,6 @@ fn w8_commit_task_validation_maps_to_engine_commit_failed_wire() {
         "commit-time system failure gate kararı fabricate etmez: {outcome}"
     );
     // TaskValidation comparison-surviving DEĞİL → sidecar YOK.
-    assert!(outcome.get("provenance_authority_drift").is_none());
     let msg = outcome["message"].as_str().expect("message");
     assert!(
         msg.contains("commit_task_claim"),
@@ -348,11 +345,5 @@ fn w8_retryable_rule_violation_emits_real_gate_decision() {
     assert!(
         outcome.get("system_failure").is_none(),
         "retryable commit error system failure DEĞİL: {outcome}"
-    );
-    // Comparison-surviving → #96 provenance sidecar taşınır (#95-B: MD-1 subject
-    // sidecar kaldırıldı — observer yok).
-    assert!(
-        outcome.get("provenance_authority_drift").is_some(),
-        "RuleViolation retryable = surviving → provenance sidecar: {outcome}"
     );
 }

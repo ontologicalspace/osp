@@ -359,6 +359,7 @@ impl FinalizedNativeTaskClaim {
     pub(crate) fn new_test_with_measured(
         claim: Claim,
         measured: crate::coords::MeasuredRawPosition,
+        baseline: crate::measurement::MeasurementBaseline,
         subject_scope: crate::measurement::CanonicalSubjectScope,
         delta_digest: crate::measurement::MeasurementDeltaDigest,
         base_revision: crate::authorization::SpaceViewRevision,
@@ -366,6 +367,7 @@ impl FinalizedNativeTaskClaim {
     ) -> Self {
         let measurement = crate::measurement::NativeSubjectMeasurement::new(
             measured,
+            baseline,
             subject_scope,
             delta_digest,
             base_revision,

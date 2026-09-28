@@ -40,7 +40,7 @@ error: cannot construct `NativeSubjectMeasurement` with struct literal syntax du
 20 |         axis_epoch_stamp: stamp,
    |         ----------------------- private field
    |
-   = note: ...and other private field `subject_binding` that was not provided
+   = note: ...and other private fields `baseline` and `subject_binding` that were not provided
 help: you might have meant to use the `new` associated function
    |
 13 -     let _token = osp_core::measurement::NativeSubjectMeasurement {
@@ -52,5 +52,5 @@ help: you might have meant to use the `new` associated function
 19 -         measurement_input_digest: input,
 20 -         axis_epoch_stamp: stamp,
 21 -     };
-13 +     let _token = osp_core::measurement::NativeSubjectMeasurement::new(_, _, _, _, _, _);
+13 +     let _token = osp_core::measurement::NativeSubjectMeasurement::new(_, _, _, _, _, _, _);
    |

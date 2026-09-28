@@ -196,11 +196,14 @@ measurement authority DEĞİL; impact hint veya compatibility observation. Bu IN
 (engine ölçer) extension'ıdır; dayanağı INV-T2 (operator task hedefini/scope'unu tanımlar) —
 task declaration'ı ölçülen gerçekliğin sınırını tanımlar, engine bunu canonical subject'a
 çözer. Subject (task scope) ve impact (structural delta) ayrı tutulur. (Status: P2-1
-implemented — `subject_authority.rs` additive compatibility observation (`#95`);
-caller cutover Faz 8a pending; `docs/notes/faz8-p2-migration-decisions.md`.)
+**implemented** — #95-A subject cutover + #95-B MD-1 cleanup + #100 Faz 8a engine
+cutover; tarihçe: pre-#95-B additive observation modülü `subject_authority.rs`
+#95-B'de (E4) silindi; karar kaydı `docs/notes/faz8-p2-migration-decisions.md`
+MD-1 bölümü.)
 
 ### INV-T4 — Predicate provenance (RawPosition provenance taşımalı)
-**Status:** planned (Aşama A)
+**Status:** implemented (#96 authority cutover + #100 Faz 8a engine cutover — uniform-Scip
+projeksiyonu fiziksel kaldırıldı; per-axis native authority tek yol)
 **Tanım:** MetricPredicate `required_source` ile "measured/scip" zorunlu kılabilir. Explicit
 `required_source` şartı bulunan predicate, eşleşmeyen source ile task'ı tamamlayamaz
 (`SourceInsufficient`). Placeholder/Heuristic/Mixed evidence, exact authority şartını
@@ -240,10 +243,11 @@ normatif evidence DEĞİL; yalnız geçici versioned compatibility observation. 
 gereksinimi değerlendirilen eksenin kendi provenance'ına uygulanır — aggregate veya synthetic
 source etiketi per-axis evidence'ın yerine geçemez. Hedef axis `Mixed` ise hiçbir `Exact(X)`
 şartını karşılamaz (fail-closed `SourceInsufficient`). Axis'ler arası heterojenlik güvenilmez
-DEĞİL — predicate yalnız kendi axis'ini kontrol eder. (Status: **implemented — #96 cutover
-tamamlandı (2026-08)**: engine-native per-axis = mutation authority; uniform-Scip artık yalnız
-reference projection — fiziksel kaldırım #100. Kanıt + dogfood rerun:
-`docs/notes/faz8-p2-migration-decisions.md` MD-2 implementation bölümü.)
+DEĞİL — predicate yalnız kendi axis'ini kontrol eder. (Status: **implemented — #96 cutover (2026-08) + #100 Faz 8a (2026-09)**: engine-native
+per-axis = mutation authority; commit `evaluate_task_gate_v2` tüketir; uniform-Scip
+reference projection + `provenanced_from_raw` üretimden FİZİKSEL kaldırıldı (#100 S3/S5).
+Kanıt + dogfood rerun: `docs/notes/faz8-p2-migration-decisions.md` MD-2 implementation
+bölümü + #100 teslim kaydı.)
 
 ### INV-T5 — Task ≠ Claim (Aşama B güncelleme: static Claim taskless olabilir)
 **Status:** planned (Aşama A) + **implemented (Aşama B — Claim.task_id + TaskBoundClaim)**

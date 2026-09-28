@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use osp_core::agent::DeltaProposal;
 use osp_core::coords::MetricSource;
-use osp_core::navigator::{provenanced_from_raw, LlmClient};
+use osp_core::navigator::LlmClient;
 use osp_core::trajectory::{
     InMemoryTaskRegistry, InternalTaskPlan, OperatorCapability, PredicateSetResult,
     ProvenancedRawPosition, Task, TaskId, TaskResolver, TrajectoryEvidence, TrajectoryId,
@@ -357,12 +357,12 @@ impl OspMcpServer {
         serde_json::to_string(&checked).map_err(|e| e.to_string())
     }
 
-    /// `osp_submit_delta` — DeltaProposal → engine measure → PredicateGate → outcome.
+    /// `osp_submit_delta` — DeltaProposal → engine measure → commit (V2 gate) → outcome.
     ///
     /// **INV:** T6 (failure≠regression), T7 (maneuver limit), T8 (progress≠merge).
     #[tool(
         name = "osp_submit_delta",
-        description = "Submit a DeltaProposal (structural-only, NO positions) for a task. Engine measures the simulated-after position, PredicateGate evaluates, returns mutation decision. INV-T6/T7/T8 enforced."
+        description = "Submit a DeltaProposal (structural-only, NO positions) for a task. Engine measures the simulated-after position, the V2 gate evaluator decides, returns mutation decision. INV-T6/T7/T8 enforced."
     )]
     async fn osp_submit_delta(
         &self,
@@ -399,7 +399,7 @@ impl OspMcpServer {
                 }
             }
         };
-        // 3. Single-attempt submit (engine measure + PredicateGate).
+        // 3. Single-attempt submit (engine measure + V2 gate).
         let outcome_json = {
             let mut ws = self.workspace.lock().map_err(|e| e.to_string())?;
             ws.submit_delta_attempt(&proposal, &task)?
@@ -837,7 +837,21 @@ impl Workspace {
 
     /// Mevcut ProvenancedRawPosition (INV-T4 source ile).
     pub fn current_measured(&self) -> ProvenancedRawPosition {
-        provenanced_from_raw(self.current_raw(), MetricSource::Scip)
+        // #100 (S5): synthetic bootstrap seed — uniform Scip damgası kalktı
+        // (source laundering); dürüst etiket Placeholder (ölçüm DEĞİL). Kaynaklar
+        // yalnız telemetry yüzeyinde görünür; loss_before otoritesi yok (#100 S2).
+        let raw = self.current_raw();
+        let stamp = |v: f64| osp_core::trajectory::AxisMetric {
+            value: v,
+            source: MetricSource::Placeholder,
+        };
+        ProvenancedRawPosition {
+            coupling: stamp(raw.x),
+            cohesion: stamp(raw.y),
+            instability: stamp(raw.z),
+            entropy: stamp(raw.w),
+            witness_depth: stamp(raw.v),
+        }
     }
 
     /// Tek DeltaProposal'ı değerlendir (single attempt — no LLM loop).
@@ -1010,48 +1024,22 @@ impl Workspace {
                 "message": format!("measured raw not finite: {violation}"),
             }));
         }
-        let target = task
-            .target_predicate_set
-            .preferred_vector
-            .unwrap_or_default();
-        let loss_before = osp_core::trajectory::trajectory_loss(&self.current_measured(), &target);
-        // #96 MD-2 W5: provenance drift draft — AYNI token; native ↔ uniform-Scip
-        // reference. Eligibility MD-1 ile aynı (Q4SyntaxRejection arm'ı YOK).
-        let prov_draft = osp_core::provenance_authority::observe_provenance_authority_drift(
-            self.engine_mut(),
-            claim.claim(),
-            task,
-            native.authority(),
-            loss_before,
-            &target,
-        );
+        // #100 (S3): MD-2 observer (uniform-Scip reference lane) fiziksel
+        // kaldırıldı — target/loss_before skalerleri observer telemetry'siydi.
         let omega = WitnessSet::new(Vec::new());
         let mut tmp_reg = InMemoryTaskRegistry::new();
         tmp_reg.insert(task.clone());
         let result = match self.engine_mut().commit_task_claim(
-            osp_core::engine::TaskCommitInput::new(
-                &claim,
-                &omega,
-                &tmp_reg as &dyn TaskResolver,
-                target,
-                loss_before,
-            ),
+            // #100 Faz 8a: target/loss_before kalktı — V2 evaluator artifact'tan
+            // derive eder (skalerler yalnız MD-2 observer telemetry'sinde yaşıyor).
+            osp_core::engine::TaskCommitInput::new(&claim, &omega, &tmp_reg as &dyn TaskResolver),
         ) {
             Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,
             Ok(osp_core::engine::EngineCommitResult::Held {
-                authorization,
-                reason,
-                snapshot,
+                reason, snapshot, ..
             }) => {
                 // **INV-T9** — expected authorization bekleme. Agent failure DEĞİL.
-                // authorization.outcome gerçek PredicateGate sonucudur.
-                // **#96 MD-2:** Held = comparison-surviving — prov sidecar.
-                let prov = prov_draft.finalize(
-                    osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
-                        predicate_completion: authorization.outcome.predicate_completion,
-                        mutation_decision: authorization.outcome.mutation_decision,
-                    },
-                );
+                // authorization.outcome gerçek gate sonucudur.
                 return Ok(serde_json::json!({
                     "commit_result": "Held",
                     "witness_hold_reason": reason.as_reason_str(),
@@ -1065,22 +1053,12 @@ impl Workspace {
                     "mainline_mutation": "not_applied",
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "await_external_evidence",
-                    "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
             Ok(osp_core::engine::EngineCommitResult::Rejected {
-                authorization,
-                reasons,
-                snapshot,
+                reasons, snapshot, ..
             }) => {
                 // Explicit witness rejection — RequiresRevision.
-                // **#96 MD-2:** Rejected = comparison-surviving — prov sidecar.
-                let prov = prov_draft.finalize(
-                    osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
-                        predicate_completion: authorization.outcome.predicate_completion,
-                        mutation_decision: authorization.outcome.mutation_decision,
-                    },
-                );
                 let witness_ids: Vec<_> = reasons.as_slice().iter().map(|r| r.witness).collect();
                 return Ok(serde_json::json!({
                     "commit_result": "Rejected",
@@ -1095,7 +1073,6 @@ impl Workspace {
                     "mainline_mutation": "not_applied",
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "requires_revision",
-                    "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
             Ok(osp_core::engine::EngineCommitResult::SuspendedColdStart {
@@ -1137,7 +1114,7 @@ impl Workspace {
                             osp_core::trajectory::GateDecision::RejectedByRule => "RejectedByRule",
                             _ => "RejectedBySyntax",
                         };
-                        let mut response = serde_json::json!({
+                        let response = serde_json::json!({
                             "attempt_outcome": {
                                 "gate_decision": gate_str,
                                 "predicate_completion": "NotCompleted",
@@ -1149,15 +1126,7 @@ impl Workspace {
                             "measured_after": null,
                             "message": format!("commit_task_claim: {e}"),
                         });
-                        // **#96 MD-2:** retryable Q5/Q6 → provenance sidecar
-                        // (Q4 arm'ı YOK — structural Q4 draft aşamasında; emission YOK).
-                        if let Some(prov) = osp_core::provenance_authority::
-                            provenance_downstream_from_engine_commit_error(&e)
-                            .map(|downstream| prov_draft.finalize(downstream))
-                        {
-                            response["provenance_authority_drift"] =
-                                serde_json::to_value(&prov).map_err(|e| e.to_string())?;
-                        }
+
                         return Ok(response);
                     }
                     // Task binding yok — terminal (navigator TaskNotFound mirror).
@@ -1241,13 +1210,6 @@ impl Workspace {
                 osp_core::trajectory::CommitLane::Sandbox => "Sandbox",
             },
         };
-        // **#96 MD-2:** Evaluated = comparison-surviving — production outcome.
-        let prov = prov_draft.finalize(
-            osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
-                predicate_completion: result.outcome.predicate_completion,
-                mutation_decision: result.outcome.mutation_decision,
-            },
-        );
 
         Ok(serde_json::json!({
             "attempt_outcome": {
@@ -1259,7 +1221,6 @@ impl Workspace {
             "apply_target": apply_str,
             "loss_after": result.loss_after,
             "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
-            "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
         }))
     }
 

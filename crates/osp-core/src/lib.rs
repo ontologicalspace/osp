@@ -25,7 +25,6 @@ pub mod engine;
 pub mod measurement;
 pub mod navigator;
 pub mod persistence;
-pub mod provenance_authority;
 pub mod rule;
 pub mod space;
 // #95-B (E4): `pub mod subject_authority;` silindi — MD-1 compatibility modülü

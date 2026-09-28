@@ -1,8 +1,10 @@
-# Handoff — #97 MD-3 Baseline Availability (TAMAMLANDI — PR açıldı) / #95-B kaydı
+# Handoff — #97 MD-3 Baseline Availability (MERGED) / #95-B kaydı
 
-**Tarih:** 2026-09-28 (S3+S4 oturumu). **#97 S1-S4 TAMAM** — branch
-`feat/97-md3-baseline-availability` (main `fb995fb` üzerinden), 7 commit push'landı,
-her aşama yeşil (40 suite / 0 fail / clippy+fmt temiz). **PR açıldı** (bkz. `gh pr list`).
+**Tarih:** 2026-09-28 (S3+S4 oturumu). **#97 S1-S4 TAMAM — PR #130 SQUASH-MERGE
+`0409f3d` (main'de; branch silindi), issue #97 CLOSED/COMPLETED.** Merge öncesi üç
+round review (round-1 P2 encapsulation + P3'ler → round-2 approve + karar kaydı matris
+notu `17ab8e2` → round-3 kesin onay); tüm aşamalar tam parity ile yeşildi. Sonraki iş:
+**#100 Faz 8a engine cutover** — kickoff: `docs/notes/100-kickoff.md`.
 
 ## Oturum nasıl başlamalı
 
@@ -131,6 +133,12 @@ kendi çıktısı — kalıcı) + tarihsel tombstone'lar).
   değiştirmek değer churn'u üretir, fayda yok.
 - MD-2 prose'unda geçen tarihsel "MD-1" anlatımları — W8 kapsamında bilinçli korundu.
 - `measurement_v1_v2_parity.rs` — MD-2 tarihsel karakterizasyon (plan karar notu).
+
+**(#100 güncellemesi, 2026-09-29):** bu bölümün değindiği ve aşağıda "Kalır" listesindeki
+maddelerin üçü de #100'de karara bağlandı — uniform-Scip reference projection + observer
+modülü fiziksel kaldırıldı (S3), `compute_raw_from_delta` üretimden çıktı (S5 — cfg(test)
++ test-lokal kopyalar), `measurement_v1_v2_parity.rs` V1 lane'i test-lokal evaluator'le
+tarihsel karakterizasyon olarak yaşıyor. Kayıt: `docs/notes/100-kickoff.md`.
 
 ## #95-B envanter (2026-09-28 tarama — kanıtlanmış gerçekler)
 
@@ -262,7 +270,8 @@ Silinir: `subject_authority.rs` observer + `SubjectAuthorityDriftObservation` +
 MD-1 comparison testleri (q92 dahil — W5 kararı) + legacy fiziksel isimler (W6) +
 `osp_mcp` `submit_delta_attempt`'ın kullanılmayan `_task_id: TaskId` parametresi (W7;
 PR #128 review P3 — task kimliği `task` nesnesinden türetiliyor).
-Kalır: uniform-Scip reference projection (#96'nın evi — #100), `compute_raw_from_delta`
+Kalır (tarihsel — #100'de karara bağlandı; bkz. üstteki güncelleme + 100-kickoff.md):
+uniform-Scip reference projection, `compute_raw_from_delta`
 (#100 machinery), MD-3 yüzeyleri (#97). "Compatibility code tamamen kaldırılmış"
 kriteri **MD-1 compatibility code** olarak okunur.
 

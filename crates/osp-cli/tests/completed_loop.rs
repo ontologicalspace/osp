@@ -808,9 +808,11 @@ fn completed_loop_exact_pin_via_json_envelope() {
         envelope["execution_measurement"]["provenance_native"], true,
         "provenance_native=true (#96)"
     );
-    assert_eq!(
-        envelope["execution_measurement"]["authority"], "engine_native_per_axis",
-        "deprecated authority alias = provenance mirror (#100'e kadar)"
+    // #100 (S5): deprecated `authority` alias kaldırıldı (tarihsel değer:
+    // engine_native_per_axis — yalnız provenance mirror'ıydı).
+    assert!(
+        envelope["execution_measurement"].get("authority").is_none(),
+        "#100: deprecated authority alias kaldirildi"
     );
 
     // Result kind + attempts.
