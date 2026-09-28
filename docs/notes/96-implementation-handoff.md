@@ -1,19 +1,27 @@
-# Handoff — #95-A MD-1 Subject Cutover (TAMAMLANDI — merge pending; sıradaki #95-B)
+# Handoff — #95-A MD-1 Subject Cutover (TAMAMLANDI — PR #128 OPEN/review bekliyor; sıradaki #95-B)
 
-**Tarih:** 2026-08-23. Branch: `feat/95a-md1-subject-cutover` (origin/main `158eb79`).
-**Durum:** #95-A implementasyonu TAMAMLANDI — workspace 41 suite yeşil (fmt + clippy
-`-D warnings` + test). PR açıldı; review sonrası merge → **#95-B** (MD-1 cleanup).
+**Tarih:** 2026-08-23 (oturum sonu). Branch: `feat/95a-md1-subject-cutover` @ `678053a`
+(origin/main `158eb79`). **PR #128** OPEN/MERGEABLE — review bekliyor (CI parity
+yerelde yeşil: fmt + clippy `-D warnings` + 41 test suite). Merge sonrası: **#95-B**.
 
 ## Oturum nasıl başlamalı
 
-> Handoff: **#95 — MD-1: #95-A PR review/merge sonrası #95-B cleanup** (observer +
-> SubjectAuthorityDriftObservation + legacy subject producer + MD-1 sidecar alanları +
-> legacy fiziksel isimler; kalır: uniform-Scip reference #96'nın evi, MD-3 yüzeyleri).
-> Branch: main üzerinden yeni branch.
-> Notlar: `docs/notes/96-implementation-handoff.md` (bu dosya — #96/#95-A zinciri) +
-> `docs/notes/faz8-p2-migration-decisions.md` MD-1 "#95-A implementation" bölümü.
+PR #128 review gelmişse:
+> Handoff: **#95 — MD-1: PR #128 review düzeltmeleri** (head `678053a`'dan
+> sonraki commit'ler). Branch: `feat/95a-md1-subject-cutover`.
+> Notlar: `docs/notes/96-implementation-handoff.md` + PR #128 body.
 
-**İlk adımlar:** (1) bu dosya, (2) `git log --oneline -4`, (3)
+PR #128 merge edilmişse:
+> Handoff: **#95-B — MD-1 cleanup** (observer + `SubjectAuthorityDriftObservation` +
+> legacy subject producer + MD-1 sidecar alanları + legacy fiziksel isimler +
+> `effective_legacy_measure_set`; kalır: uniform-Scip reference #96'nın evi — #100,
+> `compute_raw_from_delta` — #100 machinery, MD-3 yüzeyleri — #97).
+> Branch: main üzerinden yeni branch.
+> Notlar: `docs/notes/96-implementation-handoff.md` (bu dosya — #96/#95-A zinciri +
+> #95-B scope bölümü) + `docs/notes/faz8-p2-migration-decisions.md` MD-1 bölümü.
+
+**İlk adımlar:** (1) bu dosya, (2) `gh pr view 128 --json state,reviewDecision`
+(OPEN/review durumuna göre yukarıdaki dal), (3) `git log --oneline -4`, (4)
 `export PATH="$HOME/.cargo/bin:$PATH"` + `cargo test --locked --workspace
 --all-features --exclude osp-desktop` (yeşil başlangıç).
 
