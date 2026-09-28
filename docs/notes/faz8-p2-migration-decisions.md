@@ -187,6 +187,22 @@ olabileceğini söyler (advisory impact metadata — authority DEĞİL).
   `effective_legacy_measure_set` (yalnız compat producer'da yaşıyor) —
   construction-parity witness olarak bugün yaşıyorlar.
 
+### #95-B sidecar wire-yönü karar notu (2026-09-28; PR #129 review P2 face-face pinleme)
+
+MD-1 sidecar alanlarının (`subject_authority_drift`) kaldırılmasının wire etkisi
+yüzey-yüzeydir — tek bir genel kural yok:
+
+| Yüzey | Serde karakteri | Kaldırma etkisi | Karar |
+|---|---|---|---|
+| `TrajectoryEvidence` (trajectory.rs) | derive; `deny_unknown_fields` YOK; alan `#[serde(default)]` Option | İki yön de kabul (eski reader yeni kaydı default-None; yeni reader eski kaydı ignore) | **Sorun yok — direkt kaldır** |
+| `PendingAuthorization` (durable record) | custom Deserialize + `deny_unknown_fields` (INV-T9 strict wire) | **Yeni reader eski kaydı unknown-field reject eder** | **Bilinçli epoch ilerlemesi** — reason `md1-cleanup (#95-B)`; mevcut durable kayıtlar yalnız dogfood Temp fixture'ları (yeniden üretilebilir), production deployment yok |
+| `RevisionRequired` (durable record) | custom Deserialize strict (aynı aile) | Aynı yön — yeni reader eski kaydı reject eder | Aynı karar |
+| MCP response JSON | additive (error semantiği değişmemişti) | Geri alma non-breaking | **E1'de kaldırıldı** |
+
+Digest güvenliği: alan hiçbir digest preimage'ine girmiyordu (test pinliydi) —
+epoch ilerlemesi authorization identity'yi DEĞİŞTİRMEZ, yalnızca eski kayıtların
+okunabilirliğini kapatır.
+
 ### Cutover acceptance criteria (Faz 8a gate, Issue #92 kanıtı sonrası)
 
 - Tüm driftler açıklanabilir ve subject-set farkına bağlanabilir.
