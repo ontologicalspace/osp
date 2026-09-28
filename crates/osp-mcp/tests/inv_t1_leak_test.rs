@@ -207,9 +207,7 @@ fn inv_t1_submit_delta_outcome_has_no_target_coordinate() {
         ..Default::default() // G2c-2: removed_edges, affected_nodes default
     };
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
     let json = serde_json::to_string(&outcome).expect("serialize");
     assert_no_leak(&json, "osp_submit_delta");
     // **INV-T9:** Production witness policy (boş witness set) → Held (expected authorization

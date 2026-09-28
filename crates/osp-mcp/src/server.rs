@@ -389,7 +389,7 @@ impl OspMcpServer {
         // 3. Single-attempt submit (engine measure + PredicateGate).
         let outcome_json = {
             let mut ws = self.workspace.lock().map_err(|e| e.to_string())?;
-            ws.submit_delta_attempt(&proposal, &task, input.task_id)?
+            ws.submit_delta_attempt(&proposal, &task)?
         };
         let envelope = McpEnvelope::success(
             "osp_submit_delta",
@@ -775,7 +775,6 @@ impl Workspace {
         &mut self,
         proposal: &DeltaProposal,
         task: &Task,
-        _task_id: TaskId,
     ) -> Result<JsonValue, String> {
         use osp_core::coords::RawPosition;
         use osp_core::witness::WitnessSet;

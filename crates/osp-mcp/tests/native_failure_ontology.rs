@@ -123,9 +123,7 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     // Typed system failure yüzeyi.
     let sys = outcome
@@ -192,9 +190,7 @@ fn w8_q4_syntax_precedes_measurement_failure_on_mcp_surface() {
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 999)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     // Yarış kazananı: DRAFT Q4 — RejectedBySyntax attempt_outcome (gerçek syntax
     // reddi; fabrication değil) + "claim draft" mesajı.
@@ -244,9 +240,7 @@ fn w8_commit_task_validation_maps_to_engine_commit_failed_wire() {
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     let sys = outcome
         .get("system_failure")
@@ -342,9 +336,7 @@ fn w8_retryable_rule_violation_emits_real_gate_decision() {
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     // Retryable → attempt_outcome GERÇEK gate kararı ile (hardcode syntax DEĞİL).
     assert_eq!(
