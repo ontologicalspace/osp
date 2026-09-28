@@ -8695,6 +8695,8 @@ v = 0.5
         registry.insert(task_b);
 
         let omega = crate::witness::WitnessSet::new(vec![]);
+        // Terminallik iddiasının tabanı: fence RED öncesi space fingerprint.
+        let digest_before = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         let err = engine
             .commit_task_claim(crate::engine::TaskCommitInput::new(
                 &carrier,
@@ -8716,7 +8718,6 @@ v = 0.5
             "TaskSubjectBindingMismatch bekleniyordu; got: {err:?}"
         );
         // Terminallik: mutation YOK — space fingerprint değişmedi.
-        let digest_before = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         let digest_after = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         assert_eq!(digest_before, digest_after, "fence terminal — mutation yok");
     }

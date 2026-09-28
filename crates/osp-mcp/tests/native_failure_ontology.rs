@@ -72,8 +72,9 @@ fn node_scope_coupling_task() -> osp_core::trajectory::Task {
 }
 
 /// Task scope Node(42) uzayda çözülemez (base'de yok, delta-introduced değil)
-/// → native measurement `SubjectMemberUnresolvable` → disposition
-/// `SystemFailure` → wire: typed system failure (navigator mirror). Eski
+/// → native measurement `SubjectMemberUnresolvable` → terminal disposition
+/// `TerminalTaskDeclaration` → wire: typed `system_failure` (navigator
+/// `SystemFailure` mirror). Eski
 /// davranış: `RejectedBySyntax` attempt_outcome — gözlenmeyen gate kararını
 /// gözlenmiş gibi sunmak (fabrication) idi. *(#95-A not: eski tetikleyici
 /// task_id≠task.id artık ölçüm aşamasına ulaşamaz — draft task kimliğini

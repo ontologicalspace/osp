@@ -7,7 +7,7 @@
 // hâlâ yoktur) — yalnız BU test yakalar.
 fn main() {
     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();
-    let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented();
+    let scope: osp_core::measurement::CanonicalSubjectScope = unimplemented!();
     let delta: osp_core::measurement::MeasurementDeltaDigest = unimplemented!();
     let revision: osp_core::authorization::SpaceViewRevision = unimplemented!();
     let input: osp_core::authorization::MeasurementInputDigest = unimplemented!();
