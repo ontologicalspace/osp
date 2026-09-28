@@ -1,58 +1,59 @@
-# Handoff — #97 MD-3 Baseline Availability (AKTİF — S1+S2 tamam, S3'ten devam) / #95-B kaydı
+# Handoff — #97 MD-3 Baseline Availability (TAMAMLANDI — PR açıldı) / #95-B kaydı
 
-**Tarih:** 2026-09-28 (oturum sonu). **#95-B PR #129 MERGED** (squash `fb995fb`).
-**#97 aktif:** branch `feat/97-md3-baseline-availability` (main `fb995fb` üzerinden).
+**Tarih:** 2026-09-28 (S3+S4 oturumu). **#97 S1-S4 TAMAM** — branch
+`feat/97-md3-baseline-availability` (main `fb995fb` üzerinden), 7 commit push'landı,
+her aşama yeşil (40 suite / 0 fail / clippy+fmt temiz). **PR açıldı** (bkz. `gh pr list`).
 
 ## Oturum nasıl başlamalı
 
-> Handoff: **#97 — MD-3, S3'ten devam** (S1+S2 done). Branch:
-> `feat/97-md3-baseline-availability`. Notlar: issue #97 + MD-3 kararı + bu dosyanın
-> S3 tasarım notu. PR henüz AÇILMADI (S3+S4 bitince açılır).
+> Handoff: **#97 MD-3 TAMAMLANDI** (S1-S4; PR açık). Sonraki iş: PR review +
+> merge → **#100 Faz 8a engine cutover** (MD-2 fiziksel kaldırım dahil). Bu dosyanın
+> #97 teslim kaydı + Run D önerisi bölümleri bilgi amaçlı kalır.
 
-## S1+S2 teslim edilenler (yeşil; 39 suite / 0 fail / clippy temiz)
+## #97 teslim edilenler (commit zinciri)
 
 - `7db890f` kickoff docs (envanter + tasarım + S-planı)
 - `923d14a` **S1 tip modeli:** `ColdStartPolicy` (default Disallow; `TaskPolicy`
   alanı `#[serde(default)]` — eski task wire'ı Disallow'a düşer, test pin'li) +
   `MutationDecision::AcceptAsColdStart` (→Sandbox, INV-T8; negatif pin'ler) +
-  `MutationDecisionTag` append-only **4** (0-3 değişmez; TryFrom(5) fail-closed) +
-  faz8-p2 manifest **regolden** (18 builder digest; reason:
-  `task-policy-adds-cold-start (#97 S1)` — eski değerler `git show 923d14a~1:...cases.json`'da)
-- `a7ab56e` **S2 motor:** `BaselineAvailabilityClass` (değer TAŞIMAYAN sınıflandırma
-  — synthetic baseline temsili tip seviyesinde imkânsız) + commit Phase 0d'de
-  `classify_baseline_availability` (measure yolu partition mantığının aynısı) +
-  **INV-T6 extension zorlaması:** Unavailable + NotCompleted altında gate'in skaler
-  improvement'ı REDDEDİLİR (AcceptAsProgress → Reject; `loss_before` running scalar
-  kanıt DEĞİL — navigator.rs "#97" rezervasyonu böyle kapatıldı) +
-  `EngineCommitResult::SuspendedColdStart` (INV-T9 extension; Held'den AYRI otorite;
-  PartialNew ASLA) + `NavigatorResult::AwaitingColdStartApproval` + MCP/CLI/corpus
-  typed map'ler + CLI exit code 14 + 4 exact matris testi (Disallow/RequireOp/
-  PartialNew/Completed) + compat testleri (6 md3_* testi).
+  `MutationDecisionTag` append-only **4** + faz8-p2 manifest regolden (18 digest;
+  reason: `task-policy-adds-cold-start (#97 S1)`)
+- `a7ab56e` **S2 motor karar matrisi:** `BaselineAvailabilityClass` (değer
+  TAŞIMAYAN sınıflandırma) + commit Phase 0d'de INV-T6 extension zorlaması
+  (Unavailable+NotCompleted altında skaler improvement REJECT'e düşer) +
+  `EngineCommitResult::SuspendedColdStart` (Held'den AYRI otorite) +
+  navigator/MCP/CLI typed map'ler (CLI exit 14) + 4 exact matris testi
+- `42e49c1` docs: S1+S2 handoff
+- `caf54f1` **S3 onay akışı:** `approve_cold_start` engine metodu — in-flight
+  suspension kaydı (kalıcı DEĞİL; motor ömrüyle sınırlı — `PendingAuthorization`
+  persist modeline bilinçli benzeşmezlik) + onay anında deterministik revalidation
+  (task bind + #95-A scope fence + #96 5-fence stale + Q5 vision + MD-3
+  sınıflandırma/policy/completion + Q6 rules — **operatör onayı güvenlik çekirdeğini
+  bypass ETMEZ**) + operatör otoritesiyle witness-bypass Sandbox apply
+  (`bigbang::prospective_delta_from_claim` — witness::evaluate ile TEK preimage
+  truth; `time.advance` çağrılmaz; t_c ilerler) + tek kullanım (kayıt düşer) +
+  `ColdStartAcceptanceEvidence` (issue'nun 8 alanı + task/claim bağlamı;
+  `improvement_claimed` ctor sabiti false) + `ColdStartOperatorId`/
+  `ColdStartAuthorizationId` newtype + navigator INV-T9 pin (retry/evidence/mutation
+  YOK — tek proposal'lı mock kanıtı) + MCP `osp_approve_cold_start` operator-only
+  tool (INV-T2 gate; typed error sınıfları: unknown_suspension/stale_binding/
+  policy_changed/...) + 9 yeni test (6 motor + 1 navigator + 2 MCP uçtan uca)
+- `463c575` **S4 kabul:** spec INV-T6/T8/T9 MD-3 bölümleri planned→**implemented**
+  (test isimleriyle kanıt bağlandı; INV-T8 spec kod örneğine AcceptAsColdStart map
+  satırı eklendi) + matrisin kalan satırı: `md3_completed_with_partial_new_subject_
+  still_completes` (rule 3'ün en geniş claim'i — PartialNew altında bile completion
+  bağımsız; SuspendedColdStart asla)
 
-## S3 tasarım notu (uygulayıcı için)
+## #97 dogfood Run D önerisi (PR merge sonrası aday)
 
-Onay akışı — engine'e `approve_cold_start(...)` metodu: SuspendedColdStart'ın
-taşıdığı {task_id, claim_id} + operator kimliği → **`ColdStartAcceptanceEvidence`**
-(issue'daki 8 alan: baseline_reason + subject_digest + measurement_context_digest +
-base_space_view_revision + policy + operator_id + authorization_id +
-improvement_claimed=false) üret → claim'i `MutationDecision::AcceptAsColdStart` +
-`ApplyTarget::Lane(Sandbox)` ile uygula (apply_delta Sandbox hattı; Mainline promote
-YOK — sonraki measurement'ta normal AcceptAsCompleted). Suspension süresince
-maneuver budget tüketilmez (navigator AwaitingColdStartApproval terminal döner —
-budget zaten tüketilmiyor; test pin'li olacak). Wire: SuspendedColdStart kalıcı
-kayıt değil (in-flight domain outcome) — PendingAuthorization'a BENZEMEZ; onay
-kanıtı ColdStartAcceptanceEvidence ile evidence ledger'a girer (S3'te şekillendir;
-issue'nun acceptance criteria listesi esas).
-
-## S4 (kapanış)
-
-Spec status flip'leri (INV-T6/T8/T9 planned→implemented, `docs/spec/invariants.md`
-MD-3 bölümleri) + matrisin kalan satırları zaten S2 testlerinde + PR aç + dogfood
-notu (Run D önerisi: cold-start fixture'ı ile SuspendedColdStart→onay→Sandbox
-uçtan uca).
-
-**İlk adımlar:** (1) issue #97 + MD-3 kararı, (2) `git log --oneline -3`,
-(3) yeşil başlangıç testi.
+Cold-start fixture'ı ile uçtan uca canlı akış: (1) task scope'u base'te olmayan
+node'a bağlı + `ColdStartPolicy::RequireOperatorApproval` + NotCompleted predicate;
+(2) `osp_run_task`/`osp_submit_delta` → `SuspendedColdStart` (mainline_mutation:
+not_applied); (3) `osp_approve_cold_start` (operator mode) → `AcceptAsColdStart` +
+Sandbox apply + evidence 8 alan; (4) ikinci onay → unknown_suspension; (5) onay
+öncesi space'e başka apply → stale_binding fail-closed. MCP contract testleri
+(`crates/osp-mcp/tests/md3_cold_start_approval.rs`) aynı zinciri zaten kanıtlıyor —
+Run D bunu canlı repo üzerinde envelope üretimiyle tekrarlar (Run A/B/C kalıbı).
 
 ## #97 MD-3 envanter (2026-09-28 tarama — mevcut durum)
 
@@ -83,23 +84,12 @@ map; MCP → typed JSON. Onay sonrası: engine `approve_cold_start(...)` →
 `ColdStartAcceptanceEvidence` (issue'daki 8 alan). `PartialNewSubject` → terminal
 Reject (reason evidence'da korunur — matris satırı; override yok).
 
-## #97 S-planı
+## #97 S-planı (TÜMÜ TAMAMLANDI)
 
-- **S1 tip modeli:** `ColdStartPolicy {Disallow, RequireOperatorApproval}` +
-  `TaskPolicy.cold_start_policy` (serde default Disallow) +
-  `MutationDecision::AcceptAsColdStart` + `apply_target→Sandbox` +
-  `MutationDecisionTag` append-only u8 + exhaustive match güncellemeleri
-  (navigator/MCP/CLI) + tag/serde compat testleri.
-- **S2 motor:** commit yolunda baseline-reason × cold_start_policy ön değerlendirme —
-  (NotCompleted, AllMembers, RequireOperatorApproval) → `SuspendedColdStart`
-  (improvement değerlendirmesiz); (NotCompleted, PartialNew) → terminal Reject;
-  Completed satırları baseline'dan bağımsız (pin). Disallow default mevcut
-  davranış (pin test).
-- **S3 onay akışı:** `ColdStartAcceptanceEvidence` + `approve_cold_start` engine
-  metodu (Sandbox apply, mainline promote YOK) + navigator/MCP map + INV-T9
-  (no mutation pre-approval, budget tüketmez, retry yok).
-- **S4 kabul:** exact matris testleri (8 satır) + INV-T6/T8/T9 spec status
-  planned→implemented + dogfood notu + PR.
+- **S1 tip modeli:** ✅ `923d14a`
+- **S2 motor:** ✅ `a7ab56e`
+- **S3 onay akışı:** ✅ `caf54f1`
+- **S4 kabul:** ✅ `463c575` (spec flip + matris pin) + PR + Run D önerisi (yukarıda)
 
 ---
 
