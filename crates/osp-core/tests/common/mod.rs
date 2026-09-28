@@ -2461,6 +2461,9 @@ pub fn evaluate_v2_candidate_case(
     };
 
     // V1 compatibility projection: loss_before measurement token'ından türe.
+    // **#100 Faz 8a:** commit artık bu skalerleri ALMAZ (V2 evaluator artifact'tan
+    // derive eder); değerler yalnız observation kaydı için hesaplanır — formül
+    // engine'in V1 wire projection'ıyla aynı (compat projection).
     let target = case
         .task
         .target_predicate_set
@@ -2492,22 +2495,20 @@ pub fn evaluate_v2_candidate_case(
     // **P0-tur4:** commit yalnız sealed carrier kabul eder — ayrı claim +
     // measurement artifact mix'i (eski `&final_claim + &native_token`) artık
     // type-level unrepresentable; claim carrier'dan gelir (finalize product).
+    // **#100:** target/loss_before parametreleri kalktı (V2 artifact-derived).
     let result = engine.commit_task_claim(osp_core::engine::TaskCommitInput::new(
         &native_token,
         &omega,
         &registry as &dyn TaskResolver,
-        target,
-        loss_before,
     ));
 
-    // **PR #91 review P1:** commit_task_claim'e geçirilen gerçek decision-input scalar'ları.
-    // V2 candidate fail-closed projection: loss_before = project_v1_loss_before_compatibility_v2
-    // (Unavailable dalı → loss_after). loss_after = trajectory_loss(token.after(), target).
-    // token move edilmedi (clone ile extracted), loss_after helper projection ile aynı after.
+    // **PR #91 review P1:** V2 commit'in kullandığı decision-input scalar'larının
+    // compat-projection kaydı (engine wire projection formülüyle aynı: Available →
+    // trajectory_loss(before, target); Unavailable → loss_after).
     //
     // **PR #91 review P2 (non-blocking):** `decision_input` yalnızca predicate decision yoluna
     // ulaşıldığında (commit_task_claim Ok) Some — Err (StoppedBeforeCommit) scalar'lar gönderildi
-    // ama decision yolu tamamlanmadı. Doc contract: Some ⟺ PredicateGate'e ulaşıldı.
+    // ama decision yolu tamamlanmadı. Doc contract: Some ⟺ gate'e ulaşıldı.
     let loss_after = osp_core::trajectory::trajectory_loss(token.after(), &target);
     let decision_input = result.as_ref().ok().map(|_| DecisionInputObservation {
         loss_before_bits: loss_before.to_bits(),

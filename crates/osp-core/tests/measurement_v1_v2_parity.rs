@@ -2211,7 +2211,6 @@ fn engine_snapshot(engine: &osp_core::engine::SpaceEngine) -> EngineSnapshot {
 fn commit_invalid_mixed_case(
     case: &common::CharacterizationCase,
 ) -> Option<osp_core::engine::EngineCommitError> {
-    use osp_core::coords::MetricSource;
     use osp_core::navigator::build_claim_from_proposal;
     use osp_core::trajectory::{InMemoryTaskRegistry, TaskResolver};
     use osp_core::witness::WitnessSet;
@@ -2225,14 +2224,7 @@ fn commit_invalid_mixed_case(
         1,
     )
     .expect("probe claim build başarılı olmalı");
-
-    let target = case
-        .task
-        .target_predicate_set
-        .preferred_vector
-        .unwrap_or_default();
-    let measured =
-        osp_core::navigator::provenanced_from_raw(probe_claim.computed_raw, MetricSource::Scip);
+    let _ = probe_claim; // #100: target/measured skalerleri kalktı — yalnız Q4 probe.
 
     let mut registry = InMemoryTaskRegistry::new();
     registry.insert(case.task.clone());
@@ -2260,8 +2252,7 @@ fn commit_invalid_mixed_case(
         &finalized,
         &omega,
         &registry as &dyn TaskResolver,
-        target,
-        osp_core::trajectory::trajectory_loss(&measured, &target),
+        // #100 Faz 8a: target/loss_before kalktı — V2 artifact-derived.
     ));
 
     result.err()

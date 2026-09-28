@@ -5975,9 +5975,23 @@ pub(crate) struct VerifiedGateEvaluationV2 {
 impl VerifiedGateEvaluationV2 {
     /// **pub(crate) consumer (plan md:78):** Verified proof'u canonical snapshot'a
     /// indirger. Context constructor bunu çağırır (tek yol — field private).
-    #[allow(dead_code, reason = "Faz 4 context constructor / Commit 2 consumer")]
+    /// **#100:** allow(dead_code) kalktı — context constructor production wired.
     pub(crate) fn into_canonical(self) -> CanonicalGateEvaluationV2 {
         self.canonical
+    }
+
+    /// **#100 Faz 8a wiring:** Mutation decision read — bundle accessor'ı
+    /// (`VerifiedGateEvaluationBundleV2::mutation_decision`) commit yoluna taşır;
+    /// karar yeniden türetilmez, evaluator proof'undan okunur. `RejectedByGate`
+    /// Faz 8 hard-gate üreticisi yoktur — savunma kolu Reject'e iner (NotApplied
+    /// eşdeğeri; apply_target() ile tutarlı).
+    pub(crate) fn mutation_decision(&self) -> crate::trajectory::MutationDecision {
+        match &self.canonical {
+            CanonicalGateEvaluationV2::GatePassed { mutation_decision } => *mutation_decision,
+            CanonicalGateEvaluationV2::RejectedByGate { .. } => {
+                crate::trajectory::MutationDecision::Reject
+            }
+        }
     }
 
     /// **INV-T9 #70 Faz 5 Adım 18 (plan md:75-79):** Production constructor —
@@ -6144,7 +6158,7 @@ impl AuthorizationContextV2 {
     ///
     /// **Invariant:** "AuthorizationContextV2 yalnızca VerifiedGateEvaluationV2
     /// tüketilerek doğabilir". Verified proof'un `into_canonical`'ı çağrılır (tek yol).
-    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    /// **#100 Faz 8a:** allow(dead_code) kalktı — commit_task_claim production consumer.
     pub(crate) fn new(
         basis: AuthorizationBasisV2,
         gate_evaluation: VerifiedGateEvaluationV2,
@@ -6167,7 +6181,8 @@ impl AuthorizationContextV2 {
     }
 
     /// Basis accessor.
-    #[allow(dead_code, reason = "Faz 4 context builder / Commit 2 consumer")]
+    /// **#100 Faz 8a:** allow(dead_code) kalktı — commit-yolu V1 wire projection
+    /// loss alanlarını basis'ten okur.
     pub fn basis(&self) -> &AuthorizationBasisV2 {
         &self.basis
     }

@@ -920,12 +920,13 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 }
             };
             let task_result = match self.engine.commit_task_claim(
+                // **#100 Faz 8a:** target/loss_before parametreleri kalktı — loss
+                // otoritesi V2 evaluator'da (artifact-derived; navigator running
+                // skaleri yalnız iç telemetry).
                 crate::engine::TaskCommitInput::new(
                     &finalized,
                     &omega,
                     self.resolver as &dyn TaskResolver,
-                    self.target_vector,
-                    loss_before,
                 ),
             ) {
                 Ok(crate::engine::EngineCommitResult::Evaluated { result, .. }) => result,
@@ -1737,14 +1738,6 @@ mod tests {
             &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
-            RawPosition {
-                x: 0.55,
-                y: 0.6,
-                z: 0.4,
-                w: 0.5,
-                v: 0.3,
-            },
-            1.0,
         ));
         // Q5.b çalıştı — Reject (witness yok) veya Ok (predicate reject NotApplied).
         // İkisi de Q5.b'nin çalıştığını gösterir. Witness boş → INV-T9 Held beklenir.
@@ -1827,8 +1820,6 @@ mod tests {
             &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
-            target,
-            1.0,
         ));
 
         // Ayrı olarak aynı girdilerle PredicateGate.evaluate → gate_out.
@@ -1939,8 +1930,6 @@ mod tests {
             &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
-            target,
-            1.0,
         ));
         let resolved_task = resolver.resolve(TaskId::from(1u64)).unwrap();
         let gate_out = PredicateGate.evaluate(PredicateGateInput {
@@ -1988,8 +1977,6 @@ mod tests {
             &commit_token,
             &omega,
             &resolver as &dyn TaskResolver,
-            RawPosition::default(),
-            1.0,
         ));
         assert!(
             result.is_err(),
@@ -2053,13 +2040,20 @@ mod tests {
             )
             .expect("fallback canonical scope (delta ids unique)")
         });
-        // **#100 (TD-1):** synthetic carrier baseline — commit partition'ıyla aynı
-        // sınıflandırma (Available sentetik before=measured).
+        // **#100 (TD-1 + S2):** synthetic carrier baseline — commit partition'ıyla
+        // aynı sınıflandırma; Available kolunda GERÇEK before-centroid (base space,
+        // subject üyeleri) — derived loss_before improvement'ı temsil edebilir
+        // (measured-kopya sentinel DEĞİL; #100 derived loss semantiği).
         let baseline = match engine.classify_baseline_availability(claim, &subject) {
             Ok(crate::engine::BaselineAvailabilityClass::Unavailable(reason)) => {
                 crate::measurement::MeasurementBaseline::Unavailable { reason }
             }
-            _ => crate::measurement::MeasurementBaseline::Available(measured.clone()),
+            _ => {
+                let before = engine
+                    .measured_centroid_of(engine.space(), subject.member_ids())
+                    .expect("before centroid (subject base'te mevcut — classify Available)");
+                crate::measurement::MeasurementBaseline::Available(before)
+            }
         };
         crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
             claim.clone(),
@@ -2087,13 +2081,7 @@ mod tests {
         measured: ProvenancedRawPosition,
     ) -> Result<crate::engine::EngineCommitResult, crate::engine::EngineCommitError> {
         let carrier = characterization_carrier(engine, claim, task, measured);
-        engine.commit_task_claim(TaskCommitInput::new(
-            &carrier,
-            omega,
-            resolver,
-            RawPosition::default(),
-            1.0,
-        ))
+        engine.commit_task_claim(TaskCommitInput::new(&carrier, omega, resolver))
     }
 
     #[test]
@@ -3597,14 +3585,6 @@ mod tests {
             &commit_token,
             &omega,
             &resolver as &dyn crate::trajectory::TaskResolver,
-            crate::coords::RawPosition {
-                x: 0.55,
-                y: 0.6,
-                z: 0.4,
-                w: 0.5,
-                v: 0.3,
-            },
-            1.0,
         ));
 
         // **reviewer P2 (test sıkılaştırma):** Fixture kesin Held üretmeli (boş witness →

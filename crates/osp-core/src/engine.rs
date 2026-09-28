@@ -94,7 +94,7 @@ pub struct CommitOutcome {
 
 /// Aşama D2 — Task-bound Claim commit girdisi. Sizin önerdiğiniz structured input
 /// (tek parametre yerine — daha temiz, genişletilebilir). commit()'in (standalone)
-/// yanında, task-bound Claim'ler için Q5.b PredicateGate entegrasyonu.
+/// yanında, task-bound Claim'ler için Q5.b gate entegrasyonu.
 ///
 /// **Prensip:** `commit() = legacy/standalone claim path; commit_task_claim() = trajectory/task-bound path.`
 /// Mevcut commit() korunur (Paper 1 uyumluluk); commit_task_claim Paper 2 için.
@@ -103,21 +103,20 @@ pub struct CommitOutcome {
 /// fields + `new()` smart ctor — external crate literal bypass kapalı). `measured`
 /// alanı gitti → **sealed `FinalizedNativeTaskClaim` carrier** kabul eder (P0-tur4:
 /// ayrı `&Claim + &token` kombinasyonu type-level unrepresentable — artifact mix
-/// bypass imkânsız). `target`/`loss_before` KALIR (semantik authority #97 MD-3;
-/// **fiziksel** removal #100 smart ctor tamamlaması).
+/// bypass imkânsız).
+///
+/// **#100 Faz 8a — smart ctor tamamlaması:** `target`/`loss_before` FİZİKSEN
+/// KALDIRILDI. Loss target = task `preferred_vector` (binding snapshot'ından),
+/// loss_before = `measurement.before()` derive (V2 evaluator — caller-controlled
+/// skaler improvement iddiası kapandı; issue #100 "Smart ctor + legacy field
+/// kaldırma").
 pub struct TaskCommitInput<'a> {
     claim: &'a crate::witness::Claim,
     omega: &'a crate::witness::WitnessSet,
     task_resolver: &'a dyn crate::trajectory::TaskResolver,
-    /// preferred_vector (loss/distance target — INV-T1 internal).
-    /// **#96:** değişmez; semantik authority #97, fiziksel removal #100.
-    target: crate::coords::RawPosition,
-    /// Loss before (running scalar — navigator :631 init / :1132 progress update).
-    /// **#96:** değişmez (MD-3 #97); fiziksel removal #100.
-    loss_before: f64,
     /// **#96 MD-2:** Opaque engine-issued native provenance token (canonical
     /// task-scope subject). Sealed carrier'dan gelir — finalize proof'u commit
-    /// boundary'ye taşınır.
+    /// boundary'ye taşınır. **#100:** typed baseline dahil (S1).
     measurement: &'a crate::measurement::NativeSubjectMeasurement,
 }
 
@@ -126,19 +125,17 @@ impl<'a> TaskCommitInput<'a> {
     /// Ayrı `&Claim + &token` kombinasyonu type-level unrepresentable:
     /// `FinalizedNativeTaskClaim` yalnız `finalize(&token)` ile üretilir
     /// (subject-binding kontrolü burada yapılır; bypass imkânsız).
+    /// **#100:** target/loss_before parametreleri yok — loss otoritesi V2
+    /// evaluator'da (artifact-derived).
     pub fn new(
         finalized: &'a crate::task_measurement::FinalizedNativeTaskClaim,
         omega: &'a crate::witness::WitnessSet,
         task_resolver: &'a dyn crate::trajectory::TaskResolver,
-        target: crate::coords::RawPosition,
-        loss_before: f64,
     ) -> Self {
         Self {
             claim: finalized.claim(),
             omega,
             task_resolver,
-            target,
-            loss_before,
             measurement: finalized.measurement(),
         }
     }
@@ -767,17 +764,9 @@ impl VerifiedNativeMeasurementBinding {
         }
     }
 
-    pub(crate) fn base_revision(&self) -> &crate::authorization::SpaceViewRevision {
-        &self.base_revision
-    }
-
-    pub(crate) fn measurement_input_digest(&self) -> &crate::authorization::MeasurementInputDigest {
-        &self.measurement_input_digest
-    }
-
-    pub(crate) fn measured(&self) -> &crate::coords::MeasuredRawPosition {
-        &self.measured
-    }
+    // **#100 Faz 8a:** accessor'lar kaldırıldı — commit/approve yolları artifact
+    // üzerinden okur (`engine_measurement`); 5-fence kanıtı tamamen opak
+    // (Ok/Err yüzeyi yeterli; alanlar Debug tanıklığında görünür).
 }
 
 impl std::fmt::Debug for VerifiedNativeMeasurementBinding {
@@ -1594,10 +1583,9 @@ struct SuspendedColdStartRecord {
     /// Sealed carrier claim + native measurement (apply + 5-fence reverify bunlardan).
     claim: crate::witness::Claim,
     measurement: crate::measurement::NativeSubjectMeasurement,
-    /// Suspension ANINDAKİ gate girdileri — onay revalidation'ı aynı girdilerle
-    /// deterministik yeniden koşar (task-bound commit yoluyla aynı preimage).
-    target: crate::coords::RawPosition,
-    loss_before: f64,
+    // #100 Faz 8a: `target`/`loss_before` kaldırıldı — onay revalidation'ı V2
+    // evaluator'la artifact üzerinden deterministik yeniden koşar (token baseline
+    // dahil; caller skaleri zaten commit girdisi değil).
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1840,6 +1828,11 @@ impl SpaceEngine {
         clippy::result_large_err,
         reason = "MeasurementError carry's the measurement-ontology family (intentional inline); see measurement.rs layout decision"
     )]
+    /// **#100 Faz 8a:** commit/approve yolları artifact'tan okur (`token.baseline()`
+    /// / `engine_measurement.before()` — partition tek truth ölçüm anı, #131 P3-4).
+    /// Bu ikinci üretim yalnız `#[cfg(test)]` fixture'ları için yaşar (synthetic
+    /// carrier baseline türetimi + karakterizasyon eşdeğerlik pin'leri).
+    #[cfg(test)]
     pub(crate) fn classify_baseline_availability(
         &self,
         claim: &crate::witness::Claim,
@@ -1908,7 +1901,7 @@ impl SpaceEngine {
         &mut self,
         input: TaskCommitInput<'_>,
     ) -> Result<EngineCommitResult, EngineCommitError> {
-        use crate::trajectory::{ApplyTarget, MutationDecision, PredicateGate, PredicateGateInput};
+        use crate::trajectory::{ApplyTarget, MutationDecision};
         use crate::witness::WitnessDisposition;
 
         // Phase 0a: Q4 Syntax (claim-based, deterministik).
@@ -1977,11 +1970,13 @@ impl SpaceEngine {
 
         // **#96 MD-2 (plan v4 P0-tur3):** Opaque token'ın commit-anı geçerlilik kanıtı
         // (5 kontrol: delta digest / raw bits / revision / context / epoch — ABA fence).
-        // Başarılıysa private proof döner; Q5/gate/basis bu proof ile beslenir.
+        // **#100 Faz 8a (TD-2):** kanıt üretimi artifact rekonstrüksiyonuyla birleşti —
+        // `verify_task_measurement_binding` 5-fence'i KAPSAR + EngineMeasurement kurar +
+        // Faz 3 commitment bloğunu üretir (outer proof → V2 evaluator girdisi).
         // Failure → tek funnel `MeasurementBindingVerification` (SystemFailure sınıfı —
         // navigator terminal, budget yok, LLM retry yok).
-        let verified_binding =
-            self.verify_native_measurement_binding(input.claim, input.measurement)?;
+        let (task_binding, engine_measurement) =
+            self.verify_task_measurement_binding(input.claim, input.measurement, bound.task)?;
 
         // Phase 0c: Q5 Vision (θ bound — negatif-uzay safety).
         // **Step 4b:** Captured `EffectiveVisionGateContext` — bir kez üretilir, Q5 +
@@ -1992,57 +1987,82 @@ impl SpaceEngine {
             .map_err(EngineCommitError::VisionContextInvalid)?;
         self.check_claim_vision_with_context(input.claim, &vision_context)?;
 
-        // Phase 0d: Q5.b PredicateGate (soft gate — task completion + policy).
-        // **#96 MD-2:** measured artık native token'dan (proof-verified) — caller
-        // supplied plain measured YOK.
-        // **#97 MD-3:** cold-start policy `bound` taşınmadan ÖNCE kopyalanır
-        // (aşağıdaki MD-3 karar matrisi kullanır; ColdStartPolicy: Copy).
+        // Phase 0d: Q5.b — **#100 Faz 8a: V2 typed gate evaluator** (legacy V1
+        // `PredicateGate.evaluate` üretimden kalktı). 3-digest TOCTOU recheck +
+        // predicate EXACTLY ONCE + completion-first loss matrisi + decision core.
+        // `loss_before` caller skaleri YOK — `measurement.before()` + task
+        // `preferred_vector` snapshot'ından derive (PR#84 P0-2 semantiği).
+        // **#97 MD-3:** cold-start policy matris için kopyalanır (ColdStartPolicy: Copy).
         let cold_start_policy = bound.task.policy.cold_start_policy;
-        let gate_out = PredicateGate.evaluate(PredicateGateInput {
-            bound,
-            measured: verified_binding.measured(),
-            loss_before: input.loss_before,
-            target: &input.target,
-        });
-        let mut outcome = gate_out.outcome.clone();
-        let loss_after = gate_out.loss_after;
+        let bundle = crate::authorization::evaluate_task_gate_v2(
+            task_binding,
+            &engine_measurement,
+            bound.task,
+        )
+        .map_err(|e| {
+            // SystemFailure sınıfı — TOCTOU/digest hatası; agent-correctable DEĞİL.
+            // Typed `GateEvaluationV2Error` ailesi engine funnel'ında String detayla
+            // korunur (navigator/MCP yüzeyi zaten SystemFailure tek sınıf).
+            EngineCommitError::AuthorizationContextFailed(format!(
+                "V2 gate evaluation failed: {e:?}"
+            ))
+        })?;
+        // Bundle'dan tek-evaluation çıktıları (predicate exactly once korunur).
+        let predicate_completion = bundle.predicate_completion();
+        let mutation_decision = bundle.mutation_decision();
+        let loss_evidence = bundle.loss_evidence().clone();
+        // Loss telemetry skaleri (TaskCommitResult + V1 wire basis alanları):
+        // Available evidence → evaluator üretimi; aksi halde preferred-vector
+        // distance'ı (V1 süreklilik); preferred YOK → 0.0 (loss kanıtı NotRequired —
+        // completion-first; 0.0 sentinel kanıt DEĞİL, yalnız telemetry).
+        let preferred_vector = bound.task.target_predicate_set.preferred_vector;
+        let loss_after = match &loss_evidence {
+            crate::authorization::CanonicalTrajectoryLossEvidence::Available {
+                loss_after, ..
+            } => *loss_after,
+            _ => preferred_vector
+                .map(|target| {
+                    crate::trajectory::trajectory_loss(engine_measurement.after(), &target)
+                })
+                .unwrap_or(0.0),
+        };
+        let outcome = crate::trajectory::AttemptOutcome {
+            gate_decision: crate::trajectory::GateDecision::PassedAll,
+            predicate_completion,
+            mutation_decision,
+            witness_status: None,
+        };
 
         // **#97 MD-3 (INV-T6 extension — S2):** Typed baseline kullanılabilirliği
-        // commit karar noktasında ZORLANIR. Caller-supplied running scalar
-        // (`loss_before`) improvement iddiası KANITI OLAMAZ — sınıflandırma
-        // motor tarafından base space + claim delta + subject scope'tan yeniden
-        // türetilir (ölçüm yolu partition mantığıyla aynı):
+        // commit karar noktasında ZORLANIR. **#100 Faz 8a:** sınıflandırma ARTIFACT'tan
+        // okunur (`engine_measurement.before()` — token baseline #100 S1; ölçüm anı
+        // partition'ı TEK truth; commit-time ikinci üretim `classify_baseline_
+        // availability` YOK — #131 P3-4 drift riski yapısal kapalı):
         // - `Unavailable{AllMembers}` + `RequireOperatorApproval` + NotCompleted →
         //   `SuspendedColdStart` (improvement değerlendirmesi YAPILMAZ; INV-T9
         //   extension — mutation yok, witness yok);
-        // - `Unavailable{..}` altında `AcceptAsProgress` ÜRETİLEMEZ — gate skaler
-        //   improvement önerse bile motor REDDEDER (Reject'e düşürür);
+        // - `Unavailable{..}` altında `AcceptAsProgress` ÜRETİLEMEZ — V2 evaluator
+        //   (`compute_completion_first_loss_and_decision`) Unavailable altında
+        //   improved=false + Reject ÜRETİR (INV-T6 native; #97'nin commit-time
+        //   düşürme bloğu V1 gate ile birlikte tarihe karıştı);
         // - `PartialNewSubject` → cold-start override YOK (matris: terminal Reject,
         //   reason evidence'da korunur — SuspendedColdStart ASLA);
         // - `Completed` baseline'tan BAĞIMSIZ (rule 3 — AcceptAsCompleted kalır).
-        let baseline_class = self
-            .classify_baseline_availability(input.claim, &current_scope)
-            .map_err(|e| {
-                // Pratikte unreachable savunma yolu: ölçüm yolu aynı partition'ı
-                // daha önce fail-closed koştu; space POST-measure değişseydi #96
-                // 5-fence (revision/epoch) bunu commit'ten önce yakalardı.
-                EngineCommitError::Internal(format!(
-                    "MD-3 baseline availability classification failed: {e:?}"
-                ))
-            })?;
-        if let BaselineAvailabilityClass::Unavailable(reason) = &baseline_class {
-            use crate::trajectory::PredicateCompletion;
-            if outcome.predicate_completion == PredicateCompletion::NotCompleted {
-                match (reason, cold_start_policy, outcome.mutation_decision) {
+        if let crate::measurement::MeasurementBaseline::Unavailable { reason } =
+            engine_measurement.before()
+        {
+            if predicate_completion == crate::trajectory::PredicateCompletion::NotCompleted {
+                match (reason, cold_start_policy) {
                     (
                         crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta { .. },
                         crate::trajectory::ColdStartPolicy::RequireOperatorApproval,
-                        _,
                     ) => {
                         // **#97 MD-3 S3:** in-flight suspension kaydı — onay
                         // (`approve_cold_start`) carrier'ı buradan çeker. Kalıcı
                         // kayıt DEĞİL (PendingAuthorization'a benzeMEz); motor
-                        // ömrüyle sınırlı.
+                        // ömrüyle sınırlı. **#100:** target/loss_before alanları
+                        // kalktı — onay revalidation'ı V2 evaluator'la artifact
+                        // üzerinden (caller skaleri zaten yok).
                         //
                         // Sıralama notu (PR #130 review P3): askı Q6'dan ÖNCE
                         // üretilir — pipeline gate sırası (Q5.b karar → MD-3
@@ -2057,8 +2077,6 @@ impl SpaceEngine {
                             SuspendedColdStartRecord {
                                 claim: input.claim.clone(),
                                 measurement: input.measurement.clone(),
-                                target: input.target,
-                                loss_before: input.loss_before,
                             },
                         );
                         return Ok(EngineCommitResult::SuspendedColdStart {
@@ -2071,32 +2089,20 @@ impl SpaceEngine {
                     (
                         crate::measurement::BaselineUnavailableReason::PartialNewSubject { .. },
                         crate::trajectory::ColdStartPolicy::RequireOperatorApproval,
-                        _,
                     ) => {
                         // Matris: PartialNewSubject + herhangi cold-start policy →
                         // cold-start override YOK (override PAYLAŞILMAZ); reason
-                        // sınıflandırmada typed taşınır. Decision predicate
-                        // failure policy'sine göre iner: improvement iddiası
-                        // (AcceptAsProgress) aşağıdaki INV-T6 düşürmesiyle
-                        // Reject'e iner; StrictReject zaten Reject. NOT (PR #130
-                        // review P3): `PredicateFailurePolicy::OperatorApproval`
-                        // altında gate'in ürettiği legacy `RequireOperatorApproval`
+                        // sınıflandırmada typed taşınır. Decision V2 evaluator'dan
+                        // policy'e göre iner (AcceptImprovement altında INV-T6
+                        // native Reject; StrictReject Reject). NOT (PR #130 review
+                        // P3): `PredicateFailurePolicy::OperatorApproval` altında
+                        // evaluator'ın ürettiği legacy `RequireOperatorApproval`
                         // kararı DÜŞÜRÜLMEZ (INV-T6 yalnız progress iddiasını
                         // hedefler) — o akış MD-3 kapsamı dışında legacy
                         // operator-approval yolunda devam eder; mutasyon/progress
                         // iddiası üretmez, cold-start bypass kapalıdır.
                     }
                     _ => {}
-                }
-                // **INV-T6 extension:** Unavailable altında progress kanıtlanamaz —
-                // gate'in skaler improvement'ı REDDEDİLİR (AcceptAsProgress → Reject).
-                // `gate_decision` DOKUNULMAZ (binding doğrulaması geçti; düşürme
-                // yalnızca mutasyon kararı — epistemik ayrım).
-                if matches!(
-                    outcome.mutation_decision,
-                    MutationDecision::AcceptAsProgress
-                ) {
-                    outcome.mutation_decision = MutationDecision::Reject;
                 }
             }
         }
@@ -2131,20 +2137,44 @@ impl SpaceEngine {
             });
         }
 
-        // **reviewer P0-4 + plan-review #1:** AuthorizationContext tam bir kez üretilir —
-        // bütün deterministik gate'ler (Q4/Q5/Q5.b/Q6) geçtikten sonra, witness
-        // (`time.advance`) çağrısından hemen önce. Satisfied/Held/Rejected aynı context'i
-        // kullanır. witness_requirement gerçek `input.omega`'dan (engine config DEĞİL).
-        // **Step 4b:** Captured `vision_context` paylaşılır — Q5 ile aynı effective vision.
+        // **#100 Faz 8a (TD-3) — V2 otorite zinciri:** witness requirement gerçek
+        // `input.omega`'dan (engine config DEĞİL) + bundle bütün olarak consume edilir
+        // → `AuthorizationContextV2` (invariant checkpoint: witness `validate_for(
+        // apply_target)` + gate↔basis semantic parity). V2 tiplerinin tek serialization
+        // yolu wire DTO'dur; kalıcı kayıt V1 wire projection'dır (authorization.rs:9465
+        // "V1 frozen") — aşağıda türetilir.
+        let witness_policy_v2 = crate::authorization::CanonicalWitnessPolicy::try_from(input.omega)
+            .map_err(|e| EngineCommitError::AuthorizationContextFailed(e.to_string()))?;
+        let witness_requirement_v2 = crate::authorization::CanonicalWitnessRequirementV2::try_from(
+            (&witness_policy_v2, &apply_target),
+        )
+        .map_err(|e| {
+            EngineCommitError::AuthorizationContextFailed(format!(
+                "V2 witness requirement derivation: {e}"
+            ))
+        })?;
+        // Authority checkpoint — V2 context constructed-and-validated; wire record
+        // bundan türetilir (V2 Serialize bilinçli YOK — frozen V1 wire'a projection).
+        let _authorization_v2 = crate::authorization::build_authorization_context_v2(
+            bundle,
+            witness_requirement_v2,
+            &engine_measurement,
+        )
+        .map_err(|e| {
+            EngineCommitError::AuthorizationContextFailed(format!(
+                "V2 authorization context build: {e:?}"
+            ))
+        })?;
         let authorization = self
-            .build_authorization_context(
+            .project_wire_authorization_context(
                 &outcome,
                 apply_target,
-                &input,
-                &verified_binding,
-                input.loss_before,
+                input.claim,
+                bound.task,
+                &engine_measurement,
+                preferred_vector,
+                &loss_evidence,
                 loss_after,
-                &gate_out.improvement_policy,
                 &rule_context,
                 &vision_context,
                 input.omega,
@@ -2215,8 +2245,7 @@ impl SpaceEngine {
         input: ColdStartApprovalInput<'_>,
     ) -> Result<ColdStartApprovalResult, ColdStartApprovalError> {
         use crate::trajectory::{
-            ApplyTarget, ColdStartPolicy, MutationDecision, PredicateCompletion, PredicateGate,
-            PredicateGateInput,
+            ApplyTarget, ColdStartPolicy, MutationDecision, PredicateCompletion,
         };
 
         // 1. In-flight suspension — motor belleğinde (kalıcı kayıt DEĞİL).
@@ -2267,9 +2296,11 @@ impl SpaceEngine {
             });
         }
 
-        // 4. #96 5-fence — onay penceresinde uzay ilerlediyse claim bayat.
-        let verified_binding = self
-            .verify_native_measurement_binding(&record.claim, &record.measurement)
+        // 4. #96 5-fence + **#100 Faz 8a (TD-5) artifact rekonstrüksiyonu** — onay
+        //    penceresinde uzay ilerlediyse claim bayat; V2 evaluator girdisi (outer
+        //    proof + EngineMeasurement) buradan gelir.
+        let (task_binding, engine_measurement) = self
+            .verify_task_measurement_binding(&record.claim, &record.measurement, task)
             .map_err(ColdStartApprovalError::StaleBinding)?;
 
         // 5. Q5 vision (deterministic revalidation — INV-T9 Step 4b).
@@ -2284,21 +2315,29 @@ impl SpaceEngine {
             })?;
 
         // 6. MD-3 revalidation — sınıflandırma hâlâ AllMembersIntroducedByDelta.
-        // (Pratikte 4. adımdaki 5-fence space değişimini önce yakalar; bu kol
-        // savunma derinliği — sınıflandırma ile binding farklı preimage'lara bakar.)
-        let baseline_class = self
-            .classify_baseline_availability(&record.claim, &current_scope)
-            .map_err(|e| {
-                ColdStartApprovalError::Internal(format!(
-                    "MD-3 baseline availability classification failed: {e:?}"
-                ))
-            })?;
-        let baseline_reason = match baseline_class {
-            BaselineAvailabilityClass::Unavailable(
-                reason @ crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta { .. },
-            ) => reason,
+        // **#100:** sınıflandırma artifact'tan (`engine_measurement.before()` —
+        // token baseline; ikinci partition üretimi yok). (Pratikte 4. adımdaki
+        // 5-fence space değişimini önce yakalar; bu kol savunma derinliği —
+        // baseline artifact'ı ile binding farklı preimage'lara bakar.)
+        let baseline_reason = match engine_measurement.before() {
+            crate::measurement::MeasurementBaseline::Unavailable {
+                reason:
+                    reason
+                    @ crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                        ..
+                    },
+            } => reason.clone(),
             other => {
-                return Err(ColdStartApprovalError::BaselineChanged { current: other });
+                return Err(ColdStartApprovalError::BaselineChanged {
+                    current: match other {
+                        crate::measurement::MeasurementBaseline::Unavailable { reason } => {
+                            BaselineAvailabilityClass::Unavailable(reason.clone())
+                        }
+                        crate::measurement::MeasurementBaseline::Available(_) => {
+                            BaselineAvailabilityClass::Available
+                        }
+                    },
+                });
             }
         };
 
@@ -2308,22 +2347,20 @@ impl SpaceEngine {
             return Err(ColdStartApprovalError::PolicyChanged { current: policy });
         }
 
-        // 8. Q5.b completion revalidation — suspension girdileriyle deterministik
-        //    yeniden koşum (loss_before/target kayıttan — commit anıyla aynı).
-        //    mutation_decision'a bakılmaz: INV-T6 extension zaten Unavailable
-        //    altında improvement düşürür; burada yalnız completion doğrulanır.
-        let gate_out = PredicateGate.evaluate(PredicateGateInput {
-            bound: crate::trajectory::TaskBoundClaim {
-                claim: &record.claim,
-                task,
-            },
-            measured: verified_binding.measured(),
-            loss_before: record.loss_before,
-            target: &record.target,
-        });
-        if gate_out.outcome.predicate_completion != PredicateCompletion::NotCompleted {
+        // 8. Q5.b completion revalidation — **#100 Faz 8a:** V2 evaluator'la
+        //    deterministik yeniden koşum (artifact preimage'leriyle — commit anıyla
+        //    aynı; caller loss_before/target skaleri artık yok). 3-digest recheck
+        //    + predicate exactly once. mutation_decision'a bakılmaz: INV-T6 V2'de
+        //    native (Unavailable altında improvement üretilemez); burada yalnız
+        //    completion doğrulanır.
+        let bundle =
+            crate::authorization::evaluate_task_gate_v2(task_binding, &engine_measurement, task)
+                .map_err(|e| {
+                    ColdStartApprovalError::Internal(format!("V2 gate revalidation failed: {e:?}"))
+                })?;
+        if bundle.predicate_completion() != PredicateCompletion::NotCompleted {
             return Err(ColdStartApprovalError::CompletionStateChanged {
-                completion: gate_out.outcome.predicate_completion,
+                completion: bundle.predicate_completion(),
             });
         }
 
@@ -2344,14 +2381,19 @@ impl SpaceEngine {
         self.suspended_cold_starts.remove(&input.claim_id);
 
         // 11. Normatif onay kanıtı — 8 alan + audit bağlamı (INV-T6: improvement
-        //     iddiası YOK — `improvement_claimed` ctor sabiti false).
+        //     iddiası YOK — `improvement_claimed` ctor sabiti false). **#100:**
+        //     digest/revision artifact'tan (request cross-field verify ile token
+        //     ölçüm anına bağlı).
         let evidence = ColdStartAcceptanceEvidence::new(
             input.task_id,
             input.claim_id,
             baseline_reason,
             *record.measurement.subject_binding(),
-            verified_binding.measurement_input_digest().clone(),
-            verified_binding.base_revision().clone(),
+            engine_measurement
+                .request()
+                .measurement_input_digest()
+                .clone(),
+            engine_measurement.revision().clone(),
             policy,
             input.operator_id,
             input.authorization_id,
@@ -2366,27 +2408,33 @@ impl SpaceEngine {
         })
     }
 
-    /// **reviewer P0-4 + plan-review #1:** Engine-owned AuthorizationContext üretimi.
+    /// **#100 Faz 8a (TD-3) — V1 wire projection:** Kalıcı `AuthorizationContext`
+    /// (V1) kaydı artık V2 otorite zincirinin ÇIKTISINDAN türetilir (wire FROZEN —
+    /// authorization.rs:9465; V2 Serialize bilinçli yok, tek serialization yolu V1
+    /// wire DTO). `reviewer P0-4 + plan-review #1` sözleşmeleri korunur: context
+    /// witness'tan ÖNCE, bütün deterministik gate'ler geçtikten sonra; gerçek
+    /// `omega`'dan; captured `rule_context`/`vision_context` paylaşımıyla.
     ///
-    /// Witness'tan ÖNCE, bütün deterministik gate'ler geçtikten sonra çağrılır.
-    /// Engine'in elindeki TÜM gerçek verilerden basis inşa eder — navigator placeholder
-    /// DEĞİL. Hata durumunda fail-closed (SystemFailure) — sıfır digest'e düşüş YOK.
-    ///
-    /// **plan-review #1:** `witness_requirement` ve `basis.witness_policy` gerçek
-    /// `input.omega`'dan türetilir (engine config DEĞİL).
-    ///
-    /// **Step 4b:** Captured `vision_context` paylaşılır — Q5 ile aynı effective vision
-    /// digest'a bağlanır. Yeniden vision infer YOK (drift risk kapalı).
+    /// **Loss alanları (#100 semantik değişim — sınıflandırılmış):**
+    /// - `target_vector` = task `preferred_vector` (V1'de caller `input.target`
+    ///   idi); preferred YOK → (0,0,0,0,0) sentinel (loss kanıtı zaten NotRequired).
+    /// - `loss_before` = compat projection: Available baseline →
+    ///   `trajectory_loss(before, target)`; Unavailable → `loss_after` (V1 skaler
+    ///   contract'ına geçici adaptasyon — tarihsel karakterizasyon harness'iyle
+    ///   aynı formül; caller running skaleri kalktı).
+    /// - `loss_after` = V2 loss evidence Available değeri (evaluator üretimi) veya
+    ///   preferred-vector telemetry distance'ı.
     #[allow(clippy::too_many_arguments)]
-    fn build_authorization_context(
+    fn project_wire_authorization_context(
         &self,
         outcome: &crate::trajectory::AttemptOutcome,
         apply_target: crate::trajectory::ApplyTarget,
-        input: &TaskCommitInput<'_>,
-        verified_binding: &VerifiedNativeMeasurementBinding,
-        loss_before: f64,
+        claim: &Claim,
+        task: &crate::trajectory::Task,
+        measurement: &crate::measurement::EngineMeasurement,
+        preferred_vector: Option<RawPosition>,
+        loss_evidence: &crate::authorization::CanonicalTrajectoryLossEvidence,
         loss_after: f64,
-        improvement_policy: &crate::authorization::EffectiveImprovementPolicy,
         rule_context: &crate::authorization::RuleEvaluationContext,
         vision_context: &crate::authorization::EffectiveVisionGateContext,
         omega: &crate::witness::WitnessSet,
@@ -2397,10 +2445,27 @@ impl SpaceEngine {
             ProvenancedMeasuredResult, WitnessRequirement,
         };
         use crate::canonical_tags::{PredicateAxisTag, PredicateModeTag};
-        let claim = input.claim;
         let task_id = claim
             .task_id
             .ok_or_else(|| "claim has no task_id for authorization context".to_string())?;
+        // **#100:** improvement policy — V2 evaluator kendi kopyasını üretti (tek
+        // construction site evaluator'da); wire record saf sabiti yeniden okur
+        // (`current_semantics()` pure constant — değer her çağrıda özdeş).
+        let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
+        // Wire loss target + compat-projected loss_before (yukarıdaki doc).
+        let wire_target = preferred_vector.unwrap_or_default();
+        let loss_before = match measurement.before() {
+            crate::measurement::MeasurementBaseline::Available(before) => {
+                crate::trajectory::trajectory_loss(before, &wire_target)
+            }
+            crate::measurement::MeasurementBaseline::Unavailable { .. } => match loss_evidence {
+                crate::authorization::CanonicalTrajectoryLossEvidence::Available {
+                    loss_after: evidence_after,
+                    ..
+                } => *evidence_after,
+                _ => loss_after,
+            },
+        };
 
         // **Reviewer v5 P1-2:** Shared structural delta producer — measurement
         // `MeasurementDeltaDigest` ile aynı ontology. İki truth source (inline vs
@@ -2411,9 +2476,8 @@ impl SpaceEngine {
             .map_err(|e| e.to_string())?;
 
         // Predicate content — task'ın predicate set'inden effective predicate'lara.
-        let task = input.task_resolver.resolve(task_id).ok_or_else(|| {
-            format!("task_id {task_id} not found in resolver during authorization context build")
-        })?;
+        // **#100:** task param olarak gelir (commit çözümlemesiyle aynı object —
+        // yeniden resolve YOK, TOCTOU kapalı).
         let predicate_mode = PredicateModeTag::try_from(&task.target_predicate_set.mode)
             .map_err(|e| e.to_string())?;
         let predicates: Vec<crate::authorization::EffectiveMetricPredicate> = task
@@ -2441,17 +2505,17 @@ impl SpaceEngine {
             predicates,
         };
 
-        // Predicate evaluation basis — gerçek PredicateGate girdileri (reviewer P1-2).
-        // target_vector = input.target (preferred_vector DEĞİL — evaluator input.target kullanır).
-        // min_improvement_delta = gerçek is_improved_loss girdisi.
-        // improvement_policy = mevcut sabit 0.85/0.15 threshold'ları explicit.
+        // Predicate evaluation basis — gerçek evaluator girdileri (reviewer P1-2).
+        // **#100:** target_vector = task preferred_vector (V2 loss target'ı —
+        // evaluator snapshot'ı ile aynı); min_improvement_delta gerçek girdi;
+        // improvement_policy sabit threshold'lar explicit.
         let predicate_evaluation = PredicateEvaluationBasis {
             target_vector: CanonicalRawPosition {
-                x: input.target.x,
-                y: input.target.y,
-                z: input.target.z,
-                w: input.target.w,
-                v: input.target.v,
+                x: wire_target.x,
+                y: wire_target.y,
+                z: wire_target.z,
+                w: wire_target.w,
+                v: wire_target.v,
             },
             loss_before: loss_before as CanonicalF64,
             loss_after: loss_after as CanonicalF64,
@@ -2461,7 +2525,7 @@ impl SpaceEngine {
             .map_err(|e| e.to_string())?,
             min_improvement_delta: task.policy.min_improvement_delta as CanonicalF64,
             allow_progress_checkpoint: task.policy.allow_progress_checkpoint,
-            improvement_policy: *improvement_policy,
+            improvement_policy,
         };
 
         // Measured result — 5 eksen value + source (INV-T4 per-axis provenance).
@@ -2476,7 +2540,10 @@ impl SpaceEngine {
                     .map_err(|e: crate::authorization::CanonicalizationError| e.to_string())?,
             })
         };
-        let verified_measured = verified_binding.measured();
+        // **#100:** measured artifact'tan (`measurement.after()` — token measured
+        // ile SAME value bits; rekonstrüksiyon 5-fence + evaluator digest recheck
+        // altında). İkinci üretim yok.
+        let verified_measured = measurement.after();
         let measured_result = ProvenancedMeasuredResult {
             coupling: mk_axis(&verified_measured.coupling)?,
             cohesion: mk_axis(&verified_measured.cohesion)?,
@@ -2488,11 +2555,11 @@ impl SpaceEngine {
         // Witness policy — gerçek omega'dan (plan-review #1).
         let witness_policy = CanonicalWitnessPolicy::try_from(omega).map_err(|e| e.to_string())?;
 
-        // **#96 MD-2 (P0-tur3 — ikinci TOCTOU kapanışı):** Measurement input digest
-        // PROOF'TAN (token'ın captured context'i) — `MeasurementInputContext::try_from
-        // (&self.coord_system)` yeniden okuması KALDIRILDI ("verify context A → axis
-        // mutates → basis records B" imkânsız).
-        let measurement_input_digest = verified_binding.measurement_input_digest().clone();
+        // **#96 MD-2 (P0-tur3):** Measurement input digest PROOF bağlantısından —
+        // **#100:** artifact request'inden (`measurement.request()` — EngineMeasurement
+        // ctor cross-field verify ile token'ın captured context digest'ine bağlı;
+        // yeniden coord_system okuması YOK).
+        let measurement_input_digest = measurement.request().measurement_input_digest().clone();
 
         // **reviewer (Step 4a + 4b + 4c closure):** Evaluation context digest — captured
         // `rule_context` + `vision_context` kullanır (commit_task_claim'in ürettiği
@@ -2502,10 +2569,10 @@ impl SpaceEngine {
         let evaluation_context_digest =
             crate::authorization::EvaluationContextDigest::compute(rule_context, vision_context)
                 .map_err(|e| e.to_string())?;
-        // **#96 MD-2 (P0-tur3):** base revision PROOF'TAN (token'ın ölçüm anı) —
-        // `current_space_view_revision()` yeniden okuması KALDIRILDI (verification
-        // ile basis aynı revision'ı bağlar; stale fence tutarlı).
-        let base_space_view_revision = verified_binding.base_revision().clone();
+        // **#96 MD-2 (P0-tur3):** base revision PROOF bağlantısından — **#100:**
+        // artifact revision'ı (`measurement.revision()` → request.base_revision —
+        // token'ın ölçüm anı; stale fence ile aynı preimage).
+        let base_space_view_revision = measurement.revision().clone();
 
         let basis = AuthorizationBasis {
             schema_version: 1,
@@ -3594,6 +3661,28 @@ impl SpaceEngine {
         VerifiedNativeMeasurementBinding,
         crate::measurement::MeasurementBindingVerificationError,
     > {
+        self.verify_native_measurement_binding_with_context(claim, token)
+            .map(|(binding, _context)| binding)
+    }
+
+    /// **#100 Faz 8a (TD-2):** 5-fence + ölçüm context'i birlikte — commit-yolu
+    /// artifact rekonstrüksiyonu (`verify_task_measurement_binding`) context'i
+    /// yeniden üretmeden paylaşır. Public 5-fence sarmalayıcısı bunu çağırır.
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
+    fn verify_native_measurement_binding_with_context(
+        &self,
+        claim: &Claim,
+        token: &crate::measurement::NativeSubjectMeasurement,
+    ) -> Result<
+        (
+            VerifiedNativeMeasurementBinding,
+            crate::authorization::MeasurementInputContext,
+        ),
+        crate::measurement::MeasurementBindingVerificationError,
+    > {
         use crate::measurement::{
             MeasurementBindingDerivationError as DerivErr, MeasurementBindingVerificationError,
             MeasurementDeltaDigest, NativeMeasurementBindingError as NativeErr,
@@ -3704,11 +3793,197 @@ impl SpaceEngine {
             ));
         }
 
-        Ok(VerifiedNativeMeasurementBinding::new(
+        let verified = VerifiedNativeMeasurementBinding::new(
             token.base_revision().clone(),
             token.measurement_input_digest().clone(),
             token.measured().clone(),
-        ))
+        );
+        Ok((verified, context))
+    }
+
+    /// **#100 Faz 8a (TD-2) — commit-anı artifact rekonstrüksiyonu + outer proof:**
+    ///
+    /// 5-fence'i (`verify_native_measurement_binding_with_context`) KAPSAR; ardından
+    /// `EngineMeasurement` artifact'ını kurar (before = token baseline #100 S1;
+    /// after = token measured; context = 5-fence session capture; request = subject
+    /// scope + impact + revision + canonical delta + context) ve Faz 3 commitment
+    /// türetim bloğunu (task_claim/task_goal/policy digest + preferred_vector
+    /// snapshot) commit yoluna taşır → `VerifiedTaskMeasurementBinding`
+    /// (`evaluate_task_gate_v2` girdisi).
+    ///
+    /// **Yeniden ölçüm YOK:** before/after değerleri token'dan (ölçüm anı, tek
+    /// session); 5-fence revision/context/epoch garantisi altında rekonstrüksiyon
+    /// deterministiktir (cross-artifact TOCTOU evaluator'ın digest recheck'iyle
+    /// kapanır). Faz 3 `verify_measurement_binding`'in commitment bloğu buraya
+    /// taşındı (aynı mapping — Derivation varyant ailesi korundu).
+    #[allow(
+        clippy::result_large_err,
+        reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
+    )]
+    fn verify_task_measurement_binding(
+        &self,
+        claim: &Claim,
+        token: &crate::measurement::NativeSubjectMeasurement,
+        task: &crate::trajectory::Task,
+    ) -> Result<
+        (
+            VerifiedTaskMeasurementBinding,
+            crate::measurement::EngineMeasurement,
+        ),
+        crate::measurement::MeasurementBindingVerificationError,
+    > {
+        use crate::measurement::MeasurementBindingDerivationError as DerivErr;
+        use crate::measurement::MeasurementBindingVerificationError;
+
+        // 5-fence + captured context (context yeniden üretilmez — paylaşımlı).
+        let (_native_proof, context) =
+            self.verify_native_measurement_binding_with_context(claim, token)?;
+
+        // Artifact rekonstrüksiyonu — measurement.rs private ctor pub(crate) (tek
+        // producer disiplini: engine). Defensive cross-field verify ctor içinde.
+        let subject = token.subject_scope().clone();
+        let impact = self.derive_impact_scope(claim).map_err(|e| {
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::StructuralCanonicalizationFailed {
+                    detail: format!("impact scope derivation: {e}"),
+                },
+            )
+        })?;
+        let canonical_delta = crate::authorization::canonical_structural_delta_from_claim(claim)
+            .map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::StructuralCanonicalizationFailed {
+                        detail: e.to_string(),
+                    },
+                )
+            })?;
+        let request = crate::measurement::MeasurementRequest::try_new(
+            subject.clone(),
+            impact.clone(),
+            token.base_revision().clone(),
+            &canonical_delta,
+            &context,
+        )
+        .map_err(|source| {
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::RequestDigestComputationFailed { source },
+            )
+        })?;
+        let measurement = crate::measurement::EngineMeasurement::reassemble_from_verified_parts(
+            token.baseline().clone(),
+            token.measured().clone(),
+            context,
+            request,
+        )
+        .map_err(|e| {
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::StructuralCanonicalizationFailed {
+                    detail: format!("engine measurement reconstruction: {e}"),
+                },
+            )
+        })?;
+
+        // ── Faz 3 commitment türetim bloğu (engine.rs eski :1130-1236 — aynı
+        //    mapping; Faz 3 verify_measurement_binding S2'de silinir).
+        let expected_delta_digest =
+            crate::measurement::MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)
+                .map_err(|source| {
+                    MeasurementBindingVerificationError::Derivation(
+                        DerivErr::RequestDigestComputationFailed { source },
+                    )
+                })?;
+        let task_claim_digest =
+            crate::measurement::TaskClaimDigest::compute(claim, task.id, &expected_delta_digest)
+                .map_err(|e| {
+                    MeasurementBindingVerificationError::Derivation(
+                        DerivErr::TaskClaimDigestComputationFailed {
+                            detail: e.to_string(),
+                        },
+                    )
+                })?;
+        let measurement_digest =
+            crate::measurement::MeasurementDigest::compute(measurement.after()).map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::MeasurementResultDigestComputationFailed {
+                        detail: e.to_string(),
+                    },
+                )
+            })?;
+        let request_digest = crate::measurement::MeasurementRequestDigest::compute(
+            measurement.request(),
+        )
+        .map_err(|source| {
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::RequestDigestComputationFailed { source },
+            )
+        })?;
+
+        // Inner binding — Faz 1 frozen 6 field (subject/impact/delta/revision/
+        // context/request_digest); revision token'ın ölçüm anından (stale fence
+        // parity — kanıt yeniden okunmaz).
+        let binding_inner = VerifiedMeasurementBinding::new(
+            subject,
+            impact,
+            canonical_delta,
+            token.base_revision().clone(),
+            measurement.context().clone(),
+            request_digest,
+        );
+
+        let task_goal_evidence = crate::authorization::CanonicalTaskGoalEvidenceV2::try_from(task)
+            .map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::StructuralCanonicalizationFailed {
+                        detail: format!("task_goal_evidence projection: {e}"),
+                    },
+                )
+            })?;
+        let task_goal_digest =
+            crate::measurement::TaskGoalDigest::compute_from_canonical(&task_goal_evidence)
+                .map_err(|e| {
+                    MeasurementBindingVerificationError::Derivation(
+                        DerivErr::TaskGoalDigestComputationFailed {
+                            detail: e.to_string(),
+                        },
+                    )
+                })?;
+        let engine_measurement_digest = measurement.compute_digest().map_err(|e| {
+            MeasurementBindingVerificationError::Derivation(
+                DerivErr::EngineMeasurementDigestComputationFailed {
+                    detail: e.to_string(),
+                },
+            )
+        })?;
+        let preferred_vector_snapshot = task.target_predicate_set.preferred_vector;
+        let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
+        let predicate_gate_policy_digest =
+            crate::measurement::PredicateGatePolicyDigestV2::compute(
+                task.id,
+                &task_goal_digest,
+                &task.policy,
+                &improvement_policy,
+            )
+            .map_err(|e| {
+                MeasurementBindingVerificationError::Derivation(
+                    DerivErr::PredicateGatePolicyDigestComputationFailed {
+                        detail: e.to_string(),
+                    },
+                )
+            })?;
+
+        let binding = VerifiedTaskMeasurementBinding::new(
+            task.id,
+            claim.id,
+            task_claim_digest,
+            measurement_digest,
+            binding_inner,
+            task_goal_digest,
+            engine_measurement_digest,
+            preferred_vector_snapshot,
+            predicate_gate_policy_digest,
+            task_goal_evidence,
+        );
+        Ok((binding, measurement))
     }
 
     /// **INV-T9 #70 Commit 3 (P2-2 v3):** Task → subject scope üyeleri türetme (canonical).
@@ -4812,14 +5087,19 @@ v = 0.5
             claim.delta_nodes.iter().map(|n| n.id).collect(),
         )
         .expect("canonical subject scope");
-        // **#100 (TD-1):** synthetic carrier baseline — commit partition'ıyla aynı
-        // sınıflandırma (Available sentetik before=measured; fixture subject'ları
-        // tipik olarak delta-introduced).
+        // **#100 (TD-1 + S2):** synthetic carrier baseline — commit partition'ıyla aynı
+        // sınıflandırma; Available kolunda GERÇEK before-centroid (measured-kopya
+        // sentinel DEĞİL — derived loss_before improvement'ı temsil edebilir).
         let baseline = match engine.classify_baseline_availability(claim, &subject) {
             Ok(crate::engine::BaselineAvailabilityClass::Unavailable(reason)) => {
                 crate::measurement::MeasurementBaseline::Unavailable { reason }
             }
-            _ => crate::measurement::MeasurementBaseline::Available(measured.clone()),
+            _ => {
+                let before = engine
+                    .measured_centroid_of(engine.space(), subject.member_ids())
+                    .expect("before centroid (subject base'te mevcut — classify Available)");
+                crate::measurement::MeasurementBaseline::Available(before)
+            }
         };
         crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
             claim.clone(),
@@ -4973,19 +5253,7 @@ v = 0.5
         let omega = WitnessSet::new(vec![]);
 
         let commit_token = characterization_carrier_test(&engine, &claim, measured);
-        let input = TaskCommitInput::new(
-            &commit_token,
-            &omega,
-            &resolver,
-            RawPosition {
-                x: 0.5,
-                y: 0.5,
-                z: 0.5,
-                w: 0.5,
-                v: 0.5,
-            },
-            1.0,
-        );
+        let input = TaskCommitInput::new(&commit_token, &omega, &resolver);
 
         match engine.commit_task_claim(input) {
             Ok(crate::engine::EngineCommitResult::Held {
@@ -5506,29 +5774,27 @@ v = 0.5
             "measurement digest aynı canonical identity'den üretiliyor"
         );
 
-        // **Reviewer v6/v7 P2-1:** Shared-producer regression guard — `build_authorization_context`
-        // inline structural canonicalization'a geri dönerse, bu source-level contract test yakalar.
+        // **Reviewer v6/v7 P2-1:** Shared-producer regression guard — wire projection
+        // (#100: `project_wire_authorization_context`, eski `build_authorization_context`)
+        // inline structural canonicalization'a geri dönerse, bu source-level contract
+        // test yakalar.
         //
         // **Reviewer v7 P2-2:** Tam üretim çağrı biçimi aranır (`let structural_delta = ...`),
         // yorumlar geçmez. İki-çağrı parity test inline'a dönüşü yakalayamıyordu (aynı
         // fonksiyonu çağırıyordu); bu guard gerçek production-path contract'ı doğrular.
-        //
-        // NOT: Tam semantic production-path test (build_authorization_context fixture'ı ile
-        // gerçek AuthorizationContext.basis.structural_delta karşılaştırması) ağırdır —
-        // builder 8 parametreli (outcome, vision_context, rule_context vb.). Commit 4'te
-        // CoordinateSystem refactor sırasında builder helper'a ayrılınca semantic test eklenebilir.
         let engine_source = include_str!("engine.rs");
-        // build_authorization_context body'sini bul (fn imzasından ilk kapanış `}`'a kadar).
+        // project_wire_authorization_context body'sini bul (fn imzasından ilk kapanış
+        // `}`'a kadar).
         let builder_start = engine_source
-            .find("fn build_authorization_context(")
-            .expect("build_authorization_context must exist in engine.rs");
+            .find("fn project_wire_authorization_context(")
+            .expect("project_wire_authorization_context must exist in engine.rs");
         let builder_end = engine_source[builder_start..]
             .find("\n    }\n")
             .map(|offset| builder_start + offset)
             .unwrap_or(engine_source.len());
         let builder_body = &engine_source[builder_start..builder_end];
         // Tam üretim çağrı biçimi — yorumlarda bu syntax geçmez.
-        let shared_call = "let structural_delta =\n            crate::authorization::canonical_structural_delta_from_claim(claim)";
+        let shared_call = "let structural_delta = crate::authorization::canonical_structural_delta_from_claim(claim)";
         // fmt formatlamayı tolere etmek için whitespace-normalize edip substring ara.
         let normalized: String = builder_body
             .chars()
@@ -5538,9 +5804,84 @@ v = 0.5
             shared_call.chars().filter(|c| !c.is_whitespace()).collect();
         assert!(
             normalized.contains(&shared_call_normalized),
-            "build_authorization_context must call canonical_structural_delta_from_claim via \
-             production statement (not comment). Inline structural canonicalization drift risk."
+            "project_wire_authorization_context must call canonical_structural_delta_from_claim \
+             via production statement (not comment). Inline structural canonicalization drift risk."
         );
+    }
+
+    /// **#100 Faz 8a (S2) — semantik değişim sınıfı 2 pin'i:** NoPreferredVector +
+    /// AcceptImprovement + NotCompleted → **Reject** (fail-closed). V1'de caller
+    /// target'ıyla (input.target) progress üretilebiliyordu; V2'de loss hedefi task
+    /// snapshot'ıdır — preferred vector yoksa progress kanıtı ANLAMSIZ (INV-T6
+    /// epistemolojisi; `compute_completion_first_loss_and_decision` NoPreferredVector
+    /// → Unavailable loss + Reject). Commit-path pin.
+    #[test]
+    fn commit_no_preferred_vector_accept_improvement_rejects() {
+        use crate::trajectory::{AxisMetric, PredicateFailurePolicy, ProvenancedRawPosition};
+        let mut engine = make_measurement_engine();
+        // Subject node 1 base space'te → Available baseline (derived loss yolu canlı).
+        engine.space_mut().insert_node(Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        let mut task = task_with_node_scope(1, 42); // Coupling Le 0.5; preferred None
+        task.policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        task.policy.min_improvement_delta = 0.05;
+        let mut claim = claim_with_task_id(42, vec![mod_node(1)], vec![], vec![]);
+        claim.computed_raw = RawPosition {
+            x: 0.9,
+            y: 0.5,
+            z: 0.5,
+            w: 0.5,
+            v: 0.5,
+        };
+        claim.intent = crate::witness::Intent::new(100, claim.computed_raw);
+        // measured bits == claim.computed_raw (half-merge fence).
+        let mk = |v: f64| AxisMetric {
+            value: v,
+            source: crate::coords::MetricSource::Scip,
+        };
+        let measured = ProvenancedRawPosition {
+            coupling: mk(0.9), // 0.9 ≤ 0.5 DEĞİL → Unsatisfied → NotCompleted
+            cohesion: mk(0.5),
+            instability: mk(0.5),
+            entropy: mk(0.5),
+            witness_depth: mk(0.5),
+        };
+        let mut resolver = crate::trajectory::InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let omega = WitnessSet::new(vec![]);
+        let carrier = characterization_carrier_test(&engine, &claim, measured);
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &carrier,
+            &omega,
+            &resolver as &dyn crate::trajectory::TaskResolver,
+        ));
+        match result {
+            Ok(crate::engine::EngineCommitResult::Evaluated {
+                result,
+                authorization,
+            }) => {
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::Reject,
+                    "#100: NoPreferredVector → improvement kanıtlanamaz → Reject"
+                );
+                assert!(matches!(
+                    result.apply_target,
+                    crate::trajectory::ApplyTarget::NotApplied
+                ));
+                assert!(
+                    authorization.is_none(),
+                    "Reject/NotApplied → authorization üretilmez"
+                );
+            }
+            other => {
+                panic!("#100 NoPreferredVector fixture Evaluated(Reject) bekliyordu: {other:?}")
+            }
+        }
     }
 
     /// **Reviewer v5 P2-3:** HeterogeneousPredicateScopes diagnostic kanıtı taşır
@@ -9043,8 +9384,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                1.0,
             ))
             .expect_err("registry-overwritten scope → commit reddetmeli");
         assert!(
@@ -9110,8 +9449,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                1.0,
             ))
             .expect_err("heterojen scope overwrite → derivation failure");
         assert!(
@@ -9237,8 +9574,8 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                5.0, // skaler "improvement" önerir — INV-T6: kanıt DEĞİL
+                // #100: skaler "improvement" girdisi kalktı — INV-T6 V2'de native
+                // (Unavailable altında improvement üretilemez).
             ))
             .expect("Disallow → Evaluated (Reject), suspension yok");
         match result {
@@ -9301,8 +9638,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                5.0,
             ))
             .expect("SuspendedColdStart Ok kanalı — domain outcome");
         match result {
@@ -9370,8 +9705,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                5.0,
             ))
             .expect("PartialNew → Evaluated (terminal Reject)");
         match result {
@@ -9437,8 +9770,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                5.0,
             ))
             .expect("Completed → Evaluated");
         match result {
@@ -9503,8 +9834,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                5.0,
             ))
             .expect("Completed → Evaluated");
         match result {
@@ -9571,8 +9900,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                5.0,
             ))
             .expect("SuspendedColdStart Ok kanalı")
         {
@@ -10090,8 +10417,6 @@ v = 0.5
                 carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                1.0,
             )) {
                 Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
                 other => panic!("fixture Held üretmeli; got: {other:?}"),
@@ -10585,8 +10910,6 @@ v = 0.5
                 &carrier,
                 &omega,
                 &registry as &dyn crate::trajectory::TaskResolver,
-                RawPosition::default(),
-                1.0,
             ))
             .expect_err("commit-time stale replay reddedilmeli");
         assert!(
@@ -10747,8 +11070,6 @@ v = 0.5
             &carrier,
             &omega,
             &registry as &dyn crate::trajectory::TaskResolver,
-            RawPosition::default(),
-            1.0,
         ));
         let authorization = match result {
             Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,

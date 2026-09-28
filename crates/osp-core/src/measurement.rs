@@ -1812,6 +1812,28 @@ impl EngineMeasurement {
         &self.request
     }
 
+    /// **#100 Faz 8a (TD-2) — commit-anı artifact rekonstrüksiyonu (ölçüm DEĞİL):**
+    ///
+    /// Before/after değerleri engine-issued opaque token'dan (ölçüm anı TEK session
+    /// ürünü); request/context commit-anı 5-fence session capture'ından. Cross-field
+    /// defensive verify `new` ile aynı. Bu ctor YENİ ÖLÇÜM ÜRETMEZ — doğrulanmış
+    /// parçaları yeniden birleştirir; ölçüm üretimi tek-truth kalır
+    /// (`measure_task_delta` / `measure_attempt_native` — single-producer guard
+    /// `EngineMeasurement::new` call-site sayısını korur; tek `new` üreticisi
+    /// `measure_task_delta`).
+    #[allow(
+        clippy::result_large_err,
+        reason = "intentional inline MeasurementError; see MeasurementError layout decision"
+    )]
+    pub(crate) fn reassemble_from_verified_parts(
+        before: MeasurementBaseline,
+        after: MeasuredRawPosition,
+        context: MeasurementInputContext,
+        request: MeasurementRequest,
+    ) -> Result<Self, MeasurementError> {
+        Self::new(before, after, context, request)
+    }
+
     /// Request digest — authorization zinciri için (Commit 4).
     pub fn request_digest(&self) -> Result<MeasurementRequestDigest, MeasurementDigestError> {
         MeasurementRequestDigest::compute(&self.request)

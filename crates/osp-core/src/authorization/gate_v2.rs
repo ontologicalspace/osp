@@ -220,6 +220,10 @@ pub(crate) struct VerifiedGateEvaluationBundleV2 {
     measured_after: crate::authorization::ProvenancedMeasuredResult,
     // Evaluation sonucu (review P0-1: bundle-scoped, binding DEĞIL).
     predicate_basis: crate::authorization::CanonicalPredicateEvaluationBasisV2,
+    /// **#100 Faz 8a wiring:** Okunabilir completion (tag DEĞIL) — commit-yolu
+    /// MD-3 matrisi + AttemptOutcome projection'ı tek predicate evaluation'dan
+    /// okur ("predicate exactly once" korunur; ikinci evaluate_completion YOK).
+    completion: crate::trajectory::PredicateSetResult,
     loss_evidence: crate::authorization::CanonicalTrajectoryLossEvidence,
     // Inner binding (subject/impact/delta/revision/context/request_digest).
     binding_inner: crate::engine::VerifiedMeasurementBinding,
@@ -232,13 +236,10 @@ pub(crate) struct VerifiedGateEvaluationBundleV2 {
 impl VerifiedGateEvaluationBundleV2 {
     /// **Private constructor (Adım 18):** Sadece `evaluate_task_gate_v2` çağırır.
     /// Tüm field'lar evaluator çıktısı — external construction kapalı (tampering-proof).
-    #[allow(
-        dead_code,
-        reason = "Faz 5 evaluate_task_gate_v2 consumer (Faz 8 wiring)"
-    )]
+    /// **#100:** allow(dead_code) kalktı — Faz 8a production wiring tüketiyor.
     #[allow(
         clippy::too_many_arguments,
-        reason = "private evaluator-output constructor binds all gate-passed evidence atomically; partial builder state would allow tampering-proof boundary to leak (14 fields: identity + digests + evidence + verified gate)"
+        reason = "private evaluator-output constructor binds all gate-passed evidence atomically; partial builder state would allow tampering-proof boundary to leak (15 fields: identity + digests + evidence + readable completion + verified gate)"
     )]
     fn from_gate_passed(
         task_id: crate::trajectory::TaskId,
@@ -251,6 +252,7 @@ impl VerifiedGateEvaluationBundleV2 {
         task_goal_evidence: crate::authorization::CanonicalTaskGoalEvidenceV2,
         measured_after: crate::authorization::ProvenancedMeasuredResult,
         predicate_basis: crate::authorization::CanonicalPredicateEvaluationBasisV2,
+        completion: crate::trajectory::PredicateSetResult,
         loss_evidence: crate::authorization::CanonicalTrajectoryLossEvidence,
         binding_inner: crate::engine::VerifiedMeasurementBinding,
         preferred_vector_snapshot: Option<crate::coords::RawPosition>,
@@ -267,6 +269,7 @@ impl VerifiedGateEvaluationBundleV2 {
             task_goal_evidence,
             measured_after,
             predicate_basis,
+            completion,
             loss_evidence,
             binding_inner,
             preferred_vector_snapshot,
@@ -274,13 +277,36 @@ impl VerifiedGateEvaluationBundleV2 {
         }
     }
 
+    /// **#100 Faz 8a wiring:** Okunabilir completion — commit-yolu MD-3 matrisi ve
+    /// AttemptOutcome projection'ı bundle'dan okur (tek predicate evaluation).
+    pub(crate) fn predicate_completion(&self) -> crate::trajectory::PredicateCompletion {
+        use crate::trajectory::{PredicateCompletion, PredicateSetResult};
+        match self.completion {
+            PredicateSetResult::Completed => PredicateCompletion::Completed,
+            PredicateSetResult::SourceInsufficient | PredicateSetResult::NotCompleted => {
+                PredicateCompletion::NotCompleted
+            }
+        }
+    }
+
+    /// **#100 Faz 8a wiring:** Mutation decision — gate proof'tan (tek evaluator
+    /// çıktısı; commit kararı yeniden türetmez). `RejectedByGate` Faz 8 hard-gate
+    /// üreticisi yoktur — savunma kolu Reject'e iner.
+    pub(crate) fn mutation_decision(&self) -> crate::trajectory::MutationDecision {
+        self.gate_evaluation.mutation_decision()
+    }
+
+    /// **#100 Faz 8a wiring:** Loss evidence — commit-yolu V1 wire projection'ı
+    /// (TaskCommitResult telemetry skaleri + AuthorizationBasis loss alanları)
+    /// buradan okur; loss yeniden hesaplanmaz.
+    pub(crate) fn loss_evidence(&self) -> &crate::authorization::CanonicalTrajectoryLossEvidence {
+        &self.loss_evidence
+    }
+
     /// **pub(crate) consumer (Adım 20):** Bundle'ı bütün olarak açar.
     /// `build_authorization_context_v2` bu proof'ları consume eder → AuthorizationBasisV2.
     /// Move-only — bundle iki defa kullanılamaz (Clone YOK).
-    #[allow(
-        dead_code,
-        reason = "Faz 5 build_authorization_context_v2 consumer (Faz 8 wiring)"
-    )]
+    /// **#100:** allow(dead_code) kalktı — Faz 8a production wiring tüketiyor.
     pub(crate) fn into_parts(self) -> VerifiedGateEvaluationBundlePartsV2 {
         VerifiedGateEvaluationBundlePartsV2 {
             task_id: self.task_id,
@@ -358,10 +384,9 @@ pub(crate) struct VerifiedGateEvaluationBundlePartsV2 {
 /// yerine `measurement.before()` + binding `preferred_vector_snapshot`'tan derive.
 /// `MeasurementBaseline::Available` + `Some(target)` → `trajectory_loss(before, target)`.
 /// `Unavailable` veya `None` → progress imkânsız (typed unavailable/reject).
-#[allow(
-    dead_code,
-    reason = "Faz 5 build_authorization_context_v2 consumer (Faz 8 wiring)"
-)]
+///
+/// **#100 Faz 8a:** allow(dead_code) kalktı — `commit_task_claim` + `approve_cold_start`
+/// production consumer'ları wired.
 pub(crate) fn evaluate_task_gate_v2(
     binding: crate::engine::VerifiedTaskMeasurementBinding,
     measurement: &crate::measurement::EngineMeasurement,
@@ -559,6 +584,7 @@ pub(crate) fn evaluate_task_gate_v2(
         task_goal_evidence,
         measured_after,
         predicate_basis,
+        completion,
         loss_evidence,
         binding_inner,
         preferred_vector_snapshot,
@@ -767,10 +793,7 @@ pub(crate) fn compute_completion_first_loss_and_decision(
 /// → build_authorization_context_v2(bundle, witness, measurement) → AuthorizationContextV2.
 ///
 /// **Production wiring Faz 8.** Engine state kullanmaz (free fn, self. = 0).
-#[allow(
-    dead_code,
-    reason = "Faz 8 production wiring / Commit 2 standalone test"
-)]
+/// **#100 Faz 8a:** allow(dead_code) kalktı — `commit_task_claim` production consumer.
 pub(crate) fn build_authorization_context_v2(
     bundle: VerifiedGateEvaluationBundleV2,
     witness_requirement: crate::authorization::CanonicalWitnessRequirementV2,

@@ -1029,13 +1029,9 @@ impl Workspace {
         let mut tmp_reg = InMemoryTaskRegistry::new();
         tmp_reg.insert(task.clone());
         let result = match self.engine_mut().commit_task_claim(
-            osp_core::engine::TaskCommitInput::new(
-                &claim,
-                &omega,
-                &tmp_reg as &dyn TaskResolver,
-                target,
-                loss_before,
-            ),
+            // #100 Faz 8a: target/loss_before kalktı — V2 evaluator artifact'tan
+            // derive eder (skalerler yalnız MD-2 observer telemetry'sinde yaşıyor).
+            osp_core::engine::TaskCommitInput::new(&claim, &omega, &tmp_reg as &dyn TaskResolver),
         ) {
             Ok(osp_core::engine::EngineCommitResult::Evaluated { result: r, .. }) => r,
             Ok(osp_core::engine::EngineCommitResult::Held {
