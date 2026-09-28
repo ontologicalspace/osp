@@ -1276,13 +1276,13 @@ mod tests {
         let draft_claim = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
             &proposal,
             RawPosition::default(),
-            task.id,
+            &task,
             100,
             1,
         )
         .expect("draft (probe + structural Q4)");
         let native = engine
-            .measure_attempt_native_with_md1_shadow(&draft_claim, &proposal, &task)
+            .measure_attempt_native_with_md1_shadow(&draft_claim, &task)
             .expect("native measurement");
         let claim = draft_claim
             .finalize(native.authority())

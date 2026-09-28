@@ -2245,13 +2245,13 @@ fn commit_invalid_mixed_case(
     let draft = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
         &case.proposal,
         osp_core::coords::RawPosition::default(),
-        case.task.id,
+        &case.task,
         100,
         1,
     )
     .expect("draft (probe + structural Q4) başarılı olmalı");
     let native = engine
-        .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
+        .measure_attempt_native_with_md1_shadow(&draft, &case.task)
         .expect("native measurement başarılı olmalı");
     let finalized = draft
         .finalize(native.authority())

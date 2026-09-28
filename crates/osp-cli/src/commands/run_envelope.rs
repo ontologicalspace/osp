@@ -4,14 +4,16 @@
 //! versioned JSON envelope olarak sunar — result kind, attempts, evidence (before/after
 //! measured positions + gate/mutation/completion decisions).
 //!
-//! ## #96 MD-2 cutover — iki-eksen authority vocabulary
+//! ## #96 MD-2 + #95-A MD-1 cutover — iki-eksen authority vocabulary
 //!
-//! `execution_measurement`: `subject_authority: "affected_nodes"` (legacy family
-//! label; #95-A'da değeri `"task_scope"`a çevrilir), `provenance_authority:
-//! "engine_native_per_axis"`, `provenance_native: true`; deprecated `authority`
-//! alias yalnız provenance mirror'i (#100'e kadar). Navigator ölçümü artık
-//! engine-native per-axis (`measure_attempt_native_with_md1_shadow` — opaque
-//! token). Analyze envelope'taki `analyzer_axis_specific` provenance'dan ayrıdır.
+//! `execution_measurement`: `subject_authority: "task_scope"` (**#95-A subject
+//! cutover** — canonical task predicate scope; pre-#95-A değer
+//! `"affected_nodes"` idi), `provenance_authority: "engine_native_per_axis"`
+//! (#96 — bu eksen sabit), `provenance_native: true`; deprecated `authority`
+//! alias yalnız provenance mirror'i (#100'e kadar). Navigator ölçümü
+//! engine-native per-axis + task-scope subject
+//! (`measure_attempt_native_with_md1_shadow`). Analyze envelope'taki
+//! `analyzer_axis_specific` provenance'dan ayrıdır.
 
 #![allow(
     dead_code,
@@ -132,12 +134,12 @@ pub struct CliRunMeta {
 /// V1 execution measurement metadata — **#96 MD-2 iki-eksen authority vocabulary**
 /// (PR #124 review P2-tur1: MD-1/MD-2 eksenleri tek string'de ezilmez).
 ///
-/// - `subject_authority`: ölçüm subject'inin kaynağı — **#96'da girer** (legacy
-///   authority-family label `"affected_nodes"`; literal subject set DEĞİL — gerçek
-///   V1 subject `derive_v1_legacy_measurement_subject()`'in ordered union'ıdır:
-///   affected_nodes ∪ unseen removed_edges.from). **#95-A yalnız değerini**
-///   `"task_scope"`a çevirir.
-/// - `provenance_authority`: ölçüm provenance'ı — #96 ile `"engine_native_per_axis"`.
+/// - `subject_authority`: ölçüm subject'inin kaynağı — **#96'da girdi** (legacy
+///   `"affected_nodes"`), **#95-A (MD-1 subject cutover) ile değeri
+///   `"task_scope"`** — canonical task predicate scope (task neyin ölçüleceğini
+///   söyler; `affected_nodes` advisory impact metadata'dir, authority DEĞİL).
+/// - `provenance_authority`: ölçüm provenance'ı — #96 ile `"engine_native_per_axis"`
+///   (#95-A BU EKSENE DOKUNMAZ).
 /// - `provenance_native`: #96 ile `true`.
 /// - `authority`: **deprecated alias — yalnız `provenance_authority`'yi mirror eder**
 ///   (pre-#96 `legacy_projected_v1` → post-#96 `engine_native_per_axis`; #95-A
@@ -156,10 +158,11 @@ pub struct CliExecutionMeasurement {
 }
 
 impl CliExecutionMeasurement {
-    /// **#96 MD-2 cutover:** engine-native per-axis provenance authority.
+    /// **#96 MD-2 cutover + #95-A MD-1 subject cutover:** engine-native per-axis
+    /// provenance + canonical task-scope subject authority.
     pub fn engine_native_per_axis() -> Self {
         Self {
-            subject_authority: "affected_nodes",
+            subject_authority: "task_scope",
             provenance_authority: "engine_native_per_axis",
             provenance_native: true,
             authority: "engine_native_per_axis",
@@ -302,11 +305,13 @@ mod tests {
         assert_eq!(v["run"]["execution_mode"], "harness");
         assert_eq!(v["run"]["witness_mode"], "harness_auto_approve");
         assert_eq!(v["run"]["task_source"], "harness_task_file");
-        // **#96 MD-2 iki-eksen vocabulary:** her eksen kendi alanında; deprecated
-        // `authority` alias yalnız provenance mirror (pre-#96: legacy_projected_v1).
+        // **#96 iki-eksen + #95-A subject cutover:** subject_authority artık
+        // "task_scope" (canonical task predicate scope; pre-#95-A:
+        // "affected_nodes" — tarihsel); deprecated `authority` alias yalnız
+        // provenance mirror (pre-#96: legacy_projected_v1).
         assert_eq!(
             v["execution_measurement"]["subject_authority"],
-            "affected_nodes"
+            "task_scope"
         );
         assert_eq!(
             v["execution_measurement"]["provenance_authority"],

@@ -745,15 +745,16 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 continue;
             }
 
-            // 4. **#96 MD-2 (plan v4-FİNAL):** Draft — probe Claim + Q4 STRUCTURAL
-            //    validation tek adımda (pub shared boundary `task_measurement`;
-            //    claim_id tek inkrement; placeholder raw — ölçüm henüz YOK).
-            //    Structural Q4 fallible measurement'tan ÖNCE (Q4-vs-measurement
-            //    precedence: Q4-invalid + measurement-failing → daima SyntaxViolation).
+            // 4. **#96 MD-2 → #95-A (MD-1):** Draft — probe Claim + Q4 STRUCTURAL
+            //    validation + **canonical task scope capture** tek adımda (pub shared
+            //    boundary `task_measurement`; claim_id tek inkrement; placeholder raw —
+            //    ölçüm henüz YOK). Structural Q4 fallible scope/measurement'tan ÖNCE
+            //    (Q4-vs-measurement precedence: Q4-invalid + scope/measurement-failing
+            //    → daima SyntaxViolation).
             let draft = match crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
                 &proposal,
                 RawPosition::default(),
-                task_id,
+                &task,
                 agent,
                 claim_id_counter,
             ) {
@@ -809,17 +810,29 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     ));
                     continue;
                 }
+                Err(crate::task_measurement::ClaimDraftError::TaskSubjectScope(e)) => {
+                    // **#95-A (MD-1):** task subject scope türetilemedi (Module scope /
+                    // heterojen / empty — TerminalTaskDeclaration family). Shared
+                    // disposition tablosuyla maplenir: terminal SystemFailure — budget
+                    // yok, LLM retry yok (agent task tanımını düzeltemez).
+                    return NavigatorResult::SystemFailure(format!(
+                        "task subject scope derivation failed (disposition={:?}): {e}",
+                        crate::task_measurement::measurement_failure_disposition(&e)
+                    ));
+                }
             };
             claim_id_counter += 1;
 
-            // 5. **#96 MD-2:** Native measurement — tek `BoundMeasurementSession`
-            //    (authority token + md1_shadow). Legacy subject engine-internal
-            //    derivation; `loss_before`/`target` DOKUNULMAZ (running scalar — #97).
+            // 5. **#96 MD-2 → #95-A:** Native measurement — tek
+            //    `BoundMeasurementSession` (authority token + md1_shadow);
+            //    subject = canonical task scope (proposal param YOK — affected_nodes
+            //    authority producer'ın erişim yüzeyinden fiziksel çıktı).
+            //    `loss_before`/`target` DOKUNULMAZ (running scalar — #97).
             //    Fallible → 17-varyant disposition tablosu (v4-FİNAL; navigator+MCP
             //    ortak helper `task_measurement::measurement_failure_disposition`).
             let native = match self
                 .engine
-                .measure_attempt_native_with_md1_shadow(&draft, &proposal, &task)
+                .measure_attempt_native_with_md1_shadow(&draft, &task)
             {
                 Ok(n) => n,
                 Err(e) => {
@@ -1326,6 +1339,36 @@ mod tests {
         )
     }
 
+    /// **#95-A:** task scope Node(1) çözülebilir olsun diye node 1 içeren
+    /// D1 fixture engine'i (make_engine + izole node 1 — coupling 0, test
+    /// semantiği korunur: subject artık task scope'tur, affected değil).
+    fn make_engine_with_node1() -> SpaceEngine {
+        let mut space = Space::default();
+        space.nodes.insert(
+            1,
+            Node {
+                id: 1,
+                kind: NodeKind::Module,
+                mass: 100.0,
+                ..Default::default()
+            },
+        );
+        use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+        let cs = CoordinateSystem::default_raw_five(
+            crate::coords::MetricSource::Scip,
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(6.0),
+            WitnessDepthAxis::from_witness(0.3, 5),
+        )
+        .unwrap();
+        SpaceEngine::new(
+            space,
+            cs,
+            VisionVector::default(),
+            EngineConfig::default_calibrated(),
+        )
+    }
+
     // 7. mock_llm_returns_scripted_proposals_in_order
     #[test]
     fn mock_llm_returns_scripted_proposals_in_order() {
@@ -1433,7 +1476,7 @@ mod tests {
         resolver.insert(task);
         // Sadece 1 proposal ver → maneuver limit'e ulaşmadan LlmError (NoMoreProposals).
         let mock = MockLlmClient::new(vec![proposal_with_coupling(0.82)]);
-        let mut engine = make_engine();
+        let mut engine = make_engine_with_node1();
         let mut evidence = vec![];
         let mut nav = AgentNavigator {
             llm: &mock,
@@ -1487,7 +1530,7 @@ mod tests {
         let mut resolver = InMemoryTaskRegistry::new();
         resolver.insert(task);
         let mock = MockLlmClient::new(vec![proposal_with_coupling(0.82); 2]);
-        let mut engine = make_engine();
+        let mut engine = make_engine_with_node1();
         let mut evidence = vec![];
         let mut nav = AgentNavigator {
             llm: &mock,
@@ -1541,7 +1584,7 @@ mod tests {
         // Not: compute_raw_from_delta mock engine'de gerçek coupling vermez; bu test
         // yapısını doğrular (evidence doluyor, loop çalışıyor). D2'de gerçek measure.
         let mock = MockLlmClient::new(vec![proposal_with_coupling(0.6); 5]);
-        let mut engine = make_engine();
+        let mut engine = make_engine_with_node1();
         let mut evidence = vec![];
         let mut nav = AgentNavigator {
             llm: &mock,
@@ -1717,11 +1760,12 @@ mod tests {
     fn commit_task_claim_runs_q5b_predicate_gate() {
         let mut engine = make_real_engine();
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(coupling_task(1, 0.55, TaskPolicy::default()));
+        let task = coupling_task(1, 0.55, TaskPolicy::default());
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
-        let commit_token = characterization_carrier(&engine, &claim, measured);
+        let commit_token = characterization_carrier(&engine, &claim, &task, measured);
         let result = engine.commit_task_claim(TaskCommitInput::new(
             &commit_token,
             &omega,
@@ -1783,7 +1827,7 @@ mod tests {
         // measured'ı threshold'un dışına koyalım. En temizi: coupling Le 0.10,
         // measured 0.40 > 0.10 → Unsatisfied → NotCompleted.
         let task = coupling_task(1, 0.10, policy);
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new()); // boş → Held
@@ -1806,7 +1850,7 @@ mod tests {
         let space_digest_before =
             crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
         let t_c_before = engine.t_c();
-        let commit_token = characterization_carrier(&engine, &claim, measured.clone());
+        let commit_token = characterization_carrier(&engine, &claim, &task, measured.clone());
         let result = engine.commit_task_claim(TaskCommitInput::new(
             &commit_token,
             &omega,
@@ -1905,7 +1949,8 @@ mod tests {
             maneuver_limit: 5,
             allow_progress_checkpoint: true,
         };
-        resolver.insert(coupling_task(1, 0.10, policy));
+        let task = coupling_task(1, 0.10, policy);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
@@ -1916,7 +1961,7 @@ mod tests {
             w: 0.5,
             v: 0.3,
         };
-        let commit_token = characterization_carrier(&engine, &claim, measured.clone());
+        let commit_token = characterization_carrier(&engine, &claim, &task, measured.clone());
         let result = engine.commit_task_claim(TaskCommitInput::new(
             &commit_token,
             &omega,
@@ -1961,9 +2006,11 @@ mod tests {
         let mut engine = make_real_engine();
         let resolver = InMemoryTaskRegistry::new();
         let claim = test_claim_with_task(1, None, 0.40);
+        // Standalone claim — PermissionDenied fence'ten ÖNCE düşer; scope önemsiz.
+        let task = coupling_task(1, 0.55, TaskPolicy::default());
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
-        let commit_token = characterization_carrier(&engine, &claim, measured);
+        let commit_token = characterization_carrier(&engine, &claim, &task, measured);
         let result = engine.commit_task_claim(TaskCommitInput::new(
             &commit_token,
             &omega,
@@ -2011,6 +2058,7 @@ mod tests {
     fn characterization_carrier(
         engine: &SpaceEngine,
         claim: &Claim,
+        task: &Task,
         measured: ProvenancedRawPosition,
     ) -> crate::task_measurement::FinalizedNativeTaskClaim {
         use crate::authorization::{
@@ -2022,7 +2070,16 @@ mod tests {
         let revision = engine.current_space_view_revision().unwrap();
         let ctx = MeasurementInputContext::try_from(engine.coord_system()).unwrap();
         let input_digest = MeasurementInputDigest::compute(&ctx).unwrap();
-        let subject = claim.delta_nodes.iter().map(|n| n.id).collect();
+        // **#95-A:** characterization carrier subject = canonical TASK scope
+        // (commit-time MD-1 fence ile hizalı). Invalid-declaration fixture'ları
+        // (empty predicate set vb.) fence'ten ÖNCE TaskValidation ile düştüğü
+        // için scope karşılaştırılmaz — türetilemeyenlerde delta-ids fallback.
+        let subject = crate::measurement::canonical_task_subject_scope(task).unwrap_or_else(|_| {
+            crate::measurement::CanonicalSubjectScope::try_new(
+                claim.delta_nodes.iter().map(|n| n.id).collect(),
+            )
+            .expect("fallback canonical scope (delta ids unique)")
+        });
         crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
             claim.clone(),
             measured,
@@ -2042,11 +2099,12 @@ mod tests {
     fn commit_test(
         engine: &mut SpaceEngine,
         claim: &Claim,
+        task: &Task,
         resolver: &dyn TaskResolver,
         omega: &crate::witness::WitnessSet,
         measured: ProvenancedRawPosition,
     ) -> Result<crate::engine::EngineCommitResult, crate::engine::EngineCommitError> {
-        let carrier = characterization_carrier(engine, claim, measured);
+        let carrier = characterization_carrier(engine, claim, task, measured);
         engine.commit_task_claim(TaskCommitInput::new(
             &carrier,
             omega,
@@ -2062,13 +2120,14 @@ mod tests {
         let mut engine = make_real_engine();
         let task = invalid_task_empty_predicate_set(1);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let result = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -2093,7 +2152,7 @@ mod tests {
         let mut engine = make_real_engine();
         let task = invalid_task_empty_predicate_set(1);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         // computed_raw çok yüksek (θ bound aşar) — ama validate_for_commit önce çalışır.
         let claim = test_claim_with_task(1, Some(1), 0.95);
         let omega = crate::witness::WitnessSet::new(Vec::new());
@@ -2101,6 +2160,7 @@ mod tests {
         let result = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -2118,13 +2178,14 @@ mod tests {
         let mut engine = make_real_engine();
         let task = invalid_task_empty_predicate_set(1);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let result = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -2142,13 +2203,14 @@ mod tests {
         let mut engine = make_real_engine();
         let task = invalid_task_empty_predicate_set(1);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let result = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -2162,7 +2224,7 @@ mod tests {
         let mut engine = make_real_engine();
         let task = invalid_task_empty_predicate_set(1);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         // HarnessAutoApprove witness — ama witness hiç çağrılmamalı.
         let omega = crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0);
@@ -2170,6 +2232,7 @@ mod tests {
         let result = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -2190,13 +2253,14 @@ mod tests {
 
         let task = invalid_task_empty_predicate_set(1);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new());
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let _ = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -2226,13 +2290,14 @@ mod tests {
         let policy = TaskPolicy::default();
         let task = coupling_task(1, 0.55, policy);
         let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let omega = crate::witness::WitnessSet::new(Vec::new()).with_quorum(0, 0.0);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let result = commit_test(
             &mut engine,
             &claim,
+            &task,
             &resolver as &dyn TaskResolver,
             &omega,
             measured,
@@ -3670,12 +3735,13 @@ mod tests {
 
         // Task + claim + measured hazırla (AcceptAsCompleted yolu — authorization üretilir).
         let mut resolver = crate::trajectory::InMemoryTaskRegistry::new();
-        resolver.insert(coupling_task(1, 0.55, TaskPolicy::default()));
+        let task = coupling_task(1, 0.55, TaskPolicy::default());
+        resolver.insert(task.clone());
         let claim = test_claim_with_task(1, Some(1), 0.40);
         let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
         let omega = crate::witness::WitnessSet::new(Vec::new());
 
-        let commit_token = characterization_carrier(&engine, &claim, measured);
+        let commit_token = characterization_carrier(&engine, &claim, &task, measured);
         let result = engine.commit_task_claim(TaskCommitInput::new(
             &commit_token,
             &omega,

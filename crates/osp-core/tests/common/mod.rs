@@ -2470,13 +2470,13 @@ pub fn evaluate_v2_candidate_case(
     let draft = osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
         &case.proposal,
         osp_core::coords::RawPosition::default(),
-        case.task.id,
+        &case.task,
         100,
         1,
     )
     .expect("V2 draft");
     let v2_native = engine
-        .measure_attempt_native_with_md1_shadow(&draft, &case.proposal, &case.task)
+        .measure_attempt_native_with_md1_shadow(&draft, &case.task)
         .expect("V2 native measurement");
     let finalized = draft
         .finalize(v2_native.authority())

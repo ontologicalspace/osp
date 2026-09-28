@@ -775,7 +775,7 @@ impl Workspace {
         &mut self,
         proposal: &DeltaProposal,
         task: &Task,
-        task_id: TaskId,
+        _task_id: TaskId,
     ) -> Result<JsonValue, String> {
         use osp_core::coords::RawPosition;
         use osp_core::witness::WitnessSet;
@@ -796,18 +796,39 @@ impl Workspace {
             }));
         }
 
-        // 1. **#96 MD-2 (plan v4-FİNAL):** Draft — probe Claim + Q4 STRUCTURAL
-        //    validation tek adımda (pub shared boundary `osp_core::task_measurement`;
-        //    Q4 logic KOPYALANMAZ — tek truth). Structural Q4 fallible measurement'tan
-        //    ÖNCE (Q4-vs-measurement precedence — yarış testi MCP için de pinli).
+        // 1. **#96 MD-2 → #95-A (MD-1):** Draft — probe Claim + Q4 STRUCTURAL
+        //    validation + canonical task scope capture tek adımda (pub shared
+        //    boundary `osp_core::task_measurement`; Q4 logic KOPYALANMAZ — tek
+        //    truth). Structural Q4 fallible scope/measurement'tan ÖNCE
+        //    (Q4-vs-measurement precedence — yarış testi MCP için de pinli).
         let draft = match osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
             proposal,
             RawPosition::default(),
-            task_id,
+            task,
             1,
             1,
         ) {
             Ok(d) => d,
+            Err(osp_core::task_measurement::ClaimDraftError::TaskSubjectScope(e)) => {
+                // **#95-A (MD-1):** task scope türetilemedi — TerminalTaskDeclaration
+                // (agent task tanımını düzeltemez). Shared disposition ile terminal
+                // SystemFailure JSON (attempt_outcome fabrication YOK).
+                use osp_core::task_measurement::measurement_failure_disposition;
+                let disposition = measurement_failure_disposition(&e);
+                return Ok(serde_json::json!({
+                    "system_failure": {
+                        "class": "NativeMeasurementFailed",
+                        "disposition": format!("{disposition:?}"),
+                        "retryable": false,
+                    },
+                    "apply_target": "NotApplied",
+                    "loss_after": null,
+                    "measured_after": null,
+                    "message": format!(
+                        "task subject scope derivation failed (disposition={disposition:?}): {e}"
+                    ),
+                }));
+            }
             Err(e) => {
                 return Ok(serde_json::json!({
                     "attempt_outcome": {
@@ -834,7 +855,7 @@ impl Workspace {
         //    fabricate EDİLMEZ.
         let native = match self
             .engine_mut()
-            .measure_attempt_native_with_md1_shadow(&draft, proposal, task)
+            .measure_attempt_native_with_md1_shadow(&draft, task)
         {
             Ok(n) => n,
             Err(e) => {

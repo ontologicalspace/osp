@@ -24,7 +24,7 @@ use crate::coords::RawPosition;
 use crate::engine::EngineCommitError;
 use crate::measurement::NativeLegacySubjectMeasurement;
 use crate::space::{Edge, EdgeKind, Node, NodeId};
-use crate::trajectory::TaskId;
+use crate::trajectory::{Task, TaskId};
 use crate::witness::{AgentId, Claim, ClaimId, Intent};
 
 /// Claim build hatası (navigator.rs'ten taşındı — davranış aynen).
@@ -229,38 +229,49 @@ pub enum ClaimDraftError {
     Build(ClaimBuildError),
     /// `EngineCommitError::SyntaxViolation` — engine Q4 truth yüzeyi aynen.
     Syntax(EngineCommitError),
+    /// **#95-A (MD-1):** `canonical_task_subject_scope(task)` başarısız
+    /// (Module scope / heterojen / empty — TerminalTaskDeclaration family).
+    /// Navigator/MCP shared disposition tablosuyla mapler (terminal — retry
+    /// YOK). İsim bilinçli dar (reviewer tur-3 P2): her `MeasurementError`
+    /// task-declaration DEĞİLDİR — yalnız subject-scope türetimi.
+    TaskSubjectScope(crate::measurement::MeasurementError),
 }
 
-/// **#96 (plan v4-FİNAL + PR #124 review tur-2 P1):** Probe Claim + Q4 STRUCTURAL
-/// validation — tek adımda + current proposal'ın **legacy subject binding digest'i**
-/// (private capture; `Claim` `affected_nodes` taşımaz — proposal identity'sinin
-/// yaşadığı tek nokta bu draft'tır).
+/// **#96 (plan v4-FİNAL + PR #124 review tur-2 P1) → #95-A (MD-1 subject
+/// cutover):** Probe Claim + Q4 STRUCTURAL validation + **canonical task
+/// subject scope binding capture** — tek adımda.
 ///
 /// Type-level TOCTOU kapanışı: `finalize` YALNIZ `computed_raw`/`Intent` enjekte
-/// eder; structural fields + `claim_id` AYNI object'ten gelir. İki bağımsız
-/// `build_claim_from_proposal` çağrısı (probe + final) arasında derleyici
-/// garantisi olmaz — bu tip o boşluğu kapatır.
+/// eder; structural fields + `claim_id` AYNI object'ten gelir.
 ///
-/// **Subject binding (tur-2 P1):** `finalize(&token)` draft'ın capture ettiği
-/// `LegacySubjectBindingDigest` ile token'ınkini karşılaştırır — aynı structural
-/// delta + farklı `affected_nodes` artifact mix'i `LegacySubjectBindingMismatch`
-/// ile reddedilir (raw parity bağımsız kanıt DEĞİLDİR: finalize raw'ı token'dan
-/// enjekte eder).
+/// **Subject binding (#95-A sonrası semantik):** draft'ın capture ettiği
+/// `LegacySubjectBindingDigest` **canonical task predicate scope**'un
+/// (=`canonical_task_subject_scope(task)`) digest'idir; `finalize(&token)`
+/// token'ın taşıdığı ile karşılaştırır — draft×token subject identity binding
+/// (`LegacySubjectBindingMismatch`). *(Fiziksel "legacy" adı #95-B'ye kadar
+/// kalır — pre-#95-A'da proposal-affected-union binding'anı taşırdı.)*
+/// `affected_nodes` subject authority DEĞİLDİR (advisory impact hint — MD-1).
 ///
-/// Sıra (plan v4 Bölüm 1): `try_new` (probe + structural) → engine derives
-/// legacy subject → native measurement → `finalize(&token)` → Q4 final-raw
-/// finite → `commit_task_claim` (structural + final-raw defensively repeat).
+/// Sıra: `try_new` (probe + Q4 structural + scope capture) → engine native
+/// measurement (task scope subject) → `finalize(&token)` → Q4 final-raw finite
+/// → `commit_task_claim` (MD-1 subject fence + 5-fence defensively repeat).
 pub struct StructurallyValidatedClaimDraft {
     claim: Claim,
+    /// **#95-A:** canonical task scope binding digest'i (field adı legacy —
+    /// fiziksel yeniden adlandırma #95-B).
     legacy_subject_binding: crate::measurement::LegacySubjectBindingDigest,
 }
 
 impl StructurallyValidatedClaimDraft {
     /// Probe Claim oluştur (placeholder `computed_raw` — ölçüm henüz YOK, raw
-    /// finite-check BU aşamada yapılmaz) + Q4 structural validation.
+    /// finite-check BU aşamada yapılmaz) + Q4 structural validation + **task
+    /// subject scope binding capture**.
     ///
     /// `claim_id` tek inkrement sözleşmesi: probe ve final Claim AYNI id'yi
     /// taşır (finalize yeni claim üretmez, mevcut object'i tüketir).
+    ///
+    /// Sıra kontratı: Q4 structural ÖNCE (structural-invalid + scope-invalid
+    /// çiftinde Q4 kazanır — epistemik precedence korunur), sonra scope.
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
@@ -268,18 +279,20 @@ impl StructurallyValidatedClaimDraft {
     pub fn try_new(
         proposal: &DeltaProposal,
         placeholder_raw: RawPosition,
-        task_id: TaskId,
+        task: &Task,
         agent: AgentId,
         claim_id: ClaimId,
     ) -> Result<Self, ClaimDraftError> {
-        let claim = build_claim_from_proposal(proposal, placeholder_raw, task_id, agent, claim_id)
+        let claim = build_claim_from_proposal(proposal, placeholder_raw, task.id, agent, claim_id)
             .map_err(ClaimDraftError::Build)?;
         validate_claim_structure(&claim).map_err(ClaimDraftError::Syntax)?;
-        // **tur-2 P1:** current proposal'ın legacy subject binding'i — effective
-        // measure set (producer ile aynı helper) üzerinden, private capture.
-        let legacy_subject_binding = crate::measurement::LegacySubjectBindingDigest::compute(
-            &effective_legacy_measure_set(proposal, &claim.delta_nodes),
-        );
+        // **#95-A (MD-1):** subject authority = canonical task predicate scope.
+        // Tek truth free fn — engine authority lane + commit fence aynı
+        // fonksiyondan türetir; draft buradan private capture eder.
+        let subject_scope = crate::measurement::canonical_task_subject_scope(task)
+            .map_err(ClaimDraftError::TaskSubjectScope)?;
+        let legacy_subject_binding =
+            crate::measurement::LegacySubjectBindingDigest::compute(subject_scope.member_ids());
         Ok(Self {
             claim,
             legacy_subject_binding,
@@ -353,18 +366,22 @@ impl FinalizedNativeTaskClaim {
     /// sealed carrier üretir — YALNIZ `#[cfg(test)]` unit test'lerde (engine.rs,
     /// navigator.rs). External crate'ler (integration tests) erişemez (`pub(crate)`).
     /// Authority tipi forge edilemez dışarıdan.
+    ///
+    /// **#95-A:** subject parametresi `CanonicalSubjectScope` (vec yerine —
+    /// token içsel temsili ile hizalı; duplicate/noncanonical test girdisi
+    /// construction'da reddedilir).
     #[cfg(test)]
     pub(crate) fn new_test_with_measured(
         claim: Claim,
         measured: crate::coords::MeasuredRawPosition,
-        legacy_subject_ids: Vec<u64>,
+        subject_scope: crate::measurement::CanonicalSubjectScope,
         delta_digest: crate::measurement::MeasurementDeltaDigest,
         base_revision: crate::authorization::SpaceViewRevision,
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
     ) -> Self {
         let measurement = crate::measurement::NativeLegacySubjectMeasurement::new(
             measured,
-            legacy_subject_ids,
+            subject_scope,
             delta_digest,
             base_revision,
             measurement_input_digest,
@@ -913,9 +930,162 @@ mod tests {
             }],
             ..Default::default()
         };
-        let err =
-            StructurallyValidatedClaimDraft::try_new(&proposal, RawPosition::default(), 1, 1, 1)
-                .unwrap_err();
+        // Q4 precedence: geçerli task scope'lu task ile bile structural Q4
+        // hatası ÖNCE yüzeye çıkar (scope türetiminden önce).
+        let task = test_task_with_node_scope(1);
+        let err = StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            1,
+            1,
+        )
+        .unwrap_err();
         assert!(matches!(err, ClaimDraftError::Syntax(_)));
+    }
+
+    /// **#95-A:** scope türetimi hataları — draft aşamasında `TaskSubjectScope`
+    /// (Q4 BAŞARILI olduktan sonra). Üç aile: Module / heterojen / empty.
+    #[test]
+    fn draft_try_new_rejects_underivable_task_subject_scope() {
+        // (a) Module scope → SubjectScopeResolutionFailed.
+        let module_task = test_task_with_module_scope("core");
+        let err = StructurallyValidatedClaimDraft::try_new(
+            &test_valid_proposal(),
+            RawPosition::default(),
+            &module_task,
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ClaimDraftError::TaskSubjectScope(
+                crate::measurement::MeasurementError::SubjectScopeResolutionFailed(_)
+            )
+        ));
+
+        // (b) Heterojen scope'lar → HeterogeneousPredicateScopes.
+        let mut hetero = test_task_with_node_scope(1);
+        hetero
+            .target_predicate_set
+            .predicates
+            .push(crate::trajectory::WeightedPredicate {
+                predicate: crate::trajectory::MetricPredicate {
+                    metric: crate::trajectory::PredicateAxis::Coupling,
+                    operator: crate::trajectory::ComparisonOp::Le,
+                    threshold: 1.0,
+                    scope: crate::trajectory::PredicateScope::Node(2),
+                    required_source: None,
+                    tolerance: 0.0,
+                },
+                weight: None,
+            });
+        let err = StructurallyValidatedClaimDraft::try_new(
+            &test_valid_proposal(),
+            RawPosition::default(),
+            &hetero,
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ClaimDraftError::TaskSubjectScope(
+                crate::measurement::MeasurementError::HeterogeneousPredicateScopes { .. }
+            )
+        ));
+
+        // (c) Boş predicate set → EmptySubjectScope.
+        let mut empty = test_task_with_node_scope(1);
+        empty.target_predicate_set.predicates.clear();
+        let err = StructurallyValidatedClaimDraft::try_new(
+            &test_valid_proposal(),
+            RawPosition::default(),
+            &empty,
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ClaimDraftError::TaskSubjectScope(
+                crate::measurement::MeasurementError::EmptySubjectScope
+            )
+        ));
+    }
+
+    /// **#95-A Q4-precedence:** structural-invalid + scope-failing çiftinde Q4
+    /// KAZANIR (scope hatası gözlemlenmez).
+    #[test]
+    fn draft_try_new_q4_syntax_precedes_scope_failure() {
+        use crate::space::EdgeKind;
+        let proposal = DeltaProposal {
+            new_edges: vec![crate::agent::NewEdgeSpec {
+                from: 1,
+                to: 1, // structural Q4 ihlali
+                kind: EdgeKind::Imports,
+            }],
+            ..Default::default()
+        };
+        let module_task = test_task_with_module_scope("core"); // scope da fail ederdi
+        let err = StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &module_task,
+            1,
+            1,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ClaimDraftError::Syntax(_)),
+            "Q4 önce — scope hatası değil: {err:?}"
+        );
+    }
+
+    fn test_valid_proposal() -> DeltaProposal {
+        DeltaProposal {
+            new_nodes: vec![crate::agent::NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }],
+            affected_nodes: vec![1],
+            ..Default::default()
+        }
+    }
+
+    fn test_task_with_node_scope(node: u64) -> Task {
+        Task {
+            id: 1,
+            milestone_id: 1,
+            label: "node-scope test task".into(),
+            target_predicate_set: crate::trajectory::PredicateSet {
+                mode: crate::trajectory::PredicateMode::All,
+                predicates: vec![crate::trajectory::WeightedPredicate {
+                    predicate: crate::trajectory::MetricPredicate {
+                        metric: crate::trajectory::PredicateAxis::Coupling,
+                        operator: crate::trajectory::ComparisonOp::Le,
+                        threshold: 10.0,
+                        scope: crate::trajectory::PredicateScope::Node(node),
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                }],
+                preferred_vector: None,
+            },
+            policy: crate::trajectory::TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: crate::trajectory::TaskStatus::Pending,
+        }
+    }
+
+    fn test_task_with_module_scope(name: &str) -> Task {
+        let mut task = test_task_with_node_scope(1);
+        task.target_predicate_set.predicates[0].predicate.scope =
+            crate::trajectory::PredicateScope::Module(name.to_string());
+        task
     }
 }
