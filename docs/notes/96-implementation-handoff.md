@@ -40,6 +40,15 @@ review: onaylanabilir, P2+P3'ler düzeltildi, thread'ler resolve edildi). #95-B 
 
 ## #95-B W1-W8 stage planı (bağımlılık sırasıyla; her stage commit + yeşil test)
 
+> **Yürütme sırası düzeltmesi (implementasyon sırasında, W1 başlarken):** engine
+> `md1_shadow` düşürmeden ÖNCE tüketiciler kalkmalı (observer `native.md1_shadow()`
+> çağırıyor — engine-önce sıra ağacı kırar). Uygulama sırası:
+> **E1** navigator+MCP observer çağrıları → **E2** wire sidecar alanları + drift/sidecar
+> testleri + engine observer testi (`:8979` session-verify testi) → **E3** q92 disposal
+> (onaylı) → **E4** modül silme → **E5** engine `md1_shadow` düşürme + fn rename +
+> cross-pin silme + `TaskScopeNativeMaterial` (yalnız engine'de — MD-3 kullanmıyor,
+> doğrulandı) → **E6/E7/E8** = W6/W7/W8 (isimler, `_task_id`, kabul).
+
 - **W1 engine:** `NativeAttemptMeasurement`'dan `md1_shadow` alanı düşür; fn
   `measure_attempt_native_with_md1_shadow` → `measure_attempt_native` (imza aynı,
   yalnız dönüş bundle'ı); `measure_md1_shadow_in_session` + cross-pin testleri
