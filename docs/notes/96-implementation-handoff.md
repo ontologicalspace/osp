@@ -1,8 +1,10 @@
-# Handoff — #97 MD-3 Baseline Availability (TAMAMLANDI — PR açıldı) / #95-B kaydı
+# Handoff — #97 MD-3 Baseline Availability (MERGED) / #95-B kaydı
 
-**Tarih:** 2026-09-28 (S3+S4 oturumu). **#97 S1-S4 TAMAM** — branch
-`feat/97-md3-baseline-availability` (main `fb995fb` üzerinden), 7 commit push'landı,
-her aşama yeşil (40 suite / 0 fail / clippy+fmt temiz). **PR açıldı** (bkz. `gh pr list`).
+**Tarih:** 2026-09-28 (S3+S4 oturumu). **#97 S1-S4 TAMAM — PR #130 SQUASH-MERGE
+`0409f3d` (main'de; branch silindi), issue #97 CLOSED/COMPLETED.** Merge öncesi üç
+round review (round-1 P2 encapsulation + P3'ler → round-2 approve + karar kaydı matris
+notu `17ab8e2` → round-3 kesin onay); tüm aşamalar tam parity ile yeşildi. Sonraki iş:
+**#100 Faz 8a engine cutover** — kickoff: `docs/notes/100-kickoff.md`.
 
 ## Oturum nasıl başlamalı
 
