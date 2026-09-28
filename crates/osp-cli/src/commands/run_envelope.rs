@@ -247,7 +247,6 @@ mod tests {
             mutation_decision: mutation,
             token_cost: TokenCost::default(),
             duration_ms: 10,
-            provenance_authority_drift: None,
         }
     }
 

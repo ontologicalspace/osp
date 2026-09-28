@@ -145,6 +145,16 @@ reject (bilinçli epoch; #95-B W3 emsali — karar notu stage içinde face-face 
 Faz 8-P2 karakterizasyon KORPUSU (manifest + test dosyaları) dokunulmaz — tarihsel
 görgü tanıkları; sadece production observer gider.
 
+**TD-6 wire-yönü karar notu (S3 uygulandı — #95-B W3 emsali):**
+
+| Yüzey | Serde karakteri | Kaldırma etkisi | Karar |
+|---|---|---|---|
+| `TrajectoryEvidence` (trajectory.rs) | derive; `deny_unknown_fields` YOK; alan `#[serde(default)]` Option | İki yön de kabul (eski reader yeni kaydı default-None; yeni reader eski kaydı ignore) | Sorun yok — direkt kaldırıldı |
+| `PendingAuthorization` (durable record) | custom Deserialize + `deny_unknown_fields` (INV-T9 strict wire) | **Yeni reader eski kaydı unknown-field reject eder** | **Bilinçli epoch ilerlemesi** — reason `engine-cutover (#100)`; mevcut durable kayıtlar yalnız dogfood Temp fixture'ları (yeniden üretilebilir), production deployment yok (#95-B W3 tablosuyla aynı gerçeklik) |
+| `RevisionRequired` (durable record) | custom Deserialize strict (aynı aile) | Aynı yön | Aynı karar |
+| MCP response JSON | additive (error semantiği değişmemişti) | Geri alma non-breaking | Kaldırıldı |
+| Digest güvenliği | alan hiçbir digest preimage'ine girmiyordu (test pinliydi) | — | Epoch ilerlemesi authorization identity'yi DEĞİŞTİRMEZ; yalnız eski kayıtların okunabilirliğini kapatır |
+
 **TD-7 — `PredicateGate` üretimden silinir; karakterizasyon V1 lane test-lokal olur:**
 `PredicateGate`/`PredicateGateInput`/`PredicateGateOutput` trajectory.rs'ten silinir
 (observer S-i'inde önce gider — tek production çağrıcı kalmaz). tests/common V1 reference
