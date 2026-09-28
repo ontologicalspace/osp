@@ -208,14 +208,51 @@ getireceği değer değişimleri `engine-cutover (#100)` reason'ıyla regoldenle
 
 ## Kabul checklist (issue #100)
 
-- [ ] `commit_task_claim` V2 authorization consumer (legacy PredicateGate üretimden silik)
-- [ ] V1 compatibility projection'lar tamamen kaldırılmış (uniform-Scip reference lane,
-      DefaultFallback, provenanced_from_raw, observer, alias)
-- [ ] Case 2/3 + etkilenen golden'lar expected semantic-change regolden (tarihsel bağ)
-- [ ] Q5/predicate/policy güncellemeleri sınıflandırılmış (yukarıdaki 3 sınıf + kayıt)
-- [ ] INV-T4 (ve bağlantılı INV-T3 notu) planned→implemented; INV-T6/T8/T9 #97'den
-      implemented — cutover cümleleri güncel
-- [ ] Tüm Faz 8-P2 characterization testleri yeni V2 path ile yeşil
+- [x] `commit_task_claim` V2 authorization consumer (S2 — `evaluate_task_gate_v2` +
+      `build_authorization_context_v2` + V1 wire projection; `PredicateGate` üretimden
+      silik — S4)
+- [x] V1 compatibility projection'lar tamamen kaldırılmış (S3 observer + uniform-Scip
+      reference + sidecar'lar; S5 `provenanced_from_raw` + DefaultFallback
+      `compute_raw_from_delta`/`try_` cfg(test)+lokal kopyalar + deprecated `authority`
+      alias)
+- [x] Case 2/3 + etkilenen golden'lar expected semantic-change regolden (tarihsel bağ):
+      Case 2/3 production parity #95-A'dan (`subject-cutover`); #100 semantik
+      değişimleri (derived loss_before sınıfı 1; NoPreferredVector→Reject sınıfı 2 —
+      `commit_no_preferred_vector_accept_improvement_rejects` pin'i; INV-T6 native
+      sınıfı 3 — davranış korundu) test pin'leri + bu doküman TD-4 sınıflandırmasıyla
+      kayıtlı; faz8-p2 manifest digests etkilenmedi (guard yeşil — builder digest'ler
+      loss otoritesinden bağımsız)
+- [x] Q5/predicate/policy güncellemeleri sınıflandırılmış (TD-4'teki 3 sınıf)
+- [x] INV-T4 planned→implemented (#96+#100); INV-T3 MD-1 notu güncellendi (silinmiş
+      modül atıfı kalktı); INV-T6/T8/T9 #97'den implemented — karar kaydı cümleleri
+      güncellendi
+- [x] Tüm Faz 8-P2 characterization testleri yeni V2 path ile yeşil (V2 lane artık
+      gerçek V2 commit yolu; V1 lane test-lokal non-authoritative evaluator)
+
+## Teslim kaydı (S0-S6, 2026-09-28)
+
+- `fae8bff` S0 kickoff (bu doküman) + #97 merge kaydı
+- `3eedd69` S1 token typed baseline (`NativeSubjectMeasurement.baseline`; partition
+  measure_task_delta before-path ile aynı; trybuild re-bless)
+- `03498b5` S2 engine cutover (commit + approve V2 zinciri; `verify_task_measurement_
+  binding` artifact rekonstrüksiyonu + outer proof; `TaskCommitInput` target/loss_before
+  fiziksel kaldırım; INV-T6 düşürme bloğu V2 native; wire projection `project_wire_
+  authorization_context`; single-producer guard pin `reassemble_from_verified_parts`)
+- `0ffb17d` S3 MD-2 observer fiziksel kaldırım (−884 satır; wire-yön face-face notu
+  yukarıda — durable strict yüzeylerde bilinçli epoch)
+- `574874b` S4 PredicateGate silinimi (shared core pub; V1 referans evaluator
+  test-lokal; Faz 3 verifier + epoch makinemesi cfg(test))
+- `4f32007` S5 V1 projeksiyon silinimi (provenanced_from_raw; DefaultFallback;
+  bootstrap Placeholder damgası; alias; doc'lar)
+- S6 kabul: spec INV-T3/T4 + karar kaydı güncellemeleri + bu kayıt + CI parity
+
+**Kabul notları:** (1) `AuthorizationReceiptV2`/persistence-write-V2 (Faz 8 plan
+notundaki ileri bakış) bilinçli olarak BU issue dışı — wire frozen ilkesi; ayrı karar.
+(2) `classify_baseline_availability` cfg(test)'e indi — partition tek truth ölçüm anı
+(#131 P3-4 ikinci üretim sorunu yapısal kapandı; karakterizasyon eşdeğerlik pin'i
+S1 testinde `measure_task_delta.before()` parity üzerinden mevcut). (3) osp-desktop
+onarıldı (CI dışıydı — bonus). (4) #131 kalan maddeleri (RuleViolation onay-yolu testi,
+per-tool pin, BaselineChanged erişilebilirlik) etkilenmedi — açık kalır.
 
 ## Ortam notları (Windows)
 

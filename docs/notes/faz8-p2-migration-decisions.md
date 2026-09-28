@@ -1,6 +1,8 @@
 # Faz 8-P2 Migration Decisions
 
-**Status:** Accepted (Faz 5 closure — semantic decisions; implementation pending)
+**Status:** Accepted (Faz 5 closure — semantic decisions). **Implementation TAMAMLANDI** —
+MD-1 (#95-A/#95-B), MD-2 (#96 + #100), MD-3 (#97); Faz 8a engine cutover (#100) ile
+compatibility kodu fiziksel kaldırıldı (2026-09).
 **Decision date:** 2026-07-29
 **Evidence baseline:** PR #85 (P2-0A+B characterization), PR #91 (#87-A policy fixture),
 PR #93 (#87-B Q5 exact theta), Issue #92 (subject-authority → raw → Q5 follow-up)
@@ -28,7 +30,7 @@ Issue'lar kararın kanıt ve uygulama geçmişidir, kararın kendisi değildir.
 | Karar | Normatif hedef | Compatibility (geçici) | Cutover |
 |---|---|---|---|
 | **MD-1** Subject | task scope authority | Yol 1 compat producer (affected_nodes) | **#95-A TAMAMLANDI (2026-08)** — authority cutover; cleanup #95-B |
-| **MD-2** Provenance | engine-native per-axis | V1 uniform Scip projection (yalnız reference — #100 fiziksel kaldırım) | **TAMAMLANDI (#96)** — engine-internal cutover yapıldı |
+| **MD-2** Provenance | engine-native per-axis | ~~V1 uniform Scip projection~~ (**kaldırıldı — #100**) | **TAMAMLANDI (#96 + #100)** — engine cutover + fiziksel kaldırım |
 | **MD-3** Baseline Policy | typed Unavailable + fail-closed | V1 DefaultFallback (legacy) | policy implementation (#97) |
 
 Deployment sırası: Normatif karar sırası MD-1 → MD-2 → MD-3'tür (nedensel bağımlılık);
@@ -336,8 +338,10 @@ kararla eklenir; #96 kapanışını bloklamaz.
 4. **Native provenance authoritative** (#88 + dual-evaluation kanıtı sonrası). **TAMAMLANDI
    (W2-W4, #96): navigator + MCP native flow'a cut over; uniform-Scip yalnız reference
    projection.**
-5. **Compatibility kaldırma** (Faz 8a temizlik). **AÇIK — #100** (`uniform_scip_reference_
-   projection` fiziksel kaldırım + V1 lane).
+5. **Compatibility kaldırma** (Faz 8a temizlik). **TAMAMLANDI — #100 (2026-09)**:
+   `uniform_scip_reference_projection` + `provenance_authority.rs` observer modülü +
+   sidecar alanları fiziksel kaldırıldı; commit `evaluate_task_gate_v2` tüketiyor
+   (`provenanced_from_raw` üretimden silindi — bkz. #100 teslim kaydı).
 
 ### MD-2 implementation (Tamamlandı — #96; PR #125 W1-W7 + PR #126 W6/W8 + W9)
 
@@ -369,7 +373,7 @@ kararla eklenir; #96 kapanışını bloklamaz.
   üretilmez); agent-correctable → retry yüzeyi GERÇEK gate kararı ile
   (`RejectedByVision`/`RejectedByRule`).
 - **CLI vocabulary (W7):** run envelope `execution_measurement`: `subject_authority:
-  "affected_nodes"` (legacy — #95-A flip pending), `provenance_authority:
+  "task_scope"` (#95-A cutover tamamlandı), `provenance_authority:
   "engine_native_per_axis"`, `provenance_native: true`, deprecated `authority` mirror (#100'e
   kadar).
 - **Authority boundary kabul kanıtı (W6/W8, PR #126):** trybuild compile-fail ×6 (carrier
@@ -525,7 +529,7 @@ cold-start bypass kapalıdır (engine.rs PartialNew kolu yorumuyla hizalı).
 - **`Allow` cold-start policy varyantı:** Yeni node ekleyen her task'ın karşılaştırmasız
   progress üretmesine dönüşür. Boolean `allow_cold_start` belirsiz.
 
-### Type model (planned)
+### Type model (implemented #97)
 
 ```rust
 enum ColdStartPolicy {
@@ -545,7 +549,7 @@ enum MutationDecision {
 
 `PartialNewSubject` için gelecekte ayrı `PartialBaselinePolicy` enum (Suspend/RequireRebaselining).
 
-### Required implementation (spec planned, implementation ayrı)
+### Required implementation (implemented #97; spec INV-T6/T8/T9 implemented)
 
 - `ColdStartPolicy` typed enum + default Disallow.
 - `AcceptAsColdStart` append-only canonical tag + serde backward compat.
@@ -618,7 +622,9 @@ Bu decision note kabul edildikten sonra (aynı PR veya hemen sonrası):
   bağlantısı).
 - **MD-2 normative note:** provenance authority = engine-native per-axis (INV-T4 bağlantısı).
 
-Status: `planned — MD-x accepted, implementation pending`. Production Rust koduna dokunulmaz.
+Tarihsel not (Faz 5 closure anındaki durum): `planned — MD-x accepted, implementation
+pending`. Production Rust koduna dokunulmaz. **Güncel durum:** tüm MD extension'lar
+implemented (INV-T6/T8/T9 #97; INV-T4 #96+#100) — spec'in ilgili bölümlerine bakınız.
 
 ## Follow-up issues
 
@@ -634,8 +640,10 @@ Status: `planned — MD-x accepted, implementation pending`. Production Rust kod
 - **#96** MD-2 implementation — navigator native measurement migration + singleton
   fast-path + digest parity + Completed-loop exact pin (review B-3 P1-3 versioned JSON
   envelope). **TAMAMLANDI.**
-- **#100** Faz 8a engine cutover — MD-2 compatibility fiziksel kaldırımı dahil
-  (`uniform_scip_reference_projection`, V1 lane, deprecated `authority` alias absorbe).
+- **#100** Faz 8a engine cutover — **TAMAMLANDI (2026-09)**: commit_task_claim/approve
+  V2 typed evaluator; MD-2 observer + uniform-Scip + `provenanced_from_raw` +
+  DefaultFallback + deprecated `authority` alias fiziksel kaldırıldı. Teslim kayıt:
+  `docs/notes/100-kickoff.md` (S0-S6).
 - **#103** digest incident supersession record (W9'da transferred).
 
 ## Faz 8 test-project Completed-loop — V1 compatibility harness deferral
