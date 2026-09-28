@@ -56,8 +56,11 @@ commit_task_claim
 
 Silinir: `subject_authority.rs` observer + `SubjectAuthorityDriftObservation` +
 `produce_legacy_subject_measurement`/`derive_v1_legacy_measurement_subject` +
-`effective_legacy_measure_set` + MD-1 sidecar alanları (wire üç-epoch typed rejection
-yalnız durable wires) + MD-1 comparison testleri + legacy fiziksel isimler.
+`effective_legacy_measure_set` (çağrıcısız — PR #128 review P3 notu) + MD-1 sidecar
+alanları (wire üç-epoch typed rejection yalnız durable wires) + MD-1 comparison
+testleri + legacy fiziksel isimler + `osp_mcp` `submit_delta_attempt`'ın kullanılmayan
+`_task_id: TaskId` parametresi (PR #128 review P3 — task kimliği `task` nesnesinden
+türetiliyor; imza değişikliği cleanup PR'ına ait).
 Kalır: uniform-Scip reference projection (#96'nın evi — #100), `compute_raw_from_delta`
 (#100 machinery), MD-3 yüzeyleri (#97). "Compatibility code tamamen kaldırılmış"
 kriteri **MD-1 compatibility code** olarak okunur.
