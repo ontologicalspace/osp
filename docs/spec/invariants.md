@@ -453,7 +453,7 @@ fail-closed `Reject`. `PartialNewSubject` cold-start override paylaşmaz. (Statu
 (#97)** — `EngineCommitResult::SuspendedColdStart` (Held'den AYRI otorite: operatör ≠ witness;
 navigator `AwaitingColdStartApproval` terminal — retry/evidence/mutation pin'li) + onay akışı
 `approve_cold_start`: in-flight suspension kaydı (kalıcı DEĞİL — `PendingAuthorization` persist
-modeline benşeMEz; motor ömrüyle sınırlı) + onay anında deterministik revalidation (scope fence
+modeline benzeMEz; motor ömrüyle sınırlı) + onay anında deterministik revalidation (scope fence
 + 5-fence stale + MD-3 sınıflandırma/policy/completion + Q6 — operatör onayı güvenlik çekirdeğini
 bypass ETMEZ) + operatör otoritesiyle witness-bypass Sandbox apply + `ColdStartAcceptanceEvidence`
 (8 alan; `improvement_claimed` ctor sabiti `false`); testler `md3_approve_cold_start_*` +

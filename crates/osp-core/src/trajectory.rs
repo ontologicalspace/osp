@@ -598,7 +598,7 @@ pub enum PredicateFailurePolicy {
 /// iken sistemin davranışı. Karar matrisi: `faz8-p2-migration-decisions.md` MD-3.
 ///
 /// - `Disallow` (**default**) — fail-closed `Reject`; synthetic numeric baseline'a
-///   dönüüp progress kanıtı üretilemez (INV-T6 extension).
+///   dönüşüp progress kanıtı üretilemez (INV-T6 extension).
 /// - `RequireOperatorApproval` — improvement değerlendirmesi YAPILMAZ;
 ///   `Suspended(ColdStartAuthorizationRequired)` (INV-T9 extension — mutation yok,
 ///   maneuver budget tüketilmez, agent retry yok) → operator onayı →

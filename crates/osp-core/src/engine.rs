@@ -1353,29 +1353,34 @@ impl ColdStartAuthorizationId {
 /// SABİT `false` — cold-start kabulü improvement iddiası TAŞIMAZ (INV-T6
 /// extension: Unavailable baseline altında progress kanıtlanamaz; Sandbox
 /// uygulaması "operator-authorized isolated application" semantiğidir).
+///
+/// **Encapsulation (PR #130 review P2):** alanlar `pub(crate)` + motor-özel
+/// ctor — struct literal kurulumu crate dışında TEMSİL EDİLEMEZ (aynı disiplin
+/// `ColdStartApprovalInput` ile). Dış crate okuma: `serde::Serialize` VEYA
+/// aşağıdaki pub accessor'lar.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ColdStartAcceptanceEvidence {
     /// Audit bağlamı — kanıtın hangi task/claim'e ait olduğu.
-    pub task_id: crate::trajectory::TaskId,
+    pub(crate) task_id: crate::trajectory::TaskId,
     /// Audit bağlamı — suspension'ın taşıdığı claim kimliği.
-    pub claim_id: crate::witness::ClaimId,
+    pub(crate) claim_id: crate::witness::ClaimId,
     /// 1/8 — onay anında motor tarafından yeniden sınıflandırılan typed neden
     /// (daima `AllMembersIntroducedByDelta`; diğerleri onay yoluna düşemez).
-    pub baseline_reason: crate::measurement::BaselineUnavailableReason,
+    pub(crate) baseline_reason: crate::measurement::BaselineUnavailableReason,
     /// 2/8 — ölçülen subject'in binding digest'i (token'dan — ikinci truth yok).
-    pub subject_digest: crate::measurement::SubjectBindingDigest,
+    pub(crate) subject_digest: crate::measurement::SubjectBindingDigest,
     /// 3/8 — ölçüm girdi bağlamı digest'i (5-fence verified proof'tan).
-    pub measurement_context_digest: crate::authorization::MeasurementInputDigest,
+    pub(crate) measurement_context_digest: crate::authorization::MeasurementInputDigest,
     /// 4/8 — ölçüm anı base space view revision (5-fence verified proof'tan).
-    pub base_space_view_revision: crate::authorization::SpaceViewRevision,
+    pub(crate) base_space_view_revision: crate::authorization::SpaceViewRevision,
     /// 5/8 — onayı tetikleyen politika anlık görüntüsü.
-    pub policy: crate::trajectory::ColdStartPolicy,
+    pub(crate) policy: crate::trajectory::ColdStartPolicy,
     /// 6/8 — onaylayan operatör.
-    pub operator_id: ColdStartOperatorId,
+    pub(crate) operator_id: ColdStartOperatorId,
     /// 7/8 — dış onay kaydı referansı.
-    pub authorization_id: ColdStartAuthorizationId,
+    pub(crate) authorization_id: ColdStartAuthorizationId,
     /// 8/8 — DAİMA `false` (ctor sabiti): improvement iddiası YOK.
-    pub improvement_claimed: bool,
+    pub(crate) improvement_claimed: bool,
 }
 
 impl ColdStartAcceptanceEvidence {
@@ -1404,6 +1409,47 @@ impl ColdStartAcceptanceEvidence {
             authorization_id,
             improvement_claimed: false,
         }
+    }
+
+    /// Okuma yüzeyi — INV-T6 invariant'ın programatik denetimi için.
+    pub fn improvement_claimed(&self) -> bool {
+        self.improvement_claimed
+    }
+
+    pub fn task_id(&self) -> crate::trajectory::TaskId {
+        self.task_id
+    }
+
+    pub fn claim_id(&self) -> crate::witness::ClaimId {
+        self.claim_id
+    }
+
+    pub fn baseline_reason(&self) -> &crate::measurement::BaselineUnavailableReason {
+        &self.baseline_reason
+    }
+
+    pub fn subject_digest(&self) -> crate::measurement::SubjectBindingDigest {
+        self.subject_digest
+    }
+
+    pub fn measurement_context_digest(&self) -> &crate::authorization::MeasurementInputDigest {
+        &self.measurement_context_digest
+    }
+
+    pub fn base_space_view_revision(&self) -> &crate::authorization::SpaceViewRevision {
+        &self.base_space_view_revision
+    }
+
+    pub fn policy(&self) -> crate::trajectory::ColdStartPolicy {
+        self.policy
+    }
+
+    pub fn operator_id(&self) -> &ColdStartOperatorId {
+        &self.operator_id
+    }
+
+    pub fn authorization_id(&self) -> &ColdStartAuthorizationId {
+        &self.authorization_id
     }
 }
 
@@ -1853,7 +1899,6 @@ impl SpaceEngine {
     /// 5. Q6 Rule (check_claim_rules)
     /// 6. MutationDecision → ApplyTarget (INV-T8: Reject→NotApplied, Progress→Checkpoint)
     /// 7. Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress ise — apply_delta)
-    /// 7. Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress ise — apply_delta)
     /// 8. TaskCommitResult (outcome + apply_target + witness)
     #[allow(
         clippy::result_large_err,
@@ -1998,6 +2043,15 @@ impl SpaceEngine {
                         // (`approve_cold_start`) carrier'ı buradan çeker. Kalıcı
                         // kayıt DEĞİL (PendingAuthorization'a benzeMEz); motor
                         // ömrüyle sınırlı.
+                        //
+                        // Sıralama notu (PR #130 review P3): askı Q6'dan ÖNCE
+                        // üretilir — pipeline gate sırası (Q5.b karar → MD-3
+                        // matrisi → Q6) tüm yollarda aynı kalır; kural ihlali
+                        // askıyı sessizce engellemez. Operatör kural ihlali
+                        // nedeniyle deterministik reddedilecek bir onaya davet
+                        // edilebilir; güvenlik onay anında kapanır (Q6
+                        // revalidation → `RuleViolation`, fail-closed — mutasyon
+                        // asla uygulanamaz).
                         self.suspended_cold_starts.insert(
                             input.claim.id,
                             SuspendedColdStartRecord {
@@ -2019,10 +2073,18 @@ impl SpaceEngine {
                         crate::trajectory::ColdStartPolicy::RequireOperatorApproval,
                         _,
                     ) => {
-                        // Matris: PartialNewSubject + herhangi policy → terminal
-                        // Reject. Cold-start override PAYLAŞILMAZ. Reason zaten
-                        // sınıflandırmada typed taşınıyor; decision Reject'e iner
-                        // (aşağıdaki INV-T6 düşürmesi kapsar).
+                        // Matris: PartialNewSubject + herhangi cold-start policy →
+                        // cold-start override YOK (override PAYLAŞILMAZ); reason
+                        // sınıflandırmada typed taşınır. Decision predicate
+                        // failure policy'sine göre iner: improvement iddiası
+                        // (AcceptAsProgress) aşağıdaki INV-T6 düşürmesiyle
+                        // Reject'e iner; StrictReject zaten Reject. NOT (PR #130
+                        // review P3): `PredicateFailurePolicy::OperatorApproval`
+                        // altında gate'in ürettiği legacy `RequireOperatorApproval`
+                        // kararı DÜŞÜRÜLMEZ (INV-T6 yalnız progress iddiasını
+                        // hedefler) — o akış MD-3 kapsamı dışında legacy
+                        // operator-approval yolunda devam eder; mutasyon/progress
+                        // iddiası üretmez, cold-start bypass kapalıdır.
                     }
                     _ => {}
                 }
@@ -9584,6 +9646,117 @@ v = 0.5
             !engine.space().nodes.contains_key(&10_000),
             "fail-closed — mutasyon YOK"
         );
+    }
+
+    /// **Fail-closed (PR #130 review P3 test-gap):** suspension task'ı ile
+    /// verilen task_id uyuşmuyorsa `TaskMismatch`; mutasyon YOK.
+    #[test]
+    fn md3_approve_cold_start_task_mismatch_fails_closed() {
+        use crate::engine::{
+            ColdStartApprovalError, ColdStartApprovalInput, ColdStartAuthorizationId,
+            ColdStartOperatorId,
+        };
+
+        let mut engine = md3_engine_user_vision();
+        let registry = md3_registry_require_operator();
+        let claim_id = md3_suspend_cold_start(&mut engine, &registry, 100);
+
+        let err = engine
+            .approve_cold_start(ColdStartApprovalInput::new(
+                7, // askı task 1'de — yanlış kimlikle onay denemesi
+                claim_id,
+                ColdStartOperatorId::new("op-alice").unwrap(),
+                ColdStartAuthorizationId::new("APR-97-1").unwrap(),
+                &registry as &dyn crate::trajectory::TaskResolver,
+            ))
+            .expect_err("task kimliği uyuşmuyor");
+        assert_eq!(
+            err,
+            ColdStartApprovalError::TaskMismatch {
+                suspended: 1,
+                presented: 7
+            }
+        );
+        assert!(!engine.space().nodes.contains_key(&10_000));
+    }
+
+    /// **Fail-closed (PR #130 review P3 test-gap):** askıdayken task scope'u
+    /// registry'de başka kümeye overwrite edilirse #95-A scope fence
+    /// `ScopeMismatch` üretir; mutasyon YOK.
+    #[test]
+    fn md3_approve_cold_start_scope_overwrite_fails_closed() {
+        use crate::engine::{
+            ColdStartApprovalError, ColdStartApprovalInput, ColdStartAuthorizationId,
+            ColdStartOperatorId,
+        };
+
+        let mut engine = md3_engine_user_vision();
+        let mut registry = md3_registry_require_operator();
+        let claim_id = md3_suspend_cold_start(&mut engine, &registry, 100);
+
+        // Registry overwrite: scope Node(1)'e (base'de mevcut) — token scope
+        // Node(10_000) ile uyuşmaz.
+        use crate::trajectory::TaskResolver as _;
+        let mut overwritten = registry.resolve(1).unwrap().clone();
+        overwritten.target_predicate_set.predicates[0]
+            .predicate
+            .scope = crate::trajectory::PredicateScope::Node(1);
+        registry.insert(overwritten);
+
+        let err = engine
+            .approve_cold_start(ColdStartApprovalInput::new(
+                1,
+                claim_id,
+                ColdStartOperatorId::new("op-alice").unwrap(),
+                ColdStartAuthorizationId::new("APR-97-1").unwrap(),
+                &registry as &dyn crate::trajectory::TaskResolver,
+            ))
+            .expect_err("scope drift — MD-1 fence");
+        assert!(matches!(err, ColdStartApprovalError::ScopeMismatch { .. }));
+        assert!(!engine.space().nodes.contains_key(&10_000));
+    }
+
+    /// **Fail-closed (PR #130 review P3 test-gap):** askıdayken predicate
+    /// threshold'ı Completed üretecek şekilde overwrite edilirse onay anı
+    /// completion revalidation'ı `CompletionStateChanged` üretir — cold-start
+    /// onayı anlamsızlaşmıştır; akış normal commit yoluna döner (orada
+    /// `AcceptAsCompleted` baseline'dan bağımsızdır — MD-3 rule 3).
+    #[test]
+    fn md3_approve_cold_start_completion_change_fails_closed() {
+        use crate::engine::{
+            ColdStartApprovalError, ColdStartApprovalInput, ColdStartAuthorizationId,
+            ColdStartOperatorId,
+        };
+        use crate::trajectory::PredicateCompletion;
+
+        let mut engine = md3_engine_user_vision();
+        let mut registry = md3_registry_require_operator();
+        let claim_id = md3_suspend_cold_start(&mut engine, &registry, 100);
+
+        // Registry overwrite: Coupling Le -1 → Le 10 (daima Completed).
+        use crate::trajectory::TaskResolver as _;
+        let mut overwritten = registry.resolve(1).unwrap().clone();
+        overwritten.target_predicate_set.predicates[0]
+            .predicate
+            .threshold = 10.0;
+        registry.insert(overwritten);
+
+        let err = engine
+            .approve_cold_start(ColdStartApprovalInput::new(
+                1,
+                claim_id,
+                ColdStartOperatorId::new("op-alice").unwrap(),
+                ColdStartAuthorizationId::new("APR-97-1").unwrap(),
+                &registry as &dyn crate::trajectory::TaskResolver,
+            ))
+            .expect_err("completion artık Completed — normal commit yolu");
+        assert_eq!(
+            err,
+            ColdStartApprovalError::CompletionStateChanged {
+                completion: PredicateCompletion::Completed
+            }
+        );
+        assert!(!engine.space().nodes.contains_key(&10_000));
     }
 
     /// **#95-A W4 — affected-irrelevance TAM YOL (executable theorem):** Δ

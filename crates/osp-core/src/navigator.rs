@@ -1171,12 +1171,14 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     };
                 }
                 MutationDecision::AcceptAsColdStart => {
-                    // **#97 MD-3:** soğuk başlatma Sandbox'a uygulandı — task
-                    // tamamlandı sayMAZ (improvement/completion iddiası yok),
-                    // baseline da kurulmadı (loss_before/current_measured
-                    // güncellenmez). Terminal rapor + yeni loop kontrolü S3'te
-                    // (approve_cold_start akışı) netleşir; navigator attempt
-                    // döngüsünde mevcut davranış: retry yok, loop devam etmez.
+                    // **#97 MD-3:** Savunma kolu — `commit_task_claim` bu kararı
+                    // `Evaluated` ile ÜRETMEZ (cold-start askıda `SuspendedColdStart`
+                    // döner; onay `approve_cold_start` ile navigator DIŞINDA
+                    // uygulanır → Sandbox, task tamamlanmış sayMAZ). Ulaşılırsa
+                    // `RequiresOperatorApproval` label'ı yanlış rapor eder —
+                    // unreachable eşlemesi bilinçli (PR #130 review P3 notu);
+                    // erişilebilir hale gelirse ayrı `NavigatorResult` varyantı
+                    // gerekir.
                     return NavigatorResult::RequiresOperatorApproval {
                         attempts: attempt_num,
                         last_outcome: outcome,
