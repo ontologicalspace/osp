@@ -8482,21 +8482,12 @@ pub enum PendingAuthorizationLoadError {
     EvidenceDigestMismatch,
     #[error("task_id mismatch: record={record}, basis={basis}")]
     TaskIdMismatch { record: u64, basis: u64 },
-    /// **#95 MD-1 P2-1 (EK review P1-2):** Sidecar observation parent record
-    /// kimliğine bound değil — MD-1 migration evidence'in yanlış task/claim'e
-    /// bağlanması fail-closed reddedilir (load + creation/verify path'leri).
-    #[error(
-        "subject-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
-    )]
-    SubjectAuthorityDriftIdentityMismatch {
-        record_task_id: u64,
-        record_claim_id: u64,
-        drift_task_id: u64,
-        drift_claim_id: u64,
-    },
-    /// **#96 MD-2 (PR review tur 5 P2):** Provenance sidecar için aynı fail-closed
-    /// sözleşme — yanlış isimle `SubjectAuthorityDriftIdentityMismatch` yeniden
-    /// kullanılmaz (sidecar ailesi observable ayrışır; diagnostic truth-surface).
+    // #95-B (E5): `SubjectAuthorityDriftIdentityMismatch` varyantı silindi — MD-1
+    // drift sidecar'ı E2'de kaldırıldıktan sonra üreticisi kalmadı (varyant
+    // dead-code; thiserror Display metni tarihçede).
+    /// **#96 MD-2 (PR review tur 5 P2):** Provenance sidecar için fail-closed
+    /// sözleşme — MD-2 diagnostic'i kendi typed varyantıyla observable kalır
+    /// (sidecar ailesi ayrışır; diagnostic truth-surface).
     #[error(
         "provenance-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
     )]
@@ -15597,11 +15588,11 @@ v = 0.5
         claim_id: u64,
     ) -> crate::provenance_authority::ProvenanceAuthorityDriftObservation {
         use crate::provenance_authority::{
+            LaneQ5Observation, Q5ObservationFailure, RawMeasurementObservation,
+        };
+        use crate::provenance_authority::{
             NativeLaneObservation, ProvenanceAuthorityDriftObservation,
             ProvenanceDownstreamObservation, ProvenanceNotReachedReason, ReferenceLaneObservation,
-        };
-        use crate::subject_authority::{
-            LaneQ5Observation, Q5ObservationFailure, RawMeasurementObservation,
         };
         let raw = RawMeasurementObservation {
             bits: [1, 2, 3, 4, 5],
@@ -15649,15 +15640,11 @@ v = 0.5
             ),
             "provenance sidecar kendi typed varyantıyla reddedilmeli; got: {err:?}"
         );
-        // Subject varyantı DEĞİL (isim ayrımı pinlenir).
-        assert!(
-            !matches!(
-                err,
-                crate::authorization::PendingAuthorizationLoadError::
-                SubjectAuthorityDriftIdentityMismatch { .. }
-            ),
-            "provenance yolu subject diagnostic adını kullanmaz"
-        );
+        // Subject varyantı DEĞİL (isim ayrımı pinlenir). #95-B (E5): subject tarafının
+        // `SubjectAuthorityDriftIdentityMismatch` varyantı üreticisiz kaldığı için
+        // silindi — bu yüzden "provenance yolu subject diagnostic adını kullanmaz"
+        // iddiası artık tip seviyesinde garanti (variant yok); pozitif matches!
+        // assertion'ı yukarıda intent'i korur.
 
         // Strict wire: matched record + mismatched provenance sidecar (claim=43)
         // → deserialize Err (custom Deserialize + deny_unknown_fields).

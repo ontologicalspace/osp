@@ -12,7 +12,7 @@
 //! (#96 — bu eksen sabit), `provenance_native: true`; deprecated `authority`
 //! alias yalnız provenance mirror'i (#100'e kadar). Navigator ölçümü
 //! engine-native per-axis + task-scope subject
-//! (`measure_attempt_native_with_md1_shadow`). Analyze envelope'taki
+//! (`measure_attempt_native`). Analyze envelope'taki
 //! `analyzer_axis_specific` provenance'dan ayrıdır.
 
 #![allow(

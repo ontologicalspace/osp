@@ -3,7 +3,8 @@
 //! Plan v4-FİNAL (Faz 8a, 2026-08-18): navigator da MCP de (ayrı crate) kullanacağı
 //! claim-projection + Q4-structural truth burada yaşar — MCP navigator
 //! implementation katmanına bağımlı OLMAZ (`legacy_compatibility_projection`'ın
-//! `subject_authority.rs`'e taşınmasındaki aynı layering gerekçesi) ve Q4 logic'i
+//! eski MD-1 modülüne taşınmasındaki aynı layering gerekçesi — o modül #95-B'de
+//! silindi) ve Q4 logic'i
 //! KOPYALANMAZ (tek truth source).
 //!
 //! İçerik:

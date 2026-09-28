@@ -9,7 +9,8 @@
 //! **Wire sözleşmesi (fabrication YOK — gözlenmeyen gate kararı gözlenmiş gibi
 //! sunulmaz):**
 //! - Gerçek structural Q4 (draft aşaması) → `RejectedBySyntax` attempt_outcome
-//!   (agent delta şeklini düzeltir; md1_subject_authority_sidecar test'inde pinli).
+//!   (agent delta şeklini düzeltir; tarihsel pin eski MD-1 sidecar test'indeydi —
+//!   test #95-B ön aşamalarında silindi).
 //! - Native measurement failure (terminal disposition) → `system_failure` JSON
 //!   (class + typed disposition + retryable=false); `attempt_outcome` YOK.
 //! - Retryable commit error (Syntax/Vision/Rule) → attempt_outcome ile GERÇEK

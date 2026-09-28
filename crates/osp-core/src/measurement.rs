@@ -1889,8 +1889,9 @@ impl EngineMeasurement {
 /// - Fiziksel "legacy" adı bilinçli olarak #95-B'ye kadar kalır (eksen
 ///   izolasyonu — isim değişikliği kozmetik ekseni bulandırır).
 ///
-/// `subject_authority::MeasurementSubjectDigest` bilinçli olarak KULLANILMAZ —
-/// o modül #95-B'de silinir; bu digest bağımsız yaşar.
+/// *(Tarihsel, pre-#95-B: eski MD-1 modülünün `MeasurementSubjectDigest`'i bilinçli
+/// olarak KULLANILMAZDI; o digest modülle birlikte #95-B'de silindi.)* Bu digest
+/// bağımsız yaşamaya devam eder.
 ///
 /// Construction property: token içinde `subject_scope.member_ids()`'den
 /// TÜRETİLİR (bağımsız ikinci truth YOK — `raw()`/`measured()` ilişkisiyle
@@ -1924,7 +1925,7 @@ impl LegacySubjectBindingDigest {
 // Plan v4-FİNAL: legacy subject (affected_nodes ordered union — #95-A'ya kadar
 // değişmez) üzerinde session-bound engine-native per-axis ölçümün authority
 // token'ı. Plain `MeasuredRawPosition` forgeability'sini kapatır: private fields
-// + tek üretici (`SpaceEngine::measure_attempt_native_with_md1_shadow`).
+// + tek üretici (`SpaceEngine::measure_attempt_native`).
 // EngineMeasurement DEĞİLDİR — task-scope binding yoktur (MD-1 = #95-A);
 // baseline yoktur (MD-3 = #97'nindir).
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1963,7 +1964,7 @@ pub struct NativeLegacySubjectMeasurement {
 }
 
 impl NativeLegacySubjectMeasurement {
-    /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native_with_md1_shadow`
+    /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native`
     /// çağırır (engine.rs). External construction kapalı (private fields).
     /// `legacy_subject_binding` ctor içinde `subject_scope.member_ids()`'den
     /// türetilir.

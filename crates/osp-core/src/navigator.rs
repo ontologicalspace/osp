@@ -146,11 +146,11 @@ impl LlmClient for MockLlmClient {
 // DeltaProposal → Claim + ProvenancedRawPosition bridge (boşluk #3, #7)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// **#95 MD-1 P2-1:** `derive_v1_legacy_measurement_subject` (V1 legacy subject tek
-// truth — #92) navigator.rs'ten `subject_authority` modülüne taşındı (MD-1
-// compatibility semantics'in tek evi; MCP'nin navigator implementation katmanına
-// bağımlılığı olmasın). Unit pin test'i de taşındı; tests/common integration
-// mirror'i dokunulmadı (dual pinning korunur).
+// **#95 MD-1 P2-1 (tarihsel):** `derive_v1_legacy_measurement_subject` (V1 legacy
+// subject tek truth — #92) navigator.rs'ten eski MD-1 compatibility modülüne
+// taşınmıştı; o modül #95-B'de (E4) silindi — fonksiyon ve unit pin test'i ile
+// birlikte kaldırıldı. tests/common integration mirror'i yerinde (dual pinning'in
+// o ayağı tarihçedir).
 
 // **#96 MD-2 (plan v4-FİNAL):** `build_claim_from_proposal` + `node_from_spec` +
 // `ClaimBuildError` navigator.rs'ten `task_measurement` modülüne taşındı (neutral
@@ -810,16 +810,14 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             claim_id_counter += 1;
 
             // 5. **#96 MD-2 → #95-A:** Native measurement — tek
-            //    `BoundMeasurementSession` (authority token + md1_shadow);
+            //    `BoundMeasurementSession` (authority token; MD-1 shadow lane
+            //    #95-B E5'te silindi);
             //    subject = canonical task scope (proposal param YOK — affected_nodes
             //    authority producer'ın erişim yüzeyinden fiziksel çıktı).
             //    `loss_before`/`target` DOKUNULMAZ (running scalar — #97).
             //    Fallible → 17-varyant disposition tablosu (v4-FİNAL; navigator+MCP
             //    ortak helper `task_measurement::measurement_failure_disposition`).
-            let native = match self
-                .engine
-                .measure_attempt_native_with_md1_shadow(&draft, &task)
-            {
+            let native = match self.engine.measure_attempt_native(&draft, &task) {
                 Ok(n) => n,
                 Err(e) => {
                     use crate::task_measurement::measurement_failure_disposition;
@@ -1177,9 +1175,10 @@ mod tests {
     use crate::vision::VisionVector;
     use crate::witness::{Claim, ClaimId, Intent};
 
-    // **#95 MD-1 P2-1:** `v1_legacy_subject_derivation_pinned_to_frozen_corpus_shapes`
-    // test'i fonksiyonla birlikte `subject_authority` modülüne taşındı (dual pinning
-    // korunur — integration mirror tests/common'da yerinde).
+    // **#95 MD-1 P2-1 (tarihsel):** `v1_legacy_subject_derivation_pinned_to_frozen_corpus_shapes`
+    // test'i fonksiyonla birlikte eski MD-1 modülüne taşınmış ve #95-B'de (E4) modülle
+    // birlikte silinmişti (dual pinning'in integration mirror ayağı tests/common'da
+    // yerinde).
 
     fn measured_pos(coupling: f64) -> ProvenancedRawPosition {
         provenanced_from_raw(

@@ -708,13 +708,12 @@ type EpochOperationResult<R> = Result<
 // #96 MD-2 (plan v4-FİNAL) — Native attempt measurement bundle tipleri
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// **#96 MD-2:** Tek-session native attempt ölçüm bundle'ı — authority token +
-/// geçici MD-1 task-scope shadow material'i (aynı session'dan; observer'ın kendi
-/// `measure_task_delta` çağrısı kalkar, "yalnız subject farkı" iddiası SAME
-/// context/session altında geçerli olur).
+/// **#96 MD-2:** Tek-session native attempt ölçüm bundle'ı — authority token,
+/// TEK `BoundMeasurementSession` altında. (#95-B E5: geçici MD-1 task-scope
+/// shadow lane'i kaldırıldı — cutover (#95-A) sonrası construction-parity
+/// witness'ı görevini tamamladı.)
 pub struct NativeAttemptMeasurement {
     authority: crate::measurement::NativeLegacySubjectMeasurement,
-    md1_shadow: Result<TaskScopeNativeMaterial, crate::subject_authority::V2MeasurementFailure>,
 }
 
 impl NativeAttemptMeasurement {
@@ -722,42 +721,18 @@ impl NativeAttemptMeasurement {
     pub fn authority(&self) -> &crate::measurement::NativeLegacySubjectMeasurement {
         &self.authority
     }
-    /// MD-1 shadow material (task scope, native). `Err` = fail-closed telemetry
-    /// sınıflandırması — authority lane'i etkilemez (transparency).
-    pub fn md1_shadow(
-        &self,
-    ) -> &Result<TaskScopeNativeMaterial, crate::subject_authority::V2MeasurementFailure> {
-        &self.md1_shadow
-    }
 }
 
 impl std::fmt::Debug for NativeAttemptMeasurement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeAttemptMeasurement")
             .field("authority", &self.authority)
-            .field("md1_shadow", &self.md1_shadow)
             .finish()
     }
 }
 
-/// MD-1 observer'ın V2 (task scope) lane material'i — canonical (sorted) subject
-/// ve native measured taşır; `measure_task_delta().after()` ile aynı semantiğe
-/// sahiptir (cross-pin test pinler: observer refactor'u #95 V2 ölçüm semantiğini
-/// sessizce zayıflatamaz).
-#[derive(Debug, Clone)]
-pub struct TaskScopeNativeMaterial {
-    subject_ids: Vec<NodeId>,
-    measured: crate::coords::MeasuredRawPosition,
-}
-
-impl TaskScopeNativeMaterial {
-    pub fn subject_ids(&self) -> &[NodeId] {
-        &self.subject_ids
-    }
-    pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
-        &self.measured
-    }
-}
+// #95-B (E5): `TaskScopeNativeMaterial` (MD-1 observer'ın V2 lane material'i)
+// silindi — tek tüketicisi MD-1 shadow lane'idir; observer E3'te kaldırıldı.
 
 /// **#96 MD-2 (plan v4 P0-tur3):** Commit-anı geçerlilik KANITI —
 /// `verify_native_legacy_measurement_binding` üretir (private ctor; yalnız engine).
@@ -2748,14 +2723,15 @@ impl SpaceEngine {
     //
     // EngineMeasurement DEĞİLDİR: baseline yok (MD-3 = #97). #95-A sonrası
     // measurement subject = canonical task predicate scope; provenance
-    // engine-native (#96 — değişmez). Tek BoundMeasurementSession: authority +
-    // MD-1 shadow AYNI captured snapshot altında (shadow #95-B'de silinir —
-    // cutover sonrası construction-parity witness).
+    // engine-native (#96 — değişmez). Tek BoundMeasurementSession: authority
+    // lane TEK captured snapshot altında. (#95-B E5: MD-1 shadow lane silindi —
+    // cutover sonrası construction-parity witness'ı görevini tamamladı.)
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// **#95-A (MD-1 subject cutover):** Canonical task scope üzerinde
-    /// session-bound native ölçüm — authority token + MD-1 shadow, TEK
-    /// `BoundMeasurementSession` altında. Provenance engine-native (#96).
+    /// session-bound native ölçüm — authority token TEK `BoundMeasurementSession`
+    /// altında. Provenance engine-native (#96). *(#95-B E5: MD-1 shadow lane'i
+    /// kaldırılınca ad kısaltıldı — eski tam ad tarihçe kayıtlarında.)*
     ///
     /// **Capability reduction (tur-3 P1-1):** `proposal` parametresi YOK —
     /// hypothetical structural truth yalnız sealed draft/claim'den, subject
@@ -2766,7 +2742,7 @@ impl SpaceEngine {
     /// Sözleşmeler:
     /// - **Subject authority:** `canonical_task_subject_scope(task)` (tek truth
     ///   — draft capture + commit MD-1 fence aynı fonksiyondan). Presence/
-    ///   unresolvable matrisi md1_shadow lane ile aynı.
+    ///   unresolvable matrisi `measure_task_delta` after-path ile aynı.
     /// - **Stale replay fence:** token `base_revision` ölçüm anında capture
     ///   edilir; commit-time `current == token.base_revision`. Aynı context'te
     ///   meşru yeniden sunum engellenmez.
@@ -2778,7 +2754,7 @@ impl SpaceEngine {
     ///   tarafından construction'da reddedilir; `EmptySubjectScope` /
     ///   `HeterogeneousPredicateScopes` / Module → typed MeasurementError.
     #[allow(clippy::result_large_err)]
-    pub fn measure_attempt_native_with_md1_shadow(
+    pub fn measure_attempt_native(
         &self,
         draft: &crate::task_measurement::StructurallyValidatedClaimDraft,
         task: &crate::trajectory::Task,
@@ -2805,14 +2781,14 @@ impl SpaceEngine {
             .current_space_view_revision()
             .map_err(|e| MeasurementError::RevisionComputationFailed { detail: e })?;
 
-        // 3. TEK session — authority + md1_shadow aynı captured state altında.
+        // 3. TEK session — authority ölçümü captured state altında.
         let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
         // 4. **#95-A (MD-1):** Subject authority — canonical task predicate
         //    scope (tek truth free fn; draft capture'ı ile hizalı — finalize
-        //    karşılaştırır). Unresolvable matrisi md1_shadow ile aynı (base +
-        //    delta-introduced'e karşı).
+        //    karşılaştırır). Unresolvable matrisi measure_task_delta after-path
+        //    ile aynı (base + delta-introduced'e karşı).
         let subject_scope = crate::measurement::canonical_task_subject_scope(task)?;
         let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
             claim.delta_nodes.iter().map(|n| n.id).collect();
@@ -2841,27 +2817,23 @@ impl SpaceEngine {
         for edge in &claim.delta_edges {
             hypothetical.insert_edge(*edge);
         }
-        // Hypothetical'ta subject mevcudiyeti (md1_shadow adım 8 pre-check ile aynı).
+        // Hypothetical'ta subject mevcudiyeti (measure_task_delta pre-check ile aynı).
         for &id in subject_scope.member_ids() {
             if !hypothetical.nodes.contains_key(&id) {
                 return Err(MeasurementError::SubjectMemberMissingAfterDelta { node_id: id });
             }
         }
 
-        // 6. Authority measured — native per-axis, session-bound, task scope.
+        // 5. Authority measured — native per-axis, session-bound, task scope.
         let measured =
             self.measured_centroid_in_session(&session, &hypothetical, subject_scope.member_ids())?;
 
-        // 7. MD-1 shadow — AYNI session'da bağımsız türetim; cutover sonrası
-        //    construction-parity witness (failure → telemetry sınıflandırma).
-        let md1_shadow = self.measure_md1_shadow_in_session(&session, &hypothetical, claim, task);
-
-        // 8. Session-sonu verify (authority + shadow ölçümleri aynı fences altında).
+        // 6. Session-sonu verify (authority ölçümü fences altında).
         session
             .verify_unchanged()
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
-        // 9. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
+        // 7. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
         let context =
             crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
                 .map_err(MeasurementError::MeasurementContext)?;
@@ -2872,8 +2844,8 @@ impl SpaceEngine {
             })?;
         let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)?;
 
-        // 10. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
-        //     subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
+        // 8. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
+        //    subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
         let authority = NativeLegacySubjectMeasurement::new(
             measured,
             subject_scope,
@@ -2883,61 +2855,12 @@ impl SpaceEngine {
             session.axis_epochs(),
         );
 
-        Ok(NativeAttemptMeasurement {
-            authority,
-            md1_shadow,
-        })
+        Ok(NativeAttemptMeasurement { authority })
     }
 
-    /// MD-1 shadow lane — `measure_task_delta`'nın after-path replikasyonu (aynı
-    /// session'dan): canonical subject derivation + unresolvable matrisi (base'e
-    /// karşı) + hypothetical'ta mevcudiyet + centroid. Failure'lar authority'yi
-    /// etkilemez; `map_v2_measurement_failure` telemetry sınıflandırması.
-    #[allow(
-        clippy::result_large_err,
-        reason = "MeasurementError inline (intentional — see measurement.rs layout decision); closure Err variant"
-    )]
-    fn measure_md1_shadow_in_session(
-        &self,
-        session: &crate::coords::BoundMeasurementSession<'_>,
-        hypothetical: &crate::space::Space,
-        claim: &Claim,
-        task: &crate::trajectory::Task,
-    ) -> Result<TaskScopeNativeMaterial, crate::subject_authority::V2MeasurementFailure> {
-        use crate::measurement::MeasurementError;
-
-        let run = || -> Result<TaskScopeNativeMaterial, MeasurementError> {
-            let subject = self.derive_task_subject_scope(task)?;
-            // Unresolvable matrisi (measure_task_delta adım 7 ile aynı — base'e karşı).
-            let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
-                claim.delta_nodes.iter().map(|n| n.id).collect();
-            let mut unresolvable: Vec<crate::space::NodeId> = Vec::new();
-            for &id in subject.member_ids() {
-                if !self.space.nodes.contains_key(&id) && !delta_introduced.contains(&id) {
-                    unresolvable.push(id);
-                }
-            }
-            if !unresolvable.is_empty() {
-                return Err(MeasurementError::SubjectMemberUnresolvable {
-                    missing: unresolvable,
-                });
-            }
-            // Hypothetical'ta mevcudiyet (measure_task_delta adım 8 pre-check).
-            for &id in subject.member_ids() {
-                if !hypothetical.nodes.contains_key(&id) {
-                    return Err(MeasurementError::SubjectMemberMissingAfterDelta { node_id: id });
-                }
-            }
-            let measured =
-                self.measured_centroid_in_session(session, hypothetical, subject.member_ids())?;
-            Ok(TaskScopeNativeMaterial {
-                subject_ids: subject.member_ids().to_vec(),
-                measured,
-            })
-        };
-
-        run().map_err(|e| crate::subject_authority::map_v2_measurement_failure(&e))
-    }
+    // #95-B (E5): `measure_md1_shadow_in_session` silindi — MD-1 shadow lane'i
+    // (measure_task_delta after-path replikasyonu + map_v2_measurement_failure
+    // telemetry sınıflandırması) kaldırıldı; authority lane tek üretim yoludur.
 
     /// **#96 MD-2 (plan v4 P0-tur3) — commit-anı geçerlilik kanıtı (5 kontrol):**
     ///
@@ -7956,82 +7879,18 @@ v = 0.5
         assert_eq!(direct.witness_depth.source, centroid.witness_depth.source);
     }
 
-    /// **#96 MD-2 (plan v4 W1 cross-pin — ZORUNLU):** md1_shadow material, gerçek
-    /// `measure_task_delta().after()` ile value bits + sources exact eşit — observer
-    /// refactor'u #95 V2 ölçüm semantiğini sessizce zayıflatamaz. Stable fixture:
-    /// iki çağrı arasında mutation yok.
-    #[test]
-    fn md2_native_attempt_md1_shadow_cross_pins_measure_task_delta_after() {
-        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
-        let task = md1_task_node1();
-        let proposal = md1_edge_proposal();
-        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal,
-            RawPosition::default(),
-            &task,
-            1,
-            1,
-        )
-        .unwrap();
-
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
-
-        // Karşılaştırma yüzeyi: production `measure_task_delta` (kendi session'ı).
-        let bound = crate::trajectory::TaskBoundClaim {
-            claim: draft.claim(),
-            task: &task,
-        };
-        let revision = engine.current_space_view_revision().unwrap();
-        let reference = engine.measure_task_delta(&bound, &revision, None).unwrap();
-
-        let shadow = bundle.md1_shadow().as_ref().unwrap();
-        let after = reference.after();
-        let bits = |m: &crate::coords::MeasuredRawPosition| {
-            [
-                m.coupling.value.to_bits(),
-                m.cohesion.value.to_bits(),
-                m.instability.value.to_bits(),
-                m.entropy.value.to_bits(),
-                m.witness_depth.value.to_bits(),
-            ]
-        };
-        assert_eq!(
-            bits(shadow.measured()),
-            bits(after),
-            "md1_shadow == measure_task_delta().after() value bits (f64 shadow={:?}, after={:?})",
-            shadow.measured().coupling.value,
-            after.coupling.value
-        );
-        assert_eq!(
-            shadow.measured().coupling.source,
-            after.coupling.source,
-            "sources exact (native per-axis)"
-        );
-        assert_eq!(shadow.measured().cohesion.source, after.cohesion.source);
-        assert_eq!(
-            shadow.measured().instability.source,
-            after.instability.source
-        );
-        assert_eq!(shadow.measured().entropy.source, after.entropy.source);
-        assert_eq!(
-            shadow.measured().witness_depth.source,
-            after.witness_depth.source
-        );
-        // Canonical (sorted) task scope subject.
-        assert_eq!(
-            shadow.subject_ids(),
-            reference.request().subject().member_ids(),
-            "shadow subject == canonical task scope member_ids"
-        );
-    }
+    // #95-B (E5): `md2_native_attempt_md1_shadow_cross_pins_measure_task_delta_after`
+    // testi silindi — MD-1 shadow lane kaldırıldı (authority lane'in
+    // `measure_task_delta().after()` ile subject/value-bits/sources eşdeğerliği
+    // artık doğrudan `canonical_task_subject_scope` tek truth'u tarafından garanti;
+    // tarihçe: #96 plan v4 W1 cross-pin, karar kaydı faz8-p2-migration-decisions.md
+    // MD-1 bölümü).
 
     /// **#95-A (MD-1 subject cutover):** authority subject = canonical task
     /// predicate scope — producer İÇİNDE türetilir (serbest Vec parametresi YOK;
     /// affected_nodes erişim yüzeyinden FİZİKSEL çıktı — producer imzasında
-    /// proposal YOK). Üç vaka + authority↔shadow construction-parity pin'i
-    /// (subject/bits/sources exact).
+    /// proposal YOK). Üç vaka. *(#95-B E5: authority↔shadow construction-parity
+    /// pin bloğu silindi — MD-1 shadow lane kaldırıldı.)*
     /// *(Historical pre-#95-A golden: legacy affected-union — reason: `subject-cutover (#95-A)`)*
     #[test]
     fn md95a_authority_subject_is_canonical_task_scope() {
@@ -8061,9 +7920,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
         assert_eq!(bundle.authority().legacy_subject_ids(), &[1u64]);
 
         // (b) **#95-A regolden:** affected [1] + removed_edges.from=9 → authority
@@ -8085,9 +7942,7 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle3 = engine
-            .measure_attempt_native_with_md1_shadow(&draft3, &task)
-            .unwrap();
+        let bundle3 = engine.measure_attempt_native(&draft3, &task).unwrap();
         assert_eq!(
             bundle3.authority().legacy_subject_ids(),
             &[1u64],
@@ -8111,58 +7966,8 @@ v = 0.5
             3,
         )
         .unwrap();
-        let bundle_fb = engine
-            .measure_attempt_native_with_md1_shadow(&draft_fb, &task)
-            .unwrap();
+        let bundle_fb = engine.measure_attempt_native(&draft_fb, &task).unwrap();
         assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[1u64]);
-
-        // **#95-A construction-parity pin (W2):** authority ↔ md1_shadow —
-        // subject/bits/sources exact eşit (cutover sonrası shadow bağımsız
-        // alternatif teori değil, construction-parity witness).
-        for bundle in [&bundle, &bundle3, &bundle_fb] {
-            let shadow = bundle
-                .md1_shadow()
-                .as_ref()
-                .expect("task-scope shadow başarılı olmalı (authority ile aynı scope)");
-            assert_eq!(
-                bundle.authority().legacy_subject_ids(),
-                shadow.subject_ids(),
-                "authority↔shadow subject parity"
-            );
-            let auth_bits = bundle.authority().raw();
-            let shadow_bits = shadow.measured().to_raw();
-            assert_eq!(
-                [
-                    auth_bits.x.to_bits(),
-                    auth_bits.y.to_bits(),
-                    auth_bits.z.to_bits(),
-                    auth_bits.w.to_bits(),
-                    auth_bits.v.to_bits(),
-                ],
-                [
-                    shadow_bits.x.to_bits(),
-                    shadow_bits.y.to_bits(),
-                    shadow_bits.z.to_bits(),
-                    shadow_bits.w.to_bits(),
-                    shadow_bits.v.to_bits(),
-                ],
-                "authority↔shadow value-bits parity"
-            );
-            let sources = |m: &crate::coords::MeasuredRawPosition| {
-                [
-                    m.coupling.source,
-                    m.cohesion.source,
-                    m.instability.source,
-                    m.entropy.source,
-                    m.witness_depth.source,
-                ]
-            };
-            assert_eq!(
-                sources(bundle.authority().measured()),
-                sources(shadow.measured()),
-                "authority↔shadow per-axis sources parity"
-            );
-        }
     }
 
     /// **#95-A (MD-1) — affected-irrelevance (finalize seviyesi):** aynı task
@@ -8197,14 +8002,10 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task).unwrap();
 
         // Structural delta aynı (affected digest'e girmez) — precondition.
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task).unwrap();
         assert_eq!(
             bundle_a.authority().delta_digest(),
             bundle_b.authority().delta_digest()
@@ -8272,12 +8073,8 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task_a)
-            .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task_b)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task_a).unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task_b).unwrap();
 
         // Precondition 1: structural delta aynı.
         assert_eq!(
@@ -8342,9 +8139,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task_a)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task_a).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
         // Registry overwrite: aynı task_id, FARKLI scope.
@@ -8415,9 +8210,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task_a)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task_a).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
         let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
@@ -8496,12 +8289,8 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task).unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task).unwrap();
 
         // (1) authority subject exact eşit (= task scope [2]).
         assert_eq!(
@@ -8602,7 +8391,7 @@ v = 0.5
 
     // #95-B: `md1_observer_preserves_axis_session_state` testi silindi — MD-1
     // comparison observer'ı kaldırıldı; axis session TCB sözleşmesi producer
-    // yolunda (`measure_attempt_native_with_md1_shadow` → `verify_unchanged`)
+    // yolunda (`measure_attempt_native` → `verify_unchanged`)
     // korunmaya devam ediyor (tarihçe: #95-A PR #128 + karar kaydı
     // faz8-p2-migration-decisions.md MD-1 bölümü).
 
@@ -8731,7 +8520,7 @@ v = 0.5
         // producer'ın TEK session'ı pre/post epoch verify ile mutating axis'i yakalar
         // (eski yüzey: yalnız observer V2 lane'i fail-closed idi; authority legacy
         // compute path session'sızdı. Re-anchor ile TCB güçlendi — reason note).
-        let result = engine.measure_attempt_native_with_md1_shadow(&draft, &task);
+        let result = engine.measure_attempt_native(&draft, &task);
         assert!(
             matches!(
                 result,
@@ -8871,9 +8660,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task).unwrap();
         let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
 
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
@@ -8884,9 +8671,7 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task).unwrap();
 
         // Precondition: farklı delta → farklı digest (senaryonun ta kendisi).
         assert_ne!(
@@ -8954,9 +8739,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle_a = engine_a
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
+        let bundle_a = engine_a.measure_attempt_native(&draft_a, &task).unwrap();
         let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
 
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
@@ -8967,9 +8750,7 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_b = engine_b
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_b = engine_b.measure_attempt_native(&draft_b, &task).unwrap();
 
         // Precondition: aynı delta (aynı proposal), farklı raw (farklı mass →
         // farklı centroid ölçümü).
@@ -9022,9 +8803,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
         assert!(
             engine
@@ -9103,7 +8882,7 @@ v = 0.5
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
+            .measure_attempt_native(&draft, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
@@ -9146,7 +8925,7 @@ v = 0.5
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
+            .measure_attempt_native(&draft, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
         let digest_at_measure = carrier.measurement().measurement_input_digest().clone();
@@ -9215,9 +8994,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
         let token = carrier.measurement();
 

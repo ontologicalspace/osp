@@ -2476,7 +2476,7 @@ pub fn evaluate_v2_candidate_case(
     )
     .expect("V2 draft");
     let v2_native = engine
-        .measure_attempt_native_with_md1_shadow(&draft, &case.task)
+        .measure_attempt_native(&draft, &case.task)
         .expect("V2 native measurement");
     let finalized = draft
         .finalize(v2_native.authority())

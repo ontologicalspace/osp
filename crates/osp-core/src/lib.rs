@@ -28,7 +28,8 @@ pub mod persistence;
 pub mod provenance_authority;
 pub mod rule;
 pub mod space;
-pub mod subject_authority;
+// #95-B (E4): `pub mod subject_authority;` silindi — MD-1 compatibility modülü
+// kaldırıldı; yaşayan paylaşılan lane tipleri provenance_authority.rs'de.
 pub mod task_bridge;
 pub mod task_measurement;
 pub mod time;

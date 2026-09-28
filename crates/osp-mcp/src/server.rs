@@ -845,18 +845,16 @@ impl Workspace {
             }
         };
 
-        // 2. **#96 MD-2:** Native measurement — tek session (authority token +
-        //    md1_shadow); legacy subject engine-internal derivation. `loss_before`
+        // 2. **#96 MD-2:** Native measurement — tek session (authority token;
+        //    MD-1 shadow lane #95-B E5'te silindi); legacy subject engine-internal
+        //    derivation. `loss_before`
         //    DOKUNULMAZ (current_measured sabit tohumdan — bootstrap authority
         //    ayrı migration; loss_before = gate girdisidir, değer değişmez).
         //    **P1-1 (review tur 5):** fallible → ortak typed mapper
         //    (`MeasurementFailureDisposition::agent_surface`) — navigator ile
         //    TEK ontology; system failure artık `RejectedBySyntax` diye
         //    fabricate EDİLMEZ.
-        let native = match self
-            .engine_mut()
-            .measure_attempt_native_with_md1_shadow(&draft, task)
-        {
+        let native = match self.engine_mut().measure_attempt_native(&draft, task) {
             Ok(n) => n,
             Err(e) => {
                 use osp_core::task_measurement::measurement_failure_disposition;
