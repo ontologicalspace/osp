@@ -1,23 +1,78 @@
-# Handoff — #95-B MD-1 Cleanup (E0-E8 TAMAMLANDI — PR #129 review/merge bekliyor)
+# Handoff — #97 MD-3 Baseline Availability (AKTİF — S1'den devam) / #95-B kaydı
 
-**Tarih:** 2026-09-28 (oturum sonu). #95-A **PR #128 MERGED** (squash `e3f44c8`).
+**Tarih:** 2026-09-28 (oturum devamı). **#95-B PR #129 MERGED** (squash `fb995fb`;
+iki bağımsız review, merge-ready; P3 DOMAIN_SEPARATOR guard notu `f94c89c` ile
+işlendi). **#97 aktif:** branch `feat/97-md3-baseline-availability` (main `fb995fb`
+üzerinden). Issue #97 + karar: `faz8-p2-migration-decisions.md` MD-3 bölümü +
+`docs/spec/invariants.md` INV-T6/T8/T9 planned extension'lar.
+
+## Oturum nasıl başlamalı
+
+> Handoff: **#97 — MD-3, S-planından devam** (aşağıda). Branch:
+> `feat/97-md3-baseline-availability`. Notlar: issue #97 body (matris + kabul
+> kriterleri) + MD-3 karar bölümü.
+
+**İlk adımlar:** (1) issue #97 + MD-3 kararı, (2) `git log --oneline -3`,
+(3) yeşil başlangıç testi.
+
+## #97 MD-3 envanter (2026-09-28 tarama — mevcut durum)
+
+- **V2 tip modeli ZATEN VAR:** `MeasurementBaseline::{Available, Unavailable}`
+  (measurement.rs:818) + `BaselineUnavailableReason::{AllMembersIntroducedByDelta,
+  PartialNewSubject}` (:1746). Engine üretiyor (:2656-2667).
+- **Kontrol çekirdeği:** `gate_v2.rs:591 compute_completion_first_loss_and_decision`
+  (completion × policy matrisi). AcceptImprovement + Unavailable → improved=false +
+  Reject (PR#84 P1) — MD-3 default satırı ZATEN doğru; eksik olan politika opt-in'i.
+- **Karar enum:** `MutationDecision` (trajectory.rs:1033, 4 varyant) —
+  `AcceptAsColdStart` eklenecek. `apply_target()` (:1099) — Sandbox map.
+- **Etiket kaydı:** `MutationDecisionTag(u8)` (authorization.rs:4600; append-only —
+  yeni varyant yeni u8 alır, TryFrom u8 red kapalı).
+- **TaskPolicy** (trajectory.rs:510): `cold_start_policy: ColdStartPolicy` alanı
+  (serde default Disallow — TaskPolicy wire'da task tanımlarında taşınıyor).
+- **Bekleme mekanizması:** `WitnessHoldReason` (witness.rs:275) tanık-odaklı
+  (Q1/Q2/inv#3) — soğuk başlatma OPERATÖR odağı; Held yeniden kullanımı otorite
+  karışımı yapar.
+
+## #97 tasarım kararı (S2'ye giriş)
+
+**`EngineCommitResult::SuspendedColdStart` yeni varyant** (Held ile paralel yapı,
+ayrı otorite): `{ authorization: AuthorizationContext, reason:
+ColdStartAuthorizationRequired }` — tanık snapshot'ı YOK (operatör onayı, quorum
+anlamsız). Navigator → yeni `NavigatorResult::AwaitingOperatorApproval` benzeri
+map; MCP → typed JSON. Onay sonrası: engine `approve_cold_start(...)` →
+`MutationDecision::AcceptAsColdStart` → `ApplyTarget::Lane(Sandbox)` apply +
+`ColdStartAcceptanceEvidence` (issue'daki 8 alan). `PartialNewSubject` → terminal
+Reject (reason evidence'da korunur — matris satırı; override yok).
+
+## #97 S-planı
+
+- **S1 tip modeli:** `ColdStartPolicy {Disallow, RequireOperatorApproval}` +
+  `TaskPolicy.cold_start_policy` (serde default Disallow) +
+  `MutationDecision::AcceptAsColdStart` + `apply_target→Sandbox` +
+  `MutationDecisionTag` append-only u8 + exhaustive match güncellemeleri
+  (navigator/MCP/CLI) + tag/serde compat testleri.
+- **S2 motor:** commit yolunda baseline-reason × cold_start_policy ön değerlendirme —
+  (NotCompleted, AllMembers, RequireOperatorApproval) → `SuspendedColdStart`
+  (improvement değerlendirmesiz); (NotCompleted, PartialNew) → terminal Reject;
+  Completed satırları baseline'dan bağımsız (pin). Disallow default mevcut
+  davranış (pin test).
+- **S3 onay akışı:** `ColdStartAcceptanceEvidence` + `approve_cold_start` engine
+  metodu (Sandbox apply, mainline promote YOK) + navigator/MCP map + INV-T9
+  (no mutation pre-approval, budget tüketmez, retry yok).
+- **S4 kabul:** exact matris testleri (8 satır) + INV-T6/T8/T9 spec status
+  planned→implemented + dogfood notu + PR.
+
+---
+
+# #95-B kaydı (E0-E8 TAMAMLANDI — MERGED `fb995fb`)
+
+**Tarih:** 2026-09-28. #95-A **PR #128 MERGED** (squash `e3f44c8`).
 #95-B branch: `feat/95b-md1-cleanup` (main `e3f44c8` üzerinden). **E0-E8 tamamlandı**
 (8 commit; net ~−3.700 satır). CI parity yeşil: fmt + clippy `-D warnings` +
 39 suite / 1942 test / 0 fail. Kabul kriteri: **"MD-1 compatibility code tamamen
 kaldırılmış" (MD-1 scope) — sağlandı** (kalan `subject_authority` hit'leri: CLI
 zarf etiketi `execution_measurement.subject_authority: "task_scope"` (#95-A'nın
 kendi çıktısı — kalıcı) + tarihsel tombstone'lar).
-
-## Oturum nasıl başlamalı
-
-PR #129 review gelmişse:
-> Handoff: **#95-B — PR #129 review düzeltmeleri**. Branch: `feat/95b-md1-cleanup`.
-> Notlar: bu dosya + PR #129 review yorumları.
-
-PR #129 merge edilmişse:
-> Handoff: **#97 (MD-3 Baseline Availability yüzeyleri)** → sonra #100 (Faz 8a
-> engine cutover). Branch: main üzerinden yeni branch.
-> Notlar: `docs/notes/faz8-p2-migration-decisions.md` (MD-3 bölümü) + roadmap.
 
 ## Teslim edilenler (commit zinciri)
 
