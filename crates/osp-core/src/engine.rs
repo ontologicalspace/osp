@@ -9110,6 +9110,77 @@ v = 0.5
         }
     }
 
+    /// **Matris satırı: Completed + PartialNewSubject → AcceptAsCompleted.**
+    /// MD-3 rule 3'ün en geniş claim'i — completion baseline availability
+    /// reason'dan tamamen bağımsızdır (after-state doğrudan predicate'i karşılar;
+    /// improvement iddiası taşınmaz, bu yüzden before/after subject identity
+    /// karşılaştırılamazlığı completion'ı ENGELLEMEZ). Cold-start policy
+    /// fark etmez (`PartialNewSubject` yalnız progress/cold-start yolunu kapatır).
+    #[test]
+    fn md3_completed_with_partial_new_subject_still_completes() {
+        use crate::trajectory::ColdStartPolicy;
+        let mut engine = md3_engine_user_vision();
+        // Subgraph [1 (base'de), 10_000 (delta-introduced)] → PartialNewSubject;
+        // Coupling Le 10 her zaman geçer → Completed.
+        let task = md3_task_scoped(
+            crate::trajectory::PredicateScope::Subgraph(vec![1, 10_000]),
+            10.0,
+            crate::trajectory::TaskPolicy {
+                predicate_failure_policy:
+                    crate::trajectory::PredicateFailurePolicy::AcceptImprovement,
+                allow_progress_checkpoint: true,
+                cold_start_policy: ColdStartPolicy::RequireOperatorApproval,
+                ..Default::default()
+            },
+        );
+        let proposal = md3_cold_start_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            100,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        let carrier = draft.finalize(native.authority()).unwrap();
+
+        let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
+        registry.insert(task);
+        // Harness quorum-0 — Mainline apply'e izin verir.
+        let omega = crate::witness::WitnessSet::new(vec![]).with_quorum(0, 0.0);
+        let result = engine
+            .commit_task_claim(crate::engine::TaskCommitInput::new(
+                &carrier,
+                &omega,
+                &registry as &dyn crate::trajectory::TaskResolver,
+                RawPosition::default(),
+                5.0,
+            ))
+            .expect("Completed → Evaluated");
+        match result {
+            crate::engine::EngineCommitResult::Evaluated { result, .. } => {
+                assert_eq!(
+                    result.outcome.predicate_completion,
+                    crate::trajectory::PredicateCompletion::Completed
+                );
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::AcceptAsCompleted,
+                    "rule 3: PartialNewSubject altında bile completion bağımsızdır"
+                );
+                assert_eq!(
+                    result.apply_target,
+                    crate::trajectory::ApplyTarget::Lane(crate::trajectory::CommitLane::Mainline)
+                );
+            }
+            crate::engine::EngineCommitResult::SuspendedColdStart { .. } => {
+                panic!("Completed asla SuspendedColdStart ÜRETMEZ (rule 3)")
+            }
+            other => panic!("AcceptAsCompleted bekleniyordu; got: {other:?}"),
+        }
+    }
+
     /// **Matris satırı: Completed + AllMembersIntroduced → AcceptAsCompleted
     /// (baseline'tan bağımsız — rule 3).** Improvement iddiası taşımaz; after-state
     /// doğrudan predicate'i karşılar. Cold-start policy fark etmez.
