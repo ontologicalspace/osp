@@ -1,16 +1,55 @@
-# Handoff — #97 MD-3 Baseline Availability (AKTİF — S1'den devam) / #95-B kaydı
+# Handoff — #97 MD-3 Baseline Availability (AKTİF — S1+S2 tamam, S3'ten devam) / #95-B kaydı
 
-**Tarih:** 2026-09-28 (oturum devamı). **#95-B PR #129 MERGED** (squash `fb995fb`;
-iki bağımsız review, merge-ready; P3 DOMAIN_SEPARATOR guard notu `f94c89c` ile
-işlendi). **#97 aktif:** branch `feat/97-md3-baseline-availability` (main `fb995fb`
-üzerinden). Issue #97 + karar: `faz8-p2-migration-decisions.md` MD-3 bölümü +
-`docs/spec/invariants.md` INV-T6/T8/T9 planned extension'lar.
+**Tarih:** 2026-09-28 (oturum sonu). **#95-B PR #129 MERGED** (squash `fb995fb`).
+**#97 aktif:** branch `feat/97-md3-baseline-availability` (main `fb995fb` üzerinden).
 
 ## Oturum nasıl başlamalı
 
-> Handoff: **#97 — MD-3, S-planından devam** (aşağıda). Branch:
-> `feat/97-md3-baseline-availability`. Notlar: issue #97 body (matris + kabul
-> kriterleri) + MD-3 karar bölümü.
+> Handoff: **#97 — MD-3, S3'ten devam** (S1+S2 done). Branch:
+> `feat/97-md3-baseline-availability`. Notlar: issue #97 + MD-3 kararı + bu dosyanın
+> S3 tasarım notu. PR henüz AÇILMADI (S3+S4 bitince açılır).
+
+## S1+S2 teslim edilenler (yeşil; 39 suite / 0 fail / clippy temiz)
+
+- `7db890f` kickoff docs (envanter + tasarım + S-planı)
+- `923d14a` **S1 tip modeli:** `ColdStartPolicy` (default Disallow; `TaskPolicy`
+  alanı `#[serde(default)]` — eski task wire'ı Disallow'a düşer, test pin'li) +
+  `MutationDecision::AcceptAsColdStart` (→Sandbox, INV-T8; negatif pin'ler) +
+  `MutationDecisionTag` append-only **4** (0-3 değişmez; TryFrom(5) fail-closed) +
+  faz8-p2 manifest **regolden** (18 builder digest; reason:
+  `task-policy-adds-cold-start (#97 S1)` — eski değerler `git show 923d14a~1:...cases.json`'da)
+- `a7ab56e` **S2 motor:** `BaselineAvailabilityClass` (değer TAŞIMAYAN sınıflandırma
+  — synthetic baseline temsili tip seviyesinde imkânsız) + commit Phase 0d'de
+  `classify_baseline_availability` (measure yolu partition mantığının aynısı) +
+  **INV-T6 extension zorlaması:** Unavailable + NotCompleted altında gate'in skaler
+  improvement'ı REDDEDİLİR (AcceptAsProgress → Reject; `loss_before` running scalar
+  kanıt DEĞİL — navigator.rs "#97" rezervasyonu böyle kapatıldı) +
+  `EngineCommitResult::SuspendedColdStart` (INV-T9 extension; Held'den AYRI otorite;
+  PartialNew ASLA) + `NavigatorResult::AwaitingColdStartApproval` + MCP/CLI/corpus
+  typed map'ler + CLI exit code 14 + 4 exact matris testi (Disallow/RequireOp/
+  PartialNew/Completed) + compat testleri (6 md3_* testi).
+
+## S3 tasarım notu (uygulayıcı için)
+
+Onay akışı — engine'e `approve_cold_start(...)` metodu: SuspendedColdStart'ın
+taşıdığı {task_id, claim_id} + operator kimliği → **`ColdStartAcceptanceEvidence`**
+(issue'daki 8 alan: baseline_reason + subject_digest + measurement_context_digest +
+base_space_view_revision + policy + operator_id + authorization_id +
+improvement_claimed=false) üret → claim'i `MutationDecision::AcceptAsColdStart` +
+`ApplyTarget::Lane(Sandbox)` ile uygula (apply_delta Sandbox hattı; Mainline promote
+YOK — sonraki measurement'ta normal AcceptAsCompleted). Suspension süresince
+maneuver budget tüketilmez (navigator AwaitingColdStartApproval terminal döner —
+budget zaten tüketilmiyor; test pin'li olacak). Wire: SuspendedColdStart kalıcı
+kayıt değil (in-flight domain outcome) — PendingAuthorization'a BENZEMEZ; onay
+kanıtı ColdStartAcceptanceEvidence ile evidence ledger'a girer (S3'te şekillendir;
+issue'nun acceptance criteria listesi esas).
+
+## S4 (kapanış)
+
+Spec status flip'leri (INV-T6/T8/T9 planned→implemented, `docs/spec/invariants.md`
+MD-3 bölümleri) + matrisin kalan satırları zaten S2 testlerinde + PR aç + dogfood
+notu (Run D önerisi: cold-start fixture'ı ile SuspendedColdStart→onay→Sandbox
+uçtan uca).
 
 **İlk adımlar:** (1) issue #97 + MD-3 kararı, (2) `git log --oneline -3`,
 (3) yeşil başlangıç testi.
