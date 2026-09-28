@@ -8943,64 +8943,11 @@ v = 0.5
         );
     }
 
-    /// **#96 re-anchor:** Producer çağrısı (`measure_attempt_native_with_md1_shadow`)
-    /// `BoundMeasurementSession` TCB kontratı altında axis descriptor + epoch
-    /// state'ini değiştirmez: pre-produce session'ı açık tutulur; producer hem
-    /// authority hem md1_shadow ölçümünü TEK session altında çalıştırır ve
-    /// `verify_unchanged` geçmek zorundadır — interior mutation durumunda
-    /// `AxisStateDrift` fail-closed üretir. Descriptor parity ayrıca pinlenir.
-    #[test]
-    fn md1_observer_preserves_axis_session_state() {
-        use crate::coords::BoundMeasurementSession;
-
-        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
-        let task = md1_task_node1();
-        let proposal = md1_edge_proposal();
-        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal,
-            RawPosition::default(),
-            &task,
-            100,
-            1,
-        )
-        .expect("draft (probe + structural Q4)");
-        let native = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .expect("native measurement");
-        let claim = draft
-            .finalize(native.authority())
-            .expect("subject binding: draft ve token ayni proposal");
-        let target = RawPosition::default();
-
-        let session = BoundMeasurementSession::begin(&engine.coord_system)
-            .expect("session begin on production built-in axes");
-        let descriptors_before = session.axis_descriptors();
-
-        let observation = crate::subject_authority::observe_subject_authority_drift(
-            &engine,
-            claim.claim(),
-            &task,
-            &native,
-            0.0,
-            &target,
-        );
-        let _finalized =
-            observation.finalize(crate::subject_authority::V1DownstreamObservation::Observed(
-                crate::subject_authority::AuthoritativeDownstreamObservation {
-                    predicate_completion: crate::trajectory::PredicateCompletion::NotCompleted,
-                    mutation_decision: crate::trajectory::MutationDecision::Reject,
-                },
-            ));
-
-        session.verify_unchanged().expect(
-            "producer/observer must not drift axis epoch/descriptor state (Axis::measure TCB contract)",
-        );
-        assert_eq!(
-            session.axis_descriptors(),
-            descriptors_before,
-            "axis descriptors unchanged after measurement + observation"
-        );
-    }
+    // #95-B: `md1_observer_preserves_axis_session_state` testi silindi — MD-1
+    // comparison observer'ı kaldırıldı; axis session TCB sözleşmesi producer
+    // yolunda (`measure_attempt_native_with_md1_shadow` → `verify_unchanged`)
+    // korunmaya devam ediyor (tarihçe: #95-A PR #128 + karar kaydı
+    // faz8-p2-migration-decisions.md MD-1 bölümü).
 
     /// `make_measurement_engine`'in CoordinateSystem üreticisi — aynı production
     /// built-in axis seti.

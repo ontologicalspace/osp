@@ -379,7 +379,6 @@ pub(crate) fn make_revision_required_from_rejection(
     reasons: crate::witness::NonEmptyWitnessRejections,
     snapshot: crate::witness::WitnessQuorumSnapshot,
     attempt_num: u64,
-    drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
     prov_drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
 ) -> Result<crate::authorization::RevisionRequired, NavigatorResult> {
     use crate::authorization::{
@@ -405,13 +404,11 @@ pub(crate) fn make_revision_required_from_rejection(
         Err(e) => return Err(NavigatorResult::SystemFailure(e.to_string())),
     };
     match crate::authorization::RevisionRequired::try_new(evidence) {
-        // **#95 MD-1 P2-1:** Non-digested telemetry sidecar — Rejected yollarında
-        // observation kaybolmaz; digest preimage'lerine girmez. Checked builder
-        // (EK review P1-2): sidecar parent evidence kimliğine bound değilse
-        // fail-closed SystemFailure.
+        // **#96 MD-2:** Non-digested telemetry sidecar — Rejected yollarında
+        // observation kaybolmaz; digest preimage'lerine girmez. Checked builder:
+        // sidecar parent evidence kimliğine bound değilse fail-closed SystemFailure.
         Ok(r) => r
-            .try_with_subject_authority_drift(drift)
-            .and_then(|r| r.try_with_provenance_authority_drift(prov_drift))
+            .try_with_provenance_authority_drift(prov_drift)
             .map_err(|e| NavigatorResult::SystemFailure(e.to_string())),
         Err(e) => Err(NavigatorResult::SystemFailure(e.to_string())),
     }
@@ -434,7 +431,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
         hold_reason: crate::witness::WitnessHoldReason,
         witness_snapshot: crate::witness::WitnessQuorumSnapshot,
         attempt_num: u64,
-        drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
         prov_drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
     ) -> NavigatorResult {
         use crate::authorization::{
@@ -512,9 +508,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             suspended_attempt_evidence: evidence,
             evidence_digest,
             created_at: self.clock.unix_seconds(),
-            // **#95 MD-1 P2-1:** Non-digested telemetry sidecar — Held yollarında
-            // observation kaybolmaz; digest yüzeyleri bu alandan bağımsız.
-            subject_authority_drift: drift,
             provenance_authority_drift: prov_drift,
         };
 
@@ -545,7 +538,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
         reasons: crate::witness::NonEmptyWitnessRejections,
         snapshot: crate::witness::WitnessQuorumSnapshot,
         attempt_num: u64,
-        drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
         prov_drift: Option<crate::provenance_authority::ProvenanceAuthorityDriftObservation>,
     ) -> Result<crate::authorization::RevisionRequired, NavigatorResult> {
         make_revision_required_from_rejection(
@@ -553,7 +545,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             reasons,
             snapshot,
             attempt_num,
-            drift,
             prov_drift,
         )
     }
@@ -652,7 +643,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         mutation_decision: MutationDecision::Reject,
                         token_cost: tc,
                         duration_ms: 0,
-                        subject_authority_drift: None,
                         provenance_authority_drift: None,
                     });
                     feedback_history.push(format!(
@@ -699,7 +689,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     mutation_decision: MutationDecision::Reject,
                     token_cost,
                     duration_ms: 0,
-                    subject_authority_drift: None,
                     provenance_authority_drift: None,
                 });
                 // D4 — Calibration feedback: Q4 syntax hatasını LLM'e geri besle.
@@ -736,7 +725,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     mutation_decision: MutationDecision::Reject,
                     token_cost,
                     duration_ms: 0,
-                    subject_authority_drift: None,
                     provenance_authority_drift: None,
                 });
                 feedback_history.push(format!(
@@ -776,7 +764,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         mutation_decision: MutationDecision::Reject,
                         token_cost,
                         duration_ms: 0,
-                        subject_authority_drift: None,
                         provenance_authority_drift: None,
                     });
                     // D4 — Calibration feedback: empty proposal uyarısı.
@@ -802,7 +789,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         mutation_decision: MutationDecision::Reject,
                         token_cost,
                         duration_ms: 0,
-                        subject_authority_drift: None,
                         provenance_authority_drift: None,
                     });
                     feedback_history.push(format!(
@@ -894,7 +880,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     mutation_decision: MutationDecision::Reject,
                     token_cost,
                     duration_ms: 0,
-                    subject_authority_drift: None,
                     provenance_authority_drift: None,
                 });
                 feedback_history.push(format!(
@@ -955,7 +940,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         reason,
                         snapshot,
                         attempt_num as u64,
-                        None,
                         Some(prov),
                     );
                 }
@@ -983,7 +967,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         reasons,
                         snapshot,
                         attempt_num as u64,
-                        None,
                         Some(prov),
                     ) {
                         Ok(revision) => NavigatorResult::RequiresRevision(revision),
@@ -1034,7 +1017,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                                 mutation_decision: crate::trajectory::MutationDecision::Reject,
                                 token_cost,
                                 duration_ms: 0,
-                                subject_authority_drift: None,
                                 provenance_authority_drift: prov_observation,
                             });
                             // D4 — Calibration feedback.
@@ -1137,7 +1119,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 mutation_decision: outcome.mutation_decision,
                 token_cost,
                 duration_ms: 0,
-                subject_authority_drift: None,
                 provenance_authority_drift: prov_observation,
             });
 
@@ -2508,7 +2489,6 @@ mod tests {
             mutation_decision: MutationDecision::AcceptAsProgress,
             token_cost: TokenCost::default(),
             duration_ms: 100,
-            subject_authority_drift: None,
             provenance_authority_drift: None,
         };
         // Progress evidence: after != before (state ilerledi), gate=PassedAll.
@@ -3874,10 +3854,7 @@ mod tests {
             reasons.clone(),
             snapshot.clone(),
             expected_attempt_num,
-            // #95 MD-1 P2-1: mapper artık telemetry sidecar parametresi alıyor;
-            // bu test None ile çağırır (sidecar invariant'ları ayrı testte).
-            None,
-            // #96 MD-2: provenance sidecar — aynı şekilde None (ayrı testte).
+            // #96 MD-2: provenance sidecar — None (ayrı testte).
             None,
         )
         .expect("production rejection mapper");
