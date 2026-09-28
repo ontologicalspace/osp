@@ -1,29 +1,75 @@
-# Handoff — #95-A MD-1 Subject Cutover (TAMAMLANDI — PR #128 OPEN/review bekliyor; sıradaki #95-B)
+# Handoff — #95-B MD-1 Cleanup (AKTİF — branch açık, W0 tamam; #95-A merged)
 
-**Tarih:** 2026-08-23 (oturum sonu). Branch: `feat/95a-md1-subject-cutover` @ `678053a`
-(origin/main `158eb79`). **PR #128** OPEN/MERGEABLE — review bekliyor (CI parity
-yerelde yeşil: fmt + clippy `-D warnings` + 41 test suite). Merge sonrası: **#95-B**.
+**Tarih:** 2026-09-28 (oturum başlangıcı). #95-A **PR #128 MERGED** (squash `e3f44c8`;
+review: onaylanabilir, P2+P3'ler düzeltildi, thread'ler resolve edildi). #95-B branch:
+`feat/95b-md1-cleanup` @ `35adf59` (main `e3f44c8` üzerinden). **W0 tamam:**
+`effective_legacy_measure_set` kaldırıldı (çağrıcısız dead pub yüzey).
 
 ## Oturum nasıl başlamalı
 
-PR #128 review gelmişse:
-> Handoff: **#95 — MD-1: PR #128 review düzeltmeleri** (head `678053a`'dan
-> sonraki commit'ler). Branch: `feat/95a-md1-subject-cutover`.
-> Notlar: `docs/notes/96-implementation-handoff.md` + PR #128 body.
+> Handoff: **#95-B — MD-1 cleanup, W1'den devam** (W0 done: `effective_legacy_measure_set`).
+> Branch: `feat/95b-md1-cleanup`. Plan: bu dosyanın "#95-B W1-W8 stage planı" bölümü.
+> Notlar: `docs/notes/faz8-p2-migration-decisions.md` MD-1 bölümü + PR #128 review yorumları.
 
-PR #128 merge edilmişse:
-> Handoff: **#95-B — MD-1 cleanup** (observer + `SubjectAuthorityDriftObservation` +
-> legacy subject producer + MD-1 sidecar alanları + legacy fiziksel isimler +
-> `effective_legacy_measure_set`; kalır: uniform-Scip reference #96'nın evi — #100,
-> `compute_raw_from_delta` — #100 machinery, MD-3 yüzeyleri — #97).
-> Branch: main üzerinden yeni branch.
-> Notlar: `docs/notes/96-implementation-handoff.md` (bu dosya — #96/#95-A zinciri +
-> #95-B scope bölümü) + `docs/notes/faz8-p2-migration-decisions.md` MD-1 bölümü.
+**İlk adımlar:** (1) bu dosya, (2) `git log --oneline -4` (W0 `35adf59` üstünde
+çalışılmalı), (3) `export PATH="$HOME/.cargo/bin:$PATH"` + `cargo test --locked
+--workspace --all-features --exclude osp-desktop` (yeşil başlangıç).
 
-**İlk adımlar:** (1) bu dosya, (2) `gh pr view 128 --json state,reviewDecision`
-(OPEN/review durumuna göre yukarıdaki dal), (3) `git log --oneline -4`, (4)
-`export PATH="$HOME/.cargo/bin:$PATH"` + `cargo test --locked --workspace
---all-features --exclude osp-desktop` (yeşil başlangıç).
+## #95-B envanter (2026-09-28 tarama — kanıtlanmış gerçekler)
+
+- **MD-2 ayrışması temiz:** `provenance_authority.rs` (MD-2 observer) `NativeAttemptMeasurement`
+  / `md1_shadow`'a referans ETMİYOR — MD-1 siliniyor, MD-2 yüzeyine dokunma.
+- **`produce_legacy_subject_measurement` üretim çağrıcısız** (grep: yalnız subject_authority.rs
+  tanımı + drift-observation test) — mekanik silme; navigator/MCP #95-A'da
+  `measure_attempt_native_with_md1_shadow`'a geçmiş.
+- **Kullanım haritası:** observer/`SubjectAuthorityDriftObservation` 16 dosyada;
+  `md1_shadow` lane engine.rs'te (`NativeAttemptMeasurement.md1_shadow:717`,
+  `measure_md1_shadow_in_session:2900`, cross-pin testleri `:8302-8460`); navigator
+  observer çağrısı `navigator.rs:910`; ölçüm çağrısı `navigator.rs:835`.
+- **Karar gerektiren nokta:** `tests/measurement_v1_v2_parity.rs` (434 satır) başlığında
+  "bilinçli korunan tarihsel pre-#96 karakterizasyon" diyor (MD-2 geçmişini de belgeler).
+  Handoff scope'u "MD-1 comparison testleri" diyor — bu dosya V1/V2 subject+provenance
+  karşılaştırması. Silme kararı: yalnız MD-1-subject karşılaştırma bölümleri silinmeli,
+  MD-2 tarihsel karakterizasyon kısmı #100'e kadar KALIR (uniform-Scip reference'ın
+  görgü tanıkları). Belirsizlik varsa silme — #100'de netleşir.
+
+## #95-B W1-W8 stage planı (bağımlılık sırasıyla; her stage commit + yeşil test)
+
+- **W1 engine:** `NativeAttemptMeasurement`'dan `md1_shadow` alanı düşür; fn
+  `measure_attempt_native_with_md1_shadow` → `measure_attempt_native` (imza aynı,
+  yalnız dönüş bundle'ı); `measure_md1_shadow_in_session` + cross-pin testleri
+  (engine.rs `:8302-8460`) sil. `TaskScopeNativeMaterial` kullanan kalmıyorsa sil
+  (MD-3 yüzeylerinde kullanım VARSA dokunma — grep önce).
+- **W2 navigator:** `observe_subject_authority_drift` çağrısı (`navigator.rs:910`) +
+  drift draft finalize/sidecar wiring (Held → `PendingAuthorization.subject_authority_drift`;
+  Rejected → `RevisionRequired.with_subject_authority_drift()`) kaldır; eligibility
+  sözleşmesi (`v1_downstream_from_engine_commit_error`) kullanımdan düşer.
+- **W3 wire sidecar:** `TrajectoryEvidence.subject_authority_drift` + `PendingAuthorization`/
+  `RevisionRequired` sidecar alanları — **durable wire üç-epoch typed rejection** kurallarına
+  göre kaldır (yeni reader eski wire'ı kabul eder; eski reader yeni wire'ı reddeder —
+  serde epoch makinesine uygun yön). MCP response JSON additive sidecar'ları (error
+  semantiği değişmeden eklenmişti) kaldır — additive geri alma non-breaking.
+- **W4 modül silme:** `subject_authority.rs` tamamı + `lib.rs` mod deklarasyonu +
+  `tests/subject_authority_drift_observation.rs` + `tests/md1_subject_authority_sidecar.rs`
+  (MCP) sil. `MeasurementSubjectDigest`/`RawMeasurementObservation` vb. başka yerde
+  kullanılıyorsa (MD-2 observer kendi tiplerini kullanıyor — doğrula) taşınmadan sil.
+- **W5 legacy producer:** `produce_legacy_subject_measurement` +
+  `LegacySubjectMeasurement` + `legacy_compatibility_projection` +
+  `derive_v1_legacy_measurement_subject` sil (çağrıcısız — W4 sonrası kalan test
+  referanslarıyla birlikte).
+- **W6 isimler:** `NativeLegacySubjectMeasurement` → `NativeSubjectMeasurement`
+  (subject artık canonical task scope — "legacy" yanıltıcı); `legacy_subject_binding`
+  alanı → `subject_binding`; `LegacySubjectBindingDigest` → `SubjectBindingDigest`;
+  `NativeLegacyMeasurementBindingError` → `NativeMeasurementBindingError` (tür ailesi
+  içindeki `TaskSubjectBindingMismatch` zaten #95-A'da doğru adı taşıyor). Compile-fail
+  fixture'ları + stderr'leri yeni isimlerle re-bless (TRYBUILD=overwrite).
+- **W7 `_task_id`:** `osp_mcp submit_delta_attempt` imzasından `_task_id: TaskId` düşür
+  (server.rs:778 + iç çağrı `:392` + kalan test çağrıları; md1_sidecar testi W4'te gitti).
+- **W8 kabul + regolden:** "MD-1 compatibility code tamamen kaldırılmış" (MD-1 scope).
+  Sidecar/observer referanslı golden varsa regolden — reason: `md1-cleanup (#95-B)`;
+  eski değerler tarihçe için korunur (regolden disiplini). CI parity: fmt + clippy
+  `-D warnings` + tam paket.
+
 
 ## #95-A teslim edilenler (kritik zincir)
 
