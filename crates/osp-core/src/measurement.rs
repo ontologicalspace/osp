@@ -1900,6 +1900,10 @@ impl EngineMeasurement {
 pub struct SubjectBindingDigest([u8; 32]);
 
 impl SubjectBindingDigest {
+    /// **Preimage sabiti — DEĞİŞTİRİLMEZ (#95-B PR #129 review P3):** "legacy" adı
+    /// tarihsel kalmıştır; yeniden adırmak tüm binding digest değerlerini sessizce
+    /// değiştirir. `encode_u64` etiketleri preimage'e GİRMEZ (yalnız değer byteları)
+    /// — etiket rename'leri kozmetiktir, bu sabit değildir.
     const DOMAIN_SEPARATOR: &'static [u8] = b"osp.legacy-subject-binding.v1\0";
 
     /// Ordered member id listesi — sıra semantiktir (aggregation sırası f64 bitlerini
