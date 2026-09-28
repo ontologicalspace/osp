@@ -678,11 +678,13 @@ impl VerifiedTaskMeasurementBinding {
 /// Verification epoch view — inner verifier'e geçilen captured revision + context.
 /// Private (reviewer P3) — yalnız `with_epoch` + `verify_measurement_binding_inner`
 /// tarafından kullanılır. `pub(crate)` DEĞİL (gereksiz yüzey genişletme riski).
+#[cfg(test)] // #100 (S4): Faz 3 epoch makinemesi — yalnız cfg(test) verify_measurement_binding tüketir
 struct VerificationEpochView<'a> {
     revision_before: &'a crate::authorization::SpaceViewRevision,
     context: &'a crate::authorization::MeasurementInputContext,
 }
 
+#[cfg(test)]
 impl<'a> VerificationEpochView<'a> {
     fn revision_before(&self) -> &crate::authorization::SpaceViewRevision {
         self.revision_before
@@ -793,6 +795,7 @@ impl SpaceEngine {
         clippy::result_large_err,
         reason = "intentional inline verification failure type; see MeasurementBindingVerificationError layout decision"
     )]
+    #[cfg(test)]
     fn with_epoch<R>(
         &self,
         f: impl FnOnce(
@@ -852,6 +855,7 @@ impl SpaceEngine {
         clippy::result_large_err,
         reason = "intentional inline verification failure type; see MeasurementBindingVerificationError layout decision"
     )]
+    #[cfg(test)]
     fn finalize_verification<R>(
         &self,
         operation: EpochOperationResult<R>,
@@ -957,6 +961,12 @@ impl SpaceEngine {
         clippy::result_large_err,
         reason = "Binding primitive established in Faz 3; production commit-path wiring is Faz 8; intentional inline verification failure type, see MeasurementBindingVerificationError layout decision"
     )]
+    /// **#100 Faz 8a (S4):** test-only — production commit/approve yolları
+    /// `verify_task_measurement_binding` (token-based artifact rekonstrüksiyonu)
+    /// kullanır. Bu Faz 3 üreticisi yalnız commit2_* standalone test matrisi için
+    /// yaşar (EngineMeasurement-tabanlı fixture üretimi; single-producer guard
+    /// cfg(test)'i dışlar).
+    #[cfg(test)]
     pub(crate) fn verify_measurement_binding(
         &self,
         claim: &crate::witness::Claim,
@@ -990,6 +1000,7 @@ impl SpaceEngine {
         clippy::result_large_err,
         reason = "intentional inline verification failure type; see MeasurementBindingVerificationError layout decision"
     )]
+    #[cfg(test)]
     fn verify_measurement_binding_inner(
         &self,
         epoch: &VerificationEpochView<'_>,
@@ -1877,18 +1888,20 @@ impl SpaceEngine {
     }
 
     /// Aşama D2 — Task-bound Claim commit. Atomic pipeline: Q4 → bind → Q5 → Q5.b
-    /// (PredicateGate) → Q6 → MutationDecision → ApplyTarget → Q1-Q3 witness.
+    /// (V2 gate evaluator, #100) → MD-3 matrisi → Q6 → MutationDecision →
+    /// ApplyTarget → Q1-Q3 witness.
     ///
     /// **Prensip:** `commit() = legacy/standalone path; commit_task_claim() = trajectory path.`
     /// Mevcut commit() (standalone, Paper 1) korunur — backward compatible. Bu metod
-    /// task-bound Claim'ler için Q5.b PredicateGate'i commit transaction içine alır
-    /// (atomic — navigator ayrı PredicateGate çağırmaz).
+    /// task-bound Claim'ler için Q5.b gate değerlendirmesini commit transaction içine
+    /// alır (atomic — navigator ayrı gate çağırmaz).
     ///
     /// **İç akış (sizin önerdiğiniz sıra):**
     /// 1. Q4 Syntax (check_claim_syntax)
     /// 2. bind_claim_to_task (TaskResolver → TaskBoundClaim, INV-T5)
     /// 3. Q5 Vision (θ bound, check_claim_vision)
-    /// 4. Q5.b PredicateGate (task predicate, loss/policy → MutationDecision)
+    /// 4. Q5.b V2 gate evaluator (task predicate, artifact-derived loss/policy →
+    ///    MutationDecision — #100 Faz 8a)
     /// 5. Q6 Rule (check_claim_rules)
     /// 6. MutationDecision → ApplyTarget (INV-T8: Reject→NotApplied, Progress→Checkpoint)
     /// 7. Q1-Q3 Witness (AcceptAsCompleted/AcceptAsProgress ise — apply_delta)

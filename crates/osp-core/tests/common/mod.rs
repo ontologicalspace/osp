@@ -2180,6 +2180,62 @@ pub fn engine_with_case_space(case: &CharacterizationCase) -> osp_core::engine::
 /// ve `new_characterization_legacy` kaldırıldı; authority tipi dışarıdan forge edilemez.
 /// Vision/witness/TaskValidation motor-private aşamalar olduğundan bu evaluator onları
 /// gözlemleyemez (yalnız Q4 + PredicateGate karar yüzeyi). Epoch'lar [0;5] — corpus
+/// **#100 (S4):** V1 reference gate — production `PredicateGate` silindi;
+/// karakterizasyon V1 lane'i V1 scalar-loss semantiğini shared core üzerinden
+/// test-lokal yeniden ifade eder (`trajectory_loss` + `evaluate_completion` +
+/// `assess_improvement_v1` + `evaluate_decision_core` — V2 evaluator'ın de
+/// kullandığı machinery; iki paralel karar implementasyonu YOK).
+pub struct V1GateOutcome {
+    pub outcome: osp_core::trajectory::AttemptOutcome,
+    pub loss_after: f64,
+    pub improvement_policy: osp_core::trajectory::EffectiveImprovementPolicy,
+}
+
+pub fn v1_reference_gate(
+    bound: &osp_core::trajectory::TaskBoundClaim<'_>,
+    measured: &osp_core::trajectory::ProvenancedRawPosition,
+    loss_before: f64,
+    target: &osp_core::coords::RawPosition,
+) -> V1GateOutcome {
+    use osp_core::trajectory::{
+        assess_improvement_v1, evaluate_decision_core, trajectory_loss, AttemptOutcome,
+        EffectiveImprovementPolicy, GateDecision, PredicateCompletion, PredicateSetResult,
+    };
+    let policy = &bound.task.policy;
+    let loss_after = trajectory_loss(measured, target);
+    let improvement_policy = EffectiveImprovementPolicy::current_semantics();
+    let completion = bound
+        .task
+        .target_predicate_set
+        .evaluate_completion(measured);
+    let improved = assess_improvement_v1(
+        loss_before,
+        loss_after,
+        measured,
+        policy,
+        &improvement_policy,
+    );
+    let (_, mutation_decision) = evaluate_decision_core(
+        completion,
+        improved,
+        policy.predicate_failure_policy,
+        policy.allow_progress_checkpoint,
+    );
+    let predicate_completion = match completion {
+        PredicateSetResult::Completed => PredicateCompletion::Completed,
+        _ => PredicateCompletion::NotCompleted,
+    };
+    V1GateOutcome {
+        outcome: AttemptOutcome {
+            gate_decision: GateDecision::PassedAll,
+            predicate_completion,
+            mutation_decision,
+            witness_status: None,
+        },
+        loss_after,
+        improvement_policy,
+    }
+}
 /// axis'leri immutable (monoton epoch ZERO).
 pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
@@ -2271,33 +2327,27 @@ pub fn evaluate_v1_case(
         clippy::result_large_err,
         reason = "EngineCommitError inline (measurement.rs layout decision)"
     )]
-    let evaluation =
-        (|| {
-            // Q4 structural
-            osp_core::task_measurement::validate_claim_structure(&claim)?;
-            // Q4 raw finite
-            osp_core::task_measurement::validate_raw_position_finite(
-                claim.id,
-                "computed_raw",
-                &claim.computed_raw,
-            )?;
-            // Task binding
-            let bound = osp_core::trajectory::TaskBoundClaim {
-                claim: &claim,
-                task: &case.task,
-            };
-            // Q5 vision / Q6 / witness / TaskValidation: motor-private — evaluator
-            // ÇALIŞTIRAMAZ (aşağıda NotObserved/NotReached olarak temsil edilir).
-            // PredicateGate — V1 lane'in gözlemleyebildiği tek karar yüzeyi.
-            Ok(osp_core::trajectory::PredicateGate.evaluate(
-                osp_core::trajectory::PredicateGateInput {
-                    bound,
-                    measured: &measured,
-                    loss_before,
-                    target: &target,
-                },
-            ))
-        })();
+    let evaluation = (|| {
+        // Q4 structural
+        osp_core::task_measurement::validate_claim_structure(&claim)?;
+        // Q4 raw finite
+        osp_core::task_measurement::validate_raw_position_finite(
+            claim.id,
+            "computed_raw",
+            &claim.computed_raw,
+        )?;
+        // Task binding
+        let bound = osp_core::trajectory::TaskBoundClaim {
+            claim: &claim,
+            task: &case.task,
+        };
+        // Q5 vision / Q6 / witness / TaskValidation: motor-private — evaluator
+        // ÇALIŞTIRAMAZ (aşağıda NotObserved/NotReached olarak temsil edilir).
+        // #100 (S4): V1 reference evaluator — production `PredicateGate` silindi;
+        // V1 scalar-loss semantiği shared core üzerinden test-lokal yeniden ifade
+        // (non-authoritative; V1 lane'in gözlemleyebildiği tek karar yüzeyi).
+        Ok(v1_reference_gate(&bound, &measured, loss_before, &target))
+    })();
 
     // **PR #91 review P1:** decision-input scalar'ları. V1 loss_before =
     // trajectory_loss(current_measured, target) (yukarıda baseline loss_bits ile
@@ -2352,9 +2402,9 @@ pub fn evaluate_v1_case(
 /// V2-candidate evaluation: probe Claim → measure_task_delta → final Claim
 /// (measurement.after().to_raw()) → V1 compatibility projection → commit_task_claim.
 ///
-/// **İsimlendirme:** "V2 **candidate projection**" — production V2 consumer henüz yok
-/// (commit_task_claim hala V1). Bu harness, P2-1 implementation'ının üreteceği
-/// gözlemlenebilir davranışı characterize eder.
+/// **#100 Faz 8a:** commit_task_claim artık GERÇEK V2 consumer (engine cutover
+/// tamamlandı) — "candidate projection" adlandırması tarihsel; lane artık production
+/// V2 yolunu characterize eder.
 pub fn evaluate_v2_candidate_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,

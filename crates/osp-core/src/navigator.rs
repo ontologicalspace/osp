@@ -1,17 +1,19 @@
 //! Agent Navigator loop (Aşama D1) — DeltaProposal → Claim → gate → TaskAttempt/Evidence.
 //!
 //! OSP'nin dinamik çekirdeğinin orkestrasyonu. Bir Task için iteratif:
-//! LLM call → DeltaProposal → Claim (task-bound) → engine measure + PredicateGate →
+//! LLM call → DeltaProposal → Claim (task-bound) → engine measure + commit (V2
+//! gate, #100) →
 //! TaskAttempt/Evidence kayıt → retry (maneuver limit) veya complete.
 //!
 //! **D1 kapsamı:** Mock LLM (gerçek HTTP D2'de). Hard gates Q4/Q5/Q6 D1'de PassedAll
-//! varsayılır (commit() entegrasyonu D2'de); PredicateGate ayrı çağrılır. Evidence ledger
+//! varsayılır (commit() entegrasyonu D2'de); gate değerlendirmesi commit içine gömülü
+//! (#100: V2 evaluator). Evidence ledger
 //! in-memory (Vec<TrajectoryEvidence>).
 //!
 //! # Tez
 //! Agent Navigator, agent'ın mimari uzayda hedefe kontrollü ilerlemesini sağlar. Agent
 //! decomposition yapamaz (Aşama C), hedef koordinat göremez (INV-T1), pozisyon declare
-//! edemez (INV-T4). Sadece DeltaProposal üretir; engine ölçer; PredicateGate karar verir.
+//! edemez (INV-T4). Sadece DeltaProposal üretir; engine ölçer; V2 gate karar verir.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -313,10 +315,10 @@ pub enum NavigatorResult {
 }
 
 /// D1 — Agent Navigator. Bir Task için iteratif loop: LLM → DeltaProposal → Claim →
-/// measure → PredicateGate → evidence → retry/complete.
+/// measure → commit (V2 gate) → evidence → retry/complete.
 ///
 /// **Hard gates (Q4/Q5/Q6):** D1'de PassedAll varsayılır (commit() entegrasyonu D2'de).
-/// Navigator PredicateGate (Q5.b soft gate) ayrı çağırır.
+/// Gate değerlendirmesi (Q5.b) commit_task_claim içine gömülü (#100: V2 evaluator).
 pub struct AgentNavigator<'a, L: LlmClient + ?Sized, R: TaskResolver> {
     pub llm: &'a L,
     pub resolver: &'a R,
@@ -544,7 +546,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
     }
 
     /// Bir Task için navigator loop. Maneuver limit (INV-T7) kadar attempt.
-    /// Her attempt: LLM → DeltaProposal → Claim → measure → PredicateGate → evidence.
+    /// Her attempt: LLM → DeltaProposal → Claim → measure → commit (V2 gate) → evidence.
     pub fn run_task(&mut self, task_id: TaskId, agent: AgentId) -> NavigatorResult {
         // Task resolve.
         let task = match self.resolver.resolve(task_id) {
@@ -875,7 +877,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             }
 
             // 7. D2 — commit_task_claim: Q4(defensive)→bind→validate→**native binding
-            //    verification**→Q5→Q5.b(PredicateGate)→Q6→mutate→Q1-Q3.
+            //    verification**→Q5→Q5.b(V2 gate)→MD-3→Q6→mutate→Q1-Q3.
             // G2c-3b (arkadaş review 9): witness policy'ye göre WitnessSet quorum.
             // Production: Paper 1 witness güven modeli (min_approvers=2). Harness: auto-approve.
             let omega = match self.witness_policy {
@@ -1146,8 +1148,8 @@ mod tests {
     use crate::trajectory::{
         ApplyTarget, ColdStartPolicy, CommitLane, ComparisonOp, InMemoryTaskRegistry,
         MetricPredicate, MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy,
-        PredicateGate, PredicateGateInput, PredicateMode, PredicateScope, PredicateSet, Task,
-        TaskBoundClaim, TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
+        PredicateMode, PredicateScope, PredicateSet, Task, TaskBoundClaim, TaskId, TaskPolicy,
+        TaskStatus, WeightedPredicate,
     };
     use crate::vision::VisionVector;
     use crate::witness::{Claim, ClaimId, Intent};
@@ -1757,18 +1759,14 @@ mod tests {
             &resolver as &dyn TaskResolver,
         ));
 
-        // Ayrı olarak aynı girdilerle PredicateGate.evaluate → gate_out.
+        // #100 (S4): V1 reference evaluator (production PredicateGate silindi) —
+        // aynı girdilerle scalar-loss V1 semantiği (non-authoritative).
         let resolved_task = resolver.resolve(TaskId::from(1u64)).expect("task exists");
         let bound = TaskBoundClaim {
             claim: &claim,
             task: resolved_task,
         };
-        let gate_out = PredicateGate.evaluate(PredicateGateInput {
-            bound,
-            measured: &measured,
-            loss_before: 1.0,
-            target: &target,
-        });
+        let gate_out = v1_gate_reference(&bound, &measured, 1.0, &target);
 
         // Gate AcceptAsProgress üretmeli (NotCompleted + improved + AcceptImprovement + checkpoint).
         assert_eq!(
@@ -1867,15 +1865,11 @@ mod tests {
             &resolver as &dyn TaskResolver,
         ));
         let resolved_task = resolver.resolve(TaskId::from(1u64)).unwrap();
-        let gate_out = PredicateGate.evaluate(PredicateGateInput {
-            bound: TaskBoundClaim {
-                claim: &claim,
-                task: resolved_task,
-            },
-            measured: &measured,
-            loss_before: 1.0,
-            target: &target,
-        });
+        let bound = TaskBoundClaim {
+            claim: &claim,
+            task: resolved_task,
+        };
+        let gate_out = v1_gate_reference(&bound, &measured, 1.0, &target);
         let auth = match result {
             Ok(crate::engine::EngineCommitResult::Held { authorization, .. }) => authorization,
             other => panic!("expected Held, got {other:?}"),
@@ -1947,6 +1941,61 @@ mod tests {
     }
 
     /// **#96 MD-2:** Crate-internal characterization token — private-field
+    /// **#100 (S4):** V1 reference evaluator — production `PredicateGate` silindi;
+    /// test modülü V1 scalar-loss semantiğini shared core (`assess_improvement_v1` +
+    /// `evaluate_decision_core` — V2'nin de kullandığı machinery) üzerinden yeniden
+    /// ifade eder. Non-authoritative (tarihsel karşılaştırma amacı).
+    struct V1GateOutput {
+        outcome: crate::trajectory::AttemptOutcome,
+        loss_after: f64,
+        improvement_policy: crate::trajectory::EffectiveImprovementPolicy,
+    }
+
+    fn v1_gate_reference(
+        bound: &TaskBoundClaim<'_>,
+        measured: &crate::trajectory::ProvenancedRawPosition,
+        loss_before: f64,
+        target: &crate::coords::RawPosition,
+    ) -> V1GateOutput {
+        use crate::trajectory::{
+            assess_improvement_v1, evaluate_decision_core, trajectory_loss, AttemptOutcome,
+            EffectiveImprovementPolicy, GateDecision, PredicateCompletion, PredicateSetResult,
+        };
+        let policy = &bound.task.policy;
+        let loss_after = trajectory_loss(measured, target);
+        let improvement_policy = EffectiveImprovementPolicy::current_semantics();
+        let completion = bound
+            .task
+            .target_predicate_set
+            .evaluate_completion(measured);
+        let improved = assess_improvement_v1(
+            loss_before,
+            loss_after,
+            measured,
+            policy,
+            &improvement_policy,
+        );
+        let (_, mutation_decision) = evaluate_decision_core(
+            completion,
+            improved,
+            policy.predicate_failure_policy,
+            policy.allow_progress_checkpoint,
+        );
+        let predicate_completion = match completion {
+            PredicateSetResult::Completed => PredicateCompletion::Completed,
+            _ => PredicateCompletion::NotCompleted,
+        };
+        V1GateOutput {
+            outcome: AttemptOutcome {
+                gate_decision: GateDecision::PassedAll,
+                predicate_completion,
+                mutation_decision,
+                witness_status: None,
+            },
+            loss_after,
+            improvement_policy,
+        }
+    }
     /// `TaskCommitInput::new` test fixture'ları (tests/common mirror'i ile aynı
     /// kurulum; audit subject = claim delta node id'leri; epoch [0;5] — fixture
     /// axis'leri immutable).

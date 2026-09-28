@@ -1571,7 +1571,7 @@ impl std::error::Error for BindingError {}
 /// INV-T5 — Claim'i Task'a bağla. `claim.task_id` None → `MissingTaskId`;
 /// resolver'da bulunamazsa → `TaskNotFound`. Başarılırsa `TaskBoundClaim`.
 ///
-/// **Q5.b kuralı:** `PredicateGate::evaluate` sadece `TaskBoundClaim` kabul eder —
+/// **Q5.b kuralı:** gate değerlendirmesi sadece `TaskBoundClaim` kabul eder —
 /// çıplak Claim ile çağrılamaz (type-level, INV-T5).
 pub fn bind_task_claim<'a>(
     claim: &'a Claim,
@@ -1584,108 +1584,14 @@ pub fn bind_task_claim<'a>(
     Ok(TaskBoundClaim { claim, task })
 }
 
-/// Q5.b Predicate Gate — TaskBoundClaim'in predicate_set'ini değerlendirir ve
-/// deterministic `AttemptOutcome` üretir (Aşama B tezi).
-///
-/// **Akış:**
-/// 1. `measured` (engine ölçtü, INV-T3) → `PredicateSet::evaluate_completion` (INV-T4 source)
-/// 2. `Completed` → `AcceptAsCompleted`; `SourceInsufficient` → `Reject` (INV-T4)
-/// 3. `NotCompleted` → loss after hesapla, `is_improved` (INV-T6)
-/// 4. `TaskPolicy.predicate_failure_policy` + improved → `MutationDecision`
-/// 5. `AttemptOutcome { gate_decision: PassedAll, predicate_completion, mutation_decision, witness: None }`
-///
-/// **Not:** Hard gates (Q4/Q5/Q6) zaten geçti varsayılır (gate_decision: PassedAll).
-/// Bu fonksiyon sadece soft gate Q5.b'yi değerlendirir.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct PredicateGate;
-
-/// Q5.b değerlendirme girdisi — engine'in ölçtüğü + loss context.
-#[derive(Debug, Clone)]
-pub struct PredicateGateInput<'a> {
-    pub bound: TaskBoundClaim<'a>,
-    /// Engine-measured simulated_after (INV-T3 — agent değiştiremez).
-    pub measured: &'a ProvenancedRawPosition,
-    /// Loss before (mevcut durumun preferred_vector'e uzaklığı).
-    pub loss_before: f64,
-    /// Preferred/target vector (loss & is_improved için).
-    pub target: &'a RawPosition,
-}
-
-/// Q5.b çıktısı — AttemptOutcome + hesaplanan loss_after + karar verirken kullanılan
-/// improvement policy.
-///
-/// **reviewer P0-1:** `improvement_policy` gate içinde BİR KEZ üretilir ve output ile
-/// döndürülür. Engine bu nesneyi `build_authorization_context`'e geçirir; authorization
-/// basis aynı policy'yi kaydeder (yeniden üretmez). Tek construction site şartı.
-#[derive(Debug, Clone, PartialEq)]
-pub struct PredicateGateOutput {
-    pub outcome: AttemptOutcome,
-    pub loss_after: f64,
-    /// Karar üretirken kullanılan improvement policy — basis builder ile paylaşılır.
-    pub improvement_policy: EffectiveImprovementPolicy,
-}
-
-impl PredicateGate {
-    /// Q5.b — soft gate. Hard gates (Q4/Q5/Q6) zaten geçti (gate_decision: PassedAll).
-    ///
-    /// **reviewer P0-1:** `improvement_policy` burada BİR KEZ üretilir — `is_improved_loss`
-    /// kararını verir ve `PredicateGateOutput` ile döndürülür. Engine output'tan alıp
-    /// authorization basis'e taşır; basis builder yeniden üretmez (tek source of truth).
-    ///
-    /// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** V1 adapter — legacy scalar loss formülünü
-    /// hesaplayıp `evaluate_decision_core`'a geçirir. Core loss formülü içermez (plan
-    /// negatif koşulu). 7 test parity: mevcut behavior korunur, decision logic core'da.
-    pub fn evaluate(&self, input: PredicateGateInput<'_>) -> PredicateGateOutput {
-        let policy = &input.bound.task.policy;
-        let loss_after = trajectory_loss(input.measured, input.target);
-        let improvement_policy = EffectiveImprovementPolicy::current_semantics();
-
-        // 1. PredicateSet completion (INV-T4 source check dahil).
-        let completion = input
-            .bound
-            .task
-            .target_predicate_set
-            .evaluate_completion(input.measured);
-
-        // 2. INV-T9 #70 Faz 5 (review P0-2 düzeltme): improvement assessment V1 producer
-        //    — loss + hard-cap hesabı burada. Core loss/measured ERİŞMEZ.
-        let improved = assess_improvement_v1(
-            input.loss_before,
-            loss_after,
-            input.measured,
-            policy,
-            &improvement_policy,
-        );
-
-        // 3. Decision core — SADECE assessment + policy'den karar üretir (loss YOK).
-        let (_assessment, mutation_decision) = evaluate_decision_core(
-            completion,
-            improved,
-            policy.predicate_failure_policy,
-            policy.allow_progress_checkpoint,
-        );
-
-        // PredicateCompletion: Completed yalnızca PredicateSetResult::Completed ise.
-        let predicate_completion = match completion {
-            PredicateSetResult::Completed => PredicateCompletion::Completed,
-            PredicateSetResult::SourceInsufficient | PredicateSetResult::NotCompleted => {
-                PredicateCompletion::NotCompleted
-            }
-        };
-
-        PredicateGateOutput {
-            outcome: AttemptOutcome {
-                gate_decision: GateDecision::PassedAll,
-                predicate_completion,
-                mutation_decision,
-                witness_status: None,
-            },
-            loss_after,
-            improvement_policy,
-        }
-    }
-}
-
+// **#100 Faz 8a (S4):** V1 `PredicateGate`/`PredicateGateInput`/`PredicateGateOutput`
+// üretimden SİLİNDİ — commit/approve yolları V2 typed evaluator kullanır
+// (`authorization::evaluate_task_gate_v2` → `compute_completion_first_loss_and_decision').
+// Karar semantiği shared machinery olarak yaşar: `assess_improvement_v1` +
+// `evaluate_decision_core` + `trajectory_loss` (V2 evaluator da aynı core'u çağırır —
+// iki paralel karar implementasyonu YOK). V1 scalar-loss referans evaluator'i yalnız
+// karakterizasyon harness'lerinde test-lokal olarak yeniden ifade edilir
+// (tests/common + navigator/trajectory test modülleri; tarihçe: #100 kickoff TD-7).
 /// INV-T6 — loss-based improved kontrolü. `loss_after < loss_before - min_delta`
 /// AND hard caps aşılmadı. (Aşama A'daki `is_improved`'un loss-input versiyonu.)
 ///
@@ -1706,7 +1612,7 @@ impl PredicateGate {
 /// **V1 semantics:** `loss_after < loss_before - min_delta` AND hard caps aşılmadı.
 /// Hard-cap threshold'ları `EffectiveImprovementPolicy`'den. `is_improved_loss`'un
 /// zenginleştirilmiş versiyonu — improved bool döner, neden ayrıntısı core'da değil.
-pub(crate) fn assess_improvement_v1(
+pub fn assess_improvement_v1(
     loss_before: f64,
     loss_after: f64,
     measured: &ProvenancedRawPosition,
@@ -1732,7 +1638,7 @@ pub(crate) fn assess_improvement_v1(
 /// **7 test parity:** mevcut PredicateGate::evaluate test'leri (1-7) bu core üzerinden
 /// aynı MutationDecision üretmeli. V1 adapter `improved`'ı `assess_improvement_v1`'den
 /// alır ve core'a geçirir.
-pub(crate) fn evaluate_decision_core(
+pub fn evaluate_decision_core(
     completion: PredicateSetResult,
     improved: bool,
     failure_policy: PredicateFailurePolicy,
@@ -2684,18 +2590,54 @@ mod tests {
         }
     }
 
+    /// **#100 (S4):** V1 reference evaluator — production `PredicateGate` silindi;
+    /// karakterizasyon parity test'leri V1 scalar-loss semantiğini shared core
+    /// (`assess_improvement_v1` + `evaluate_decision_core` — V2'nin de kullandığı
+    /// machinery) üzerinden yeniden ifade eder. Non-authoritative.
+    struct V1GateOutput {
+        outcome: AttemptOutcome,
+    }
+
     fn gate_eval<'a>(
         bound: TaskBoundClaim<'a>,
         measured: &'a ProvenancedRawPosition,
         loss_before: f64,
         target: &'a RawPosition,
-    ) -> PredicateGateOutput {
-        PredicateGate.evaluate(PredicateGateInput {
-            bound,
-            measured,
+    ) -> V1GateOutput {
+        let policy = &bound.task.policy;
+        let loss_after = trajectory_loss(measured, target);
+        let improvement_policy = EffectiveImprovementPolicy::current_semantics();
+        let completion = bound
+            .task
+            .target_predicate_set
+            .evaluate_completion(measured);
+        let improved = assess_improvement_v1(
             loss_before,
-            target,
-        })
+            loss_after,
+            measured,
+            policy,
+            &improvement_policy,
+        );
+        let (_, mutation_decision) = evaluate_decision_core(
+            completion,
+            improved,
+            policy.predicate_failure_policy,
+            policy.allow_progress_checkpoint,
+        );
+        let predicate_completion = match completion {
+            PredicateSetResult::Completed => PredicateCompletion::Completed,
+            PredicateSetResult::SourceInsufficient | PredicateSetResult::NotCompleted => {
+                PredicateCompletion::NotCompleted
+            }
+        };
+        V1GateOutput {
+            outcome: AttemptOutcome {
+                gate_decision: GateDecision::PassedAll,
+                predicate_completion,
+                mutation_decision,
+                witness_status: None,
+            },
+        }
     }
 
     // 1. predicate_satisfied_completes_task

@@ -357,12 +357,12 @@ impl OspMcpServer {
         serde_json::to_string(&checked).map_err(|e| e.to_string())
     }
 
-    /// `osp_submit_delta` — DeltaProposal → engine measure → PredicateGate → outcome.
+    /// `osp_submit_delta` — DeltaProposal → engine measure → commit (V2 gate) → outcome.
     ///
     /// **INV:** T6 (failure≠regression), T7 (maneuver limit), T8 (progress≠merge).
     #[tool(
         name = "osp_submit_delta",
-        description = "Submit a DeltaProposal (structural-only, NO positions) for a task. Engine measures the simulated-after position, PredicateGate evaluates, returns mutation decision. INV-T6/T7/T8 enforced."
+        description = "Submit a DeltaProposal (structural-only, NO positions) for a task. Engine measures the simulated-after position, the V2 gate evaluator decides, returns mutation decision. INV-T6/T7/T8 enforced."
     )]
     async fn osp_submit_delta(
         &self,
@@ -399,7 +399,7 @@ impl OspMcpServer {
                 }
             }
         };
-        // 3. Single-attempt submit (engine measure + PredicateGate).
+        // 3. Single-attempt submit (engine measure + V2 gate).
         let outcome_json = {
             let mut ws = self.workspace.lock().map_err(|e| e.to_string())?;
             ws.submit_delta_attempt(&proposal, &task)?
