@@ -5349,13 +5349,6 @@ pub struct PendingAuthorization {
     pub evidence_digest: SuspendedAttemptEvidenceDigest,
     /// Clock trait'inden — digest'e DAHİL DEĞİL.
     pub created_at: u64,
-    /// **#95 MD-1 P2-1 (additive telemetry sidecar):** Subject-authority drift
-    /// shadow observation. **Digest preimage'ine GIRMEZ** — `AuthorizationBasisDigest`
-    /// ve `SuspendedAttemptEvidenceDigest` bu alandan bağımsız hesaplanır; authorization
-    /// authority yüzeyi değişmez. Held eligibility: legacy measurement üretilmiş +
-    /// comparison-surviving surface (witness disposition eligibility'yi etkilemez).
-    #[serde(default)]
-    pub subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
     /// **#96 MD-2 (additive telemetry sidecar):** Provenance authority drift —
     /// native (otorite) ↔ uniform-Scip reference. Digest preimage’e GIRMEZ;
     /// identity-bound (validate_internal); Held eligibility MD-1 sidecar ile aynı.
@@ -5447,22 +5440,6 @@ impl PendingAuthorization {
             }
         }
 
-        // **#95 MD-1 P2-1 (EK review P1-2):** Sidecar identity — observation parent
-        // record'un task/claim kimliğine bound olmalı. Hem load (custom Deserialize)
-        // hem creation (Envelope::new → verify → burası) path'lerinde fail-closed.
-        if let Some(drift) = &self.subject_authority_drift {
-            if drift.task_id != self.task_id || drift.claim_id != self.claim_id {
-                return Err(
-                    PendingAuthorizationLoadError::SubjectAuthorityDriftIdentityMismatch {
-                        record_task_id: self.task_id,
-                        record_claim_id: self.claim_id,
-                        drift_task_id: drift.task_id,
-                        drift_claim_id: drift.claim_id,
-                    },
-                );
-            }
-        }
-
         Ok(())
     }
 }
@@ -5493,12 +5470,6 @@ impl<'de> serde::Deserialize<'de> for PendingAuthorization {
             suspended_attempt_evidence: SuspendedAttemptEvidence,
             evidence_digest: SuspendedAttemptEvidenceDigest,
             created_at: u64,
-            /// **#95 MD-1 P2-1:** `#[serde(default)]` — eski wire (alan yok) → None;
-            /// strict `deny_unknown_fields` korunur (upgrade-directional wire
-            /// compatibility — plan v6 §9).
-            #[serde(default)]
-            subject_authority_drift:
-                Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
             /// **#96 MD-2:** upgrade-directional (eski wire → None).
             #[serde(default)]
             provenance_authority_drift:
@@ -5521,7 +5492,6 @@ impl<'de> serde::Deserialize<'de> for PendingAuthorization {
             suspended_attempt_evidence: wire.suspended_attempt_evidence,
             evidence_digest: wire.evidence_digest,
             created_at: wire.created_at,
-            subject_authority_drift: wire.subject_authority_drift,
             provenance_authority_drift: wire.provenance_authority_drift,
         };
         record
@@ -7710,14 +7680,6 @@ impl RevisionRequiredV2 {
 pub struct RevisionRequired {
     evidence_digest: SuspendedAttemptEvidenceDigest,
     suspended_attempt_evidence: SuspendedAttemptEvidence,
-    /// **#95 MD-1 P2-1 (additive telemetry sidecar):** Subject-authority drift
-    /// shadow observation — Rejected eligibility yollarında taşınır.
-    /// **Digest preimage'ine GIRMEZ** (`SuspendedAttemptEvidenceDigest` bu alandan
-    /// bağımsız hesaplanır; strict digest-proof taşıyıcı sözleşmesi korunur).
-    /// `try_with_subject_authority_drift` checked builder ile set edilir (creation
-    /// sonrası; EK review P1-2 — identity bound).
-    #[serde(default)]
-    subject_authority_drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
     /// **#96 MD-2 (additive telemetry sidecar):** Provenance authority drift —
     /// Rejected eligibility yollarında taşınır. Digest preimage’e GIRMEZ;
     /// `try_with_provenance_authority_drift` checked builder (identity-bound).
@@ -7756,7 +7718,6 @@ impl RevisionRequired {
         Ok(Self {
             evidence_digest,
             suspended_attempt_evidence,
-            subject_authority_drift: None,
             provenance_authority_drift: None,
         })
     }
@@ -7797,33 +7758,8 @@ impl RevisionRequired {
         Ok(Self {
             evidence_digest,
             suspended_attempt_evidence,
-            subject_authority_drift: None,
             provenance_authority_drift: None,
         })
-    }
-
-    /// **#95 MD-1 P2-1 (EK review P1-2):** Checked telemetry sidecar builder —
-    /// observation parent evidence kimliğine (task_id/claim_id) bound DEĞİLSE
-    /// fail-closed reddeder (creation + wire load path'lerinin ikisi de buradan
-    /// geçer). Digest hesaplarına girmez; `None` her zaman geçerli.
-    pub fn try_with_subject_authority_drift(
-        mut self,
-        drift: Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
-    ) -> Result<Self, RevisionRequiredError> {
-        if let Some(d) = &drift {
-            let record_task_id = self.suspended_attempt_evidence.task_id();
-            let record_claim_id = self.suspended_attempt_evidence.claim_id();
-            if d.task_id != record_task_id || d.claim_id != record_claim_id {
-                return Err(RevisionRequiredError::DriftSidecarIdentityMismatch {
-                    record_task_id,
-                    record_claim_id,
-                    drift_task_id: d.task_id,
-                    drift_claim_id: d.claim_id,
-                });
-            }
-        }
-        self.subject_authority_drift = drift;
-        Ok(self)
     }
 
     /// **#96 MD-2:** Checked provenance sidecar builder — MD-1 ile aynı sözleşme
@@ -7846,13 +7782,6 @@ impl RevisionRequired {
         }
         self.provenance_authority_drift = drift;
         Ok(self)
-    }
-
-    /// **#95 MD-1 P2-1:** Telemetry sidecar accessor (digest-proof dışı).
-    pub fn subject_authority_drift(
-        &self,
-    ) -> Option<&crate::subject_authority::SubjectAuthorityDriftObservation> {
-        self.subject_authority_drift.as_ref()
     }
 
     /// **#96 MD-2 (PR review tur 5 P2):** Provenance telemetry sidecar accessor —
@@ -7949,11 +7878,6 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
         struct Wire {
             evidence_digest: SuspendedAttemptEvidenceDigest,
             suspended_attempt_evidence: SuspendedAttemptEvidence,
-            /// **#95 MD-1 P2-1:** `#[serde(default)]` — eski wire (alan yok) → None.
-            /// Strict `deny_unknown_fields` korunur.
-            #[serde(default)]
-            subject_authority_drift:
-                Option<crate::subject_authority::SubjectAuthorityDriftObservation>,
             /// **#96 MD-2:** upgrade-directional (eski wire → None).
             #[serde(default)]
             provenance_authority_drift:
@@ -7964,7 +7888,6 @@ impl<'de> serde::Deserialize<'de> for RevisionRequired {
             wire.evidence_digest,
             wire.suspended_attempt_evidence,
         )
-        .and_then(|r| r.try_with_subject_authority_drift(wire.subject_authority_drift))
         .and_then(|r| r.try_with_provenance_authority_drift(wire.provenance_authority_drift))
         .map_err(serde::de::Error::custom)
     }
@@ -8559,21 +8482,12 @@ pub enum PendingAuthorizationLoadError {
     EvidenceDigestMismatch,
     #[error("task_id mismatch: record={record}, basis={basis}")]
     TaskIdMismatch { record: u64, basis: u64 },
-    /// **#95 MD-1 P2-1 (EK review P1-2):** Sidecar observation parent record
-    /// kimliğine bound değil — MD-1 migration evidence'in yanlış task/claim'e
-    /// bağlanması fail-closed reddedilir (load + creation/verify path'leri).
-    #[error(
-        "subject-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
-    )]
-    SubjectAuthorityDriftIdentityMismatch {
-        record_task_id: u64,
-        record_claim_id: u64,
-        drift_task_id: u64,
-        drift_claim_id: u64,
-    },
-    /// **#96 MD-2 (PR review tur 5 P2):** Provenance sidecar için aynı fail-closed
-    /// sözleşme — yanlış isimle `SubjectAuthorityDriftIdentityMismatch` yeniden
-    /// kullanılmaz (sidecar ailesi observable ayrışır; diagnostic truth-surface).
+    // #95-B (E5): `SubjectAuthorityDriftIdentityMismatch` varyantı silindi — MD-1
+    // drift sidecar'ı E2'de kaldırıldıktan sonra üreticisi kalmadı (varyant
+    // dead-code; thiserror Display metni tarihçede).
+    /// **#96 MD-2 (PR review tur 5 P2):** Provenance sidecar için fail-closed
+    /// sözleşme — MD-2 diagnostic'i kendi typed varyantıyla observable kalır
+    /// (sidecar ailesi ayrışır; diagnostic truth-surface).
     #[error(
         "provenance-authority drift sidecar identity mismatch: record task={record_task_id} claim={record_claim_id}, sidecar task={drift_task_id} claim={drift_claim_id}"
     )]
@@ -11417,42 +11331,6 @@ mod tests {
     // Envelope + Store tests (Commit 4)
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// **#95 MD-1 P2-1:** Identity-parametreli observation fixture — parent record
-    /// kimliğiyle eşleşen/eşleşmeyen sidecar'lar üretir. Final tip doğrudan kurulur
-    /// (Draft'ın alanları private — construction boundary, EK review tur-2 P1).
-    fn md1_sample_drift(
-        task_id: u64,
-        claim_id: u64,
-    ) -> crate::subject_authority::SubjectAuthorityDriftObservation {
-        use crate::subject_authority::{
-            AuthoritativeDownstreamObservation, LaneQ5Observation, MeasurementSubjectObservation,
-            Q5ObservationFailure, RawMeasurementObservation, SubjectAuthorityDriftObservation,
-            V1DownstreamObservation, V1LaneObservation, V2LaneOutcome, V2MeasurementFailure,
-        };
-        SubjectAuthorityDriftObservation {
-            task_id,
-            claim_id,
-            v1: V1LaneObservation {
-                subject: MeasurementSubjectObservation {
-                    ids: vec![1],
-                    digest: "ab".repeat(32),
-                },
-                raw: RawMeasurementObservation {
-                    bits: [1, 2, 3, 4, 5],
-                    sources: [crate::coords::MetricSource::Scip; 5],
-                },
-                q5: LaneQ5Observation::NotEvaluated {
-                    reason: Q5ObservationFailure::VisionUnavailable,
-                },
-                downstream: V1DownstreamObservation::Observed(AuthoritativeDownstreamObservation {
-                    predicate_completion: PredicateCompletion::Completed,
-                    mutation_decision: MutationDecision::AcceptAsCompleted,
-                }),
-            },
-            v2: V2LaneOutcome::MeasurementFailed(V2MeasurementFailure::EmptySubjectScope),
-        }
-    }
-
     fn sample_pending_record() -> PendingAuthorization {
         // **INV-T9 #72 (Commit 3):** Evidence ve digest `sample_basis()` ile tutarlı
         // olmalı — `Envelope::new` cross-field validation yapar (task_id, claim_id,
@@ -11505,7 +11383,6 @@ mod tests {
             suspended_attempt_evidence: evidence,
             evidence_digest,
             created_at: 1_700_000_000,
-            subject_authority_drift: None,
             provenance_authority_drift: None,
         }
     }
@@ -15698,165 +15575,10 @@ v = 0.5
         assert_eq!(rev.reasons().unwrap().as_slice().len(), 1);
     }
 
-    /// **#95 MD-1 P2-1:** `RevisionRequired` telemetry sidecar wire invariant'ları —
-    /// (1) sidecar digest preimage'ine GIRMEZ (strict digest-proof taşıyıcı sözleşmesi
-    /// korunur); (2) yeni JSON (sidecar'lı) round-trip'te korunur; (3) eski wire
-    /// (alan yok, `deny_unknown_fields` altında `#[serde(default)]`) → None + digest
-    /// ve evidence identity unchanged (upgrade-directional compatibility).
-    #[test]
-    fn revision_required_subject_authority_drift_sidecar_wire_invariants() {
-        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
-
-        let basis_digest = AuthorizationBasisDigest::from_hex(
-            "2222222222222222222222222222222222222222222222222222222222222222",
-        )
-        .unwrap();
-        let evidence = SuspendedAttemptEvidence::try_new(
-            TaskId::from(1u64),
-            ClaimId::from(42u64),
-            basis_digest,
-            AttemptNumber::try_from(5u64).unwrap(),
-            SuspendedAttemptDisposition::Rejected {
-                reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
-                    witness: 7u64,
-                    rationale: None,
-                }),
-                snapshot: WitnessQuorumSnapshot {
-                    approvers: 0,
-                    required_approvers: 2,
-                    support: 0.0,
-                    required_support: 1.5,
-                },
-            },
-        )
-        .unwrap();
-        let rev_plain = RevisionRequired::try_new(evidence).unwrap();
-        let digest_plain = rev_plain.evidence_digest().clone();
-
-        // Production composition: draft → finalize → checked builder ile sidecar set
-        // (identity: task 1 / claim 42 — evidence ile eşleşir).
-        let rev_with = rev_plain
-            .try_with_subject_authority_drift(Some(md1_sample_drift(1, 42)))
-            .expect("matching identity sidecar accepted");
-
-        // (1) Sidecar digest preimage'ine girmez.
-        assert_eq!(
-            rev_with.evidence_digest(),
-            &digest_plain,
-            "observation sidecar must not enter digest preimage"
-        );
-
-        // (2) Yeni wire round-trip — sidecar korunur (load path verified digest).
-        let json = serde_json::to_string(&rev_with).expect("serialize");
-        let parsed: RevisionRequired = serde_json::from_str(&json).expect("new wire round-trip");
-        assert!(parsed.subject_authority_drift().is_some());
-        assert_eq!(parsed.evidence_digest(), &digest_plain);
-
-        // (3) Eski wire — alan yok → None; digest/evidence identity unchanged.
-        let mut old = serde_json::to_value(&rev_with).expect("to_value");
-        old.as_object_mut()
-            .expect("revision wire is an object")
-            .remove("subject_authority_drift");
-        let old_rev: RevisionRequired =
-            serde_json::from_value(old).expect("old wire deserializes (serde default)");
-        assert!(old_rev.subject_authority_drift().is_none());
-        assert_eq!(old_rev.evidence_digest(), &digest_plain);
-    }
-
-    /// **EK review P1-2:** Sidecar parent task/claim kimliğine bound DEĞİLSE
-    /// fail-closed — `RevisionRequired` checked builder VE strict wire load
-    /// path'i reddeder.
-    #[test]
-    fn revision_required_rejects_identity_mismatched_sidecar() {
-        use crate::witness::{NonEmptyWitnessRejections, WitnessRejection};
-
-        fn rejected_evidence(basis_hex: &str) -> SuspendedAttemptEvidence {
-            SuspendedAttemptEvidence::try_new(
-                TaskId::from(1u64),
-                ClaimId::from(42u64),
-                AuthorizationBasisDigest::from_hex(basis_hex).unwrap(),
-                AttemptNumber::try_from(5u64).unwrap(),
-                SuspendedAttemptDisposition::Rejected {
-                    reasons: NonEmptyWitnessRejections::from_single(WitnessRejection {
-                        witness: 7u64,
-                        rationale: None,
-                    }),
-                    snapshot: WitnessQuorumSnapshot {
-                        approvers: 0,
-                        required_approvers: 2,
-                        support: 0.0,
-                        required_support: 1.5,
-                    },
-                },
-            )
-            .unwrap()
-        }
-
-        // Evidence: task=1, claim=42.
-        let rev = RevisionRequired::try_new(rejected_evidence(
-            "3333333333333333333333333333333333333333333333333333333333333333",
-        ))
-        .unwrap();
-
-        // Checked builder: mismatched sidecar (task=2) → typed Err.
-        let err = rev
-            .try_with_subject_authority_drift(Some(md1_sample_drift(2, 42)))
-            .expect_err("identity mismatch must be rejected");
-        assert!(matches!(
-            err,
-            crate::authorization::RevisionRequiredError::DriftSidecarIdentityMismatch { .. }
-        ));
-
-        // Strict wire load path: identity-mismatched sidecar'lı JSON → deserialize Err.
-        let base = RevisionRequired::try_new(rejected_evidence(
-            "4444444444444444444444444444444444444444444444444444444444444444",
-        ))
-        .unwrap();
-        let mut json_value = serde_json::to_value(base).expect("to_value");
-        json_value
-            .as_object_mut()
-            .expect("revision wire is an object")
-            .insert(
-                "subject_authority_drift".to_string(),
-                serde_json::to_value(md1_sample_drift(1, 43)).expect("sidecar to_value"),
-            );
-        let result: Result<RevisionRequired, _> = serde_json::from_value(json_value);
-        assert!(
-            result.is_err(),
-            "strict wire must reject identity-mismatched sidecar"
-        );
-    }
-
-    /// **EK review P1-2:** `PendingAuthorization` tarafı — `validate_internal`
-    /// (load + Envelope::new → verify → creation) identity mismatch'i reddeder;
-    /// strict wire deserialize de reddeder.
-    #[test]
-    fn pending_authorization_rejects_identity_mismatched_sidecar() {
-        // sample_pending_record: task=1, claim=42.
-        let mut record = sample_pending_record();
-        record.subject_authority_drift = Some(md1_sample_drift(2, 42));
-        let err = record
-            .validate_internal()
-            .expect_err("identity mismatch must fail validate_internal");
-        assert!(matches!(
-            err,
-            crate::authorization::PendingAuthorizationLoadError::SubjectAuthorityDriftIdentityMismatch { .. }
-        ));
-
-        // Strict wire: matched record + mismatched sidecar (claim=43) → deserialize Err.
-        let mut json = serde_json::to_value(sample_pending_record()).expect("to_value");
-        json.as_object_mut()
-            .expect("pending wire is an object")
-            .insert(
-                "subject_authority_drift".to_string(),
-                serde_json::to_value(md1_sample_drift(1, 43)).expect("sidecar to_value"),
-            );
-        let result: Result<PendingAuthorization, _> = serde_json::from_value(json);
-        assert!(
-            result.is_err(),
-            "strict wire must reject identity-mismatched sidecar"
-        );
-    }
+    // #95-B: `RevisionRequired` MD-1 sidecar wire-invariants testi ile
+    // `RevisionRequired`/`PendingAuthorization` MD-1 sidecar identity-mismatch
+    // testleri silindi — MD-1 wire alanı kaldırıldı (tarihçe: #95-A PR #128 +
+    // karar kaydı faz8-p2-migration-decisions.md MD-1 bölümü).
 
     /// **W8-d (#96 MD-2 review tur-5 P2):** minimal provenance drift sidecar
     /// fixture'ı — identity alanları (task_id, claim_id) parametrik; lane
@@ -15866,11 +15588,11 @@ v = 0.5
         claim_id: u64,
     ) -> crate::provenance_authority::ProvenanceAuthorityDriftObservation {
         use crate::provenance_authority::{
+            LaneQ5Observation, Q5ObservationFailure, RawMeasurementObservation,
+        };
+        use crate::provenance_authority::{
             NativeLaneObservation, ProvenanceAuthorityDriftObservation,
             ProvenanceDownstreamObservation, ProvenanceNotReachedReason, ReferenceLaneObservation,
-        };
-        use crate::subject_authority::{
-            LaneQ5Observation, Q5ObservationFailure, RawMeasurementObservation,
         };
         let raw = RawMeasurementObservation {
             bits: [1, 2, 3, 4, 5],
@@ -15918,15 +15640,11 @@ v = 0.5
             ),
             "provenance sidecar kendi typed varyantıyla reddedilmeli; got: {err:?}"
         );
-        // Subject varyantı DEĞİL (isim ayrımı pinlenir).
-        assert!(
-            !matches!(
-                err,
-                crate::authorization::PendingAuthorizationLoadError::
-                SubjectAuthorityDriftIdentityMismatch { .. }
-            ),
-            "provenance yolu subject diagnostic adını kullanmaz"
-        );
+        // Subject varyantı DEĞİL (isim ayrımı pinlenir). #95-B (E5): subject tarafının
+        // `SubjectAuthorityDriftIdentityMismatch` varyantı üreticisiz kaldığı için
+        // silindi — bu yüzden "provenance yolu subject diagnostic adını kullanmaz"
+        // iddiası artık tip seviyesinde garanti (variant yok); pozitif matches!
+        // assertion'ı yukarıda intent'i korur.
 
         // Strict wire: matched record + mismatched provenance sidecar (claim=43)
         // → deserialize Err (custom Deserialize + deny_unknown_fields).

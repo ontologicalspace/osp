@@ -16,8 +16,8 @@ error[E0624]: associated function `new` is private
    |
   ::: src/task_measurement.rs
    |
-   |     fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
-   |     ------------------------------------------------------------------------- private associated function defined here
+   |     fn new(claim: Claim, measurement: NativeSubjectMeasurement) -> Self {
+   |     ------------------------------------------------------------------- private associated function defined here
 
 error[E0061]: this function takes 2 arguments but 6 arguments were supplied
   --> tests/compile_fail/md2_carrier_external_construct.rs:18:13
@@ -26,7 +26,7 @@ error[E0061]: this function takes 2 arguments but 6 arguments were supplied
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 19 |         claim,
 20 |         measured,
-   |         -------- expected `NativeLegacySubjectMeasurement`, found `MeasuredRawPosition`
+   |         -------- expected `NativeSubjectMeasurement`, found `MeasuredRawPosition`
 21 |         ids,
    |         --- unexpected argument #3 of type `Vec<u64>`
 22 |         delta,
@@ -39,7 +39,7 @@ error[E0061]: this function takes 2 arguments but 6 arguments were supplied
 note: associated function defined here
   --> src/task_measurement.rs
    |
-   |     fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
+   |     fn new(claim: Claim, measurement: NativeSubjectMeasurement) -> Self {
    |        ^^^
 help: remove the extra arguments
    |
@@ -48,5 +48,5 @@ help: remove the extra arguments
 22 -         delta,
 23 -         revision,
 24 -         input,
-20 +         /* NativeLegacySubjectMeasurement */,
+20 +         /* NativeSubjectMeasurement */,
    |

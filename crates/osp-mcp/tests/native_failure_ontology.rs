@@ -9,7 +9,8 @@
 //! **Wire sözleşmesi (fabrication YOK — gözlenmeyen gate kararı gözlenmiş gibi
 //! sunulmaz):**
 //! - Gerçek structural Q4 (draft aşaması) → `RejectedBySyntax` attempt_outcome
-//!   (agent delta şeklini düzeltir; md1_subject_authority_sidecar test'inde pinli).
+//!   (agent delta şeklini düzeltir; tarihsel pin eski MD-1 sidecar test'indeydi —
+//!   test #95-B ön aşamalarında silindi).
 //! - Native measurement failure (terminal disposition) → `system_failure` JSON
 //!   (class + typed disposition + retryable=false); `attempt_outcome` YOK.
 //! - Retryable commit error (Syntax/Vision/Rule) → attempt_outcome ile GERÇEK
@@ -122,9 +123,7 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     // Typed system failure yüzeyi.
     let sys = outcome
@@ -150,7 +149,6 @@ fn native_measurement_failure_emits_typed_system_failure_not_syntax_rejection() 
         "gözlenmeyen gate kararı gözlenmiş gibi sunulmaz: {outcome}"
     );
     // Sidecar yok — measurement tamamlanmadı (comparison-surviving değil).
-    assert!(outcome.get("subject_authority_drift").is_none());
     assert!(outcome.get("provenance_authority_drift").is_none());
     // apply_target yansız kalır; message typed disposition taşır.
     assert_eq!(outcome["apply_target"], "NotApplied");
@@ -192,9 +190,7 @@ fn w8_q4_syntax_precedes_measurement_failure_on_mcp_surface() {
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 999)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     // Yarış kazananı: DRAFT Q4 — RejectedBySyntax attempt_outcome (gerçek syntax
     // reddi; fabrication değil) + "claim draft" mesajı.
@@ -212,7 +208,6 @@ fn w8_q4_syntax_precedes_measurement_failure_on_mcp_surface() {
         outcome.get("system_failure").is_none(),
         "Q4 precedence: measurement failure yüzeye çıkmaz: {outcome}"
     );
-    assert!(outcome.get("subject_authority_drift").is_none());
     assert!(outcome.get("provenance_authority_drift").is_none());
 }
 
@@ -245,9 +240,7 @@ fn w8_commit_task_validation_maps_to_engine_commit_failed_wire() {
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     let sys = outcome
         .get("system_failure")
@@ -266,7 +259,6 @@ fn w8_commit_task_validation_maps_to_engine_commit_failed_wire() {
         "commit-time system failure gate kararı fabricate etmez: {outcome}"
     );
     // TaskValidation comparison-surviving DEĞİL → sidecar YOK.
-    assert!(outcome.get("subject_authority_drift").is_none());
     assert!(outcome.get("provenance_authority_drift").is_none());
     let msg = outcome["message"].as_str().expect("message");
     assert!(
@@ -344,9 +336,7 @@ fn w8_retryable_rule_violation_emits_real_gate_decision() {
     };
 
     let mut ws = handle.lock().unwrap();
-    let outcome = ws
-        .submit_delta_attempt(&proposal, &task, 1)
-        .expect("attempt");
+    let outcome = ws.submit_delta_attempt(&proposal, &task).expect("attempt");
 
     // Retryable → attempt_outcome GERÇEK gate kararı ile (hardcode syntax DEĞİL).
     assert_eq!(
@@ -359,11 +349,8 @@ fn w8_retryable_rule_violation_emits_real_gate_decision() {
         outcome.get("system_failure").is_none(),
         "retryable commit error system failure DEĞİL: {outcome}"
     );
-    // Comparison-surviving → sidecar'lar taşınır.
-    assert!(
-        outcome.get("subject_authority_drift").is_some(),
-        "RuleViolation retryable = surviving → subject sidecar: {outcome}"
-    );
+    // Comparison-surviving → #96 provenance sidecar taşınır (#95-B: MD-1 subject
+    // sidecar kaldırıldı — observer yok).
     assert!(
         outcome.get("provenance_authority_drift").is_some(),
         "RuleViolation retryable = surviving → provenance sidecar: {outcome}"

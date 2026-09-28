@@ -115,9 +115,10 @@ pub struct TaskCommitInput<'a> {
     /// Loss before (running scalar — navigator :631 init / :1132 progress update).
     /// **#96:** değişmez (MD-3 #97); fiziksel removal #100.
     loss_before: f64,
-    /// **#96 MD-2:** Opaque engine-issued native provenance token (legacy subject).
-    /// Sealed carrier'dan gelir — finalize proof'u commit boundary'ye taşınır.
-    measurement: &'a crate::measurement::NativeLegacySubjectMeasurement,
+    /// **#96 MD-2:** Opaque engine-issued native provenance token (canonical
+    /// task-scope subject). Sealed carrier'dan gelir — finalize proof'u commit
+    /// boundary'ye taşınır.
+    measurement: &'a crate::measurement::NativeSubjectMeasurement,
 }
 
 impl<'a> TaskCommitInput<'a> {
@@ -708,26 +709,18 @@ type EpochOperationResult<R> = Result<
 // #96 MD-2 (plan v4-FİNAL) — Native attempt measurement bundle tipleri
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// **#96 MD-2:** Tek-session native attempt ölçüm bundle'ı — authority token +
-/// geçici MD-1 task-scope shadow material'i (aynı session'dan; observer'ın kendi
-/// `measure_task_delta` çağrısı kalkar, "yalnız subject farkı" iddiası SAME
-/// context/session altında geçerli olur).
+/// **#96 MD-2:** Tek-session native attempt ölçüm bundle'ı — authority token,
+/// TEK `BoundMeasurementSession` altında. (#95-B E5: geçici MD-1 task-scope
+/// shadow lane'i kaldırıldı — cutover (#95-A) sonrası construction-parity
+/// witness'ı görevini tamamladı.)
 pub struct NativeAttemptMeasurement {
-    authority: crate::measurement::NativeLegacySubjectMeasurement,
-    md1_shadow: Result<TaskScopeNativeMaterial, crate::subject_authority::V2MeasurementFailure>,
+    authority: crate::measurement::NativeSubjectMeasurement,
 }
 
 impl NativeAttemptMeasurement {
     /// Authority token — `TaskCommitInput.measurement` olarak commit'e gider.
-    pub fn authority(&self) -> &crate::measurement::NativeLegacySubjectMeasurement {
+    pub fn authority(&self) -> &crate::measurement::NativeSubjectMeasurement {
         &self.authority
-    }
-    /// MD-1 shadow material (task scope, native). `Err` = fail-closed telemetry
-    /// sınıflandırması — authority lane'i etkilemez (transparency).
-    pub fn md1_shadow(
-        &self,
-    ) -> &Result<TaskScopeNativeMaterial, crate::subject_authority::V2MeasurementFailure> {
-        &self.md1_shadow
     }
 }
 
@@ -735,32 +728,15 @@ impl std::fmt::Debug for NativeAttemptMeasurement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeAttemptMeasurement")
             .field("authority", &self.authority)
-            .field("md1_shadow", &self.md1_shadow)
             .finish()
     }
 }
 
-/// MD-1 observer'ın V2 (task scope) lane material'i — canonical (sorted) subject
-/// ve native measured taşır; `measure_task_delta().after()` ile aynı semantiğe
-/// sahiptir (cross-pin test pinler: observer refactor'u #95 V2 ölçüm semantiğini
-/// sessizce zayıflatamaz).
-#[derive(Debug, Clone)]
-pub struct TaskScopeNativeMaterial {
-    subject_ids: Vec<NodeId>,
-    measured: crate::coords::MeasuredRawPosition,
-}
-
-impl TaskScopeNativeMaterial {
-    pub fn subject_ids(&self) -> &[NodeId] {
-        &self.subject_ids
-    }
-    pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
-        &self.measured
-    }
-}
+// #95-B (E5): `TaskScopeNativeMaterial` (MD-1 observer'ın V2 lane material'i)
+// silindi — tek tüketicisi MD-1 shadow lane'idir; observer E3'te kaldırıldı.
 
 /// **#96 MD-2 (plan v4 P0-tur3):** Commit-anı geçerlilik KANITI —
-/// `verify_native_legacy_measurement_binding` üretir (private ctor; yalnız engine).
+/// `verify_native_measurement_binding` üretir (private ctor; yalnız engine).
 ///
 /// **İkinci TOCTOU kapanışı:** `build_authorization_context` bu proof'tan okur —
 /// `base_space_view_revision` / `measurement_input_digest` / `measured_result`
@@ -771,14 +747,14 @@ impl TaskScopeNativeMaterial {
 /// hizalı): cross-context substitution / stale-space / context-drift / ABA axis-state
 /// koruması kanıtlanır; aynı context'te meşru yeniden sunum (Held + witness evidence
 /// + resubmit) engellenmez — "token cannot be replayed" iddiası YOK.
-pub struct VerifiedNativeLegacyMeasurementBinding {
+pub struct VerifiedNativeMeasurementBinding {
     base_revision: crate::authorization::SpaceViewRevision,
     measurement_input_digest: crate::authorization::MeasurementInputDigest,
     measured: crate::coords::MeasuredRawPosition,
 }
 
-impl VerifiedNativeLegacyMeasurementBinding {
-    /// Private ctor — yalnız `verify_native_legacy_measurement_binding` üretir.
+impl VerifiedNativeMeasurementBinding {
+    /// Private ctor — yalnız `verify_native_measurement_binding` üretir.
     fn new(
         base_revision: crate::authorization::SpaceViewRevision,
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
@@ -804,9 +780,9 @@ impl VerifiedNativeLegacyMeasurementBinding {
     }
 }
 
-impl std::fmt::Debug for VerifiedNativeLegacyMeasurementBinding {
+impl std::fmt::Debug for VerifiedNativeMeasurementBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerifiedNativeLegacyMeasurementBinding")
+        f.debug_struct("VerifiedNativeMeasurementBinding")
             .field("base_revision", &self.base_revision)
             .field("measurement_input_digest", &self.measurement_input_digest)
             .field("measured", &self.measured)
@@ -1574,8 +1550,8 @@ impl SpaceEngine {
         // source requirement, geçersiz policy.
         //
         // Guard order: Q4 syntax → task bind → **validate_for_commit** →
-        // **#95-A: MD-1 subject fence** → **#96: verify_native_legacy_measurement_
-        // binding** → Q5 vision → Q5.b gate → Q6 rule → witness.
+        // **#95-A: MD-1 subject fence** → **#96: verify_native_measurement_binding**
+        // → Q5 vision → Q5.b gate → Q6 rule → witness.
         // Terminal — maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
         bound.task.validate_for_commit()?;
 
@@ -1603,7 +1579,7 @@ impl SpaceEngine {
         if current_scope != *input.measurement.subject_scope() {
             return Err(EngineCommitError::MeasurementBindingVerification(
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::TaskSubjectBindingMismatch {
+                    crate::measurement::NativeMeasurementBindingError::TaskSubjectBindingMismatch {
                         expected: current_scope,
                         presented: input.measurement.subject_scope().clone(),
                     },
@@ -1617,7 +1593,7 @@ impl SpaceEngine {
         // Failure → tek funnel `MeasurementBindingVerification` (SystemFailure sınıfı —
         // navigator terminal, budget yok, LLM retry yok).
         let verified_binding =
-            self.verify_native_legacy_measurement_binding(input.claim, input.measurement)?;
+            self.verify_native_measurement_binding(input.claim, input.measurement)?;
 
         // Phase 0c: Q5 Vision (θ bound — negatif-uzay safety).
         // **Step 4b:** Captured `EffectiveVisionGateContext` — bir kez üretilir, Q5 +
@@ -1741,7 +1717,7 @@ impl SpaceEngine {
         outcome: &crate::trajectory::AttemptOutcome,
         apply_target: crate::trajectory::ApplyTarget,
         input: &TaskCommitInput<'_>,
-        verified_binding: &VerifiedNativeLegacyMeasurementBinding,
+        verified_binding: &VerifiedNativeMeasurementBinding,
         loss_before: f64,
         loss_after: f64,
         improvement_policy: &crate::authorization::EffectiveImprovementPolicy,
@@ -2748,14 +2724,15 @@ impl SpaceEngine {
     //
     // EngineMeasurement DEĞİLDİR: baseline yok (MD-3 = #97). #95-A sonrası
     // measurement subject = canonical task predicate scope; provenance
-    // engine-native (#96 — değişmez). Tek BoundMeasurementSession: authority +
-    // MD-1 shadow AYNI captured snapshot altında (shadow #95-B'de silinir —
-    // cutover sonrası construction-parity witness).
+    // engine-native (#96 — değişmez). Tek BoundMeasurementSession: authority
+    // lane TEK captured snapshot altında. (#95-B E5: MD-1 shadow lane silindi —
+    // cutover sonrası construction-parity witness'ı görevini tamamladı.)
     // ═══════════════════════════════════════════════════════════════════════════════
 
     /// **#95-A (MD-1 subject cutover):** Canonical task scope üzerinde
-    /// session-bound native ölçüm — authority token + MD-1 shadow, TEK
-    /// `BoundMeasurementSession` altında. Provenance engine-native (#96).
+    /// session-bound native ölçüm — authority token TEK `BoundMeasurementSession`
+    /// altında. Provenance engine-native (#96). *(#95-B E5: MD-1 shadow lane'i
+    /// kaldırılınca ad kısaltıldı — eski tam ad tarihçe kayıtlarında.)*
     ///
     /// **Capability reduction (tur-3 P1-1):** `proposal` parametresi YOK —
     /// hypothetical structural truth yalnız sealed draft/claim'den, subject
@@ -2766,7 +2743,7 @@ impl SpaceEngine {
     /// Sözleşmeler:
     /// - **Subject authority:** `canonical_task_subject_scope(task)` (tek truth
     ///   — draft capture + commit MD-1 fence aynı fonksiyondan). Presence/
-    ///   unresolvable matrisi md1_shadow lane ile aynı.
+    ///   unresolvable matrisi `measure_task_delta` after-path ile aynı.
     /// - **Stale replay fence:** token `base_revision` ölçüm anında capture
     ///   edilir; commit-time `current == token.base_revision`. Aynı context'te
     ///   meşru yeniden sunum engellenmez.
@@ -2778,14 +2755,14 @@ impl SpaceEngine {
     ///   tarafından construction'da reddedilir; `EmptySubjectScope` /
     ///   `HeterogeneousPredicateScopes` / Module → typed MeasurementError.
     #[allow(clippy::result_large_err)]
-    pub fn measure_attempt_native_with_md1_shadow(
+    pub fn measure_attempt_native(
         &self,
         draft: &crate::task_measurement::StructurallyValidatedClaimDraft,
         task: &crate::trajectory::Task,
     ) -> Result<NativeAttemptMeasurement, crate::measurement::MeasurementError> {
         use crate::measurement::{
             compute_measurement_input_digest, MeasurementDeltaDigest, MeasurementError,
-            NativeLegacySubjectMeasurement,
+            NativeSubjectMeasurement,
         };
         let claim = draft.claim();
 
@@ -2805,14 +2782,14 @@ impl SpaceEngine {
             .current_space_view_revision()
             .map_err(|e| MeasurementError::RevisionComputationFailed { detail: e })?;
 
-        // 3. TEK session — authority + md1_shadow aynı captured state altında.
+        // 3. TEK session — authority ölçümü captured state altında.
         let session = crate::coords::BoundMeasurementSession::begin(&self.coord_system)
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
         // 4. **#95-A (MD-1):** Subject authority — canonical task predicate
         //    scope (tek truth free fn; draft capture'ı ile hizalı — finalize
-        //    karşılaştırır). Unresolvable matrisi md1_shadow ile aynı (base +
-        //    delta-introduced'e karşı).
+        //    karşılaştırır). Unresolvable matrisi measure_task_delta after-path
+        //    ile aynı (base + delta-introduced'e karşı).
         let subject_scope = crate::measurement::canonical_task_subject_scope(task)?;
         let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
             claim.delta_nodes.iter().map(|n| n.id).collect();
@@ -2841,27 +2818,23 @@ impl SpaceEngine {
         for edge in &claim.delta_edges {
             hypothetical.insert_edge(*edge);
         }
-        // Hypothetical'ta subject mevcudiyeti (md1_shadow adım 8 pre-check ile aynı).
+        // Hypothetical'ta subject mevcudiyeti (measure_task_delta pre-check ile aynı).
         for &id in subject_scope.member_ids() {
             if !hypothetical.nodes.contains_key(&id) {
                 return Err(MeasurementError::SubjectMemberMissingAfterDelta { node_id: id });
             }
         }
 
-        // 6. Authority measured — native per-axis, session-bound, task scope.
+        // 5. Authority measured — native per-axis, session-bound, task scope.
         let measured =
             self.measured_centroid_in_session(&session, &hypothetical, subject_scope.member_ids())?;
 
-        // 7. MD-1 shadow — AYNI session'da bağımsız türetim; cutover sonrası
-        //    construction-parity witness (failure → telemetry sınıflandırma).
-        let md1_shadow = self.measure_md1_shadow_in_session(&session, &hypothetical, claim, task);
-
-        // 8. Session-sonu verify (authority + shadow ölçümleri aynı fences altında).
+        // 6. Session-sonu verify (authority ölçümü fences altında).
         session
             .verify_unchanged()
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
-        // 9. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
+        // 7. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
         let context =
             crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
                 .map_err(MeasurementError::MeasurementContext)?;
@@ -2872,9 +2845,9 @@ impl SpaceEngine {
             })?;
         let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)?;
 
-        // 10. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
-        //     subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
-        let authority = NativeLegacySubjectMeasurement::new(
+        // 8. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
+        //    subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
+        let authority = NativeSubjectMeasurement::new(
             measured,
             subject_scope,
             delta_digest,
@@ -2883,61 +2856,12 @@ impl SpaceEngine {
             session.axis_epochs(),
         );
 
-        Ok(NativeAttemptMeasurement {
-            authority,
-            md1_shadow,
-        })
+        Ok(NativeAttemptMeasurement { authority })
     }
 
-    /// MD-1 shadow lane — `measure_task_delta`'nın after-path replikasyonu (aynı
-    /// session'dan): canonical subject derivation + unresolvable matrisi (base'e
-    /// karşı) + hypothetical'ta mevcudiyet + centroid. Failure'lar authority'yi
-    /// etkilemez; `map_v2_measurement_failure` telemetry sınıflandırması.
-    #[allow(
-        clippy::result_large_err,
-        reason = "MeasurementError inline (intentional — see measurement.rs layout decision); closure Err variant"
-    )]
-    fn measure_md1_shadow_in_session(
-        &self,
-        session: &crate::coords::BoundMeasurementSession<'_>,
-        hypothetical: &crate::space::Space,
-        claim: &Claim,
-        task: &crate::trajectory::Task,
-    ) -> Result<TaskScopeNativeMaterial, crate::subject_authority::V2MeasurementFailure> {
-        use crate::measurement::MeasurementError;
-
-        let run = || -> Result<TaskScopeNativeMaterial, MeasurementError> {
-            let subject = self.derive_task_subject_scope(task)?;
-            // Unresolvable matrisi (measure_task_delta adım 7 ile aynı — base'e karşı).
-            let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
-                claim.delta_nodes.iter().map(|n| n.id).collect();
-            let mut unresolvable: Vec<crate::space::NodeId> = Vec::new();
-            for &id in subject.member_ids() {
-                if !self.space.nodes.contains_key(&id) && !delta_introduced.contains(&id) {
-                    unresolvable.push(id);
-                }
-            }
-            if !unresolvable.is_empty() {
-                return Err(MeasurementError::SubjectMemberUnresolvable {
-                    missing: unresolvable,
-                });
-            }
-            // Hypothetical'ta mevcudiyet (measure_task_delta adım 8 pre-check).
-            for &id in subject.member_ids() {
-                if !hypothetical.nodes.contains_key(&id) {
-                    return Err(MeasurementError::SubjectMemberMissingAfterDelta { node_id: id });
-                }
-            }
-            let measured =
-                self.measured_centroid_in_session(session, hypothetical, subject.member_ids())?;
-            Ok(TaskScopeNativeMaterial {
-                subject_ids: subject.member_ids().to_vec(),
-                measured,
-            })
-        };
-
-        run().map_err(|e| crate::subject_authority::map_v2_measurement_failure(&e))
-    }
+    // #95-B (E5): `measure_md1_shadow_in_session` silindi — MD-1 shadow lane'i
+    // (measure_task_delta after-path replikasyonu + map_v2_measurement_failure
+    // telemetry sınıflandırması) kaldırıldı; authority lane tek üretim yoludur.
 
     /// **#96 MD-2 (plan v4 P0-tur3) — commit-anı geçerlilik kanıtı (5 kontrol):**
     ///
@@ -2950,28 +2874,29 @@ impl SpaceEngine {
     /// ```
     ///
     /// Error funnel (PR #124 review P1 düzeltmesi): engine-issued token hataları
-    /// **`NativeAuthority(NativeLegacyMeasurementBindingError)`** typed family'sinde —
+    /// **`NativeAuthority(NativeMeasurementBindingError)`** typed family'sinde —
     /// mevcut `Mismatch` (presented-authority/caller) ailesi YENİDEN ANLAMLANDIRILMAZ
     /// ve DOKUNULMAZ. Tek funnel `EngineCommitError::MeasurementBindingVerification`
     /// korunur (paralel ontology yok). Derivation hataları mevcut
     /// `MeasurementBindingDerivationError` ailesinde (SystemFailure sınıfı).
-    /// `LegacySubjectMismatch` YOK — token'ın legacy_subject_ids'i audited
-    /// measurement subject'tır, canonical task authority değildir (#96 sınırı; MD-1 = #95-A).
+    /// `SubjectMismatch` YOK — token'ın `subject_member_ids()` audited
+    /// measurement subject'tir; commit-anı canonical task authority
+    /// karşılaştırması `TaskSubjectBindingMismatch`'tır (#95-A).
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
     )]
-    pub fn verify_native_legacy_measurement_binding(
+    pub fn verify_native_measurement_binding(
         &self,
         claim: &Claim,
-        token: &crate::measurement::NativeLegacySubjectMeasurement,
+        token: &crate::measurement::NativeSubjectMeasurement,
     ) -> Result<
-        VerifiedNativeLegacyMeasurementBinding,
+        VerifiedNativeMeasurementBinding,
         crate::measurement::MeasurementBindingVerificationError,
     > {
         use crate::measurement::{
             MeasurementBindingDerivationError as DerivErr, MeasurementBindingVerificationError,
-            MeasurementDeltaDigest, NativeLegacyMeasurementBindingError as NativeErr,
+            MeasurementDeltaDigest, NativeMeasurementBindingError as NativeErr,
         };
 
         // (1) Structural delta identity — shared canonical producer (tek truth).
@@ -3079,7 +3004,7 @@ impl SpaceEngine {
             ));
         }
 
-        Ok(VerifiedNativeLegacyMeasurementBinding::new(
+        Ok(VerifiedNativeMeasurementBinding::new(
             token.base_revision().clone(),
             token.measurement_input_digest().clone(),
             token.measured().clone(),
@@ -7778,354 +7703,11 @@ v = 0.5
         );
     }
 
-    // ═════════════════════════════════════════════════════════════════════════════
-    // Issue #92 — subject-divergent raw → theta downstream (same context).
-    //
-    // PR #87-B kanıtı (conditional): Q5(V1)=Q5(V2) ancak raw ve context eşitse.
-    // #92 (bu bölüm): subject-authority divergent topology'de farklı raw'ın
-    // theta'ya propagate olduğunun fixture-scoped empirical karakterizasyonu.
-    // Claim disiplini: "bu iki frozen fixture'da gözlemlenir" — cosine projection
-    // many-to-one olduğundan genel teorem iddia EDİLMEZ.
-    //
-    // wide-affected-scope-002 / removed-edge-external-source-002 corpus case'lerinin
-    // engine-unit kanıt yüzeyi (integration drift matrisi ayrı — parity test).
-    // ═════════════════════════════════════════════════════════════════════════════
-
-    /// #92 ortak gövde: gerçek DeltaProposal → `build_claim_from_proposal` →
-    /// `node_from_spec` (production claim-mapping yolu — review P1-1: elle
-    /// `q5_fixture_module` claim KURULMAZ; classification semantics değişirse
-    /// corpus ile birlikte drift eder) → iki raw producer (V1 legacy subject /
-    /// V2 task scope) → aynı engine'de observe_q5_theta. Context identity
-    /// construction-by-design: clone, yalnız computed_raw değişir.
-    ///
-    /// Dönen: (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw). Intervention purity
-    /// 001 karşılıkları (boş delta-node claim) ile ayrıca assert edilir — bkz. gövde.
-    fn q92_observe_divergent_pair(
-        space_node_ids: &[u64],
-        delta_edges: Vec<Edge>,
-        removed_edges: Vec<crate::agent::EdgeRef>,
-        v1_affected: Vec<NodeId>,
-        v2_task_scope: NodeId,
-    ) -> (
-        Q5ThetaObservation,
-        Q5ThetaObservation,
-        Vec<NodeId>,
-        RawPosition,
-        RawPosition,
-    ) {
-        use crate::agent::{NewEdgeSpec, NewNodeSpec};
-        let mut engine = make_measurement_engine();
-        for id in space_node_ids {
-            engine.space_mut().insert_node(q5_fixture_module(*id));
-        }
-        // 002 delta: izole role-bearing NewNodeSpec (connected_to=[] — edge yok,
-        // hypothetical geometri değişmez). Claim production mapping üzerinden
-        // kurulur: build_claim_from_proposal → node_from_spec → default
-        // classification → infer_role(Runtime) → BuiltinRole vision.
-        let new_edge_specs: Vec<NewEdgeSpec> = delta_edges
-            .iter()
-            .map(|e| NewEdgeSpec {
-                from: e.from,
-                to: e.to,
-                kind: e.kind,
-            })
-            .collect();
-        let proposal_002 = crate::agent::DeltaProposal {
-            new_nodes: vec![NewNodeSpec {
-                kind: crate::space::NodeKind::Module,
-                initial_mass: 1.0,
-                connected_to: vec![],
-            }],
-            new_edges: new_edge_specs,
-            removed_edges: removed_edges.clone(),
-            affected_nodes: v1_affected.clone(),
-            ..Default::default()
-        };
-        let probe_claim = crate::navigator::build_claim_from_proposal(
-            &proposal_002,
-            RawPosition::default(), // placeholder — V1/V2 raw producer'ları override eder
-            42,
-            100,
-            1,
-        )
-        .expect("002 probe claim (non-empty: new_nodes var)");
-        // Production mapping id discipline: node_from_spec ilk spec'e 10_000 atar.
-        assert_eq!(
-            probe_claim.delta_nodes[0].id, 10_000,
-            "node_from_spec production id assignment (first spec → 10_000)"
-        );
-
-        let revision_before = engine
-            .current_space_view_revision()
-            .expect("revision before measurement");
-
-        // V1 raw: production subject derivation helper — AYNI proposal_002 üzerinde
-        // (review P1-1: helper ile claim aynı kaynaktan; ayrı elle proposal KURULMAZ).
-        let v1_subject =
-            crate::subject_authority::derive_v1_legacy_measurement_subject(&proposal_002);
-        let v1_raw = engine.compute_raw_from_delta(
-            &probe_claim.delta_nodes,
-            &probe_claim.delta_edges,
-            &probe_claim.removed_edges,
-            &v1_subject,
-        );
-
-        // V2 raw: task scope (measure_task_delta).
-        let task = task_with_node_scope(v2_task_scope, 42);
-        let probe_bound = crate::trajectory::TaskBoundClaim {
-            claim: &probe_claim,
-            task: &task,
-        };
-        let measurement = engine
-            .measure_task_delta(&probe_bound, &revision_before, None)
-            .expect("V2 measurement");
-        let v2_raw = measurement.after().to_raw();
-
-        // Tek structural claim → clone → yalnız raw değişir (context identity
-        // construction-by-design; ayrıca full assert aşağıda).
-        let mut v1_claim = probe_claim.clone();
-        v1_claim.computed_raw = v1_raw;
-        let mut v2_claim = probe_claim.clone();
-        v2_claim.computed_raw = v2_raw;
-
-        let obs_v1 = observe_q5_theta(&engine, &v1_claim);
-        let obs_v2 = observe_q5_theta(&engine, &v2_claim);
-
-        // Revision invariant: characterization tek engine revision içinde.
-        let revision_after = engine
-            .current_space_view_revision()
-            .expect("revision after measurement");
-        assert_eq!(
-            revision_before, revision_after,
-            "#92 characterization must remain within one engine revision"
-        );
-
-        (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw)
-    }
-
-    /// #92: full context identity assert — vision_subject, effective_vision_bits,
-    /// vision_source, 3 semver, theta_bound_bits (review P1-1: effective_vision_bits
-    /// DAHİL; "aynı context" koşulunun tam tanımı). Sessiz/tesadüfi context drift
-    /// kapanır — downstream fark tek başına subject-set farkına bağlanabilir.
-    fn q92_assert_context_identity(obs_v1: &Q5ThetaObservation, obs_v2: &Q5ThetaObservation) {
-        assert_eq!(
-            obs_v1.vision_subject, obs_v2.vision_subject,
-            "context identity: vision subject"
-        );
-        assert_eq!(
-            obs_v1.effective_vision_bits, obs_v2.effective_vision_bits,
-            "context identity: effective vision bits (the Q5 context itself)"
-        );
-        assert_eq!(
-            obs_v1.vision_source, obs_v2.vision_source,
-            "context identity: vision source"
-        );
-        assert_eq!(
-            obs_v1.role_inference_semver, obs_v2.role_inference_semver,
-            "context identity: role inference semver"
-        );
-        assert_eq!(
-            obs_v1.vision_selection_semver, obs_v2.vision_selection_semver,
-            "context identity: vision selection semver"
-        );
-        assert_eq!(
-            obs_v1.deviation_semver, obs_v2.deviation_semver,
-            "context identity: deviation semver"
-        );
-        assert_eq!(
-            obs_v1.theta_bound_bits, obs_v2.theta_bound_bits,
-            "context identity: theta bound"
-        );
-    }
-
-    /// Intervention purity: 002 raw == 001 raw (bit-exact) her iki producer için.
-    /// 001 claim = aynı structural delta ama delta_nodes BOŞ (role-bearing node yok).
-    ///
-    /// V1 subject burada da production helper'dan türetilir (removed_edges.from
-    /// fold dahil — ham affected listesi DEĞİL; wide'da etkisiz, removed'da kritik).
-    fn q92_001_raws(
-        space_node_ids: &[u64],
-        delta_edges: Vec<Edge>,
-        removed_edges: Vec<crate::agent::EdgeRef>,
-        v1_affected: Vec<NodeId>,
-        v2_task_scope: NodeId,
-    ) -> (RawPosition, RawPosition) {
-        let mut engine = make_measurement_engine();
-        for id in space_node_ids {
-            engine.space_mut().insert_node(q5_fixture_module(*id));
-        }
-        // 001 shape: new_nodes YOK → delta_nodes boş (GlobalDefault pre-theta reject
-        // yüzeyi — bu yüzden 001'de theta kanıtı yok).
-        let claim_001 = claim_with_task_id(42, vec![], delta_edges, removed_edges.clone());
-        let revision = engine.current_space_view_revision().unwrap();
-        // V1 subject: production derivation (affected + removed_edges.from fold).
-        use crate::agent::DeltaProposal;
-        let proposal_001 = DeltaProposal {
-            new_nodes: vec![],
-            new_edges: vec![],
-            removed_edges,
-            affected_nodes: v1_affected,
-            ..Default::default()
-        };
-        let v1_subject =
-            crate::subject_authority::derive_v1_legacy_measurement_subject(&proposal_001);
-        let v1_raw = engine.compute_raw_from_delta(
-            &claim_001.delta_nodes,
-            &claim_001.delta_edges,
-            &claim_001.removed_edges,
-            &v1_subject,
-        );
-        let task = task_with_node_scope(v2_task_scope, 42);
-        let bound = crate::trajectory::TaskBoundClaim {
-            claim: &claim_001,
-            task: &task,
-        };
-        let measurement = engine
-            .measure_task_delta(&bound, &revision, None)
-            .expect("V2 001 measurement");
-        (v1_raw, measurement.after().to_raw())
-    }
-
-    #[test]
-    fn q5_theta_subject_divergent_same_context_shows_theta_divergence() {
-        // wide-affected-scope-002: space {1,2,3}, edge 1→2, affected [1,2,3],
-        // task scope Node(1). V1 subject {1,2,3} vs V2 {1}.
-        let (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw) =
-            q92_observe_divergent_pair(&[1, 2, 3], vec![edge(1, 2)], vec![], vec![1, 2, 3], 1);
-
-        // Subject evidence: production helper'dan exact (elle sabit yok).
-        assert_eq!(
-            v1_subject,
-            vec![1, 2, 3],
-            "V1 legacy subject (helper-derived)"
-        );
-
-        // Intervention purity: raw(002) == raw(001) bit-exact — izole role-bearing
-        // node tek müdahale; subject/raw divergence 001'den aynen korunur.
-        let (raw_v1_001, raw_v2_001) =
-            q92_001_raws(&[1, 2, 3], vec![edge(1, 2)], vec![], vec![1, 2, 3], 1);
-        assert_eq!(
-            q5_axis_bits(&v1_raw),
-            q5_axis_bits(&raw_v1_001),
-            "intervention purity: raw_v1(002) == raw_v1(001)"
-        );
-        assert_eq!(
-            q5_axis_bits(&v2_raw),
-            q5_axis_bits(&raw_v2_001),
-            "intervention purity: raw_v2(002) == raw_v2(001)"
-        );
-
-        // Raw divergence (PR #85 zinciri bu fixture'da da): farklı subject → farklı raw.
-        assert_ne!(
-            obs_v1.computed_raw_bits, obs_v2.computed_raw_bits,
-            "subject divergence must propagate to raw in this fixture"
-        );
-
-        // Full context identity (P1-1 — effective_vision_bits dahil).
-        q92_assert_context_identity(&obs_v1, &obs_v2);
-
-        // Theta divergence — fixture-scoped empirical (ana teorem iddiası YOK).
-        assert_ne!(
-            obs_v1.theta_bits, obs_v2.theta_bits,
-            "raw divergence must propagate to theta in this fixture (same context)"
-        );
-
-        // Exact theta goldens (probe-then-freeze; ~0.15249 vs ~0.11711).
-        assert_eq!(
-            obs_v1.theta_bits,
-            4594662147918958728,
-            "theta_v1 golden (f64={})",
-            f64::from_bits(obs_v1.theta_bits)
-        );
-        assert_eq!(
-            obs_v2.theta_bits,
-            4593103093345799528,
-            "theta_v2 golden (f64={})",
-            f64::from_bits(obs_v2.theta_bits)
-        );
-
-        // Q5 verdict — empirical:Passed/Passed (theta drift ≠ zorunlu verdict drift;
-        // bu fixture'da ikisi de theta_bound=0.3 altında).
-        assert_eq!(obs_v1.actual_verdict, Q5VerdictObservation::Passed);
-        assert_eq!(obs_v2.actual_verdict, Q5VerdictObservation::Passed);
-    }
-
-    #[test]
-    fn q5_theta_removed_edge_external_same_context_shows_theta_divergence() {
-        // removed-edge-external-source-002: space {1,9}, edge 1→9, removed 9→1,
-        // affected [1] (helper 9'u ekler → {1,9}), task scope Node(1).
-        let (obs_v1, obs_v2, v1_subject, v1_raw, v2_raw) = q92_observe_divergent_pair(
-            &[1, 9],
-            vec![edge(1, 9)],
-            vec![crate::agent::EdgeRef {
-                from: 9,
-                to: 1,
-                kind: crate::space::EdgeKind::Imports,
-            }],
-            vec![1],
-            1,
-        );
-
-        // Subject evidence: removed_edges.from=9 helper tarafından fold edilir.
-        assert_eq!(
-            v1_subject,
-            vec![1, 9],
-            "V1 legacy subject (helper-derived, 9 folded)"
-        );
-
-        // Intervention purity: raw(002) == raw(001) bit-exact.
-        let (raw_v1_001, raw_v2_001) = q92_001_raws(
-            &[1, 9],
-            vec![edge(1, 9)],
-            vec![crate::agent::EdgeRef {
-                from: 9,
-                to: 1,
-                kind: crate::space::EdgeKind::Imports,
-            }],
-            vec![1],
-            1,
-        );
-        assert_eq!(
-            q5_axis_bits(&v1_raw),
-            q5_axis_bits(&raw_v1_001),
-            "intervention purity: raw_v1(002) == raw_v1(001)"
-        );
-        assert_eq!(
-            q5_axis_bits(&v2_raw),
-            q5_axis_bits(&raw_v2_001),
-            "intervention purity: raw_v2(002) == raw_v2(001)"
-        );
-
-        // Raw + theta divergence (same context).
-        assert_ne!(
-            obs_v1.computed_raw_bits, obs_v2.computed_raw_bits,
-            "subject divergence must propagate to raw in this fixture"
-        );
-        q92_assert_context_identity(&obs_v1, &obs_v2);
-        assert_ne!(
-            obs_v1.theta_bits, obs_v2.theta_bits,
-            "raw divergence must propagate to theta in this fixture (same context)"
-        );
-
-        // Exact theta goldens (probe-then-freeze; ~0.13770 vs ~0.11711).
-        assert_eq!(
-            obs_v1.theta_bits,
-            4594129220971291796,
-            "theta_v1 golden (f64={})",
-            f64::from_bits(obs_v1.theta_bits)
-        );
-        assert_eq!(
-            obs_v2.theta_bits,
-            4593103093345799528,
-            "theta_v2 golden (f64={})",
-            f64::from_bits(obs_v2.theta_bits)
-        );
-
-        // Q5 verdict — empirical: Passed/Passed.
-        assert_eq!(obs_v1.actual_verdict, Q5VerdictObservation::Passed);
-        assert_eq!(obs_v2.actual_verdict, Q5VerdictObservation::Passed);
-    }
-
+    // #95-B: Issue #92 subject-divergence bölümü silindi (q92_observe_divergent_pair
+    // + q92_001_raws + q92_assert_context_identity +
+    // q5_theta_subject_divergent_same_context_shows_theta_divergence) — MD-1
+    // comparison kanıtı; tarihçe: #92 karakterizasyonu + #95-A PR #128 + karar kaydı
+    // faz8-p2-migration-decisions.md MD-1 bölümü (mimar onayı 2026-09-28).
     // ═════════════════════════════════════════════════════════════════════════════
     // #95 MD-1 P2-1 — observer axis-state neutrality + fail-closed sentinel
     // (plan v6 §5-1 crate-internal katman: `coord_system` private field'ına yalnızca
@@ -8299,82 +7881,18 @@ v = 0.5
         assert_eq!(direct.witness_depth.source, centroid.witness_depth.source);
     }
 
-    /// **#96 MD-2 (plan v4 W1 cross-pin — ZORUNLU):** md1_shadow material, gerçek
-    /// `measure_task_delta().after()` ile value bits + sources exact eşit — observer
-    /// refactor'u #95 V2 ölçüm semantiğini sessizce zayıflatamaz. Stable fixture:
-    /// iki çağrı arasında mutation yok.
-    #[test]
-    fn md2_native_attempt_md1_shadow_cross_pins_measure_task_delta_after() {
-        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
-        let task = md1_task_node1();
-        let proposal = md1_edge_proposal();
-        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal,
-            RawPosition::default(),
-            &task,
-            1,
-            1,
-        )
-        .unwrap();
-
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
-
-        // Karşılaştırma yüzeyi: production `measure_task_delta` (kendi session'ı).
-        let bound = crate::trajectory::TaskBoundClaim {
-            claim: draft.claim(),
-            task: &task,
-        };
-        let revision = engine.current_space_view_revision().unwrap();
-        let reference = engine.measure_task_delta(&bound, &revision, None).unwrap();
-
-        let shadow = bundle.md1_shadow().as_ref().unwrap();
-        let after = reference.after();
-        let bits = |m: &crate::coords::MeasuredRawPosition| {
-            [
-                m.coupling.value.to_bits(),
-                m.cohesion.value.to_bits(),
-                m.instability.value.to_bits(),
-                m.entropy.value.to_bits(),
-                m.witness_depth.value.to_bits(),
-            ]
-        };
-        assert_eq!(
-            bits(shadow.measured()),
-            bits(after),
-            "md1_shadow == measure_task_delta().after() value bits (f64 shadow={:?}, after={:?})",
-            shadow.measured().coupling.value,
-            after.coupling.value
-        );
-        assert_eq!(
-            shadow.measured().coupling.source,
-            after.coupling.source,
-            "sources exact (native per-axis)"
-        );
-        assert_eq!(shadow.measured().cohesion.source, after.cohesion.source);
-        assert_eq!(
-            shadow.measured().instability.source,
-            after.instability.source
-        );
-        assert_eq!(shadow.measured().entropy.source, after.entropy.source);
-        assert_eq!(
-            shadow.measured().witness_depth.source,
-            after.witness_depth.source
-        );
-        // Canonical (sorted) task scope subject.
-        assert_eq!(
-            shadow.subject_ids(),
-            reference.request().subject().member_ids(),
-            "shadow subject == canonical task scope member_ids"
-        );
-    }
+    // #95-B (E5): `md2_native_attempt_md1_shadow_cross_pins_measure_task_delta_after`
+    // testi silindi — MD-1 shadow lane kaldırıldı (authority lane'in
+    // `measure_task_delta().after()` ile subject/value-bits/sources eşdeğerliği
+    // artık doğrudan `canonical_task_subject_scope` tek truth'u tarafından garanti;
+    // tarihçe: #96 plan v4 W1 cross-pin, karar kaydı faz8-p2-migration-decisions.md
+    // MD-1 bölümü).
 
     /// **#95-A (MD-1 subject cutover):** authority subject = canonical task
     /// predicate scope — producer İÇİNDE türetilir (serbest Vec parametresi YOK;
     /// affected_nodes erişim yüzeyinden FİZİKSEL çıktı — producer imzasında
-    /// proposal YOK). Üç vaka + authority↔shadow construction-parity pin'i
-    /// (subject/bits/sources exact).
+    /// proposal YOK). Üç vaka. *(#95-B E5: authority↔shadow construction-parity
+    /// pin bloğu silindi — MD-1 shadow lane kaldırıldı.)*
     /// *(Historical pre-#95-A golden: legacy affected-union — reason: `subject-cutover (#95-A)`)*
     #[test]
     fn md95a_authority_subject_is_canonical_task_scope() {
@@ -8404,10 +7922,8 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
-        assert_eq!(bundle.authority().legacy_subject_ids(), &[1u64]);
+        let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
+        assert_eq!(bundle.authority().subject_member_ids(), &[1u64]);
 
         // (b) **#95-A regolden:** affected [1] + removed_edges.from=9 → authority
         // subject YİNE [1] (task scope). *(Historical pre-#95-A golden: legacy
@@ -8428,11 +7944,9 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle3 = engine
-            .measure_attempt_native_with_md1_shadow(&draft3, &task)
-            .unwrap();
+        let bundle3 = engine.measure_attempt_native(&draft3, &task).unwrap();
         assert_eq!(
-            bundle3.authority().legacy_subject_ids(),
+            bundle3.authority().subject_member_ids(),
             &[1u64],
             "#95-A: authority subject = canonical task scope (affected union DEĞİL)"
         );
@@ -8454,58 +7968,8 @@ v = 0.5
             3,
         )
         .unwrap();
-        let bundle_fb = engine
-            .measure_attempt_native_with_md1_shadow(&draft_fb, &task)
-            .unwrap();
-        assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[1u64]);
-
-        // **#95-A construction-parity pin (W2):** authority ↔ md1_shadow —
-        // subject/bits/sources exact eşit (cutover sonrası shadow bağımsız
-        // alternatif teori değil, construction-parity witness).
-        for bundle in [&bundle, &bundle3, &bundle_fb] {
-            let shadow = bundle
-                .md1_shadow()
-                .as_ref()
-                .expect("task-scope shadow başarılı olmalı (authority ile aynı scope)");
-            assert_eq!(
-                bundle.authority().legacy_subject_ids(),
-                shadow.subject_ids(),
-                "authority↔shadow subject parity"
-            );
-            let auth_bits = bundle.authority().raw();
-            let shadow_bits = shadow.measured().to_raw();
-            assert_eq!(
-                [
-                    auth_bits.x.to_bits(),
-                    auth_bits.y.to_bits(),
-                    auth_bits.z.to_bits(),
-                    auth_bits.w.to_bits(),
-                    auth_bits.v.to_bits(),
-                ],
-                [
-                    shadow_bits.x.to_bits(),
-                    shadow_bits.y.to_bits(),
-                    shadow_bits.z.to_bits(),
-                    shadow_bits.w.to_bits(),
-                    shadow_bits.v.to_bits(),
-                ],
-                "authority↔shadow value-bits parity"
-            );
-            let sources = |m: &crate::coords::MeasuredRawPosition| {
-                [
-                    m.coupling.source,
-                    m.cohesion.source,
-                    m.instability.source,
-                    m.entropy.source,
-                    m.witness_depth.source,
-                ]
-            };
-            assert_eq!(
-                sources(bundle.authority().measured()),
-                sources(shadow.measured()),
-                "authority↔shadow per-axis sources parity"
-            );
-        }
+        let bundle_fb = engine.measure_attempt_native(&draft_fb, &task).unwrap();
+        assert_eq!(bundle_fb.authority().subject_member_ids(), &[1u64]);
     }
 
     /// **#95-A (MD-1) — affected-irrelevance (finalize seviyesi):** aynı task
@@ -8540,14 +8004,10 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task).unwrap();
 
         // Structural delta aynı (affected digest'e girmez) — precondition.
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task).unwrap();
         assert_eq!(
             bundle_a.authority().delta_digest(),
             bundle_b.authority().delta_digest()
@@ -8561,7 +8021,7 @@ v = 0.5
     }
 
     /// **#95-A — scope-mismatch negatifi (finalize seviyesi):** farklı task
-    /// scope'lu draft×token → `LegacySubjectBindingMismatch`. Simetrik uzayda
+    /// scope'lu draft×token → `SubjectBindingMismatch`. Simetrik uzayda
     /// raw bits EŞİT olsa bile (raw parity bağımsız kanıt DEĞİL — eski test 2'nin
     /// #95-A karşılığı; scope artık binding'in kendisi).
     #[test]
@@ -8615,12 +8075,8 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task_a)
-            .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task_b)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task_a).unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task_b).unwrap();
 
         // Precondition 1: structural delta aynı.
         assert_eq!(
@@ -8654,9 +8110,9 @@ v = 0.5
         assert!(
             matches!(
                 err,
-                crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch { .. }
+                crate::measurement::NativeMeasurementBindingError::SubjectBindingMismatch { .. }
             ),
-            "LegacySubjectBindingMismatch (scope): {err:?}"
+            "SubjectBindingMismatch (scope): {err:?}"
         );
     }
 
@@ -8685,9 +8141,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task_a)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task_a).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
         // Registry overwrite: aynı task_id, FARKLI scope.
@@ -8711,7 +8165,7 @@ v = 0.5
                 &err,
                 crate::engine::EngineCommitError::MeasurementBindingVerification(
                     crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                        crate::measurement::NativeLegacyMeasurementBindingError::TaskSubjectBindingMismatch { .. }
+                        crate::measurement::NativeMeasurementBindingError::TaskSubjectBindingMismatch { .. }
                     )
                 )
             ),
@@ -8758,9 +8212,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task_a)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task_a).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
         let mut registry = crate::trajectory::InMemoryTaskRegistry::new();
@@ -8839,19 +8291,15 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task).unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task).unwrap();
 
         // (1) authority subject exact eşit (= task scope [2]).
         assert_eq!(
-            bundle_a.authority().legacy_subject_ids(),
-            bundle_b.authority().legacy_subject_ids()
+            bundle_a.authority().subject_member_ids(),
+            bundle_b.authority().subject_member_ids()
         );
-        assert_eq!(bundle_a.authority().legacy_subject_ids(), &[2u64]);
+        assert_eq!(bundle_a.authority().subject_member_ids(), &[2u64]);
         // (2) measured bits exact.
         let bits = |r: crate::coords::RawPosition| {
             [
@@ -8943,64 +8391,11 @@ v = 0.5
         );
     }
 
-    /// **#96 re-anchor:** Producer çağrısı (`measure_attempt_native_with_md1_shadow`)
-    /// `BoundMeasurementSession` TCB kontratı altında axis descriptor + epoch
-    /// state'ini değiştirmez: pre-produce session'ı açık tutulur; producer hem
-    /// authority hem md1_shadow ölçümünü TEK session altında çalıştırır ve
-    /// `verify_unchanged` geçmek zorundadır — interior mutation durumunda
-    /// `AxisStateDrift` fail-closed üretir. Descriptor parity ayrıca pinlenir.
-    #[test]
-    fn md1_observer_preserves_axis_session_state() {
-        use crate::coords::BoundMeasurementSession;
-
-        let engine = md1_engine_with_cs(make_measurement_engine_coordinate_system());
-        let task = md1_task_node1();
-        let proposal = md1_edge_proposal();
-        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
-            &proposal,
-            RawPosition::default(),
-            &task,
-            100,
-            1,
-        )
-        .expect("draft (probe + structural Q4)");
-        let native = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .expect("native measurement");
-        let claim = draft
-            .finalize(native.authority())
-            .expect("subject binding: draft ve token ayni proposal");
-        let target = RawPosition::default();
-
-        let session = BoundMeasurementSession::begin(&engine.coord_system)
-            .expect("session begin on production built-in axes");
-        let descriptors_before = session.axis_descriptors();
-
-        let observation = crate::subject_authority::observe_subject_authority_drift(
-            &engine,
-            claim.claim(),
-            &task,
-            &native,
-            0.0,
-            &target,
-        );
-        let _finalized =
-            observation.finalize(crate::subject_authority::V1DownstreamObservation::Observed(
-                crate::subject_authority::AuthoritativeDownstreamObservation {
-                    predicate_completion: crate::trajectory::PredicateCompletion::NotCompleted,
-                    mutation_decision: crate::trajectory::MutationDecision::Reject,
-                },
-            ));
-
-        session.verify_unchanged().expect(
-            "producer/observer must not drift axis epoch/descriptor state (Axis::measure TCB contract)",
-        );
-        assert_eq!(
-            session.axis_descriptors(),
-            descriptors_before,
-            "axis descriptors unchanged after measurement + observation"
-        );
-    }
+    // #95-B: `md1_observer_preserves_axis_session_state` testi silindi — MD-1
+    // comparison observer'ı kaldırıldı; axis session TCB sözleşmesi producer
+    // yolunda (`measure_attempt_native` → `verify_unchanged`)
+    // korunmaya devam ediyor (tarihçe: #95-A PR #128 + karar kaydı
+    // faz8-p2-migration-decisions.md MD-1 bölümü).
 
     /// `make_measurement_engine`'in CoordinateSystem üreticisi — aynı production
     /// built-in axis seti.
@@ -9127,7 +8522,7 @@ v = 0.5
         // producer'ın TEK session'ı pre/post epoch verify ile mutating axis'i yakalar
         // (eski yüzey: yalnız observer V2 lane'i fail-closed idi; authority legacy
         // compute path session'sızdı. Re-anchor ile TCB güçlendi — reason note).
-        let result = engine.measure_attempt_native_with_md1_shadow(&draft, &task);
+        let result = engine.measure_attempt_native(&draft, &task);
         assert!(
             matches!(
                 result,
@@ -9267,9 +8662,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle_a = engine
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
+        let bundle_a = engine.measure_attempt_native(&draft_a, &task).unwrap();
         let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
 
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
@@ -9280,9 +8673,7 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_b = engine
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_b = engine.measure_attempt_native(&draft_b, &task).unwrap();
 
         // Precondition: farklı delta → farklı digest (senaryonun ta kendisi).
         assert_ne!(
@@ -9291,18 +8682,18 @@ v = 0.5
         );
         // Pozitif kontrol: kendi claim×token çifti verify'den geçer.
         assert!(engine
-            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_a.authority())
+            .verify_native_measurement_binding(carrier_a.claim(), bundle_a.authority())
             .is_ok());
 
         // Negatif: claim A + token B → StructuralDeltaMismatch (enum equality).
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_b.authority())
+            .verify_native_measurement_binding(carrier_a.claim(), bundle_b.authority())
             .expect_err("cross-pair farklı delta → mismatch");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::StructuralDeltaMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::StructuralDeltaMismatch { .. }
                 )
             ),
             "check-1 StructuralDeltaMismatch bekleniyordu; got: {err:?}"
@@ -9350,9 +8741,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle_a = engine_a
-            .measure_attempt_native_with_md1_shadow(&draft_a, &task)
-            .unwrap();
+        let bundle_a = engine_a.measure_attempt_native(&draft_a, &task).unwrap();
         let carrier_a = draft_a.finalize(bundle_a.authority()).unwrap();
 
         let draft_b = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
@@ -9363,9 +8752,7 @@ v = 0.5
             2,
         )
         .unwrap();
-        let bundle_b = engine_b
-            .measure_attempt_native_with_md1_shadow(&draft_b, &task)
-            .unwrap();
+        let bundle_b = engine_b.measure_attempt_native(&draft_b, &task).unwrap();
 
         // Precondition: aynı delta (aynı proposal), farklı raw (farklı mass →
         // farklı centroid ölçümü).
@@ -9373,7 +8760,7 @@ v = 0.5
             bundle_a.authority().delta_digest(),
             bundle_b.authority().delta_digest()
         );
-        let raw_bits = |t: &crate::measurement::NativeLegacySubjectMeasurement| {
+        let raw_bits = |t: &crate::measurement::NativeSubjectMeasurement| {
             [
                 t.raw().x.to_bits(),
                 t.raw().y.to_bits(),
@@ -9390,13 +8777,13 @@ v = 0.5
 
         // Negatif: engine A claim + engine B token → RawMismatch.
         let err = engine_a
-            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_b.authority())
+            .verify_native_measurement_binding(carrier_a.claim(), bundle_b.authority())
             .expect_err("cross-space raw mix → mismatch");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::RawMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::RawMismatch { .. }
                 )
             ),
             "check-2 RawMismatch bekleniyordu; got: {err:?}"
@@ -9418,13 +8805,11 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
         assert!(
             engine
-                .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+                .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
                 .is_ok(),
             "precondition: mutasyon öncesi kendi çifti geçer"
         );
@@ -9439,13 +8824,13 @@ v = 0.5
 
         // Public verifier: stale replay fence.
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("stale token replay reddedilmeli");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::StaleSpaceRevision { .. }
+                    crate::measurement::NativeMeasurementBindingError::StaleSpaceRevision { .. }
                 )
             ),
             "check-3 StaleSpaceRevision bekleniyordu; got: {err:?}"
@@ -9469,7 +8854,7 @@ v = 0.5
                 &commit_err,
                 crate::engine::EngineCommitError::MeasurementBindingVerification(
                     crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                        crate::measurement::NativeLegacyMeasurementBindingError::StaleSpaceRevision { .. }
+                        crate::measurement::NativeMeasurementBindingError::StaleSpaceRevision { .. }
                     )
                 )
             ),
@@ -9499,7 +8884,7 @@ v = 0.5
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
+            .measure_attempt_native(&draft, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
 
@@ -9507,13 +8892,13 @@ v = 0.5
         generation.store(1, Ordering::SeqCst);
 
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("context TOCTOU reddedilmeli");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::MeasurementContextMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::MeasurementContextMismatch { .. }
                 )
             ),
             "check-4 MeasurementContextMismatch bekleniyordu; got: {err:?}"
@@ -9542,7 +8927,7 @@ v = 0.5
         )
         .unwrap();
         let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
+            .measure_attempt_native(&draft, &task)
             .expect("non-mutating axis → producer session geçer");
         let carrier = draft.finalize(bundle.authority()).unwrap();
         let digest_at_measure = carrier.measurement().measurement_input_digest().clone();
@@ -9564,13 +8949,13 @@ v = 0.5
 
         // Yalnız monoton epoch fence yakalar (epoch 0→2 — ABA'da bile geri dönmez).
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("ABA epoch revert reddedilmeli");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::AxisEpochMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::AxisEpochMismatch { .. }
                 )
             ),
             "check-5 AxisEpochMismatch bekleniyordu (digest eşitken yalnız epoch yakalar); got: {err:?}"
@@ -9611,9 +8996,7 @@ v = 0.5
             1,
         )
         .unwrap();
-        let bundle = engine
-            .measure_attempt_native_with_md1_shadow(&draft, &task)
-            .unwrap();
+        let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
         let carrier = draft.finalize(bundle.authority()).unwrap();
         let token = carrier.measurement();
 

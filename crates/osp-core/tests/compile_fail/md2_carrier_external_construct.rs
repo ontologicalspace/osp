@@ -5,8 +5,8 @@
 // Non-forgeability evidence katmanları:
 // - Module privacy (yalnız finalize üretir): BU test (external erişim engeli).
 // - finalize subject-binding negatifleri: engine.rs unit test'leri
-//   (md2_finalize_rejects_same_delta_different_affected_nodes_token_mix +
-//   md2_finalize_rejects_same_raw_bits_different_legacy_subject).
+//   (md95a_finalize_affected_nodes_do_not_bind_subject +
+//   md95a_finalize_rejects_different_task_scope_same_raw_bits).
 fn main() {
     let claim: osp_core::witness::Claim = unimplemented!();
     let measured: osp_core::coords::MeasuredRawPosition = unimplemented!();

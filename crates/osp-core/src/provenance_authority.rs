@@ -9,17 +9,19 @@
 //! event'i** üzerinde yalnız PROVENANCE eksenindeki farkı gözlemler:
 //!
 //! ```text
-//! NativeLegacySubjectMeasurement (otorite — commit'in tükettiği token)
+//! NativeSubjectMeasurement (otorite — commit'in tükettiği token)
 //!   ├─ native lane    : measured values + engine-native per-axis sources  → AUTHORITATIVE
 //!   └─ reference lane : AYNI value bits + uniform-Scip izdüşümü            → REFERENCE ONLY
 //!                        (counterfactual PredicateGate — asla "production
 //!                         observed" olarak serialize EDILMEZ)
 //! ```
 //!
-//! **Ayrım MD-1 observer ile:** subject_authority.rs subject eksenini izler (legacy
-//! affected_nodes ↔ task scope; iki lane de native). Bu modül provenance eksenini
-//! izler (native ↔ uniform-Scip; iki lane aynı subject/value bits). Dogfood Run A
-//! senaryosunun (subject+θ parity + downstream diverge) kurumsal kalıcı yüzeyi.
+//! **Ayrım MD-1 observer ile (tarihsel):** eski `subject_authority.rs` subject
+//! eksenini izlerdi (legacy affected_nodes ↔ task scope; iki lane de native) —
+//! modül #95-B'de silindi; MD-2 gözlemi kalıcı kurumsal yüzeydir. Bu modül
+//! provenance eksenini izler (native ↔ uniform-Scip; iki lane aynı subject/value
+//! bits). Dogfood Run A senaryosunun (subject+θ parity + downstream diverge)
+//! kurumsal kalıcı yüzeyi.
 //!
 //! **Eligibility (plan v4 P1-tur3 — precedence correction):**
 //! - structural-Q4 reject → observation YOK (measurement henüz gerçekleşmedi)
@@ -33,19 +35,145 @@
 //! Wire: additive sidecar'lar (`TrajectoryEvidence` / `PendingAuthorization` /
 //! `RevisionRequired` / MCP response) — digest preimage'lerine GİRMEZ; durable
 //! wire'larda identity-bound (task/claim parent). #95-B subject_authority.rs
-//! silinirken paylaşılan lane tipleri bu modüle taşınır (tek hamle).
+//! silinirken paylaşılan lane tipleri bu modüle taşındı (tek hamle — E4).
 
 use crate::coords::{MeasuredRawPosition, MetricSource, RawPosition};
 use crate::engine::SpaceEngine;
-use crate::measurement::NativeLegacySubjectMeasurement;
+use crate::measurement::NativeSubjectMeasurement;
 use crate::trajectory::{
-    PredicateCompletion, PredicateGate, PredicateGateInput, Task, TaskBoundClaim,
+    MutationDecision, PredicateCompletion, PredicateGate, PredicateGateInput, Task, TaskBoundClaim,
 };
 use crate::witness::Claim;
 
-use crate::subject_authority::{
-    EvaluatedQ5Verdict, LaneQ5Observation, RawMeasurementObservation, ShadowDownstreamObservation,
-};
+// ═══════════════════════════════════════════════════════════════════════════════
+// Paylaşılan Q5-observation makineleri — #95-B (E4): subject_authority.rs
+// modülünden taşındı (serde wire attrs VERBATİM; JSON değişmez).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Ölçüm değer yüzeyi — 5-axis bit-exact değerler + per-axis provenance.
+///
+/// `bits` sırası: `(x, y, z, w, v)` = (coupling, cohesion, instability, entropy,
+/// witness_depth) `to_bits()`. `sources` aynı sırada. V1 sources = uniform-Scip
+/// **compatibility projection** (native evidence DEĞİL — MD-2 ayrı migration
+/// authority'dir); V2 sources = engine-native per-axis.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RawMeasurementObservation {
+    pub bits: [u64; 5],
+    pub sources: [MetricSource; 5],
+}
+
+fn raw_observation(raw: RawPosition, sources: [MetricSource; 5]) -> RawMeasurementObservation {
+    RawMeasurementObservation {
+        bits: [
+            raw.x.to_bits(),
+            raw.y.to_bits(),
+            raw.z.to_bits(),
+            raw.w.to_bits(),
+            raw.v.to_bits(),
+        ],
+        sources,
+    }
+}
+
+fn measured_sources(measured: &MeasuredRawPosition) -> [MetricSource; 5] {
+    [
+        measured.coupling.source,
+        measured.cohesion.source,
+        measured.instability.source,
+        measured.entropy.source,
+        measured.witness_depth.source,
+    ]
+}
+
+/// Lane Q5 yüzeyi — illegal state'ler tip seviyesinde imkânsız (plan v3 P1-4):
+/// `Passed + theta=None` gibi kombinasyonlar temsil edilemez.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LaneQ5Observation {
+    Evaluated {
+        theta_bits: u64,
+        theta_bound_bits: u64,
+        verdict: EvaluatedQ5Verdict,
+    },
+    NotEvaluated {
+        reason: Q5ObservationFailure,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluatedQ5Verdict {
+    Passed,
+    Violated,
+}
+
+/// Q5 gözlem yüzeyine ulaşılamama sebebi — güncel `VisionContextError`'un
+/// **8 varyantının tamamı** (authorization.rs), telemetry wire'ına runtime payload
+/// taşımadan (unit varyantlar; runtime error representation wire contract'a bağlanmaz).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Q5ObservationFailure {
+    VisionUnavailable,
+    VisionAuthorityInsufficient,
+    SubjectSourceMismatch,
+    NonFiniteVisionAxis,
+    NonFiniteThetaBound,
+    ThetaBoundOutOfRange,
+    UnsupportedSemanticsVersion,
+    CanonicalRoleConversionFailed,
+}
+
+pub(crate) fn map_q5_observation_failure(
+    err: crate::authorization::VisionContextError,
+) -> Q5ObservationFailure {
+    use crate::authorization::VisionContextError;
+    match err {
+        VisionContextError::VisionUnavailable => Q5ObservationFailure::VisionUnavailable,
+        VisionContextError::VisionAuthorityInsufficient { .. } => {
+            Q5ObservationFailure::VisionAuthorityInsufficient
+        }
+        VisionContextError::SubjectSourceMismatch { .. } => {
+            Q5ObservationFailure::SubjectSourceMismatch
+        }
+        VisionContextError::NonFiniteVisionAxis { .. } => Q5ObservationFailure::NonFiniteVisionAxis,
+        VisionContextError::NonFiniteThetaBound(_) => Q5ObservationFailure::NonFiniteThetaBound,
+        VisionContextError::ThetaBoundOutOfRange(_) => Q5ObservationFailure::ThetaBoundOutOfRange,
+        VisionContextError::UnsupportedSemanticsVersion { .. } => {
+            Q5ObservationFailure::UnsupportedSemanticsVersion
+        }
+        VisionContextError::CanonicalRoleConversionFailed(_) => {
+            Q5ObservationFailure::CanonicalRoleConversionFailed
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ShadowDownstreamObservation {
+    pub predicate_completion: PredicateCompletion,
+    pub mutation_decision: MutationDecision,
+}
+
+/// Tek captured context altında bir raw'ın Q5 yüzeyi. Verdict üretimi production
+/// karşılaştırmasının aynısı: `CosineDeviation.theta(raw, effective_vision, space)`
+/// + `theta > theta_bound` (engine.rs `check_vision_raw_with_context` gövdesi).
+pub(crate) fn evaluate_lane_q5(
+    engine: &SpaceEngine,
+    raw: RawPosition,
+    ctx: &crate::authorization::EffectiveVisionGateContext,
+) -> LaneQ5Observation {
+    use crate::vision::{CosineDeviation, DeviationMetric};
+    let theta = CosineDeviation.theta(&raw, &ctx.selection.effective_vision, engine.space());
+    let verdict = if theta > ctx.theta_bound {
+        EvaluatedQ5Verdict::Violated
+    } else {
+        EvaluatedQ5Verdict::Passed
+    };
+    LaneQ5Observation::Evaluated {
+        theta_bits: theta.to_bits(),
+        theta_bound_bits: ctx.theta_bound.to_bits(),
+        verdict,
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Reference projection (uniform-Scip — reference-only)
@@ -53,9 +181,10 @@ use crate::subject_authority::{
 
 /// **#96 MD-2:** Uniform-Scip **reference projection** — aynı ölçüm event'inin
 /// value bit'lerinin legacy V1 provenance temsilindeki izdüşümü. Karar ÜRETMEZ
-/// (mutation authority DEĞİL); yalnız MD-2 reference telemetry. `subject_authority::
-/// legacy_compatibility_projection`'ın reference-only evi burasıdır (fiziksel
-/// kaldırma #100). Bit-identical construction: `AxisMeasurement { value, Scip }`.
+/// (mutation authority DEĞİL); yalnız MD-2 reference telemetry. Eski MD-1
+/// modülünün `legacy_compatibility_projection`'ının (#95-B'de modülle birlikte
+/// silindi) reference-only mirasçısı burasıdır (fiziksel kaldırma #100).
+/// Bit-identical construction: `AxisMeasurement { value, Scip }`.
 pub fn uniform_scip_reference_projection(raw: RawPosition) -> MeasuredRawPosition {
     let axis = |value: f64| crate::coords::AxisMeasurement {
         value,
@@ -202,17 +331,17 @@ pub fn observe_provenance_authority_drift(
     engine: &SpaceEngine,
     claim: &Claim,
     task: &Task,
-    token: &NativeLegacySubjectMeasurement,
+    token: &NativeSubjectMeasurement,
     loss_before: f64,
     target: &RawPosition,
 ) -> ProvenanceAuthorityDriftDraft {
     // Tek captured vision context (MD-1 observer ile aynı disiplin).
     let ctx_result = engine
         .effective_vision_gate_context(claim)
-        .map_err(crate::subject_authority::map_q5_observation_failure);
+        .map_err(map_q5_observation_failure);
     let raw = token.raw();
     let q5 = match &ctx_result {
-        Ok(c) => crate::subject_authority::evaluate_lane_q5(engine, raw, c),
+        Ok(c) => evaluate_lane_q5(engine, raw, c),
         Err(reason) => LaneQ5Observation::NotEvaluated { reason: *reason },
     };
 
@@ -252,29 +381,6 @@ pub fn observe_provenance_authority_drift(
         native,
         reference,
     }
-}
-
-fn raw_observation(raw: RawPosition, sources: [MetricSource; 5]) -> RawMeasurementObservation {
-    RawMeasurementObservation {
-        bits: [
-            raw.x.to_bits(),
-            raw.y.to_bits(),
-            raw.z.to_bits(),
-            raw.w.to_bits(),
-            raw.v.to_bits(),
-        ],
-        sources,
-    }
-}
-
-fn measured_sources(m: &MeasuredRawPosition) -> [MetricSource; 5] {
-    [
-        m.coupling.source,
-        m.cohesion.source,
-        m.instability.source,
-        m.entropy.source,
-        m.witness_depth.source,
-    ]
 }
 
 /// Navigator + MCP ortak path→finalize eşlemesi (MD-1
@@ -319,5 +425,67 @@ mod tests {
         assert_eq!(m.to_raw().w.to_bits(), raw.w.to_bits());
         assert_eq!(m.coupling.source, MetricSource::Scip);
         assert_eq!(m.witness_depth.source, MetricSource::Scip);
+    }
+
+    /// **#95-B (E4):** subject_authority.rs'den taşındı — `map_q5_observation_failure`
+    /// bu modülde yaşamaya devam ettiği için mapping-pin kapsamı da taşındı.
+    #[test]
+    fn q5_observation_failure_maps_all_vision_context_error_variants() {
+        use crate::authorization::{CanonicalVisionSubject, VisionContextError};
+        use crate::vision::VisionSource;
+
+        // 8 varyantın tamamı — exhaustiveness compiler contract'ı; bu test
+        // representative değerlerle mapping doğruluğunu pinler.
+        let cases: Vec<(VisionContextError, Q5ObservationFailure)> = vec![
+            (
+                VisionContextError::VisionUnavailable,
+                Q5ObservationFailure::VisionUnavailable,
+            ),
+            (
+                VisionContextError::VisionAuthorityInsufficient {
+                    vision_source: VisionSource::GlobalDefault,
+                },
+                Q5ObservationFailure::VisionAuthorityInsufficient,
+            ),
+            (
+                VisionContextError::SubjectSourceMismatch {
+                    subject: CanonicalVisionSubject::Global,
+                    vision_source: VisionSource::RoleProfile,
+                },
+                Q5ObservationFailure::SubjectSourceMismatch,
+            ),
+            (
+                VisionContextError::NonFiniteVisionAxis { axis: "x" },
+                Q5ObservationFailure::NonFiniteVisionAxis,
+            ),
+            (
+                VisionContextError::NonFiniteThetaBound(f64::NAN),
+                Q5ObservationFailure::NonFiniteThetaBound,
+            ),
+            (
+                VisionContextError::ThetaBoundOutOfRange(9.0),
+                Q5ObservationFailure::ThetaBoundOutOfRange,
+            ),
+            (
+                VisionContextError::UnsupportedSemanticsVersion {
+                    field: "role_inference_semver",
+                    found: 2,
+                    supported: 1,
+                },
+                Q5ObservationFailure::UnsupportedSemanticsVersion,
+            ),
+            (
+                VisionContextError::CanonicalRoleConversionFailed("role".to_string()),
+                Q5ObservationFailure::CanonicalRoleConversionFailed,
+            ),
+        ];
+        assert_eq!(
+            cases.len(),
+            8,
+            "VisionContextError 8 varyantlı — plan v5 P1"
+        );
+        for (err, expected) in cases {
+            assert_eq!(map_q5_observation_failure(err), expected);
+        }
     }
 }

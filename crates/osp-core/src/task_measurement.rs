@@ -3,7 +3,8 @@
 //! Plan v4-FİNAL (Faz 8a, 2026-08-18): navigator da MCP de (ayrı crate) kullanacağı
 //! claim-projection + Q4-structural truth burada yaşar — MCP navigator
 //! implementation katmanına bağımlı OLMAZ (`legacy_compatibility_projection`'ın
-//! `subject_authority.rs`'e taşınmasındaki aynı layering gerekçesi) ve Q4 logic'i
+//! eski MD-1 modülüne taşınmasındaki aynı layering gerekçesi — o modül #95-B'de
+//! silindi) ve Q4 logic'i
 //! KOPYALANMAZ (tek truth source).
 //!
 //! İçerik:
@@ -14,7 +15,7 @@
 //!   Ontoloji: **structural syntax = proposal/claim gerçeği** (measurement'tan
 //!   önce); **raw finiteness = measurement gerçeği** (measurement'tan sonra).
 //! - `StructurallyValidatedClaimDraft` — probe Claim + Q4 structural validation
-//!   tek adımda; consuming `finalize(&NativeLegacySubjectMeasurement)` YALNIZ
+//!   tek adımda; consuming `finalize(&NativeSubjectMeasurement)` YALNIZ
 //!   computed_raw/Intent enjekte eder (structural fields + claim_id aynı
 //!   object'ten) → probe↔final structural TOCTOU type-level kapalı. #95-A
 //!   `CheckedTaskMeasurement` boundary'sinin doğal temeli.
@@ -22,7 +23,7 @@
 use crate::agent::{DeltaProposal, SyntaxViolation};
 use crate::coords::RawPosition;
 use crate::engine::EngineCommitError;
-use crate::measurement::NativeLegacySubjectMeasurement;
+use crate::measurement::NativeSubjectMeasurement;
 use crate::space::{Edge, EdgeKind, Node, NodeId};
 use crate::trajectory::{Task, TaskId};
 use crate::witness::{AgentId, Claim, ClaimId, Intent};
@@ -45,7 +46,7 @@ impl std::fmt::Display for ClaimBuildError {
 /// INV-T4 (boşluk #3) — DeltaProposal + computed_raw + task_id → Claim (task-bound).
 /// navigator.rs'ten taşındı (bit-identical — davranış değişikliği YOK).
 ///
-/// **#96 not:** computed_raw artık `NativeLegacySubjectMeasurement.raw()`'dan gelir
+/// **#96 not:** computed_raw artık `NativeSubjectMeasurement.raw()`'dan gelir
 /// (session-bound native ölçüm); placeholder raw probe Claim için kullanılır.
 pub fn build_claim_from_proposal(
     proposal: &DeltaProposal,
@@ -113,20 +114,6 @@ pub fn node_from_spec(spec: &crate::agent::NewNodeSpec, index: usize) -> Node {
         kind: spec.kind,
         mass: spec.initial_mass,
         ..Default::default()
-    }
-}
-
-/// **#96 (PR #124 review tur-2 P1):** Effective legacy measure set — draft ile
-/// producer'ın TEK truth'tan kullandığı hesap: `derive_v1_legacy_measurement_subject`
-/// ordered union; boşsa delta node id'leri (legacy fallback). Draft'ın
-/// `legacy_subject_binding` capture'ı ile token'ın audited subject'i bu hesapla
-/// hizalı kalır (farklı hesap = sessiz binding drift).
-pub fn effective_legacy_measure_set(proposal: &DeltaProposal, delta_nodes: &[Node]) -> Vec<NodeId> {
-    let derived = crate::subject_authority::derive_v1_legacy_measurement_subject(proposal);
-    if derived.is_empty() {
-        delta_nodes.iter().map(|n| n.id).collect()
-    } else {
-        derived
     }
 }
 
@@ -245,11 +232,11 @@ pub enum ClaimDraftError {
 /// eder; structural fields + `claim_id` AYNI object'ten gelir.
 ///
 /// **Subject binding (#95-A sonrası semantik):** draft'ın capture ettiği
-/// `LegacySubjectBindingDigest` **canonical task predicate scope**'un
+/// `SubjectBindingDigest` **canonical task predicate scope**'un
 /// (=`canonical_task_subject_scope(task)`) digest'idir; `finalize(&token)`
 /// token'ın taşıdığı ile karşılaştırır — draft×token subject identity binding
-/// (`LegacySubjectBindingMismatch`). *(Fiziksel "legacy" adı #95-B'ye kadar
-/// kalır — pre-#95-A'da proposal-affected-union binding'anı taşırdı.)*
+/// (`SubjectBindingMismatch`). *(Fiziksel "legacy" adlar #95-B'de yeniden
+/// adlandırıldı; pre-#95-A'da proposal-affected-union bağını taşırdı.)*
 /// `affected_nodes` subject authority DEĞİLDİR (advisory impact hint — MD-1).
 ///
 /// Sıra: `try_new` (probe + Q4 structural + scope capture) → engine native
@@ -257,9 +244,8 @@ pub enum ClaimDraftError {
 /// → `commit_task_claim` (MD-1 subject fence + 5-fence defensively repeat).
 pub struct StructurallyValidatedClaimDraft {
     claim: Claim,
-    /// **#95-A:** canonical task scope binding digest'i (field adı legacy —
-    /// fiziksel yeniden adlandırma #95-B).
-    legacy_subject_binding: crate::measurement::LegacySubjectBindingDigest,
+    /// **#95-A:** canonical task scope binding digest'i.
+    subject_binding: crate::measurement::SubjectBindingDigest,
 }
 
 impl StructurallyValidatedClaimDraft {
@@ -291,11 +277,11 @@ impl StructurallyValidatedClaimDraft {
         // fonksiyondan türetir; draft buradan private capture eder.
         let subject_scope = crate::measurement::canonical_task_subject_scope(task)
             .map_err(ClaimDraftError::TaskSubjectScope)?;
-        let legacy_subject_binding =
-            crate::measurement::LegacySubjectBindingDigest::compute(subject_scope.member_ids());
+        let subject_binding =
+            crate::measurement::SubjectBindingDigest::compute(subject_scope.member_ids());
         Ok(Self {
             claim,
-            legacy_subject_binding,
+            subject_binding,
         })
     }
 
@@ -304,18 +290,18 @@ impl StructurallyValidatedClaimDraft {
         &self.claim
     }
 
-    /// **tur-2 P1:** Capture edilen legacy subject binding digest'i (readonly).
-    pub fn legacy_subject_binding(&self) -> &crate::measurement::LegacySubjectBindingDigest {
-        &self.legacy_subject_binding
+    /// **tur-2 P1:** Capture edilen subject binding digest'i (readonly).
+    pub fn subject_binding(&self) -> &crate::measurement::SubjectBindingDigest {
+        &self.subject_binding
     }
 
     /// Final Claim — YALNIZ `computed_raw` + `Intent` enjekte edilir (token'ın
     /// `raw()` değeri); structural fields + `claim_id` aynı object'ten. Consuming:
     /// draft bir kez finalize edilir (çift finalize derleme hatası).
     ///
-    /// **tur-2 P1 subject-binding kontrolü:** token'ın `legacy_subject_binding`
+    /// **tur-2 P1 subject-binding kontrolü:** token'ın `subject_binding`
     /// digest'i draft'ın capture ettiğiyle eşit olMALIDIR — eşit değilse
-    /// `LegacySubjectBindingMismatch` (aynı structural delta + farklı affected_nodes
+    /// `SubjectBindingMismatch` (aynı structural delta + farklı affected_nodes
     /// artifact mix'i; MD-1 canonical authority ile karışmaz — "Binding" adı bilinçli).
     #[allow(
         clippy::result_large_err,
@@ -323,14 +309,13 @@ impl StructurallyValidatedClaimDraft {
     )]
     pub fn finalize(
         self,
-        measurement: &NativeLegacySubjectMeasurement,
-    ) -> Result<FinalizedNativeTaskClaim, crate::measurement::NativeLegacyMeasurementBindingError>
-    {
-        if self.legacy_subject_binding != *measurement.legacy_subject_binding() {
+        measurement: &NativeSubjectMeasurement,
+    ) -> Result<FinalizedNativeTaskClaim, crate::measurement::NativeMeasurementBindingError> {
+        if self.subject_binding != *measurement.subject_binding() {
             return Err(
-                crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch {
-                    expected: self.legacy_subject_binding,
-                    presented: *measurement.legacy_subject_binding(),
+                crate::measurement::NativeMeasurementBindingError::SubjectBindingMismatch {
+                    expected: self.subject_binding,
+                    presented: *measurement.subject_binding(),
                 },
             );
         }
@@ -351,14 +336,14 @@ impl StructurallyValidatedClaimDraft {
 /// external construction kapalı; `claim()`/`measurement()` accessors read-only.
 pub struct FinalizedNativeTaskClaim {
     claim: Claim,
-    measurement: NativeLegacySubjectMeasurement,
+    measurement: NativeSubjectMeasurement,
 }
 
 impl FinalizedNativeTaskClaim {
     /// Private — yalnız `finalize` (aynı modül) çağırır; "sealed" iddiası crate
     /// içinde de geçerli (review P2: `pub(crate)` herhangi bir modülün carrier'ı
     /// elle kurmasına izin veriyordu).
-    fn new(claim: Claim, measurement: NativeLegacySubjectMeasurement) -> Self {
+    fn new(claim: Claim, measurement: NativeSubjectMeasurement) -> Self {
         Self { claim, measurement }
     }
 
@@ -379,7 +364,7 @@ impl FinalizedNativeTaskClaim {
         base_revision: crate::authorization::SpaceViewRevision,
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
     ) -> Self {
-        let measurement = crate::measurement::NativeLegacySubjectMeasurement::new(
+        let measurement = crate::measurement::NativeSubjectMeasurement::new(
             measured,
             subject_scope,
             delta_digest,
@@ -396,7 +381,7 @@ impl FinalizedNativeTaskClaim {
     }
 
     /// Authority token (finalize'den gelen — subject-bound).
-    pub fn measurement(&self) -> &NativeLegacySubjectMeasurement {
+    pub fn measurement(&self) -> &NativeSubjectMeasurement {
         &self.measurement
     }
 }

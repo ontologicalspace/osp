@@ -3,8 +3,8 @@ warning: unreachable statement
   |
 5 |     let claim: osp_core::witness::Claim = unimplemented!();
   |                                           ---------------- any code following this expression is unreachable
-6 |     let measurement: osp_core::measurement::NativeLegacySubjectMeasurement = unimplemented!();
-  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+6 |     let measurement: osp_core::measurement::NativeSubjectMeasurement = unimplemented!();
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
   |
   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
 
