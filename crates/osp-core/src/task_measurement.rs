@@ -116,20 +116,6 @@ pub fn node_from_spec(spec: &crate::agent::NewNodeSpec, index: usize) -> Node {
     }
 }
 
-/// **#96 (PR #124 review tur-2 P1):** Effective legacy measure set — draft ile
-/// producer'ın TEK truth'tan kullandığı hesap: `derive_v1_legacy_measurement_subject`
-/// ordered union; boşsa delta node id'leri (legacy fallback). Draft'ın
-/// `legacy_subject_binding` capture'ı ile token'ın audited subject'i bu hesapla
-/// hizalı kalır (farklı hesap = sessiz binding drift).
-pub fn effective_legacy_measure_set(proposal: &DeltaProposal, delta_nodes: &[Node]) -> Vec<NodeId> {
-    let derived = crate::subject_authority::derive_v1_legacy_measurement_subject(proposal);
-    if derived.is_empty() {
-        delta_nodes.iter().map(|n| n.id).collect()
-    } else {
-        derived
-    }
-}
-
 /// **#96 (plan v4 P1-tur2):** Q4 STRUCTURAL validation — engine
 /// `check_claim_structure`'ının neutral pub hâli (logic bit-identical taşındı;
 /// engine metodu buna delege eder). `claim.computed_raw`'a DOKUNMAZ — raw
