@@ -1840,7 +1840,7 @@ impl SpaceEngine {
         clippy::result_large_err,
         reason = "MeasurementError carry's the measurement-ontology family (intentional inline); see measurement.rs layout decision"
     )]
-    fn classify_baseline_availability(
+    pub(crate) fn classify_baseline_availability(
         &self,
         claim: &crate::witness::Claim,
         subject: &crate::measurement::CanonicalSubjectScope,
@@ -3454,14 +3454,21 @@ impl SpaceEngine {
 
         // 4. **#95-A (MD-1):** Subject authority — canonical task predicate
         //    scope (tek truth free fn; draft capture'ı ile hizalı — finalize
-        //    karşılaştırır). Unresolvable matrisi measure_task_delta after-path
-        //    ile aynı (base + delta-introduced'e karşı).
+        //    karşılaştırır). **#100 (TD-1):** partition matrisi `measure_task_delta`
+        //    before-path ile AYNI (existing | introduced | unresolvable) — token
+        //    typed baseline taşıyor; commit-time ikinci partition üretimi yok.
         let subject_scope = crate::measurement::canonical_task_subject_scope(task)?;
         let delta_introduced: std::collections::HashSet<crate::space::NodeId> =
             claim.delta_nodes.iter().map(|n| n.id).collect();
+        let mut existing: Vec<crate::space::NodeId> = Vec::new();
+        let mut introduced: Vec<crate::space::NodeId> = Vec::new();
         let mut unresolvable: Vec<crate::space::NodeId> = Vec::new();
         for &id in subject_scope.member_ids() {
-            if !self.space.nodes.contains_key(&id) && !delta_introduced.contains(&id) {
+            if self.space.nodes.contains_key(&id) {
+                existing.push(id);
+            } else if delta_introduced.contains(&id) {
+                introduced.push(id);
+            } else {
                 unresolvable.push(id);
             }
         }
@@ -3471,7 +3478,32 @@ impl SpaceEngine {
             });
         }
 
-        // 5. Hypothetical (measure_task_delta P2-3 sırası: removed → nodes → edges)
+        // 5. **#100 (TD-1):** Typed baseline — measure_task_delta :3291-3333 ile aynı
+        //    matris; Available before-centroid BEFORE ile AYNI session'dan (bit-parity
+        //    construction property). Unavailable reason'lar typed taşınır (#97 MD-3
+        //    commit matrisi artifact'tan okur).
+        use crate::measurement::{BaselineUnavailableReason, MeasurementBaseline};
+        let baseline = match (existing.is_empty(), introduced.is_empty()) {
+            (true, true) => return Err(MeasurementError::EmptySubjectScope),
+            (false, true) => {
+                let centroid =
+                    self.measured_centroid_in_session(&session, &self.space, &existing)?;
+                MeasurementBaseline::Available(centroid)
+            }
+            (true, false) => MeasurementBaseline::Unavailable {
+                reason: BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                    members: introduced,
+                },
+            },
+            (false, false) => MeasurementBaseline::Unavailable {
+                reason: BaselineUnavailableReason::PartialNewSubject {
+                    existing,
+                    introduced,
+                },
+            },
+        };
+
+        // 6. Hypothetical (measure_task_delta P2-3 sırası: removed → nodes → edges)
         //    — structural truth YALNIZ sealed draft/claim'den (proposal YOK —
         //    capability reduction, reviewer tur-3 P1-1).
         let mut hypothetical = self.space.clone();
@@ -3491,16 +3523,16 @@ impl SpaceEngine {
             }
         }
 
-        // 5. Authority measured — native per-axis, session-bound, task scope.
+        // 7. Authority measured — native per-axis, session-bound, task scope.
         let measured =
             self.measured_centroid_in_session(&session, &hypothetical, subject_scope.member_ids())?;
 
-        // 6. Session-sonu verify (authority ölçümü fences altında).
+        // 8. Session-sonu verify (authority ölçümü fences altında).
         session
             .verify_unchanged()
             .map_err(MeasurementError::CoordinateMeasurement)?;
 
-        // 7. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
+        // 9. Context + digest'ler — captured snapshot'tan (yeniden traversal YOK).
         let context =
             crate::authorization::MeasurementInputContext::try_new(session.axis_descriptors())
                 .map_err(MeasurementError::MeasurementContext)?;
@@ -3511,10 +3543,12 @@ impl SpaceEngine {
             })?;
         let delta_digest = MeasurementDeltaDigest::compute_from_canonical(&canonical_delta)?;
 
-        // 8. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
-        //    subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
+        // 10. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
+        //     subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
+        //     #100: baseline artifact'a gömülü (after ile aynı session).
         let authority = NativeSubjectMeasurement::new(
             measured,
+            baseline,
             subject_scope,
             delta_digest,
             base_revision,
@@ -4778,9 +4812,19 @@ v = 0.5
             claim.delta_nodes.iter().map(|n| n.id).collect(),
         )
         .expect("canonical subject scope");
+        // **#100 (TD-1):** synthetic carrier baseline — commit partition'ıyla aynı
+        // sınıflandırma (Available sentetik before=measured; fixture subject'ları
+        // tipik olarak delta-introduced).
+        let baseline = match engine.classify_baseline_availability(claim, &subject) {
+            Ok(crate::engine::BaselineAvailabilityClass::Unavailable(reason)) => {
+                crate::measurement::MeasurementBaseline::Unavailable { reason }
+            }
+            _ => crate::measurement::MeasurementBaseline::Available(measured.clone()),
+        };
         crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
             claim.clone(),
             measured,
+            baseline,
             subject,
             delta_digest,
             revision,
@@ -8636,6 +8680,183 @@ v = 0.5
         .unwrap();
         let bundle_fb = engine.measure_attempt_native(&draft_fb, &task).unwrap();
         assert_eq!(bundle_fb.authority().subject_member_ids(), &[1u64]);
+    }
+
+    // ═════════════════════════════════════════════════════════════════════════════
+    // #100 (S1 / TD-1) — token typed baseline: ölçüm anı partition'ı
+    // ═════════════════════════════════════════════════════════════════════════════
+
+    /// Helper: tek `Subgraph(ids)` predicate scope'lu task (#100 baseline testleri).
+    fn task_with_subgraph_scope(
+        ids: Vec<NodeId>,
+        task_id: crate::trajectory::TaskId,
+    ) -> crate::trajectory::Task {
+        use crate::trajectory::{
+            MetricPredicate, PredicateMode, PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
+        };
+        let predicate = MetricPredicate {
+            metric: crate::trajectory::PredicateAxis::Coupling,
+            operator: crate::trajectory::ComparisonOp::Le,
+            threshold: 0.5,
+            scope: crate::trajectory::PredicateScope::Subgraph(ids),
+            required_source: None,
+            tolerance: 0.0,
+        };
+        Task {
+            id: task_id,
+            milestone_id: 0,
+            label: "test-task-subgraph".to_string(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate,
+                    weight: None,
+                }],
+                preferred_vector: None,
+            },
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        }
+    }
+
+    /// **#100 (TD-1):** Available baseline — subject üyelerinin tamamı base'de;
+    /// token before-centroid taşır ve `measure_task_delta().before()` ile eşit
+    /// (tek partition truth — commit-time ikinci üretim #100 S2'de kalkar).
+    #[test]
+    fn native_token_baseline_available_matches_measure_task_delta_before() {
+        let engine = SpaceEngine::new(
+            md1_space_two_nodes(),
+            make_measurement_engine_coordinate_system(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let task = md1_task_node1();
+        let proposal = md1_edge_proposal();
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            1,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+
+        // Node 1 base'de mevcut; delta yeni subject üyesi YOK → Available.
+        assert!(matches!(
+            native.authority().baseline(),
+            crate::measurement::MeasurementBaseline::Available(_)
+        ));
+
+        // Parity: measure_task_delta before-path — aynı partition + aynı centroid.
+        let bound = crate::trajectory::TaskBoundClaim {
+            claim: draft.claim(),
+            task: &task,
+        };
+        let revision = engine.current_space_view_revision().unwrap();
+        let measurement = engine.measure_task_delta(&bound, &revision, None).unwrap();
+        assert_eq!(
+            *native.authority().baseline(),
+            *measurement.before(),
+            "#100 TD-1: token baseline == measure_task_delta before (tek partition truth)"
+        );
+    }
+
+    /// **#100 (TD-1):** AllMembersIntroducedByDelta — task scope tamamen
+    /// delta-introduced (cold-start shape; #97 MD-3 matrisinin AllMembers kolu).
+    #[test]
+    fn native_token_baseline_all_introduced_cold_start() {
+        // Boş space; proposal tek yeni node tanıtır (ID ataması 10_000 + index).
+        let engine = SpaceEngine::new(
+            crate::space::Space::new(),
+            make_measurement_engine_coordinate_system(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        let task = task_with_node_scope(10_000, 42);
+        let proposal = crate::agent::DeltaProposal {
+            new_nodes: vec![crate::agent::NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }],
+            new_edges: vec![],
+            removed_edges: vec![],
+            affected_nodes: vec![],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "#100 all-introduced baseline fixture".to_string(),
+        };
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            1,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        match native.authority().baseline() {
+            crate::measurement::MeasurementBaseline::Unavailable {
+                reason:
+                    crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                        members,
+                    },
+            } => {
+                assert_eq!(members, &vec![10_000u64]);
+            }
+            other => panic!("#100 TD-1: AllMembersIntroducedByDelta beklendi, gelen: {other:?}"),
+        }
+    }
+
+    /// **#100 (TD-1):** PartialNewSubject — scope mixed (base üyesi + delta-introduced).
+    #[test]
+    fn native_token_baseline_partial_new_subject() {
+        let engine = SpaceEngine::new(
+            md1_space_two_nodes(),
+            make_measurement_engine_coordinate_system(),
+            VisionVector::new(RawPosition::default()),
+            EngineConfig::default_calibrated(),
+        );
+        // Scope [1, 10_000]: node 1 base'de, 10_000 delta-introduced.
+        let task = task_with_subgraph_scope(vec![1, 10_000], 42);
+        let proposal = crate::agent::DeltaProposal {
+            new_nodes: vec![crate::agent::NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 1.0,
+                connected_to: vec![],
+            }],
+            new_edges: vec![],
+            removed_edges: vec![],
+            affected_nodes: vec![],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "#100 partial-new baseline fixture".to_string(),
+        };
+        let draft = crate::task_measurement::StructurallyValidatedClaimDraft::try_new(
+            &proposal,
+            RawPosition::default(),
+            &task,
+            1,
+            1,
+        )
+        .unwrap();
+        let native = engine.measure_attempt_native(&draft, &task).unwrap();
+        match native.authority().baseline() {
+            crate::measurement::MeasurementBaseline::Unavailable {
+                reason:
+                    crate::measurement::BaselineUnavailableReason::PartialNewSubject {
+                        existing,
+                        introduced,
+                    },
+            } => {
+                assert_eq!(existing, &vec![1u64]);
+                assert_eq!(introduced, &vec![10_000u64]);
+            }
+            other => panic!("#100 TD-1: PartialNewSubject beklendi, gelen: {other:?}"),
+        }
     }
 
     /// **#95-A (MD-1) — affected-irrelevance (finalize seviyesi):** aynı task

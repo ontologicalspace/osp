@@ -30,9 +30,31 @@ error[E0624]: associated function `new` is private
    |
    | /     pub(crate) fn new(
    | |         measured: crate::coords::MeasuredRawPosition,
+   | |         baseline: MeasurementBaseline,
    | |         subject_scope: CanonicalSubjectScope,
-   | |         delta_digest: MeasurementDeltaDigest,
 ...  |
    | |         axis_epoch_stamp: crate::coords::CoreAxisEpochStamp,
    | |     ) -> Self {
    | |_____________- private associated function defined here
+
+error[E0061]: this function takes 7 arguments but 6 arguments were supplied
+  --> tests/compile_fail/md2_native_token_external_new.rs:16:13
+   |
+16 |     let _ = osp_core::measurement::NativeSubjectMeasurement::new(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+17 |         measured,
+18 |         scope,
+   |         ----- argument #2 of type `MeasurementBaseline` is missing
+   |
+note: associated function defined here
+  --> src/measurement.rs
+   |
+   |     pub(crate) fn new(
+   |                   ^^^
+help: provide the argument
+   |
+16 |     let _ = osp_core::measurement::NativeSubjectMeasurement::new(
+17 |         measured,
+18 ~         /* MeasurementBaseline */,
+19 ~         scope,
+   |

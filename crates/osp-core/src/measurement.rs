@@ -1926,7 +1926,12 @@ impl SubjectBindingDigest {
 // ölçüm subject'i #95-A'dan beri canonical task scope (pre-#95-A: affected_nodes
 // ordered union). Plain `MeasuredRawPosition` forgeability'sini kapatır: private fields
 // + tek üretici (`SpaceEngine::measure_attempt_native`).
-// EngineMeasurement DEĞİLDİR — baseline yoktur (MD-3 = #97'nindir).
+// **#100 Faz 8a (TD-1):** token artık typed baseline DA taşır — before, after ile
+// AYNI `BoundMeasurementSession` altında ölçülür/partitionlanır (measure_task_delta
+// before-path ile aynı mantık; partition tek truth ölçüm anı). EngineMeasurement'in
+// tamamı DEĞİLDİR (request/context artifact'a commit-anı rekonstrüksiyonunda kurulur —
+// #100 TD-2); baseline engine-issued + opaque kalır (MD-3 commit matrisi artifact'tan
+// okur — ikinci partition üretimi yok).
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// **#96 MD-2 (plan v4-FİNAL):** Opaque engine-issued native provenance token —
@@ -1938,6 +1943,11 @@ impl SubjectBindingDigest {
 /// construction property). Commit-time `verify_native_measurement_binding`
 /// 5 kontrolü yapar; `AuthorizationBasis` kanıtı PROOF'TAN okur.
 ///
+/// **#100 (TD-1):** `baseline` — ölçüm anı typed baseline kullanılabilirliği.
+/// Available ise before centroid değerleri (after ile AYNI session), değilse typed
+/// unavailable reason. Commit-yolu V2 gate evaluator'ı (`evaluate_task_gate_v2`)
+/// loss_before derive'unu ve #97 MD-3 matrisini buradan okur.
+///
 /// **Stale replay fence:** token, üretildiği revision/context/epoch bağlamında
 /// geçerliliğini KANITLAR; aynı bağlamda meşru yeniden sunum (ör. Held + witness
 /// evidence + resubmit) engellenmez — "token cannot be replayed" iddiası YOK
@@ -1945,6 +1955,10 @@ impl SubjectBindingDigest {
 #[derive(Clone)]
 pub struct NativeSubjectMeasurement {
     measured: crate::coords::MeasuredRawPosition,
+    /// **#100 (TD-1):** Ölçüm anı typed baseline — after ile AYNI session'dan
+    /// (bit-parity construction property: aynı captured descriptors/epochs altında
+    /// before/after). Engine-issued; ikinci partition truth'u YOK.
+    baseline: MeasurementBaseline,
     /// **#95-A (MD-1 subject cutover):** measurement subject = **canonical task
     /// predicate scope** (`canonical_task_subject_scope`). İçsel temsil
     /// `CanonicalSubjectScope` (illegal durumlar — `[]`/duplicate/noncanonical
@@ -1967,9 +1981,11 @@ impl NativeSubjectMeasurement {
     /// Tek üretici — yalnız `SpaceEngine::measure_attempt_native`
     /// çağırır (engine.rs). External construction kapalı (private fields).
     /// `subject_binding` ctor içinde `subject_scope.member_ids()`'den
-    /// türetilir.
+    /// türetilir. **#100 (TD-1):** `baseline` ölçüm anı partition'ından
+    /// (before centroid veya typed unavailable reason) — after ile aynı session.
     pub(crate) fn new(
         measured: crate::coords::MeasuredRawPosition,
+        baseline: MeasurementBaseline,
         subject_scope: CanonicalSubjectScope,
         delta_digest: MeasurementDeltaDigest,
         base_revision: crate::authorization::SpaceViewRevision,
@@ -1979,6 +1995,7 @@ impl NativeSubjectMeasurement {
         let subject_binding = SubjectBindingDigest::compute(subject_scope.member_ids());
         Self {
             measured,
+            baseline,
             subject_scope,
             subject_binding,
             delta_digest,
@@ -1999,6 +2016,13 @@ impl NativeSubjectMeasurement {
     /// `AuthorizationBasis.measured_result` bu değerleri bağlar.
     pub fn measured(&self) -> &crate::coords::MeasuredRawPosition {
         &self.measured
+    }
+
+    /// **#100 (TD-1):** Ölçüm anı typed baseline — after ile aynı session'dan.
+    /// V2 gate evaluator loss_before derive + #97 MD-3 matrisi buradan okur
+    /// (commit-time ikinci partition üretimi YOK).
+    pub fn baseline(&self) -> &MeasurementBaseline {
+        &self.baseline
     }
 
     /// `measured.to_raw()` — bağımsız ikinci truth YOK (construction property).
@@ -2053,6 +2077,7 @@ impl std::fmt::Debug for NativeSubjectMeasurement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NativeSubjectMeasurement")
             .field("measured", &self.measured)
+            .field("baseline", &self.baseline)
             .field("subject_scope", &self.subject_scope)
             .field("delta_digest", &self.delta_digest)
             .field("base_revision", &self.base_revision)

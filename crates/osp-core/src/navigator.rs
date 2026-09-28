@@ -2053,9 +2053,18 @@ mod tests {
             )
             .expect("fallback canonical scope (delta ids unique)")
         });
+        // **#100 (TD-1):** synthetic carrier baseline — commit partition'ıyla aynı
+        // sınıflandırma (Available sentetik before=measured).
+        let baseline = match engine.classify_baseline_availability(claim, &subject) {
+            Ok(crate::engine::BaselineAvailabilityClass::Unavailable(reason)) => {
+                crate::measurement::MeasurementBaseline::Unavailable { reason }
+            }
+            _ => crate::measurement::MeasurementBaseline::Available(measured.clone()),
+        };
         crate::task_measurement::FinalizedNativeTaskClaim::new_test_with_measured(
             claim.clone(),
             measured,
+            baseline,
             subject,
             delta_digest,
             revision,
