@@ -1,19 +1,52 @@
-# Handoff — #95-B MD-1 Cleanup (AKTİF — branch açık, W0 tamam; #95-A merged)
+# Handoff — #95-B MD-1 Cleanup (E0-E8 TAMAMLANDI — PR #129 review/merge bekliyor)
 
-**Tarih:** 2026-09-28 (oturum başlangıcı). #95-A **PR #128 MERGED** (squash `e3f44c8`;
-review: onaylanabilir, P2+P3'ler düzeltildi, thread'ler resolve edildi). #95-B branch:
-`feat/95b-md1-cleanup` @ `35adf59` (main `e3f44c8` üzerinden). **W0 tamam:**
-`effective_legacy_measure_set` kaldırıldı (çağrıcısız dead pub yüzey).
+**Tarih:** 2026-09-28 (oturum sonu). #95-A **PR #128 MERGED** (squash `e3f44c8`).
+#95-B branch: `feat/95b-md1-cleanup` (main `e3f44c8` üzerinden). **E0-E8 tamamlandı**
+(8 commit; net ~−3.700 satır). CI parity yeşil: fmt + clippy `-D warnings` +
+39 suite / 1942 test / 0 fail. Kabul kriteri: **"MD-1 compatibility code tamamen
+kaldırılmış" (MD-1 scope) — sağlandı** (kalan `subject_authority` hit'leri: CLI
+zarf etiketi `execution_measurement.subject_authority: "task_scope"` (#95-A'nın
+kendi çıktısı — kalıcı) + tarihsel tombstone'lar).
 
 ## Oturum nasıl başlamalı
 
-> Handoff: **#95-B — MD-1 cleanup, W1'den devam** (W0 done: `effective_legacy_measure_set`).
-> Branch: `feat/95b-md1-cleanup`. Plan: bu dosyanın "#95-B W1-W8 stage planı" bölümü.
-> Notlar: `docs/notes/faz8-p2-migration-decisions.md` MD-1 bölümü + PR #128 review yorumları.
+PR #129 review gelmişse:
+> Handoff: **#95-B — PR #129 review düzeltmeleri**. Branch: `feat/95b-md1-cleanup`.
+> Notlar: bu dosya + PR #129 review yorumları.
 
-**İlk adımlar:** (1) bu dosya, (2) `git log --oneline -4` (W0 `35adf59` üstünde
-çalışılmalı), (3) `export PATH="$HOME/.cargo/bin:$PATH"` + `cargo test --locked
---workspace --all-features --exclude osp-desktop` (yeşil başlangıç).
+PR #129 merge edilmişse:
+> Handoff: **#97 (MD-3 Baseline Availability yüzeyleri)** → sonra #100 (Faz 8a
+> engine cutover). Branch: main üzerinden yeni branch.
+> Notlar: `docs/notes/faz8-p2-migration-decisions.md` (MD-3 bölümü) + roadmap.
+
+## Teslim edilenler (commit zinciri)
+
+- `35adf59` W0: `effective_legacy_measure_set` (çağrıcısız)
+- `9d68bd5`+`f8e1ab1`+`22e919b`+`d50e706` docs: plan + PR review revizyonu (P1 q92
+  disposal kararı, P2 wire yönü face-face) + tüketici-önce sırası + karar notu
+- `5478c48` E1: navigator+MCP observer çağrıları + MD-1 sidecar JSON/testleri
+- `5e0c2bb` E2: wire sidecar alanları (TrajectoryEvidence/PendingAuthorization/
+  RevisionRequired — durable yüzeylerde bilinçli epoch ilerlemesi) + drift-observation
+  test dosyası + engine observer testi (−1249)
+- `bbb75ee` E3: q92 subject-divergence bölümü (mimar onaylı disposal)
+- `e31b7f7` E4+E5: `subject_authority.rs` modülü silindi; ortak Q5 gözlem tipleri
+  `provenance_authority.rs`'e taşındı (MD-2 dokunulmadı — byte-identical, serde
+  değişmedi); engine `md1_shadow` lane düştü; `measure_attempt_native` rename;
+  legacy producer ailesi + `V2MeasurementFailure` + `TaskScopeNativeMaterial` (−1701)
+- `f1781bc` E7: `submit_delta_attempt` `_task_id` parametresi
+- `94c6f67` E6: legacy isimler → `NativeSubjectMeasurement`,
+  `NativeMeasurementBindingError`, `SubjectBindingDigest`, `SubjectBindingMismatch`
+  (draft×token digest varyantı — `TaskSubjectBindingMismatch`'tan FARKLI, ikisi de
+  yaşıyor), `subject_binding`, `subject_member_ids()`; compile-fail stderr'ler re-bless
+
+## Bilinçli keep'ler (#100'e not)
+
+- CLI zarf etiketi `execution_measurement.subject_authority` — #95-A authority mode
+  beyanı, MD-1 compat DEĞİL.
+- `b"osp.legacy-subject-binding.v1\0"` DOMAIN_SEPARATOR — digest preimage sabiti;
+  değiştirmek değer churn'u üretir, fayda yok.
+- MD-2 prose'unda geçen tarihsel "MD-1" anlatımları — W8 kapsamında bilinçli korundu.
+- `measurement_v1_v2_parity.rs` — MD-2 tarihsel karakterizasyon (plan karar notu).
 
 ## #95-B envanter (2026-09-28 tarama — kanıtlanmış gerçekler)
 
