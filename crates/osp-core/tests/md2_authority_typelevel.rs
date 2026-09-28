@@ -5,7 +5,7 @@
 //! 1. `FinalizedNativeTaskClaim` external crate'ten elle KURULAMAZ:
 //!    - constructor private (`fn new` — yalnız `finalize` üretir)
 //!    - struct literal kapalı (private fields)
-//! 2. `NativeLegacySubjectMeasurement::new_characterization_legacy` YOK
+//! 2. `NativeSubjectMeasurement::new_characterization_legacy` YOK
 //!    (kaldırılan P0-1 yüzeyi — geri getirilirse bu test derleme hatası verir).
 //! 3. `TaskCommitInput::new` yalnız sealed carrier kabul eder — "Claim B +
 //!    token A" artifact-mix çağrı şekli type-level unrepresentable.

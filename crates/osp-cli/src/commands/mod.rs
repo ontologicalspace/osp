@@ -818,7 +818,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         let json = serde_json::to_string_pretty(&envelope)?;
         // Diagnostics stderr'e — stdout JSON-only.
         // **#96 MD-2 + #95-A MD-1 cutover:** navigator ölçümü engine-native
-        // per-axis (opaque NativeLegacySubjectMeasurement token) + canonical
+        // per-axis (opaque NativeSubjectMeasurement token) + canonical
         // task-scope subject. Envelope iki-eksen vocabulary taşır.
         eprintln!(
             "osp trajectory attempt: #96 MD-2 engine_native_per_axis provenance authority \

@@ -20,8 +20,8 @@ warning: unreachable statement
    |
    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
 
-error[E0599]: no associated function or constant named `new_characterization_legacy` found for struct `NativeLegacySubjectMeasurement` in the current scope
-  --> tests/compile_fail/md2_characterization_ctor_removed.rs:16:68
+error[E0599]: no associated function or constant named `new_characterization_legacy` found for struct `NativeSubjectMeasurement` in the current scope
+  --> tests/compile_fail/md2_characterization_ctor_removed.rs:16:62
    |
-16 |     let _ = osp_core::measurement::NativeLegacySubjectMeasurement::new_characterization_legacy(
-   |                                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `NativeLegacySubjectMeasurement`
+16 |     let _ = osp_core::measurement::NativeSubjectMeasurement::new_characterization_legacy(
+   |                                                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function or constant not found in `NativeSubjectMeasurement`

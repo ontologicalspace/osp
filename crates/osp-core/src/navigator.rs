@@ -849,7 +849,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
 
             // 6. Finalized sealed carrier — draft.consume: YALNIZ computed_raw/Intent
             //    enjekte (structural + claim_id aynı object) + **subject-binding kontrolü**
-            //    (`LegacySubjectBindingMismatch`) + Q4 FINAL-RAW finite validation.
+            //    (`SubjectBindingMismatch`) + Q4 FINAL-RAW finite validation.
             //    **P0-tur4:** finalize `FinalizedNativeTaskClaim` döner (sealed —
             //    claim+measurement ayrılamaz; TaskCommitInput yalnız bunu kabul eder).
             let finalized = match draft.finalize(native.authority()) {

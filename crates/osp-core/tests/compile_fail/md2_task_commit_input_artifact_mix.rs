@@ -9,7 +9,7 @@ fn main() {
     let omega: osp_core::witness::WitnessSet = unimplemented!();
     let resolver: &dyn osp_core::trajectory::TaskResolver = unimplemented!();
     let target = osp_core::coords::RawPosition::default();
-    let token: osp_core::measurement::NativeLegacySubjectMeasurement = unimplemented!();
+    let token: osp_core::measurement::NativeSubjectMeasurement = unimplemented!();
     // (a) Eski 6-argüman şekli derlenmemeli.
     let _ = osp_core::engine::TaskCommitInput::new(
         &claim,

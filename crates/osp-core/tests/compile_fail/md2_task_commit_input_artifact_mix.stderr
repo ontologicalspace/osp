@@ -17,7 +17,7 @@ error[E0061]: this function takes 5 arguments but 6 arguments were supplied
    |         ------ expected `&FinalizedNativeTaskClaim`, found `&Claim`
 ...
 20 |         &token,
-   |         ------ unexpected argument #6 of type `&NativeLegacySubjectMeasurement`
+   |         ------ unexpected argument #6 of type `&NativeSubjectMeasurement`
    |
    = note: expected reference `&FinalizedNativeTaskClaim`
               found reference `&osp_core::witness::Claim`

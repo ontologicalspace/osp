@@ -10,7 +10,7 @@ fn main() {
     let input: osp_core::authorization::MeasurementInputDigest = unimplemented!();
     let stamp: osp_core::coords::CoreAxisEpochStamp = unimplemented!();
     // Bu satır derlenmemeli: tüm field'lar private.
-    let _token = osp_core::measurement::NativeLegacySubjectMeasurement {
+    let _token = osp_core::measurement::NativeSubjectMeasurement {
         measured,
         subject_scope: scope,
 

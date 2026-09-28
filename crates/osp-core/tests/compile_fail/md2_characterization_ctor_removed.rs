@@ -13,7 +13,7 @@ fn main() {
     let input: osp_core::authorization::MeasurementInputDigest = unimplemented!();
     let stamp: osp_core::coords::CoreAxisEpochStamp = unimplemented!();
     // Bu satır derlenmemeli: metod yok (kaldırıldı).
-    let _ = osp_core::measurement::NativeLegacySubjectMeasurement::new_characterization_legacy(
+    let _ = osp_core::measurement::NativeSubjectMeasurement::new_characterization_legacy(
         measured,
         ids,
         delta,

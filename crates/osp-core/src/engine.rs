@@ -115,9 +115,10 @@ pub struct TaskCommitInput<'a> {
     /// Loss before (running scalar — navigator :631 init / :1132 progress update).
     /// **#96:** değişmez (MD-3 #97); fiziksel removal #100.
     loss_before: f64,
-    /// **#96 MD-2:** Opaque engine-issued native provenance token (legacy subject).
-    /// Sealed carrier'dan gelir — finalize proof'u commit boundary'ye taşınır.
-    measurement: &'a crate::measurement::NativeLegacySubjectMeasurement,
+    /// **#96 MD-2:** Opaque engine-issued native provenance token (canonical
+    /// task-scope subject). Sealed carrier'dan gelir — finalize proof'u commit
+    /// boundary'ye taşınır.
+    measurement: &'a crate::measurement::NativeSubjectMeasurement,
 }
 
 impl<'a> TaskCommitInput<'a> {
@@ -713,12 +714,12 @@ type EpochOperationResult<R> = Result<
 /// shadow lane'i kaldırıldı — cutover (#95-A) sonrası construction-parity
 /// witness'ı görevini tamamladı.)
 pub struct NativeAttemptMeasurement {
-    authority: crate::measurement::NativeLegacySubjectMeasurement,
+    authority: crate::measurement::NativeSubjectMeasurement,
 }
 
 impl NativeAttemptMeasurement {
     /// Authority token — `TaskCommitInput.measurement` olarak commit'e gider.
-    pub fn authority(&self) -> &crate::measurement::NativeLegacySubjectMeasurement {
+    pub fn authority(&self) -> &crate::measurement::NativeSubjectMeasurement {
         &self.authority
     }
 }
@@ -735,7 +736,7 @@ impl std::fmt::Debug for NativeAttemptMeasurement {
 // silindi — tek tüketicisi MD-1 shadow lane'idir; observer E3'te kaldırıldı.
 
 /// **#96 MD-2 (plan v4 P0-tur3):** Commit-anı geçerlilik KANITI —
-/// `verify_native_legacy_measurement_binding` üretir (private ctor; yalnız engine).
+/// `verify_native_measurement_binding` üretir (private ctor; yalnız engine).
 ///
 /// **İkinci TOCTOU kapanışı:** `build_authorization_context` bu proof'tan okur —
 /// `base_space_view_revision` / `measurement_input_digest` / `measured_result`
@@ -746,14 +747,14 @@ impl std::fmt::Debug for NativeAttemptMeasurement {
 /// hizalı): cross-context substitution / stale-space / context-drift / ABA axis-state
 /// koruması kanıtlanır; aynı context'te meşru yeniden sunum (Held + witness evidence
 /// + resubmit) engellenmez — "token cannot be replayed" iddiası YOK.
-pub struct VerifiedNativeLegacyMeasurementBinding {
+pub struct VerifiedNativeMeasurementBinding {
     base_revision: crate::authorization::SpaceViewRevision,
     measurement_input_digest: crate::authorization::MeasurementInputDigest,
     measured: crate::coords::MeasuredRawPosition,
 }
 
-impl VerifiedNativeLegacyMeasurementBinding {
-    /// Private ctor — yalnız `verify_native_legacy_measurement_binding` üretir.
+impl VerifiedNativeMeasurementBinding {
+    /// Private ctor — yalnız `verify_native_measurement_binding` üretir.
     fn new(
         base_revision: crate::authorization::SpaceViewRevision,
         measurement_input_digest: crate::authorization::MeasurementInputDigest,
@@ -779,9 +780,9 @@ impl VerifiedNativeLegacyMeasurementBinding {
     }
 }
 
-impl std::fmt::Debug for VerifiedNativeLegacyMeasurementBinding {
+impl std::fmt::Debug for VerifiedNativeMeasurementBinding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("VerifiedNativeLegacyMeasurementBinding")
+        f.debug_struct("VerifiedNativeMeasurementBinding")
             .field("base_revision", &self.base_revision)
             .field("measurement_input_digest", &self.measurement_input_digest)
             .field("measured", &self.measured)
@@ -1549,8 +1550,8 @@ impl SpaceEngine {
         // source requirement, geçersiz policy.
         //
         // Guard order: Q4 syntax → task bind → **validate_for_commit** →
-        // **#95-A: MD-1 subject fence** → **#96: verify_native_legacy_measurement_
-        // binding** → Q5 vision → Q5.b gate → Q6 rule → witness.
+        // **#95-A: MD-1 subject fence** → **#96: verify_native_measurement_binding**
+        // → Q5 vision → Q5.b gate → Q6 rule → witness.
         // Terminal — maneuver budget tüketmez, witness'a ulaşmaz, authorization üretmez.
         bound.task.validate_for_commit()?;
 
@@ -1578,7 +1579,7 @@ impl SpaceEngine {
         if current_scope != *input.measurement.subject_scope() {
             return Err(EngineCommitError::MeasurementBindingVerification(
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::TaskSubjectBindingMismatch {
+                    crate::measurement::NativeMeasurementBindingError::TaskSubjectBindingMismatch {
                         expected: current_scope,
                         presented: input.measurement.subject_scope().clone(),
                     },
@@ -1592,7 +1593,7 @@ impl SpaceEngine {
         // Failure → tek funnel `MeasurementBindingVerification` (SystemFailure sınıfı —
         // navigator terminal, budget yok, LLM retry yok).
         let verified_binding =
-            self.verify_native_legacy_measurement_binding(input.claim, input.measurement)?;
+            self.verify_native_measurement_binding(input.claim, input.measurement)?;
 
         // Phase 0c: Q5 Vision (θ bound — negatif-uzay safety).
         // **Step 4b:** Captured `EffectiveVisionGateContext` — bir kez üretilir, Q5 +
@@ -1716,7 +1717,7 @@ impl SpaceEngine {
         outcome: &crate::trajectory::AttemptOutcome,
         apply_target: crate::trajectory::ApplyTarget,
         input: &TaskCommitInput<'_>,
-        verified_binding: &VerifiedNativeLegacyMeasurementBinding,
+        verified_binding: &VerifiedNativeMeasurementBinding,
         loss_before: f64,
         loss_after: f64,
         improvement_policy: &crate::authorization::EffectiveImprovementPolicy,
@@ -2761,7 +2762,7 @@ impl SpaceEngine {
     ) -> Result<NativeAttemptMeasurement, crate::measurement::MeasurementError> {
         use crate::measurement::{
             compute_measurement_input_digest, MeasurementDeltaDigest, MeasurementError,
-            NativeLegacySubjectMeasurement,
+            NativeSubjectMeasurement,
         };
         let claim = draft.claim();
 
@@ -2846,7 +2847,7 @@ impl SpaceEngine {
 
         // 8. Opaque token — tek üretici burası (measurement.rs ctor pub(crate));
         //    subject scope CANONICAL olarak taşınır (tur-3 P2 — re-canonicalization YOK).
-        let authority = NativeLegacySubjectMeasurement::new(
+        let authority = NativeSubjectMeasurement::new(
             measured,
             subject_scope,
             delta_digest,
@@ -2873,28 +2874,29 @@ impl SpaceEngine {
     /// ```
     ///
     /// Error funnel (PR #124 review P1 düzeltmesi): engine-issued token hataları
-    /// **`NativeAuthority(NativeLegacyMeasurementBindingError)`** typed family'sinde —
+    /// **`NativeAuthority(NativeMeasurementBindingError)`** typed family'sinde —
     /// mevcut `Mismatch` (presented-authority/caller) ailesi YENİDEN ANLAMLANDIRILMAZ
     /// ve DOKUNULMAZ. Tek funnel `EngineCommitError::MeasurementBindingVerification`
     /// korunur (paralel ontology yok). Derivation hataları mevcut
     /// `MeasurementBindingDerivationError` ailesinde (SystemFailure sınıfı).
-    /// `LegacySubjectMismatch` YOK — token'ın legacy_subject_ids'i audited
-    /// measurement subject'tır, canonical task authority değildir (#96 sınırı; MD-1 = #95-A).
+    /// `SubjectMismatch` YOK — token'ın `subject_member_ids()` audited
+    /// measurement subject'tir; commit-anı canonical task authority
+    /// karşılaştırması `TaskSubjectBindingMismatch`'tır (#95-A).
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
     )]
-    pub fn verify_native_legacy_measurement_binding(
+    pub fn verify_native_measurement_binding(
         &self,
         claim: &Claim,
-        token: &crate::measurement::NativeLegacySubjectMeasurement,
+        token: &crate::measurement::NativeSubjectMeasurement,
     ) -> Result<
-        VerifiedNativeLegacyMeasurementBinding,
+        VerifiedNativeMeasurementBinding,
         crate::measurement::MeasurementBindingVerificationError,
     > {
         use crate::measurement::{
             MeasurementBindingDerivationError as DerivErr, MeasurementBindingVerificationError,
-            MeasurementDeltaDigest, NativeLegacyMeasurementBindingError as NativeErr,
+            MeasurementDeltaDigest, NativeMeasurementBindingError as NativeErr,
         };
 
         // (1) Structural delta identity — shared canonical producer (tek truth).
@@ -3002,7 +3004,7 @@ impl SpaceEngine {
             ));
         }
 
-        Ok(VerifiedNativeLegacyMeasurementBinding::new(
+        Ok(VerifiedNativeMeasurementBinding::new(
             token.base_revision().clone(),
             token.measurement_input_digest().clone(),
             token.measured().clone(),
@@ -7921,7 +7923,7 @@ v = 0.5
         )
         .unwrap();
         let bundle = engine.measure_attempt_native(&draft, &task).unwrap();
-        assert_eq!(bundle.authority().legacy_subject_ids(), &[1u64]);
+        assert_eq!(bundle.authority().subject_member_ids(), &[1u64]);
 
         // (b) **#95-A regolden:** affected [1] + removed_edges.from=9 → authority
         // subject YİNE [1] (task scope). *(Historical pre-#95-A golden: legacy
@@ -7944,7 +7946,7 @@ v = 0.5
         .unwrap();
         let bundle3 = engine.measure_attempt_native(&draft3, &task).unwrap();
         assert_eq!(
-            bundle3.authority().legacy_subject_ids(),
+            bundle3.authority().subject_member_ids(),
             &[1u64],
             "#95-A: authority subject = canonical task scope (affected union DEĞİL)"
         );
@@ -7967,7 +7969,7 @@ v = 0.5
         )
         .unwrap();
         let bundle_fb = engine.measure_attempt_native(&draft_fb, &task).unwrap();
-        assert_eq!(bundle_fb.authority().legacy_subject_ids(), &[1u64]);
+        assert_eq!(bundle_fb.authority().subject_member_ids(), &[1u64]);
     }
 
     /// **#95-A (MD-1) — affected-irrelevance (finalize seviyesi):** aynı task
@@ -8019,7 +8021,7 @@ v = 0.5
     }
 
     /// **#95-A — scope-mismatch negatifi (finalize seviyesi):** farklı task
-    /// scope'lu draft×token → `LegacySubjectBindingMismatch`. Simetrik uzayda
+    /// scope'lu draft×token → `SubjectBindingMismatch`. Simetrik uzayda
     /// raw bits EŞİT olsa bile (raw parity bağımsız kanıt DEĞİL — eski test 2'nin
     /// #95-A karşılığı; scope artık binding'in kendisi).
     #[test]
@@ -8108,9 +8110,9 @@ v = 0.5
         assert!(
             matches!(
                 err,
-                crate::measurement::NativeLegacyMeasurementBindingError::LegacySubjectBindingMismatch { .. }
+                crate::measurement::NativeMeasurementBindingError::SubjectBindingMismatch { .. }
             ),
-            "LegacySubjectBindingMismatch (scope): {err:?}"
+            "SubjectBindingMismatch (scope): {err:?}"
         );
     }
 
@@ -8163,7 +8165,7 @@ v = 0.5
                 &err,
                 crate::engine::EngineCommitError::MeasurementBindingVerification(
                     crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                        crate::measurement::NativeLegacyMeasurementBindingError::TaskSubjectBindingMismatch { .. }
+                        crate::measurement::NativeMeasurementBindingError::TaskSubjectBindingMismatch { .. }
                     )
                 )
             ),
@@ -8294,10 +8296,10 @@ v = 0.5
 
         // (1) authority subject exact eşit (= task scope [2]).
         assert_eq!(
-            bundle_a.authority().legacy_subject_ids(),
-            bundle_b.authority().legacy_subject_ids()
+            bundle_a.authority().subject_member_ids(),
+            bundle_b.authority().subject_member_ids()
         );
-        assert_eq!(bundle_a.authority().legacy_subject_ids(), &[2u64]);
+        assert_eq!(bundle_a.authority().subject_member_ids(), &[2u64]);
         // (2) measured bits exact.
         let bits = |r: crate::coords::RawPosition| {
             [
@@ -8680,18 +8682,18 @@ v = 0.5
         );
         // Pozitif kontrol: kendi claim×token çifti verify'den geçer.
         assert!(engine
-            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_a.authority())
+            .verify_native_measurement_binding(carrier_a.claim(), bundle_a.authority())
             .is_ok());
 
         // Negatif: claim A + token B → StructuralDeltaMismatch (enum equality).
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_b.authority())
+            .verify_native_measurement_binding(carrier_a.claim(), bundle_b.authority())
             .expect_err("cross-pair farklı delta → mismatch");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::StructuralDeltaMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::StructuralDeltaMismatch { .. }
                 )
             ),
             "check-1 StructuralDeltaMismatch bekleniyordu; got: {err:?}"
@@ -8758,7 +8760,7 @@ v = 0.5
             bundle_a.authority().delta_digest(),
             bundle_b.authority().delta_digest()
         );
-        let raw_bits = |t: &crate::measurement::NativeLegacySubjectMeasurement| {
+        let raw_bits = |t: &crate::measurement::NativeSubjectMeasurement| {
             [
                 t.raw().x.to_bits(),
                 t.raw().y.to_bits(),
@@ -8775,13 +8777,13 @@ v = 0.5
 
         // Negatif: engine A claim + engine B token → RawMismatch.
         let err = engine_a
-            .verify_native_legacy_measurement_binding(carrier_a.claim(), bundle_b.authority())
+            .verify_native_measurement_binding(carrier_a.claim(), bundle_b.authority())
             .expect_err("cross-space raw mix → mismatch");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::RawMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::RawMismatch { .. }
                 )
             ),
             "check-2 RawMismatch bekleniyordu; got: {err:?}"
@@ -8807,7 +8809,7 @@ v = 0.5
         let carrier = draft.finalize(bundle.authority()).unwrap();
         assert!(
             engine
-                .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+                .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
                 .is_ok(),
             "precondition: mutasyon öncesi kendi çifti geçer"
         );
@@ -8822,13 +8824,13 @@ v = 0.5
 
         // Public verifier: stale replay fence.
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("stale token replay reddedilmeli");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::StaleSpaceRevision { .. }
+                    crate::measurement::NativeMeasurementBindingError::StaleSpaceRevision { .. }
                 )
             ),
             "check-3 StaleSpaceRevision bekleniyordu; got: {err:?}"
@@ -8852,7 +8854,7 @@ v = 0.5
                 &commit_err,
                 crate::engine::EngineCommitError::MeasurementBindingVerification(
                     crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                        crate::measurement::NativeLegacyMeasurementBindingError::StaleSpaceRevision { .. }
+                        crate::measurement::NativeMeasurementBindingError::StaleSpaceRevision { .. }
                     )
                 )
             ),
@@ -8890,13 +8892,13 @@ v = 0.5
         generation.store(1, Ordering::SeqCst);
 
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("context TOCTOU reddedilmeli");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::MeasurementContextMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::MeasurementContextMismatch { .. }
                 )
             ),
             "check-4 MeasurementContextMismatch bekleniyordu; got: {err:?}"
@@ -8947,13 +8949,13 @@ v = 0.5
 
         // Yalnız monoton epoch fence yakalar (epoch 0→2 — ABA'da bile geri dönmez).
         let err = engine
-            .verify_native_legacy_measurement_binding(carrier.claim(), carrier.measurement())
+            .verify_native_measurement_binding(carrier.claim(), carrier.measurement())
             .expect_err("ABA epoch revert reddedilmeli");
         assert!(
             matches!(
                 &err,
                 crate::measurement::MeasurementBindingVerificationError::NativeAuthority(
-                    crate::measurement::NativeLegacyMeasurementBindingError::AxisEpochMismatch { .. }
+                    crate::measurement::NativeMeasurementBindingError::AxisEpochMismatch { .. }
                 )
             ),
             "check-5 AxisEpochMismatch bekleniyordu (digest eşitken yalnız epoch yakalar); got: {err:?}"

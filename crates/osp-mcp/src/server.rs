@@ -845,8 +845,8 @@ impl Workspace {
         };
 
         // 2. **#96 MD-2:** Native measurement — tek session (authority token;
-        //    MD-1 shadow lane #95-B E5'te silindi); legacy subject engine-internal
-        //    derivation. `loss_before`
+        //    MD-1 shadow lane #95-B E5'te silindi); subject derivation
+        //    engine-internal (canonical task scope). `loss_before`
         //    DOKUNULMAZ (current_measured sabit tohumdan — bootstrap authority
         //    ayrı migration; loss_before = gate girdisidir, değer değişmez).
         //    **P1-1 (review tur 5):** fallible → ortak typed mapper
@@ -894,7 +894,7 @@ impl Workspace {
         };
 
         // 3. Final Claim (yalnız computed_raw/Intent enjekte) + **tur-2 P1
-        //    subject-binding kontrolü** (`LegacySubjectBindingMismatch` →
+        //    subject-binding kontrolü** (`SubjectBindingMismatch` →
         //    NativeAuthority family kontratı: SystemFailure/no-budget/no-retry)
         //    + Q4 FINAL-RAW finite + commit_task_claim (native binding
         //    verification engine'de).

@@ -9,7 +9,7 @@
 //! event'i** üzerinde yalnız PROVENANCE eksenindeki farkı gözlemler:
 //!
 //! ```text
-//! NativeLegacySubjectMeasurement (otorite — commit'in tükettiği token)
+//! NativeSubjectMeasurement (otorite — commit'in tükettiği token)
 //!   ├─ native lane    : measured values + engine-native per-axis sources  → AUTHORITATIVE
 //!   └─ reference lane : AYNI value bits + uniform-Scip izdüşümü            → REFERENCE ONLY
 //!                        (counterfactual PredicateGate — asla "production
@@ -39,7 +39,7 @@
 
 use crate::coords::{MeasuredRawPosition, MetricSource, RawPosition};
 use crate::engine::SpaceEngine;
-use crate::measurement::NativeLegacySubjectMeasurement;
+use crate::measurement::NativeSubjectMeasurement;
 use crate::trajectory::{
     MutationDecision, PredicateCompletion, PredicateGate, PredicateGateInput, Task, TaskBoundClaim,
 };
@@ -331,7 +331,7 @@ pub fn observe_provenance_authority_drift(
     engine: &SpaceEngine,
     claim: &Claim,
     task: &Task,
-    token: &NativeLegacySubjectMeasurement,
+    token: &NativeSubjectMeasurement,
     loss_before: f64,
     target: &RawPosition,
 ) -> ProvenanceAuthorityDriftDraft {
