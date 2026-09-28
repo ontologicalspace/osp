@@ -670,7 +670,9 @@ mod tests {
         // language's adapter — no feature-gating required. This must surface as
         // IncompleteReason::AdapterUnavailable, not a silently dropped file.
         use crate::adapters::rust::RustAdapter;
-        use crate::language::{AdapterRegistry, AnalysisCompleteness, IncompleteReason, LanguageId};
+        use crate::language::{
+            AdapterRegistry, AnalysisCompleteness, IncompleteReason, LanguageId,
+        };
 
         let dir = make_fixture(); // 3 .py files + readme.md
         fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();

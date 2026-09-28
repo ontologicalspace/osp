@@ -364,7 +364,13 @@ mod tests {
     fn catalog_returns_none_for_non_source_extensions() {
         // These are NOT "unsupported languages" — they're simply out of scope.
         // The catalog must never claim knowledge of a file type it doesn't map.
-        for name in ["README.md", "config.json", "logo.png", "script.sh", "data.csv"] {
+        for name in [
+            "README.md",
+            "config.json",
+            "logo.png",
+            "script.sh",
+            "data.csv",
+        ] {
             assert_eq!(
                 LanguageCatalog::language_for_path(Path::new(name)),
                 None,
@@ -375,7 +381,10 @@ mod tests {
 
     #[test]
     fn catalog_returns_none_for_no_extension() {
-        assert_eq!(LanguageCatalog::language_for_path(Path::new("Makefile")), None);
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("Makefile")),
+            None
+        );
     }
 
     #[test]
@@ -453,6 +462,9 @@ mod tests {
 
     #[test]
     fn completeness_default_is_complete() {
-        assert_eq!(AnalysisCompleteness::default(), AnalysisCompleteness::Complete);
+        assert_eq!(
+            AnalysisCompleteness::default(),
+            AnalysisCompleteness::Complete
+        );
     }
 }
