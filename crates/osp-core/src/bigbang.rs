@@ -82,6 +82,21 @@ pub fn apply_delta(space: &mut Space, delta: &Delta) -> Vec<NodeId> {
     compute_reposition_set(space, &new_node_ids)
 }
 
+/// Claim'in prospective delta'sı — mutasyon preimage.
+///
+/// **#97 MD-3 S3:** `witness::evaluate` (Satisfied delta'sı) ile cold-start onay
+/// apply'ı (`approve_cold_start`) AYNI üretimi paylaşır — iki ayrı inline üretim
+/// preimage drift riski açardı. `repositioned` burada boştur; `apply_delta`
+/// `ΔV ∪ N₁(ΔV)` hesaplar (inv #6).
+pub fn prospective_delta_from_claim(claim: &crate::witness::Claim) -> Delta {
+    Delta {
+        new_nodes: claim.delta_nodes.clone(), // Faz 2.4: full Node objects (replay için)
+        new_edges: claim.delta_edges.clone(),
+        removed_edges: claim.removed_edges.clone(), // G2c-2: subtractive delta
+        repositioned: vec![],
+    }
+}
+
 /// `ΔV ∪ N₁(ΔV)` — yeniden konumlanması gereken düğüm seti (inv #6).
 ///
 /// `ΔV`: commit ile eklenen yeni node'lar. `N₁(ΔV)`: bu node'lara komşu (1-hop)
