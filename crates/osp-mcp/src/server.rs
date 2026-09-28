@@ -1139,6 +1139,8 @@ impl Workspace {
             osp_core::trajectory::MutationDecision::RequireOperatorApproval => {
                 "RequireOperatorApproval"
             }
+            // **#97 MD-3:** operator-onaylı soğuk başlatma — append-only wire etiketi.
+            osp_core::trajectory::MutationDecision::AcceptAsColdStart => "AcceptAsColdStart",
         };
         let apply_str = match result.apply_target {
             osp_core::trajectory::ApplyTarget::NotApplied => "NotApplied",

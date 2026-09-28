@@ -1143,6 +1143,18 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         last_outcome: outcome,
                     };
                 }
+                MutationDecision::AcceptAsColdStart => {
+                    // **#97 MD-3:** soğuk başlatma Sandbox'a uygulandı — task
+                    // tamamlandı sayMAZ (improvement/completion iddiası yok),
+                    // baseline da kurulmadı (loss_before/current_measured
+                    // güncellenmez). Terminal rapor + yeni loop kontrolü S3'te
+                    // (approve_cold_start akışı) netleşir; navigator attempt
+                    // döngüsünde mevcut davranış: retry yok, loop devam etmez.
+                    return NavigatorResult::RequiresOperatorApproval {
+                        attempts: attempt_num,
+                        last_outcome: outcome,
+                    };
+                }
             }
         }
 
@@ -1167,10 +1179,10 @@ mod tests {
     use crate::engine::{EngineConfig, SpaceEngine};
     use crate::space::{Edge, Node, NodeKind, Space};
     use crate::trajectory::{
-        ApplyTarget, CommitLane, ComparisonOp, InMemoryTaskRegistry, MetricPredicate,
-        MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy, PredicateGate,
-        PredicateGateInput, PredicateMode, PredicateScope, PredicateSet, Task, TaskBoundClaim,
-        TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
+        ApplyTarget, ColdStartPolicy, CommitLane, ComparisonOp, InMemoryTaskRegistry,
+        MetricPredicate, MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy,
+        PredicateGate, PredicateGateInput, PredicateMode, PredicateScope, PredicateSet, Task,
+        TaskBoundClaim, TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
     };
     use crate::vision::VisionVector;
     use crate::witness::{Claim, ClaimId, Intent};
@@ -1743,6 +1755,7 @@ mod tests {
             max_axis_regression: 0.15,
             maneuver_limit: 5,
             allow_progress_checkpoint: true,
+            cold_start_policy: ColdStartPolicy::Disallow,
         };
         // Threshold yüksek (0.80) → measured coupling 0.40 < 0.80 ama source Scip →
         // completion: NotCompleted (0.40 ≤ 0.80 geçer AMA biz NotCompleted yolunu
@@ -1874,6 +1887,7 @@ mod tests {
             max_axis_regression: 0.15,
             maneuver_limit: 5,
             allow_progress_checkpoint: true,
+            cold_start_policy: ColdStartPolicy::Disallow,
         };
         let task = coupling_task(1, 0.10, policy);
         resolver.insert(task.clone());
