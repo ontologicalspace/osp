@@ -1042,7 +1042,8 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 }
             };
             let outcome = task_result.outcome.clone();
-            let _loss_after = task_result.loss_after; // #100: telemetry only (wire basis loss_after kanalı yaşar)
+            // #100 (S3/P3-2 review #132): loss_after telemetry degiskeni kalkti —
+            // loss kanali wire basis\'te yasiyor; navigator evidence loss tasimiyor.
             last_outcome = Some(outcome.clone());
 
             // 7. Evidence kaydet (boşluk #6) — inline push (field borrow çatışmasını önle).

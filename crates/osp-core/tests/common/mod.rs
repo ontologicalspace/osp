@@ -2310,9 +2310,8 @@ pub fn evaluate_v1_case(
     engine: &mut osp_core::engine::SpaceEngine,
     case: &CharacterizationCase,
 ) -> CharacterizationObservation {
+    // P3-3 (review #132): self-import kaldırıldı — aynı modülün öğeleri doğrudan.
     use osp_core::navigator::build_claim_from_proposal;
-
-    use crate::common::{v1_compute_raw_from_delta, v1_provenanced_from_raw};
 
     // affected = proposal.affected_nodes ∪ removed_edges.from (navigator.rs:810-815 mirror).
     let mut affected: Vec<u64> = case.proposal.affected_nodes.clone();

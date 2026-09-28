@@ -258,6 +258,16 @@ impl VerifiedGateEvaluationBundleV2 {
         preferred_vector_snapshot: Option<crate::coords::RawPosition>,
         gate_evaluation: crate::authorization::VerifiedGateEvaluationV2,
     ) -> Self {
+        // **P3-1 (review #132):** ikili temsil bağlanır — düz `completion` alanı ile
+        // `predicate_basis.result` tag'i aynı evaluator çıktısından üretilir;
+        // divergence temsil edilemez (debug build'de ctor assert; tek üretici bu fn).
+        debug_assert_eq!(
+            crate::canonical_tags::PredicateSetResultTag::try_from(&completion)
+                .expect("total tag mapping")
+                .as_u8(),
+            predicate_basis.result.as_u8(),
+            "bundle dual representation diverged: completion != predicate_basis.result"
+        );
         Self {
             task_id,
             claim_id,

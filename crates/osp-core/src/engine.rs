@@ -2166,9 +2166,11 @@ impl SpaceEngine {
                 "V2 witness requirement derivation: {e}"
             ))
         })?;
-        // Authority checkpoint — V2 context constructed-and-validated; wire record
-        // bundan türetilir (V2 Serialize bilinçli YOK — frozen V1 wire'a projection).
-        let _authorization_v2 = crate::authorization::build_authorization_context_v2(
+        // Authority checkpoint + wire kaynağı — V2 context constructed-and-validated
+        // (witness validate_for(apply_target) + gate↔basis parity); V1 wire record
+        // AŞAĞIDA bundan türetilir (projection loss evidence'ı context basis'ten
+        // okur; V2 Serialize bilinçli YOK — frozen V1 wire'a projection).
+        let authorization_v2 = crate::authorization::build_authorization_context_v2(
             bundle,
             witness_requirement_v2,
             &engine_measurement,
@@ -2180,13 +2182,13 @@ impl SpaceEngine {
         })?;
         let authorization = self
             .project_wire_authorization_context(
+                &authorization_v2,
                 &outcome,
                 apply_target,
                 input.claim,
                 bound.task,
                 &engine_measurement,
                 preferred_vector,
-                &loss_evidence,
                 loss_after,
                 &rule_context,
                 &vision_context,
@@ -2440,13 +2442,13 @@ impl SpaceEngine {
     #[allow(clippy::too_many_arguments)]
     fn project_wire_authorization_context(
         &self,
+        authorization_v2: &crate::authorization::AuthorizationContextV2,
         outcome: &crate::trajectory::AttemptOutcome,
         apply_target: crate::trajectory::ApplyTarget,
         claim: &Claim,
         task: &crate::trajectory::Task,
         measurement: &crate::measurement::EngineMeasurement,
         preferred_vector: Option<RawPosition>,
-        loss_evidence: &crate::authorization::CanonicalTrajectoryLossEvidence,
         loss_after: f64,
         rule_context: &crate::authorization::RuleEvaluationContext,
         vision_context: &crate::authorization::EffectiveVisionGateContext,
@@ -2465,6 +2467,9 @@ impl SpaceEngine {
         // construction site evaluator'da); wire record saf sabiti yeniden okur
         // (`current_semantics()` pure constant — değer her çağrıda özdeş).
         let improvement_policy = crate::trajectory::EffectiveImprovementPolicy::current_semantics();
+        // **P2-1 (review #132):** loss evidence V2 CONTEXT BASIS'TEN okunur — wire
+        // record gerçekten V2 otorite zincirinin çıktısından türetilir (ölü kanal yok).
+        let loss_evidence = authorization_v2.basis().trajectory_loss();
         // Wire loss target + compat-projected loss_before (yukarıdaki doc).
         let wire_target = preferred_vector.unwrap_or_default();
         let loss_before = match measurement.before() {
@@ -3833,9 +3838,13 @@ impl SpaceEngine {
     ///
     /// **Yeniden ölçüm YOK:** before/after değerleri token'dan (ölçüm anı, tek
     /// session); 5-fence revision/context/epoch garantisi altında rekonstrüksiyon
-    /// deterministiktir (cross-artifact TOCTOU evaluator'ın digest recheck'iyle
-    /// kapanır). Faz 3 `verify_measurement_binding`'in commitment bloğu buraya
-    /// taşındı (aynı mapping — Derivation varyant ailesi korundu).
+    /// deterministiktir. **TOCTOU ayrımı (review #132 P3-5):** zamanlar-arası
+    /// garanti (ölçüm ↔ commit arası space/context/epoch değişimi) 5-fence'e aittir;
+    /// evaluator'ın `engine_measurement_digest` recheck'i ise binding'e yazılan
+    /// digest'i AYNI rekonstrüksiyonun recomput'uyla karşılaştırır — kapattığı
+    /// intra-commit mutasyon penceresidir (zamanlar-arası değil). Faz 3
+    /// `verify_measurement_binding`'in commitment bloğu buraya taşındı (aynı mapping
+    /// — Derivation varyant ailesi korundu).
     #[allow(
         clippy::result_large_err,
         reason = "EngineCommitError carries MeasurementBindingVerificationError (intentional inline); see measurement.rs layout decision"
