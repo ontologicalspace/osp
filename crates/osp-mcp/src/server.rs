@@ -94,6 +94,19 @@ pub struct TaskAddInput {
     pub task_json: JsonValue,
 }
 
+/// `osp_approve_cold_start` input (operator-only, INV-T2 — #97 MD-3 S3).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApproveColdStartInput {
+    /// Suspension'ın task'ı (`SuspendedColdStart` sonucundaki task_id).
+    pub task_id: u64,
+    /// Suspension'ın claim'i (`SuspendedColdStart` sonucundaki claim_id).
+    pub claim_id: u64,
+    /// Onaylayan operatörün dış kimliği (non-empty).
+    pub operator_id: String,
+    /// Dış onay kaydı referansı (non-empty).
+    pub authorization_id: String,
+}
+
 // ── G2: Navigator loop tool input'ları (agent-facing) ──────────────────────────
 
 /// `osp_run_task` input. Navigator loop — sadece task_id (LLM delta üretir).
@@ -499,6 +512,51 @@ impl OspMcpServer {
         serde_json::to_string(&envelope).map_err(|e| e.to_string())
     }
 
+    /// `osp_approve_cold_start` (operator-only) — **#97 MD-3 S3:** askıdaki
+    /// cold-start claim'ini (`SuspendedColdStart` — INV-T9 extension) operatör
+    /// onayıyla uygular. Otorite: OPERATÖR (witness quorum değil) → delta Sandbox
+    /// lane'e apply; `ColdStartAcceptanceEvidence` üretilir. Mainline promotion
+    /// YOK (INV-T8 extension) — improvement iddiası taşınmaz (INV-T6 extension).
+    ///
+    /// Fail-closed: stale binding (onay penceresinde uzay ilerledi / #96 5-fence),
+    /// policy overwrite, baseline değişimi, completion değişimi, Q6 rule ihlali —
+    /// hepsi typed `error` sınıfıyla reddedilir; mutasyon uygulanmaz.
+    #[tool(
+        name = "osp_approve_cold_start",
+        description = "OPERATOR-ONLY (INV-T2, #97 MD-3). Approve a suspended cold-start claim (from osp_submit_delta / osp_run_task result SuspendedColdStart). Applies the delta to the Sandbox lane with ColdStartAcceptanceEvidence (operator authority — NOT witness quorum). No improvement claim (INV-T6), no mainline promotion (INV-T8). Fail-closed on stale binding, policy/baseline/completion changes, or rule violation."
+    )]
+    async fn osp_approve_cold_start(
+        &self,
+        Parameters(input): Parameters<ApproveColdStartInput>,
+    ) -> Result<String, String> {
+        // INV-T2 runtime gate — onay operatör eylemidir (agent onaylayamaz).
+        let _cap = self.gate_operator_tool("osp_approve_cold_start")?;
+        // Lock sırası registry-önce (mevcut tool'larla tutarlı — deadlock yok).
+        let outcome = {
+            let reg = self.registry.lock().map_err(|e| e.to_string())?;
+            let mut ws = self.workspace.lock().map_err(|e| e.to_string())?;
+            ws.approve_cold_start(
+                input.task_id,
+                input.claim_id,
+                &input.operator_id,
+                &input.authorization_id,
+                &reg,
+            )?
+        };
+        let envelope = McpEnvelope::success(
+            "osp_approve_cold_start",
+            outcome,
+            vec![
+                "INV-T2".into(),
+                "INV-T6".into(),
+                "INV-T8".into(),
+                "INV-T9".into(),
+            ],
+        );
+        // Operator tool — leak check INTENTIONALLY skipped (operator görebilir).
+        serde_json::to_string(&envelope).map_err(|e| e.to_string())
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // G2b — NAVIGATOR LOOP TOOLS (agent-facing, INV-T1/T7/T8 enforced)
     // ═══════════════════════════════════════════════════════════════════════════
@@ -680,6 +738,21 @@ fn serialize_navigator_result(result: &osp_core::navigator::NavigatorResult) -> 
             "rejecting_witnesses": rev.reasons().map(|r| r.as_slice().iter().map(|x| x.witness).collect::<Vec<_>>()).unwrap_or_default(),
             "commit_state": "rejected_by_witness",
             "next_action": "requires_revision",
+        }),
+        // **#97 MD-3:** cold-start operatör onayı — typed JSON (INV-T9 extension).
+        NavigatorResult::AwaitingColdStartApproval {
+            attempts,
+            task_id,
+            claim_id,
+            baseline_reason,
+        } => serde_json::json!({
+            "outcome": "AwaitingColdStartApproval",
+            "attempts": attempts,
+            "task_id": task_id,
+            "claim_id": claim_id,
+            "baseline_unavailable_reason": format!("{baseline_reason:?}"),
+            "commit_state": "cold_start_suspended",
+            "next_action": "operator_approval",
         }),
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
             serde_json::json!({
@@ -1025,6 +1098,24 @@ impl Workspace {
                     "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
+            Ok(osp_core::engine::EngineCommitResult::SuspendedColdStart {
+                task_id,
+                claim_id,
+                baseline_reason,
+                ..
+            }) => {
+                // **#97 MD-3 (INV-T9 extension):** cold-start operatör onayı —
+                // witness DEĞİL, ayrı otorite. Mutation uygulanmadı.
+                return Ok(serde_json::json!({
+                    "commit_result": "SuspendedColdStart",
+                    "task_id": task_id,
+                    "claim_id": claim_id,
+                    "baseline_unavailable_reason": format!("{baseline_reason:?}"),
+                    "commit_state": "cold_start_suspended",
+                    "mainline_mutation": "not_applied",
+                    "next_action": "operator_approval",
+                }));
+            }
             Err(e) => {
                 // **P1-1 (review tur 5):** ortak typed mapper — navigator'ın
                 // commit-error arm'ları ile TEK ontology
@@ -1139,6 +1230,8 @@ impl Workspace {
             osp_core::trajectory::MutationDecision::RequireOperatorApproval => {
                 "RequireOperatorApproval"
             }
+            // **#97 MD-3:** operator-onaylı soğuk başlatma — append-only wire etiketi.
+            osp_core::trajectory::MutationDecision::AcceptAsColdStart => "AcceptAsColdStart",
         };
         let apply_str = match result.apply_target {
             osp_core::trajectory::ApplyTarget::NotApplied => "NotApplied",
@@ -1168,6 +1261,95 @@ impl Workspace {
             "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
             "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
         }))
+    }
+
+    /// **#97 MD-3 S3:** Askıdaki cold-start claim'ini operatör onayıyla uygular
+    /// (motor `approve_cold_start` — INV-T9 extension onay akışı). Başarı/hata
+    /// ikisi de typed JSON döner (operatör kararı hata DEĞİL, domain sonucudur).
+    pub fn approve_cold_start(
+        &mut self,
+        task_id: u64,
+        claim_id: u64,
+        operator_id: &str,
+        authorization_id: &str,
+        registry: &osp_core::trajectory::InMemoryTaskRegistry,
+    ) -> Result<JsonValue, String> {
+        use osp_core::engine::{
+            ColdStartApprovalError, ColdStartApprovalInput, ColdStartAuthorizationId,
+            ColdStartOperatorId,
+        };
+
+        // Newtype kurulum — boş kimlik fail-closed (typed sınıf, motor değil).
+        let operator = match ColdStartOperatorId::new(operator_id) {
+            Some(o) => o,
+            None => {
+                return Ok(serde_json::json!({
+                    "error": "empty_operator_id",
+                    "applied": false,
+                    "retryable": false,
+                    "detail": "operator_id must be non-empty",
+                }));
+            }
+        };
+        let authorization = match ColdStartAuthorizationId::new(authorization_id) {
+            Some(a) => a,
+            None => {
+                return Ok(serde_json::json!({
+                    "error": "empty_authorization_id",
+                    "applied": false,
+                    "retryable": false,
+                    "detail": "authorization_id must be non-empty",
+                }));
+            }
+        };
+
+        let result = self
+            .engine_mut()
+            .approve_cold_start(ColdStartApprovalInput::new(
+                task_id,
+                claim_id,
+                operator,
+                authorization,
+                registry as &dyn osp_core::trajectory::TaskResolver,
+            ));
+        match result {
+            Ok(r) => Ok(serde_json::json!({
+                "commit_result": "AcceptAsColdStart",
+                "apply_target": "Sandbox",
+                // INV-T8 extension pin — Mainline promotion mekanizması YOK.
+                "mainline_promotion": "not_available",
+                "evidence": serde_json::to_value(&r.evidence).map_err(|e| e.to_string())?,
+                "repositioned": r.repositioned,
+                "t_c": r.t_c,
+                "applied": true,
+            })),
+            Err(e) => {
+                // Typed error sınıfı — operatör domain bilgisine göre hareket eder.
+                let class = match &e {
+                    ColdStartApprovalError::UnknownSuspension { .. } => "unknown_suspension",
+                    ColdStartApprovalError::TaskMismatch { .. } => "task_mismatch",
+                    ColdStartApprovalError::TaskUnavailable { .. } => "task_unavailable",
+                    ColdStartApprovalError::ScopeMismatch { .. } => "subject_scope_mismatch",
+                    ColdStartApprovalError::StaleBinding(_) => "stale_binding",
+                    ColdStartApprovalError::VisionContextInvalid(_) => "vision_context_invalid",
+                    ColdStartApprovalError::BaselineChanged { .. } => "baseline_changed",
+                    ColdStartApprovalError::PolicyChanged { .. } => "policy_changed",
+                    ColdStartApprovalError::CompletionStateChanged { .. } => {
+                        "completion_state_changed"
+                    }
+                    ColdStartApprovalError::RuleViolation(_) => "rule_violation",
+                    ColdStartApprovalError::Internal(_) => "internal",
+                };
+                Ok(serde_json::json!({
+                    "error": class,
+                    "detail": e.to_string(),
+                    "applied": false,
+                    // Tamamı fail-closed — agent retry ile çözülmez; operatör
+                    // durumu değerlendirir (yeniden ölçüm / normal commit yolu).
+                    "retryable": false,
+                }))
+            }
+        }
     }
 }
 

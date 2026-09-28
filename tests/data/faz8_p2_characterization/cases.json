@@ -15,7 +15,7 @@
       "class": "matching_scope",
       "source": "synthetic_adversarial",
       "description": "Task targets Node(1); proposal affected_nodes=[1]. Subject/value parity but source divergence (INV-T4: V1 Scip override vs V2 TreeSitter axis).",
-      "builder_digest_blake3": "00ef0bc3d3dd61ebb0645b9520263bdd9425af7833caaf1502ee48ed077398b5",
+      "builder_digest_blake3": "548c90cb2e19bcbb68e9ef4bf1898f1ac80178bc27a8fd62a4c896bc2f311230",
       "notes": "Subject/value parity case. Source divergence (INV-T4) present even in matching scope — required_source matrix quantifies decision impact."
     },
     {
@@ -23,7 +23,7 @@
       "class": "wide_affected_scope",
       "source": "synthetic_adversarial",
       "description": "Task Node(1) scope; affected_nodes=[1,2,3]. KNOWN divergence: V1 measures centroid over {1,2,3}, V2 over {1}.",
-      "builder_digest_blake3": "be3365b6411eb0aeec41f41b487969027a0109ffde3ca2100b61f37470df9758",
+      "builder_digest_blake3": "4529bdc0d98a0f92c91a99df4f182c62b143f6c50d5debfd99d1d9d4bf62fe73",
       "notes": "Core ontological divergence case — subject authority: LLM-affected vs task-derived. P2-1 cannot open without resolving this."
     },
     {
@@ -31,7 +31,7 @@
       "class": "removed_edge_external_source",
       "source": "synthetic_adversarial",
       "description": "Task Node(1); affected=[1] + removed_edge from=9 (external). V1 folds 9 into affected set; V2 subject scope {1} excludes it.",
-      "builder_digest_blake3": "1690fd36d4727631ae5bce06dcabd993c26c0fbbbb0b971dc3dbdf15c916c878",
+      "builder_digest_blake3": "934cf748e5ca3324c38484aa1602ad9f9a7d87c9dd186a8640db23588a9bc2bd",
       "notes": "removed_edges.from external to task scope — V1 affected-set contamination."
     },
     {
@@ -39,7 +39,7 @@
       "class": "wide_affected_scope",
       "source": "synthetic_adversarial",
       "description": "#92 theta variant: 001 + isolated role-bearing new_node (connected_to=[]). raw(002)==raw(001) bit-exact; Q5 theta yüzeyi açık (BuiltinRole Runtime). Subject divergence korunur: V1 {1,2,3}, V2 {1}.",
-      "builder_digest_blake3": "cb445092eb877016551a04a3c445dff4f5e576257642e02fa23e3d3872bd6c1c",
+      "builder_digest_blake3": "c3cefbba75a015296d4441c8b3966e31594ec5f620dd074139105742516d8b71",
       "notes": "Issue #92 evidence: subject-authority divergence'in Q5 theta downstream etkisi. Minimum role-bearing extension — intervention purity kanitli (raw==001 bit-exact). 001'de GlobalDefault authority theta'dan once reject ediyordu (Q5 stop tesadufi parity); 002 BuiltinRole Runtime vision ile theta yuzeyini acar."
     },
     {
@@ -47,7 +47,7 @@
       "class": "removed_edge_external_source",
       "source": "synthetic_adversarial",
       "description": "#92 theta variant: 001 + isolated role-bearing new_node (connected_to=[]). raw(002)==raw(001) bit-exact; Q5 theta yüzeyi açık. Subject divergence korunur: V1 {1,9}, V2 {1}.",
-      "builder_digest_blake3": "fb892d274f1fa65be90865beeb14481c5da4bb95f3d3ae51768e045cec3a1ff4",
+      "builder_digest_blake3": "0fd1d02396fa4e8505582d874f3007ae6bbd8aec113c4fd6645e8faf604ce222",
       "notes": "Issue #92 evidence: removed-edge external-source contamination'in Q5 theta downstream etkisi. Ayni intervention purity (raw==001 bit-exact, izole node)."
     },
     {
@@ -55,7 +55,7 @@
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
       "description": "Subject node 10000 delta-introduced (node_from_spec id). V2 baseline UnavailableAllIntroduced (typed); V1 DefaultFallback (empty positions → RawPosition::default). Availability divergence (Completed → AcceptAsCompleted parity; policy etkisi bu case'te observable DEĞİL — sibling delta-introduced-subject-policy-001 divergence'ı gösterir).",
-      "builder_digest_blake3": "de9c6e7248f4d70c49cfe370a451f3dbd127bc7c1e52e8e6cd38ef476054df7a",
+      "builder_digest_blake3": "6cfb75f283b08ff67b5cc0934ec05fe53e54424488837b74ecf8fe63e567bf15",
       "notes": "Baseline epistemic availability divergence: V1 DefaultFallback (yokluk → RawPosition::default sıfır) vs V2 UnavailableAllIntroduced (typed). Subject/value parity. Pipeline Observed(AcceptAsCompleted) V1/V2 parity (Held authorization.outcome) — Completed olduğu için projection etkisiz. Bu Case 4 tek başına policy etkisini göstermez; sibling delta-introduced-subject-policy-001 fixture'ı (NotCompleted + AcceptImprovement) policy/decision divergence'ı gösterir."
     },
     {
@@ -63,7 +63,7 @@
       "class": "delta_introduced_subject",
       "source": "synthetic_adversarial",
       "description": "Production-reachable structural topology üzerinde V1 legacy DefaultFallback projection ile V2 candidate fail-closed projection arasında migration-relevant policy/decision divergence. NotCompleted + AcceptImprovement: V1 → loss_before > loss_after → improved → AcceptAsProgress (TrajectoryCheckpoint, Held); V2 → loss_before=loss_after → improved=false → Reject (NotApplied, Evaluated). Migration 3 (b) hipotezi kanıtlandı.",
-      "builder_digest_blake3": "15f5c97e197686f903861fcf2201da086913f91c33bf1bea1affc3f7cc4b5954",
+      "builder_digest_blake3": "7b41c34f88078d8bf42f92de2d2e904f47d669108ec65d7df63bedb271f28861",
       "notes": "Migration 3 (b) policy/decision divergence PROVEN. Case geometrisi: reciprocal Imports edges (Ce=1, Ca=1 → instability 0.5, max_instability=0.85 hard-cap altında) + preferred_vector (0.8, 0.5, 0.5) + Coupling>=0.7 (measured 0.5 → NotCompleted) + AcceptImprovement policy + allow_progress_checkpoint=true. Counter-fixture (min_improvement_delta=1.0) V1 AcceptAsProgress'in improvement kaynaklı olduğunu kanıtlar. INV-T4 provenance divergence da V1 uniform Scip vs V2 engine-native per-axis olarak observable."
     },
     {
@@ -71,7 +71,7 @@
       "class": "direct_per_axis_authority",
       "source": "synthetic_adversarial",
       "description": "DirectPerAxisAuthority: required_source=None. V1 legacy projected coupling = Scip (Completed — source constraint yok); V2 measured coupling = TreeSitter (Completed). Numeric parity: coupling after = 0.5 (Imports 1→2, Node(1) out-degree=1). Provenance divergence yok (None → source authority constraint yok).",
-      "builder_digest_blake3": "9ecad045d3cc73ef280451503c7de1ff4311fce0ddecc7d82674a11af2ccb1cc",
+      "builder_digest_blake3": "4d6a53e73c77927b43a6859f1196f31b301eb5f60461f5d2f0ccc85c4cb36a6f",
       "notes": "MD-2 evidence contract (PR #88). DirectPerAxisAuthority family — pozitif-matching kontrolü. PR #85 inline matrix frozen corpus'a taşındı (assertion-equivalence map). affected_nodes:[1] = V1 legacy measurement selector = Node(1) = V2 subject scope. Threshold Le 0.5 (exact eski fixture).",
       "measured_subject_digest_blake3": "c56aa2ae3f75b47d095ca2cd1cacbf7540daf676b15eef213b47866e579f2b92"
     },
@@ -80,7 +80,7 @@
       "class": "direct_per_axis_authority",
       "source": "synthetic_adversarial",
       "description": "DirectPerAxisAuthority: required_source=Some(Scip). V1 legacy projected = Scip → Completed (match); V2 measured = TreeSitter → SourceInsufficient (mismatch). MD-2 divergence: V1 eşleşir, V2 eşleşmez.",
-      "builder_digest_blake3": "2637c642798cd71424d2a4b53cc0d408a6423b3dd3739c984ad8b75d0656eb20",
+      "builder_digest_blake3": "769270e590d96c236a35a6aeec35f4575a2592e2830b990abffa9660996952f8",
       "notes": "MD-2 evidence contract (PR #88). V1 legacy Scip ↔ V2 TreeSitter divergence.",
       "measured_subject_digest_blake3": "c56aa2ae3f75b47d095ca2cd1cacbf7540daf676b15eef213b47866e579f2b92"
     },
@@ -89,7 +89,7 @@
       "class": "direct_per_axis_authority",
       "source": "synthetic_adversarial",
       "description": "DirectPerAxisAuthority: required_source=Some(TreeSitter). V1 legacy projected = Scip → SourceInsufficient (mismatch); V2 measured = TreeSitter → Completed (match). Pozitif-matching kontrolü: concrete V2 source required source ile eşleşince predicate completion Completed. MixedPerAxisSources'ta bu dal kaybolur (Mixed hiçbir concrete'a eşit değil).",
-      "builder_digest_blake3": "c73d8cced8e5f65c3a982808b28b9f797cf95f2713f1e450cdc4e6828d38a78f",
+      "builder_digest_blake3": "1d256f424f3de2a04fe7bca6f58a17cf00f6084cdc446e676bad1650947974ec",
       "notes": "MD-2 evidence contract (PR #88). **Pozitif-matching kontrolü** — eski inline matrix'ten taşındı. V2 concrete source matching → Completed.",
       "measured_subject_digest_blake3": "c56aa2ae3f75b47d095ca2cd1cacbf7540daf676b15eef213b47866e579f2b92"
     },
@@ -98,7 +98,7 @@
       "class": "direct_per_axis_authority",
       "source": "synthetic_adversarial",
       "description": "DirectPerAxisAuthority: required_source=Some(Placeholder). V1 legacy = Scip → SourceInsufficient; V2 measured = TreeSitter → SourceInsufficient. Declaration-valid source token under current validator; unmet by both V1 and V2. Normative authority status is out of MD-2 scope.",
-      "builder_digest_blake3": "de144b80636203a654cc6e225a0a09530cfe1c2dbbda0201a2ed998b4e764450",
+      "builder_digest_blake3": "4d2503ec71b66ce9476217e52bab5545a48156b173f382c09a7ae4d789c3c3b1",
       "notes": "MD-2 evidence contract (PR #88). Placeholder declaration validity is characterized, not endorsed as normative measurement authority.",
       "measured_subject_digest_blake3": "c56aa2ae3f75b47d095ca2cd1cacbf7540daf676b15eef213b47866e579f2b92"
     },
@@ -107,7 +107,7 @@
       "class": "direct_per_axis_authority",
       "source": "synthetic_adversarial",
       "description": "DirectPerAxisAuthority: required_source=Some(Heuristic). V1 legacy = Scip → SourceInsufficient; V2 measured = TreeSitter → SourceInsufficient.",
-      "builder_digest_blake3": "34c73e0adbb7b58a4f84f793e1e908fb4c184ab8e88fa93ca5748d5471819ecc",
+      "builder_digest_blake3": "10b9ad03960960ad4fdb9c0844682755355fdbef5bf154fc3f0b83fe89802a3c",
       "notes": "MD-2 evidence contract (PR #88). V1/V2 agreement (ikisi de karşılamaz).",
       "measured_subject_digest_blake3": "c56aa2ae3f75b47d095ca2cd1cacbf7540daf676b15eef213b47866e579f2b92"
     },
@@ -116,7 +116,7 @@
       "class": "mixed_per_axis_sources",
       "source": "synthetic_adversarial",
       "description": "MixedPerAxisSources: required_source=None. V1 legacy projected = Scip (Completed); V2 measured aggregate = Mixed (Completed). Mixed numeric değerlendirmeye katılır (source authority constraint yok). Cohesion after = 0.55.",
-      "builder_digest_blake3": "940733676d7f50e096b0c8ad79c34c201ea476753210075323f18e727894b2ab",
+      "builder_digest_blake3": "c0f2b802f0337da95b9ddb18b41b1e77bb946d7717c21a16f9305c37b3255b33",
       "notes": "MD-2 evidence contract (PR #88). MixedPerAxisSources family — fail-closed + declaration-validation. Mixed gerçek cohesion aggregation hattından doğar. DependsOn delta 5 axis nötr.",
       "measured_subject_digest_blake3": "f75cf610da021571a7c092b5e9dab6e21c02332696681ec56df1aa422c8c55a1"
     },
@@ -125,7 +125,7 @@
       "class": "mixed_per_axis_sources",
       "source": "synthetic_adversarial",
       "description": "MixedPerAxisSources: required_source=Some(Scip). V1 legacy projected = Scip (Completed — match); V2 measured = Mixed → SourceInsufficient (fail-closed — Mixed concrete authority şartını karşılamaz). MD-2 divergence: V1 eşleşir, V2 eşleşmez.",
-      "builder_digest_blake3": "9d1ce6645e41af48d6d2b8be257f44e1ce25439917dba51ce9fbbdf62a3a876a",
+      "builder_digest_blake3": "17b7dac7b43782a9d956cf6a0ef33389a3c2cb739e354957f69fae2fb3b11be0",
       "notes": "MD-2 evidence contract (PR #88). Mixed, herhangi bir non-Mixed required-source token'ını karşılayamaz.",
       "measured_subject_digest_blake3": "f75cf610da021571a7c092b5e9dab6e21c02332696681ec56df1aa422c8c55a1"
     },
@@ -134,7 +134,7 @@
       "class": "mixed_per_axis_sources",
       "source": "synthetic_adversarial",
       "description": "MixedPerAxisSources: required_source=Some(TreeSitter). V1 legacy = Scip → SourceInsufficient; V2 measured = Mixed → SourceInsufficient (fail-closed). V1/V2 agreement (ikisi de karşılamaz).",
-      "builder_digest_blake3": "65ddef71814a07fdd56893eeb8afd120c351d084f43bb06e4867931a29ee0cf2",
+      "builder_digest_blake3": "ae22c4a834c3a9ed7d74a2812afbe9c851be159d7b05f092c1ac6c519449fcd2",
       "notes": "MD-2 evidence contract (PR #88). V1/V2 agreement.",
       "measured_subject_digest_blake3": "f75cf610da021571a7c092b5e9dab6e21c02332696681ec56df1aa422c8c55a1"
     },
@@ -143,7 +143,7 @@
       "class": "mixed_per_axis_sources",
       "source": "synthetic_adversarial",
       "description": "MixedPerAxisSources: required_source=Some(Heuristic). V1 legacy = Scip → SourceInsufficient; V2 measured = Mixed → SourceInsufficient.",
-      "builder_digest_blake3": "88b6a53762529420348d1c90b5680b241ddc76e8cf7607770ac2e42f97d38700",
+      "builder_digest_blake3": "18aeece380499b75bfc13dd09dc262091756a352067411af1c4b4ffac0be84a3",
       "notes": "MD-2 evidence contract (PR #88).",
       "measured_subject_digest_blake3": "f75cf610da021571a7c092b5e9dab6e21c02332696681ec56df1aa422c8c55a1"
     },
@@ -152,7 +152,7 @@
       "class": "mixed_per_axis_sources",
       "source": "synthetic_adversarial",
       "description": "MixedPerAxisSources: required_source=Some(Placeholder). V1 legacy = Scip → SourceInsufficient; V2 measured = Mixed → SourceInsufficient. Declaration-valid source token under current validator; unmet by both V1 and V2. Normative authority status is out of MD-2 scope.",
-      "builder_digest_blake3": "e6a6d5dda0c7c480d3719b04df6ef9266eece17f13dc62354c36c673c8d2d35d",
+      "builder_digest_blake3": "9fefb788db2df5523676f0d344a1496b9e52d73ad35f8a330d41e76b296e3d0d",
       "notes": "MD-2 evidence contract (PR #88). Placeholder declaration validity is characterized, not endorsed as normative measurement authority.",
       "measured_subject_digest_blake3": "f75cf610da021571a7c092b5e9dab6e21c02332696681ec56df1aa422c8c55a1"
     },
@@ -161,7 +161,7 @@
       "class": "mixed_per_axis_sources",
       "source": "synthetic_adversarial",
       "description": "MixedPerAxisSources: required_source=Some(Mixed) → declaration validation reject. Mixed epistemik bir talep değildir — yalnız heterojen aggregation çıktısıdır. commit_task_claim validate_for_commit (engine.rs:1416) → InvalidRequiredMetricSource (trajectory.rs:822-828) → EngineCommitError::TaskValidation. Measurement'dan ÖNCE terminal reject. Standalone probe Mixed üretebildi (cohesion aggregation), ama commit pipeline measurement'a ulaşmadan durdu (probe vs pipeline ayrımı).",
-      "builder_digest_blake3": "1bc23326264a52bc07e920667e39733896625156d6269e8810e7fed2db02bedb",
+      "builder_digest_blake3": "b18719445b7716af21f087d90470e4a5ba25392d8dd9f228e4dc6f5525aac2c8",
       "notes": "MD-2 evidence contract (PR #88). Declaration-validation case — Mixed required source olarak talep edilemez. Exact error chain: EngineCommitError::TaskValidation(TaskValidationError::InvalidRequiredMetricSource { required_source: Mixed }). Probe vs pipeline ayrımı: standalone measure_task_delta Mixed üretir, commit_task_claim TaskValidation'da durur.",
       "measured_subject_digest_blake3": "f75cf610da021571a7c092b5e9dab6e21c02332696681ec56df1aa422c8c55a1"
     }

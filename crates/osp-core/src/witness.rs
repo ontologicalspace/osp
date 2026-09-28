@@ -536,12 +536,9 @@ pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessDisposition {
     // (Q4-Q6 claim-based — engine seviyesinde, evaluate()'den önce kontrol edildi)
 
     // Commit — prospective delta (gerçek mutasyon Faz 1.8 commit() içinde).
-    let delta = crate::bigbang::Delta {
-        new_nodes: claim.delta_nodes.clone(), // Faz 2.4: full Node objects (replay için)
-        new_edges: claim.delta_edges.clone(),
-        removed_edges: claim.removed_edges.clone(), // G2c-2: subtractive delta
-        repositioned: vec![],                       // Faz 1.8: ΔV ∪ N₁(ΔV) hesaplar
-    };
+    // **#97 MD-3 S3:** paylaşılan üretici — `approve_cold_start` apply'ı aynı
+    // preimage'ı kullanır (iki truth source drift riski kapalı).
+    let delta = crate::bigbang::prospective_delta_from_claim(claim);
 
     WitnessDisposition::Satisfied {
         delta,

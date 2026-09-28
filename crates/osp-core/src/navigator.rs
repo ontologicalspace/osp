@@ -275,6 +275,17 @@ pub enum NavigatorResult {
     /// + `evidence_digest` (INV-T9 #72 — attempt_evidence_id kaldırıldı, dangling
     ///   reference yok; accessor'lar evidence üzerinden).
     RequiresRevision(crate::authorization::RevisionRequired),
+    /// **#97 MD-3 (INV-T9 extension):** Cold-start operator onayı bekleme —
+    /// `AwaitingWitnesses`'ten AYRI otorite (operatör ≠ witness). Mutation
+    /// uygulanmadı; maneuver budget TÜKETİLMEDİ; LLM retry YOK. Onay akışı:
+    /// S3 `approve_cold_start` → AcceptAsColdStart → Sandbox.
+    AwaitingColdStartApproval {
+        attempts: usize,
+        task_id: TaskId,
+        claim_id: crate::witness::ClaimId,
+        /// Typed unavailable nedeni — normatif evidence (INV-T6 extension).
+        baseline_reason: crate::measurement::BaselineUnavailableReason,
+    },
     /// Pending authorization persistence failure — terminal (non-retryable).
     PendingAuthorizationPersistenceFailure {
         pending: crate::authorization::PendingAuthorization,
@@ -918,6 +929,22 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 ),
             ) {
                 Ok(crate::engine::EngineCommitResult::Evaluated { result, .. }) => result,
+                Ok(crate::engine::EngineCommitResult::SuspendedColdStart {
+                    task_id: cs_task,
+                    claim_id: cs_claim,
+                    baseline_reason,
+                    ..
+                }) => {
+                    // **#97 MD-3 (INV-T9 extension):** cold-start operator onayı —
+                    // agent retry DEĞİL, budget tüketilmez, mutation uygulanmaz.
+                    // Onay akışı S3 (`approve_cold_start` → Sandbox).
+                    return NavigatorResult::AwaitingColdStartApproval {
+                        attempts: attempt_num,
+                        task_id: cs_task,
+                        claim_id: cs_claim,
+                        baseline_reason,
+                    };
+                }
                 Ok(crate::engine::EngineCommitResult::Held {
                     authorization,
                     reason,
@@ -1143,6 +1170,20 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         last_outcome: outcome,
                     };
                 }
+                MutationDecision::AcceptAsColdStart => {
+                    // **#97 MD-3:** Savunma kolu — `commit_task_claim` bu kararı
+                    // `Evaluated` ile ÜRETMEZ (cold-start askıda `SuspendedColdStart`
+                    // döner; onay `approve_cold_start` ile navigator DIŞINDA
+                    // uygulanır → Sandbox, task tamamlanmış sayMAZ). Ulaşılırsa
+                    // `RequiresOperatorApproval` label'ı yanlış rapor eder —
+                    // unreachable eşlemesi bilinçli (PR #130 review P3 notu);
+                    // erişilebilir hale gelirse ayrı `NavigatorResult` varyantı
+                    // gerekir.
+                    return NavigatorResult::RequiresOperatorApproval {
+                        attempts: attempt_num,
+                        last_outcome: outcome,
+                    };
+                }
             }
         }
 
@@ -1167,10 +1208,10 @@ mod tests {
     use crate::engine::{EngineConfig, SpaceEngine};
     use crate::space::{Edge, Node, NodeKind, Space};
     use crate::trajectory::{
-        ApplyTarget, CommitLane, ComparisonOp, InMemoryTaskRegistry, MetricPredicate,
-        MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy, PredicateGate,
-        PredicateGateInput, PredicateMode, PredicateScope, PredicateSet, Task, TaskBoundClaim,
-        TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
+        ApplyTarget, ColdStartPolicy, CommitLane, ComparisonOp, InMemoryTaskRegistry,
+        MetricPredicate, MutationDecision, OpKind, PredicateAxis, PredicateFailurePolicy,
+        PredicateGate, PredicateGateInput, PredicateMode, PredicateScope, PredicateSet, Task,
+        TaskBoundClaim, TaskId, TaskPolicy, TaskStatus, WeightedPredicate,
     };
     use crate::vision::VisionVector;
     use crate::witness::{Claim, ClaimId, Intent};
@@ -1718,6 +1759,10 @@ mod tests {
                 // **INV-T9** — Witness Q1 fail (MinApproversNotMet) → Held (expected authorization
                 // bekleme). Artık Err DEĞİL Ok kanalında. Predicate çalıştı, witness aşamasında hold.
             }
+            Ok(crate::engine::EngineCommitResult::SuspendedColdStart { .. }) => {
+                // **#97 MD-3:** fixture subject'i base'de mevcut — bu kol
+                // practical-unreachable; exhaustiveness için explicit.
+            }
             Ok(crate::engine::EngineCommitResult::Rejected { .. }) => {
                 // Explicit witness rejection (Q3 honest-reject).
             }
@@ -1743,6 +1788,7 @@ mod tests {
             max_axis_regression: 0.15,
             maneuver_limit: 5,
             allow_progress_checkpoint: true,
+            cold_start_policy: ColdStartPolicy::Disallow,
         };
         // Threshold yüksek (0.80) → measured coupling 0.40 < 0.80 ama source Scip →
         // completion: NotCompleted (0.40 ≤ 0.80 geçer AMA biz NotCompleted yolunu
@@ -1874,6 +1920,7 @@ mod tests {
             max_axis_regression: 0.15,
             maneuver_limit: 5,
             allow_progress_checkpoint: true,
+            cold_start_policy: ColdStartPolicy::Disallow,
         };
         let task = coupling_task(1, 0.10, policy);
         resolver.insert(task.clone());
@@ -4002,5 +4049,149 @@ mod tests {
                 content_digest: crate::authorization::SpaceDigest::from_bytes([0xbb; 32]),
             },
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // #97 MD-3 S3 — navigator INV-T9 extension pin'leri (cold-start askısı)
+    // ═══════════════════════════════════════════════════════════════════════
+
+    /// MD-3 navigator fixture: node 1 mevcut + UserLoaded vision (GlobalDefault
+    /// vision Q5'te terminal düşer — commit'e ulaşmak için gerçek vision gerek).
+    fn make_engine_node1_user_vision() -> SpaceEngine {
+        let mut space = Space::default();
+        space.nodes.insert(
+            1,
+            Node {
+                id: 1,
+                kind: NodeKind::Module,
+                mass: 100.0,
+                ..Default::default()
+            },
+        );
+        use crate::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+        let cs = CoordinateSystem::default_raw_five(
+            crate::coords::MetricSource::Scip,
+            CohesionAxis::new(),
+            EntropyAxis::from_commit_entropy(6.0),
+            WitnessDepthAxis::from_witness(0.3, 5),
+        )
+        .unwrap();
+        SpaceEngine::new(
+            space,
+            cs,
+            crate::vision::VisionVector::with_source(
+                RawPosition {
+                    x: 0.5,
+                    y: 0.5,
+                    z: 0.5,
+                    w: 0.5,
+                    v: 0.5,
+                },
+                crate::vision::VisionSource::UserLoaded,
+            ),
+            EngineConfig::default_calibrated(),
+        )
+    }
+
+    /// **INV-T9 extension (#97 MD-3 S3):** cold-start askısı navigator'da
+    /// TERMINAL — `AwaitingColdStartApproval` döner; LLM retry BAŞLAMAZ
+    /// (tek proposal'lı mock ile retry olsaydı `LlmError(NoMoreProposals)`
+    /// gelirdi), evidence ledger'a deneme YAZILMAZ (mutation yok — kanıt da
+    /// yok), uzay değişmez. Maneuver budget tüketilmez (attempt kanıtı üretilmez).
+    #[test]
+    fn navigator_cold_start_suspends_without_retry_or_evidence() {
+        // Task: scope Node(10_000) base'te YOK + delta ile giriyor (cold-start),
+        // Coupling Le -1 → daima NotCompleted, policy RequireOperatorApproval.
+        let task = Task {
+            id: 1,
+            milestone_id: 1,
+            label: "md3 cold-start navigator fixture".into(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric: PredicateAxis::Coupling,
+                        operator: ComparisonOp::Le,
+                        threshold: -1.0,
+                        scope: PredicateScope::Node(10_000),
+                        required_source: None,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                }],
+                preferred_vector: None,
+            },
+            policy: TaskPolicy {
+                predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
+                allow_progress_checkpoint: true,
+                cold_start_policy: ColdStartPolicy::RequireOperatorApproval,
+                ..Default::default()
+            },
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        };
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        // Tek proposal (tek delta-introduced node → id 10_000 allocator sözleşmesi).
+        let mock = MockLlmClient::new(vec![proposal_with_coupling(0.82)]);
+        let mut engine = make_engine_node1_user_vision();
+        let mut evidence = vec![];
+
+        let result = {
+            let mut nav = AgentNavigator {
+                llm: &mock,
+                resolver: &resolver,
+                engine: &mut engine,
+                evidence: &mut evidence,
+                trajectory_id: 1,
+                milestone_id: 1,
+                target_vector: RawPosition {
+                    x: 0.55,
+                    y: 0.6,
+                    z: 0.4,
+                    w: 0.5,
+                    v: 0.3,
+                },
+                current_measured: measured_pos(0.82),
+                output_contract: OutputContract::strict(),
+                witness_policy: NavigatorWitnessPolicy::default(),
+                pending_authorization_store: Box::new(
+                    crate::authorization::NullPendingAuthorizationStore,
+                ),
+                clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            };
+            nav.run_task(1, 7)
+        };
+
+        match result {
+            NavigatorResult::AwaitingColdStartApproval {
+                attempts,
+                task_id,
+                claim_id: _,
+                baseline_reason,
+            } => {
+                assert_eq!(attempts, 1);
+                assert_eq!(task_id, 1);
+                assert!(matches!(
+                    baseline_reason,
+                    crate::measurement::BaselineUnavailableReason::AllMembersIntroducedByDelta {
+                        ref members
+                    } if members == &vec![10_000]
+                ));
+            }
+            other => panic!("AwaitingColdStartApproval bekleniyordu; got: {other:?}"),
+        }
+        // INV-T9 — askı süresince: retry YOK (LLM bir kez çağrıldı), deneme
+        // kanıtı YOK (evidence ledger boş), mutasyon YOK (uzay değişmedi).
+        assert_eq!(mock.call_count(), 1, "LLM retry BAŞLAMAZ");
+        assert!(
+            evidence.is_empty(),
+            "askı deneme kanıtı yazmaz (mutation yok)"
+        );
+        assert!(
+            !engine.space().nodes.contains_key(&10_000),
+            "mutation uygulanmadı"
+        );
     }
 }

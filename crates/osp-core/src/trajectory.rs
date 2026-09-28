@@ -517,6 +517,11 @@ pub struct TaskPolicy {
     pub maneuver_limit: u32,
     /// AcceptAsProgress izinli mi (progress checkpoint lane).
     pub allow_progress_checkpoint: bool,
+    /// **#97 MD-3:** Typed cold-start (`AllMembersIntroducedByDelta` +
+    /// NotCompleted) davranışı. `#[serde(default)]` — eski task wire'ı
+    /// (alan yok) → `Disallow` (fail-closed default; INV-T6 extension).
+    #[serde(default)]
+    pub cold_start_policy: ColdStartPolicy,
 }
 
 impl Default for TaskPolicy {
@@ -527,6 +532,7 @@ impl Default for TaskPolicy {
             max_axis_regression: 0.15,
             maneuver_limit: 5,
             allow_progress_checkpoint: false,
+            cold_start_policy: ColdStartPolicy::Disallow,
         }
     }
 }
@@ -585,6 +591,31 @@ pub enum PredicateFailurePolicy {
     AcceptImprovement,
     /// Critical domain (security/payment) — insan review.
     OperatorApproval,
+}
+
+/// **#97 MD-3 — Cold-start policy:** `BaselineUnavailableReason::
+/// AllMembersIntroducedByDelta` (typed cold-start) altında, predicate NotCompleted
+/// iken sistemin davranışı. Karar matrisi: `faz8-p2-migration-decisions.md` MD-3.
+///
+/// - `Disallow` (**default**) — fail-closed `Reject`; synthetic numeric baseline'a
+///   dönüşüp progress kanıtı üretilemez (INV-T6 extension).
+/// - `RequireOperatorApproval` — improvement değerlendirmesi YAPILMAZ;
+///   `Suspended(ColdStartAuthorizationRequired)` (INV-T9 extension — mutation yok,
+///   maneuver budget tüketilmez, agent retry yok) → operator onayı →
+///   `MutationDecision::AcceptAsColdStart` → `ApplyTarget::Lane(Sandbox)`.
+///
+/// `AllowAutomatically` bilinçli olarak YOK (issue #97 out of scope) — soğuk başlatma
+/// improvement/completion iddiası taşıyamaz; otomatik kanıtsız kabul yüzeyi açar.
+///
+/// `Default` = `Disallow` (ilk varyant — fail-closed; `TaskPolicy.cold_start_policy`
+/// `#[serde(default)]`'u bu değere düşer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub enum ColdStartPolicy {
+    /// Default — fail-closed Reject (typed unavailable baseline progress kanıtı olamaz).
+    #[default]
+    Disallow,
+    /// Operator onayıyla Sandbox'a soğuk başlatma (AcceptAsColdStart).
+    RequireOperatorApproval,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1039,6 +1070,13 @@ pub enum MutationDecision {
     AcceptAsCompleted,
     /// İnsan review gerekli (critical domain).
     RequireOperatorApproval,
+    /// **#97 MD-3:** Operator-onaylı soğuk başlatma — improvement/completion iddiası
+    /// taşımaz (`AcceptAsProgress ≠ AcceptAsCompleted ≠ AcceptAsColdStart`).
+    /// Yalnız `ColdStartPolicy::RequireOperatorApproval` ve
+    /// `AllMembersIntroducedByDelta` ve operator onayı sonrası üretilir;
+    /// `AcceptAsColdStart → Sandbox` (INV-T8 extension — Mainline ve
+    /// TrajectoryCheckpoint DEĞİL).
+    AcceptAsColdStart,
 }
 
 /// **INV-T9 #70 Faz 5 Adım 12 (P0-1):** Improvement assessment — gate decision core'ın
@@ -1104,6 +1142,11 @@ impl MutationDecision {
                 ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint)
             }
             MutationDecision::RequireOperatorApproval => ApplyTarget::Lane(CommitLane::Sandbox),
+            // **#97 MD-3 (INV-T8 extension):** soğuk başlatma Sandbox'a —
+            // TrajectoryCheckpoint "ölçülmüş ilerleme" için ayrılmış; cold-start
+            // improvement kanıtlanamaz. Mainline promote ancak sonraki engine
+            // measurement altında normal AcceptAsCompleted ile.
+            MutationDecision::AcceptAsColdStart => ApplyTarget::Lane(CommitLane::Sandbox),
         }
     }
 }

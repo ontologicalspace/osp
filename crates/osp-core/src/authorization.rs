@@ -4604,8 +4604,11 @@ impl MutationDecisionTag {
     pub(crate) const ACCEPT_AS_PROGRESS: Self = Self(1);
     pub(crate) const ACCEPT_AS_COMPLETED: Self = Self(2);
     pub(crate) const REQUIRE_OPERATOR_APPROVAL: Self = Self(3);
+    /// **#97 MD-3 — append-only:** mevcut 0-3 etiketleri DEĞİŞMEZ; yeni karar
+    /// sınıfı yeni etiket alır (eski kanonik kayıtlar kararlı kalır).
+    pub(crate) const ACCEPT_AS_COLD_START: Self = Self(4);
 
-    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3];
+    const VALID_TAGS: &'static [u8] = &[0, 1, 2, 3, 4];
 
     #[allow(dead_code)]
     pub(crate) const fn as_u8(&self) -> u8 {
@@ -4621,6 +4624,7 @@ impl From<&crate::trajectory::MutationDecision> for MutationDecisionTag {
             AcceptAsProgress => Self::ACCEPT_AS_PROGRESS,
             AcceptAsCompleted => Self::ACCEPT_AS_COMPLETED,
             RequireOperatorApproval => Self::REQUIRE_OPERATOR_APPROVAL,
+            AcceptAsColdStart => Self::ACCEPT_AS_COLD_START,
         }
     }
 }
@@ -16376,6 +16380,65 @@ v = 0.5
         assert_eq!(
             MutationDecisionTag::from(&MutationDecision::RequireOperatorApproval).as_u8(),
             3
+        );
+        // **#97 MD-3 — append-only pin:** mevcut 0-3 etiketleri DEĞİŞMEZ (eski
+        // kanonik kayıtlar kararlı); AcceptAsColdStart = 4.
+        assert_eq!(
+            MutationDecisionTag::from(&MutationDecision::AcceptAsColdStart).as_u8(),
+            4
+        );
+        assert!(MutationDecisionTag::try_from(4).is_ok());
+        assert!(
+            MutationDecisionTag::try_from(5).is_err(),
+            "fail-closed tag red"
+        );
+    }
+
+    /// **#97 MD-3 S1:** AcceptAsColdStart → Sandbox lane izolasyonu (INV-T8
+    /// extension) — Mainline/TrajectoryCheckpoint NEGATİF pin'leriyle.
+    #[test]
+    fn md3_accept_as_cold_start_applies_to_sandbox_only() {
+        use crate::trajectory::{ApplyTarget, CommitLane, MutationDecision};
+        assert_eq!(
+            MutationDecision::AcceptAsColdStart.apply_target(),
+            ApplyTarget::Lane(CommitLane::Sandbox),
+            "INV-T8 extension: cold-start → Sandbox"
+        );
+        assert_ne!(
+            MutationDecision::AcceptAsColdStart.apply_target(),
+            ApplyTarget::Lane(CommitLane::Mainline),
+            "negatif: Mainline promote edilmez"
+        );
+        assert_ne!(
+            MutationDecision::AcceptAsColdStart.apply_target(),
+            ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint),
+            "negatif: TrajectoryCheckpoint ölçülmüş ilerleme için ayrılmış"
+        );
+    }
+
+    /// **#97 MD-3 S1:** Eski TaskPolicy wire'ı (cold_start_policy alanı YOK) →
+    /// `Disallow` (fail-closed default; INV-T6 extension — synthetic baseline'a
+    /// dönüşüm kapalı).
+    #[test]
+    fn md3_task_policy_old_wire_defaults_to_disallow_cold_start() {
+        use crate::trajectory::TaskPolicy;
+        let old_wire = serde_json::json!({
+            "predicate_failure_policy": "StrictReject",
+            "min_improvement_delta": 0.02,
+            "max_axis_regression": 0.15,
+            "maneuver_limit": 5,
+            "allow_progress_checkpoint": false
+        });
+        let parsed: TaskPolicy =
+            serde_json::from_value(old_wire).expect("old task wire deserializes");
+        assert_eq!(
+            parsed.cold_start_policy,
+            crate::trajectory::ColdStartPolicy::Disallow,
+            "serde(default) → Disallow (fail-closed)"
+        );
+        assert_eq!(
+            TaskPolicy::default().cold_start_policy,
+            crate::trajectory::ColdStartPolicy::Disallow
         );
     }
 

@@ -321,14 +321,17 @@ Sonsuz context-loop ve token patlaması önlenir.
 **İhlal örneği:** Agent 50 kez dener, token $50 harcar, hiç ilerlemez → kaynak israfı.
 **Koruma mekanizması:** N aşıldığında task `Blocked` → operator replan veya N'i artır.
 
-**MD-3 planned extension (Faz 8-P2 migration decision):** `MeasurementBaseline::Unavailable`
+**MD-3 extension (Faz 8-P2 migration decision):** `MeasurementBaseline::Unavailable`
 altında improvement assessment yapılamaz → `MutationDecision::AcceptAsProgress` üretilemez.
 Typed unavailable baseline hiçbir compatibility projection ile synthetic numeric baseline'a
 çevrilerek progress kanıtı oluşturamaz. `AcceptAsProgress` yalnız aynı subject identity'sine
 bağlı, karşılaştırılabilir
 bir `MeasurementBaseline::Available` üzerinden, engine-measured loss azalması kanıtlandığında
-üretilebilir. (Status: planned — MD-3 accepted, implementation pending;
-`docs/notes/faz8-p2-migration-decisions.md`.)
+üretilebilir. (Status: **implemented (#97)** — motor commit Phase 0d'de typed
+`BaselineAvailabilityClass` sınıflandırması ZORLAR: Unavailable + NotCompleted altında gate'in
+skaler improvement önerisi bile `Reject`'e düşürülür; caller-supplied `loss_before` running
+scalar kanıt DEĞİL; test `md3_all_members_disallow_rejects_even_with_scalar_improvement`;
+`docs/notes/faz8-p2-migration-decisions.md` MD-3.)
 
 ### INV-T8 — Progress checkpoint isolation (review v3 — INV-T6'dan ayrı)
 **Status:** planned (Aşama B)
@@ -355,6 +358,7 @@ impl MutationDecision {
             MutationDecision::AcceptAsCompleted => ApplyTarget::Lane(CommitLane::Mainline),
             MutationDecision::AcceptAsProgress => ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint),
             MutationDecision::RequireOperatorApproval => ApplyTarget::Lane(CommitLane::Sandbox),
+            MutationDecision::AcceptAsColdStart => ApplyTarget::Lane(CommitLane::Sandbox), // MD-3 (#97)
         }
     }
 }
@@ -366,18 +370,20 @@ impl MutationDecision {
 **İhlal örneği:** predicate fail, loss improved, AcceptAsProgress, yanlışlıkla main branch
 merge → OSP güven modeli çöker (progress ≠ merge, ama merge oldu).
 
-**MD-3 planned extension (Faz 8-P2 migration decision):** Yeni `MutationDecision::AcceptAsColdStart`
+**MD-3 extension (Faz 8-P2 migration decision):** Yeni `MutationDecision::AcceptAsColdStart`
 varyantı — `BaselineUnavailableReason::AllMembersIntroducedByDelta` altında, explicit
 `ColdStartPolicy` ve operator authorization ile kabul edilen izole mutation. Improvement veya
-completion iddiası taşımaz. Planned mapping:
+completion iddiası taşımaz. Mapping (type-level):
 ```rust
 MutationDecision::AcceptAsColdStart => ApplyTarget::Lane(CommitLane::Sandbox)
 ```
 Negatif kurallar: `AcceptAsColdStart ↛ Mainline`, `↛ TrajectoryCheckpoint` (TrajectoryCheckpoint
 "ölçülmüş ilerleme" için ayrılmış; cold-start improvement kanıtlanamaz). `AcceptAsColdStart`
 `Sandbox`'a uygulanır; Mainline promotion ancak sonraki engine measurement altında normal
-`AcceptAsCompleted` ile. (Status: planned — MD-3 accepted, implementation pending;
-`docs/notes/faz8-p2-migration-decisions.md`.)
+`AcceptAsCompleted` ile. (Status: **implemented (#97)** — `apply_target()` map + append-only
+`MutationDecisionTag` 4 + negatif pin'ler `md3_accept_as_cold_start_applies_to_sandbox_only`;
+onay akışı `approve_cold_start` → Sandbox apply + `mainline_promotion: not_available` MCP pin'i;
+`docs/notes/faz8-p2-migration-decisions.md` MD-3.)
 
 ### INV-T9 — External-Evidence Suspension Isolation (review turu 1-4, Paper 2 conformance fix)
 **Status:** implemented (fix/inv-t9-witness-suspension PR)
@@ -438,13 +444,20 @@ staleness re-measure + cross-process resume) P1 takip PR'ındadır. Bu PR suspen
 claim continuity + budget isolation kurar; `PendingAuthorizationEnvelope` embedded
 `AuthorizationBasis` taşıdığı için P1 yeniden tasarım gerektirmez.
 
-**MD-3 planned extension (Faz 8-P2 migration decision):** `BaselineUnavailableReason::AllMembersIntroducedByDelta`
+**MD-3 extension (Faz 8-P2 migration decision):** `BaselineUnavailableReason::AllMembersIntroducedByDelta`
 + `NotCompleted` + `ColdStartPolicy::RequireOperatorApproval` → `Suspended(ColdStartAuthorizationRequired)`
 → mutation uygulanmaz, maneuver budget tüketilmez, agent retry başlatılmaz. Operator onayı
 sonrasında `AcceptAsColdStart → Sandbox` apply (INV-T8 extension). Onay öncesi `Sandbox` yalnız
 **intended apply target**; gerçek mutation onaydan sonra. Default `ColdStartPolicy::Disallow`
-fail-closed `Reject`. `PartialNewSubject` cold-start override paylaşmaz. (Status: planned —
-MD-3 accepted, implementation pending; `docs/notes/faz8-p2-migration-decisions.md`.)
+fail-closed `Reject`. `PartialNewSubject` cold-start override paylaşmaz. (Status: **implemented
+(#97)** — `EngineCommitResult::SuspendedColdStart` (Held'den AYRI otorite: operatör ≠ witness;
+navigator `AwaitingColdStartApproval` terminal — retry/evidence/mutation pin'li) + onay akışı
+`approve_cold_start`: in-flight suspension kaydı (kalıcı DEĞİL — `PendingAuthorization` persist
+modeline benzeMEz; motor ömrüyle sınırlı) + onay anında deterministik revalidation (scope fence
++ 5-fence stale + MD-3 sınıflandırma/policy/completion + Q6 — operatör onayı güvenlik çekirdeğini
+bypass ETMEZ) + operatör otoritesiyle witness-bypass Sandbox apply + `ColdStartAcceptanceEvidence`
+(8 alan; `improvement_claimed` ctor sabiti `false`); testler `md3_approve_cold_start_*` +
+`navigator_cold_start_suspends_without_retry_or_evidence`; `docs/notes/faz8-p2-migration-decisions.md` MD-3.)
 
 ---
 

@@ -2018,6 +2018,9 @@ pub enum WitnessReachability {
     Held,
     Rejected,
     NotReached,
+    /// **#97 MD-3:** commit cold-start operatör onayında askıya alındı —
+    /// witness consult EDİLMEDİ (INV-T9 extension; Held'den ayrı otorite).
+    ColdStartSuspended,
 }
 
 impl WitnessReachability {
@@ -2027,6 +2030,9 @@ impl WitnessReachability {
             EngineCommitResult::Evaluated { .. } => Self::Evaluated,
             EngineCommitResult::Held { .. } => Self::Held,
             EngineCommitResult::Rejected { .. } => Self::Rejected,
+            // **#97 MD-3:** witness'a hiç consult EDİLMEDİ — operatör otoritesi
+            // (INV-T9 extension; Held'den ayrı).
+            EngineCommitResult::SuspendedColdStart { .. } => Self::ColdStartSuspended,
         }
     }
 }
@@ -2556,6 +2562,16 @@ fn finalize_pipeline_observation_commit_reached(
             mutation_decision: Some(authorization.outcome.mutation_decision),
             apply_target: Some(authorization.apply_target),
             witness_reachability: WitnessReachability::Held,
+        },
+        // **#97 MD-3:** cold-start askısı — predicate NotCompleted (matris önkoşul),
+        // mutasyon kararı HENÜZ YOK (onay sonrası AcceptAsColdStart üretilir — S3),
+        // apply YOK, witness consult edilmedi.
+        EngineCommitResult::SuspendedColdStart { .. } => PipelineObservation::CommitReached {
+            q5: Q5Observation::Passed,
+            predicate_completion: Some(osp_core::trajectory::PredicateCompletion::NotCompleted),
+            mutation_decision: None,
+            apply_target: None,
+            witness_reachability: WitnessReachability::ColdStartSuspended,
         },
         EngineCommitResult::Rejected { authorization, .. } => PipelineObservation::CommitReached {
             q5: Q5Observation::Passed,

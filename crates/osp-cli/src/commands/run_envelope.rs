@@ -34,6 +34,8 @@ pub enum CliRunResultKind {
     ExceededManeuverLimit,
     RequiresRevision,
     RequiresOperatorApproval,
+    /// **#97 MD-3:** cold-start operatör onayı (INV-T9 extension — witness beklemeden ayrı).
+    AwaitingColdStartApproval,
     TaskNotFound,
     WitnessEvaluationError,
     PendingAuthorizationPersistenceFailure,
@@ -57,6 +59,9 @@ impl CliRunResult {
                 (CliRunResultKind::ExceededManeuverLimit, *attempts)
             }
             NavigatorResult::RequiresRevision(_) => (CliRunResultKind::RequiresRevision, 0),
+            NavigatorResult::AwaitingColdStartApproval { attempts, .. } => {
+                (CliRunResultKind::AwaitingColdStartApproval, *attempts)
+            }
             NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
                 (CliRunResultKind::RequiresOperatorApproval, *attempts)
             }
