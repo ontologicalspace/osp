@@ -479,6 +479,14 @@ normatif davranışı göstermeli?
 
 Future reason'lar için uydurma davranış yok: `unknown/unhandled reason → fail-closed`.
 
+**Implementasyon notu (#97, PR #130 review round-2):** PartialNewSubject satırı ve normatif
+kural 6'daki "terminal `Reject`" **cold-start politika boyutu** (`ColdStartPolicy`:
+Disallow/RequireOperatorApproval) içindir. `PredicateFailurePolicy::OperatorApproval` altında
+gate'in ürettiği legacy `RequireOperatorApproval` kararı INV-T6 extension tarafından
+düşürülmez (düşürme yalnız `AcceptAsProgress` progress iddiasını hedefler) — o akış MD-3
+kapsamı dışında legacy operator-approval yolunda devam eder; mutasyon/progress iddiası üretmez,
+cold-start bypass kapalıdır (engine.rs PartialNew kolu yorumuyla hizalı).
+
 ### `AcceptAsColdStart` — yeni karar sınıfı
 
 - `AcceptAsColdStart ≠ AcceptAsProgress ≠ AcceptAsCompleted`.
