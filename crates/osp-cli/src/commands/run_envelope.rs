@@ -9,8 +9,8 @@
 //! `execution_measurement`: `subject_authority: "task_scope"` (**#95-A subject
 //! cutover** — canonical task predicate scope; pre-#95-A değer
 //! `"affected_nodes"` idi), `provenance_authority: "engine_native_per_axis"`
-//! (#96 — bu eksen sabit), `provenance_native: true`; deprecated `authority`
-//! alias yalnız provenance mirror'i (#100'e kadar). Navigator ölçümü
+//! (#96 — bu eksen sabit), `provenance_native: true`. **#100 (S5):** deprecated
+//! `authority` alias kaldırıldı (yalnız provenance mirror'ıydı). Navigator ölçümü
 //! engine-native per-axis + task-scope subject
 //! (`measure_attempt_native`). Analyze envelope'taki
 //! `analyzer_axis_specific` provenance'dan ayrıdır.
@@ -158,8 +158,6 @@ pub struct CliExecutionMeasurement {
     pub subject_authority: &'static str,
     pub provenance_authority: &'static str,
     pub provenance_native: bool,
-    /// Deprecated alias — yalnız provenance mirror (#100'e kadar).
-    pub authority: &'static str,
 }
 
 impl CliExecutionMeasurement {
@@ -170,7 +168,6 @@ impl CliExecutionMeasurement {
             subject_authority: "task_scope",
             provenance_authority: "engine_native_per_axis",
             provenance_native: true,
-            authority: "engine_native_per_axis",
         }
     }
 }
@@ -321,10 +318,8 @@ mod tests {
             "engine_native_per_axis"
         );
         assert_eq!(v["execution_measurement"]["provenance_native"], true);
-        assert_eq!(
-            v["execution_measurement"]["authority"],
-            "engine_native_per_axis"
-        );
+        // #100 (S5): deprecated `authority` alias kaldırıldı — alan artık yok.
+        assert!(v["execution_measurement"].get("authority").is_none());
         assert_eq!(v["result"]["kind"], "completed");
         assert_eq!(v["result"]["attempts"], 1);
         assert_eq!(v["evidence"][0]["gate_decision"], "PassedAll");

@@ -18,7 +18,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::agent::{DeltaProposal, OutputContract};
-use crate::coords::{MetricSource, RawPosition};
+use crate::coords::RawPosition;
 use crate::engine::SpaceEngine;
 use crate::trajectory::{
     AgentTaskView, AttemptOutcome, GateDecision, InternalTaskPlan, MutationDecision,
@@ -163,32 +163,10 @@ pub use crate::task_measurement::{build_claim_from_proposal, ClaimBuildError};
 
 impl std::error::Error for ClaimBuildError {}
 
-/// INV-T3 (boşluk #7) — Engine RawPosition → ProvenancedRawPosition. Her axis'e aynı
-/// `source` atanır (Aşama D'de engine per-axis source verebilir; D1'de uniform).
-pub fn provenanced_from_raw(raw: RawPosition, source: MetricSource) -> ProvenancedRawPosition {
-    ProvenancedRawPosition {
-        coupling: crate::trajectory::AxisMetric {
-            value: raw.x,
-            source,
-        },
-        cohesion: crate::trajectory::AxisMetric {
-            value: raw.y,
-            source,
-        },
-        instability: crate::trajectory::AxisMetric {
-            value: raw.z,
-            source,
-        },
-        entropy: crate::trajectory::AxisMetric {
-            value: raw.w,
-            source,
-        },
-        witness_depth: crate::trajectory::AxisMetric {
-            value: raw.v,
-            source,
-        },
-    }
-}
+// **#100 Faz 8a (S5):** `provenanced_from_raw` (uniform-source V1 projeksiyonu)
+// üretimden SİLİNDİ — engine ölçümleri per-axis native source taşır (#96); uniform
+// Scip damgalama source laundering idi (MD-2). Karakterizasyon/test fixture'ları
+// test-lokal kopyayı kullanır (mod tests içinde).
 
 /// **G2c-1b (arkadaş review 6 #2):** Engine commit hatası → GateDecision mapping.
 /// Tek noktada mapping — navigator reject-evidence sitesinde elle match yerine bu helper.
@@ -1143,6 +1121,7 @@ mod tests {
     use super::*;
     use crate::agent::NewNodeSpec;
     use crate::coords::CoordinateSystem;
+    use crate::coords::MetricSource;
     use crate::engine::{EngineConfig, SpaceEngine};
     use crate::space::{Edge, Node, NodeKind, Space};
     use crate::trajectory::{
@@ -1158,6 +1137,34 @@ mod tests {
     // test'i fonksiyonla birlikte eski MD-1 modülüne taşınmış ve #95-B'de (E4) modülle
     // birlikte silinmişti (dual pinning'in integration mirror ayağı tests/common'da
     // yerinde).
+
+    /// **#100 (S5):** test-local uniform-source projeksiyon — production
+    /// `provenanced_from_raw` silindi (V1 uniform-Scip laundering kalktı); fixture
+    /// üretimi (karakterizasyon pin'leri) test-lokal kopyayla sürer.
+    fn provenanced_from_raw(raw: RawPosition, source: MetricSource) -> ProvenancedRawPosition {
+        ProvenancedRawPosition {
+            coupling: crate::trajectory::AxisMetric {
+                value: raw.x,
+                source,
+            },
+            cohesion: crate::trajectory::AxisMetric {
+                value: raw.y,
+                source,
+            },
+            instability: crate::trajectory::AxisMetric {
+                value: raw.z,
+                source,
+            },
+            entropy: crate::trajectory::AxisMetric {
+                value: raw.w,
+                source,
+            },
+            witness_depth: crate::trajectory::AxisMetric {
+                value: raw.v,
+                source,
+            },
+        }
+    }
 
     fn measured_pos(coupling: f64) -> ProvenancedRawPosition {
         provenanced_from_raw(

@@ -32,9 +32,23 @@ use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
 use osp_core::agent::{DeltaProposal, EdgeRef, NewNodeSpec, OutputContract};
 use osp_core::coords::{CoordinateSystem, MetricSource, RawPosition};
-use osp_core::navigator::{
-    provenanced_from_raw, AgentNavigator, LlmClient, LlmError, MockLlmClient, NavigatorResult,
-};
+use osp_core::navigator::{AgentNavigator, LlmClient, LlmError, MockLlmClient, NavigatorResult};
+
+/// #100 (S5): production uniform-source projeksiyonu silindi — example-local kopya
+/// (fixture telemetry; Scip/TreeSitter etiketleri corpus matrix raporlaması için).
+fn provenanced_from_raw(
+    raw: RawPosition,
+    source: MetricSource,
+) -> osp_core::trajectory::ProvenancedRawPosition {
+    let mk = |v: f64| osp_core::trajectory::AxisMetric { value: v, source };
+    osp_core::trajectory::ProvenancedRawPosition {
+        coupling: mk(raw.x),
+        cohesion: mk(raw.y),
+        instability: mk(raw.z),
+        entropy: mk(raw.w),
+        witness_depth: mk(raw.v),
+    }
+}
 use osp_core::space::{Edge, EdgeKind, Node, NodeId, NodeKind, Space};
 use osp_core::trajectory::{
     ComparisonOp, InMemoryTaskRegistry, MetricPredicate, OpKind, PredicateAxis,

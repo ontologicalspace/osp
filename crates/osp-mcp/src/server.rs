@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use osp_core::agent::DeltaProposal;
 use osp_core::coords::MetricSource;
-use osp_core::navigator::{provenanced_from_raw, LlmClient};
+use osp_core::navigator::LlmClient;
 use osp_core::trajectory::{
     InMemoryTaskRegistry, InternalTaskPlan, OperatorCapability, PredicateSetResult,
     ProvenancedRawPosition, Task, TaskId, TaskResolver, TrajectoryEvidence, TrajectoryId,
@@ -837,7 +837,21 @@ impl Workspace {
 
     /// Mevcut ProvenancedRawPosition (INV-T4 source ile).
     pub fn current_measured(&self) -> ProvenancedRawPosition {
-        provenanced_from_raw(self.current_raw(), MetricSource::Scip)
+        // #100 (S5): synthetic bootstrap seed — uniform Scip damgası kalktı
+        // (source laundering); dürüst etiket Placeholder (ölçüm DEĞİL). Kaynaklar
+        // yalnız telemetry yüzeyinde görünür; loss_before otoritesi yok (#100 S2).
+        let raw = self.current_raw();
+        let stamp = |v: f64| osp_core::trajectory::AxisMetric {
+            value: v,
+            source: MetricSource::Placeholder,
+        };
+        ProvenancedRawPosition {
+            coupling: stamp(raw.x),
+            cohesion: stamp(raw.y),
+            instability: stamp(raw.z),
+            entropy: stamp(raw.w),
+            witness_depth: stamp(raw.v),
+        }
     }
 
     /// Tek DeltaProposal'ı değerlendir (single attempt — no LLM loop).

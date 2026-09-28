@@ -111,10 +111,10 @@ pub struct DeltaProposal {
     /// **G2c-2:** Kaldırılacak kenarlar (coupling/instability düşürme = import kaldırma).
     /// `OpKind::RemoveImport` operation policy ile bağlanır — allowed_ops kontrolü navigator'da.
     pub removed_edges: Vec<EdgeRef>,
-    /// **G2c-2 (review 7 #6):** Ölçülecek/etkilenen MEVCUT node ID'leri.
-    /// `compute_raw_from_delta` bu node'ların pozisyonunu ölçer (target node DAHİL).
-    /// Boşsa `new_nodes`'un ID'leri kullanılır. `new_nodes`'a mevcut node koyma —
-    /// ontolojik tutarsızlık (yeni varlık vs ölçüm scope).
+    /// **G2c-2 (review 7 #6) + #95-A/#100:** Etkilenmiş olabilecek MEVCUT node
+    /// ID'leri — **advisory impact metadata** (ölçüm authority'si DEĞİL; subject
+    /// = canonical task predicate scope). Structural delta'nın direct impact
+    /// footprint'ini ima eder; engine ölçümü task scope üzerinden üretir.
     pub affected_nodes: Vec<NodeId>,
     /// Mevcut düğümlerin entity özelliklerinde değişiklikler (kind/mass/metadata — POZİSYON DEĞİL).
     pub modified_entities: Vec<EntityChangeSpec>,
@@ -125,7 +125,7 @@ pub struct DeltaProposal {
 }
 
 /// **G2c-2:** Edge referansı — kaldırma için from/to/kind triplet.
-/// `Space::remove_edge` ve `compute_raw_from_delta` tarafından kullanılır.
+/// `Space::remove_edge` ve structural delta uygulaması tarafından kullanılır.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct EdgeRef {
     pub from: NodeId,

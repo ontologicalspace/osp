@@ -11,6 +11,45 @@ use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
 use serde::{Deserialize, Serialize};
 
+/// #100 (S5): demo-local V1 raw projeksiyonu — production `compute_raw_from_delta`
+/// silindi; standalone demo claim'in computed_raw'ı delta node centroid'ı olarak
+/// hesaplanır (CoordinateSystem pub API üzerinden; DefaultFallback demo değil).
+fn demo_compute_raw(
+    engine: &osp_core::engine::SpaceEngine,
+    delta_nodes: &[osp_core::space::Node],
+    delta_edges: &[osp_core::space::Edge],
+) -> osp_core::coords::RawPosition {
+    if delta_nodes.is_empty() {
+        return osp_core::coords::RawPosition::default();
+    }
+    let mut hypothetical = engine.space().clone();
+    for node in delta_nodes {
+        hypothetical.insert_node(node.clone());
+    }
+    for edge in delta_edges {
+        hypothetical.insert_edge(*edge);
+    }
+    let positions: Vec<(f64, osp_core::coords::RawPosition)> = delta_nodes
+        .iter()
+        .filter_map(|n| {
+            let node = hypothetical.nodes.get(&n.id)?;
+            let raw = engine.coord_system().raw_position_of(node, &hypothetical);
+            Some((node.mass.max(0.01), raw))
+        })
+        .collect();
+    if positions.is_empty() {
+        return osp_core::coords::RawPosition::default();
+    }
+    let total_mass: f64 = positions.iter().map(|(m, _)| m).sum();
+    osp_core::coords::RawPosition {
+        x: positions.iter().map(|(m, r)| m * r.x).sum::<f64>() / total_mass,
+        y: positions.iter().map(|(m, r)| m * r.y).sum::<f64>() / total_mass,
+        z: positions.iter().map(|(m, r)| m * r.z).sum::<f64>() / total_mass,
+        w: positions.iter().map(|(m, r)| m * r.w).sum::<f64>() / total_mass,
+        v: positions.iter().map(|(m, r)| m * r.v).sum::<f64>() / total_mass,
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // JSON types (frontend ile paylaşılır)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -343,11 +382,11 @@ pub fn cmd_simulate_claim(repo_path: &str, scenario: &str) -> Result<PipelineRes
     };
 
     // Compute position (or use override).
-    // Demo pipeline: subtractive delta (edge kaldırma) ve affected_nodes yok —
-    // bu nedenle `compute_raw_from_delta`'nin 2 ek argümanı boş. engine.rs doc'una
-    // göre affected_nodes boşsa delta_nodes kullanılır (review 7 #6).
+    // #100 (S5): production `compute_raw_from_delta` (V1 DefaultFallback
+    // projeksiyonu) silindi — demo pipeline local kopyayı kullanır (delta_nodes
+    // centroid; affected_nodes yok → delta_ids measure set, review 7 #6 semantiği).
     let computed_raw = computed_raw_override
-        .unwrap_or_else(|| engine.compute_raw_from_delta(&delta_nodes, &delta_edges, &[], &[]));
+        .unwrap_or_else(|| demo_compute_raw(&engine, &delta_nodes, &delta_edges));
 
     // Build claim — standalone demo claim (INV-T5: task_id=None, G2c-2: removed_edges boş).
     let claim = osp_core::witness::Claim {

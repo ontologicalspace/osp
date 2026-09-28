@@ -3205,7 +3205,14 @@ impl SpaceEngine {
     /// `affected_nodes` (review 7 #6): ölçülecek MEVCUT node ID'leri. Boşsa delta_nodes
     /// kullanılır. Target node'u buraya koy — new_nodes'a DEĞİL (ontolojik tutarsızlık).
     /// `delta_removed`: hypothetical'ta uygulanır, coupling/instability düşürür (import kaldırma).
-    pub fn compute_raw_from_delta(
+    /// **#100 Faz 8a (S5):** test-only — V1 DefaultFallback raw projeksiyonu
+    /// (subject base'de yok → `RawPosition::default()` sıfır koordinat) üretimden
+    /// KALDIRILDI. Production raw tek yol: measure_attempt_native / measure_task_delta
+    /// (typed baseline). Bu cfg(test) kopyası yalnız in-crate karakterizasyon
+    /// fixture'ları için yaşar (integration tests kendi lokal kopyasını taşır —
+    /// tests/common).
+    #[cfg(test)]
+    pub(crate) fn compute_raw_from_delta(
         &self,
         delta_nodes: &[crate::space::Node],
         delta_edges: &[crate::space::Edge],
@@ -4080,6 +4087,10 @@ impl SpaceEngine {
     /// - Total mass: non-finite veya non-positive → `InvalidTotalSubjectMass`
     /// - Axis identity preserved: `AxisMeasurement::try_new` hatası
     ///   `CoordinateMeasurementError::AxisMeasurementFailed { axis_id, source }` sarmalanır
+    ///
+    /// **(S5) test-only tüketim:** yalnız karakterizasyon fixture before-centroid
+    /// üretimi (navigator/engine test helper'ları) — production yolu yok (#100).
+    #[cfg(test)]
     #[allow(clippy::result_large_err)]
     pub(crate) fn measured_centroid_of(
         &self,
@@ -4215,7 +4226,10 @@ impl SpaceEngine {
     /// Subject scope YOK — `affected_nodes` üzerinden (legacy parity). Authority token
     /// yolu için `measure_task_delta` kullanılır (subject-bound).
     #[allow(clippy::result_large_err)]
-    pub fn try_compute_raw_from_delta(
+    /// **#100 Faz 8a (S5):** test-only — yukarıdaki V1 raw fn'in fallible kardeşi
+    /// (production çağrıcısız; DefaultFallback üretimden kalktı).
+    #[cfg(test)]
+    pub(crate) fn try_compute_raw_from_delta(
         &self,
         delta_nodes: &[crate::space::Node],
         delta_edges: &[crate::space::Edge],
