@@ -359,10 +359,11 @@ fn w8_retryable_rule_violation_emits_real_gate_decision() {
         outcome.get("system_failure").is_none(),
         "retryable commit error system failure DEĞİL: {outcome}"
     );
-    // Comparison-surviving → sidecar'lar taşınır.
+    // Comparison-surviving → #96 provenance sidecar taşınır (#95-B: MD-1 subject
+    // sidecar kaldırıldı — observer yok).
     assert!(
-        outcome.get("subject_authority_drift").is_some(),
-        "RuleViolation retryable = surviving → subject sidecar: {outcome}"
+        outcome.get("subject_authority_drift").is_none(),
+        "#95-B: subject sidecar kaldırıldı: {outcome}"
     );
     assert!(
         outcome.get("provenance_authority_drift").is_some(),

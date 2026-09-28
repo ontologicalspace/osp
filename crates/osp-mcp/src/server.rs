@@ -945,17 +945,6 @@ impl Workspace {
             .preferred_vector
             .unwrap_or_default();
         let loss_before = osp_core::trajectory::trajectory_loss(&self.current_measured(), &target);
-        // **#96 re-anchor:** Pre-commit shadow observation draft — her iki lane AYNI
-        // native bundle'dan (tek session); finalize yalnız comparison-surviving
-        // yollarda; eligibility witness disposition'tan bağımsız.
-        let drift_draft = osp_core::subject_authority::observe_subject_authority_drift(
-            self.engine_mut(),
-            claim.claim(),
-            task,
-            &native,
-            loss_before,
-            &target,
-        );
         // #96 MD-2 W5: provenance drift draft — AYNI token; native ↔ uniform-Scip
         // reference. Eligibility MD-1 ile aynı (Q4SyntaxRejection arm'ı YOK).
         let prov_draft = osp_core::provenance_authority::observe_provenance_authority_drift(
@@ -985,15 +974,7 @@ impl Workspace {
                 snapshot,
             }) => {
                 // **INV-T9** — expected authorization bekleme. Agent failure DEĞİL.
-                // **#95 MD-1 P2-1:** Held = comparison-surviving — observation
-                // KAYBOLMAZ; authorization.outcome gerçek PredicateGate sonucudur.
-                let drift = drift_draft.finalize(
-                    osp_core::subject_authority::V1DownstreamObservation::Observed(
-                        osp_core::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
-                            &authorization.outcome,
-                        ),
-                    ),
-                );
+                // authorization.outcome gerçek PredicateGate sonucudur.
                 // **#96 MD-2:** Held = comparison-surviving — prov sidecar.
                 let prov = prov_draft.finalize(
                     osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
@@ -1014,7 +995,6 @@ impl Workspace {
                     "mainline_mutation": "not_applied",
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "await_external_evidence",
-                    "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
                     "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
@@ -1024,15 +1004,6 @@ impl Workspace {
                 snapshot,
             }) => {
                 // Explicit witness rejection — RequiresRevision.
-                // **#95 MD-1 P2-1:** Rejected = comparison-surviving — observation
-                // response JSON sidecar'ında taşınır.
-                let drift = drift_draft.finalize(
-                    osp_core::subject_authority::V1DownstreamObservation::Observed(
-                        osp_core::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
-                            &authorization.outcome,
-                        ),
-                    ),
-                );
                 // **#96 MD-2:** Rejected = comparison-surviving — prov sidecar.
                 let prov = prov_draft.finalize(
                     osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
@@ -1054,7 +1025,6 @@ impl Workspace {
                     "mainline_mutation": "not_applied",
                     "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
                     "next_action": "requires_revision",
-                    "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
                     "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
                 }));
             }
@@ -1099,13 +1069,6 @@ impl Workspace {
                         {
                             response["provenance_authority_drift"] =
                                 serde_json::to_value(&prov).map_err(|e| e.to_string())?;
-                        }
-                        if let Some(drift) =
-                            osp_core::subject_authority::v1_downstream_from_engine_commit_error(&e)
-                                .map(|downstream| drift_draft.finalize(downstream))
-                        {
-                            response["subject_authority_drift"] =
-                                serde_json::to_value(&drift).map_err(|e| e.to_string())?;
                         }
                         return Ok(response);
                     }
@@ -1188,15 +1151,6 @@ impl Workspace {
                 osp_core::trajectory::CommitLane::Sandbox => "Sandbox",
             },
         };
-        // **#95 MD-1 P2-1:** Evaluated = comparison-surviving — gerçek outcome
-        // authoritative downstream olarak finalize edilir.
-        let drift = drift_draft.finalize(
-            osp_core::subject_authority::V1DownstreamObservation::Observed(
-                osp_core::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
-                    &result.outcome,
-                ),
-            ),
-        );
         // **#96 MD-2:** Evaluated = comparison-surviving — production outcome.
         let prov = prov_draft.finalize(
             osp_core::provenance_authority::ProvenanceDownstreamObservation::Observed {
@@ -1215,7 +1169,6 @@ impl Workspace {
             "apply_target": apply_str,
             "loss_after": result.loss_after,
             "measured_after": serde_json::to_value(native.authority().measured()).map_err(|e| e.to_string())?,
-            "subject_authority_drift": serde_json::to_value(&drift).map_err(|e| e.to_string())?,
             "provenance_authority_drift": serde_json::to_value(&prov).map_err(|e| e.to_string())?,
         }))
     }

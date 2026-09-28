@@ -903,18 +903,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 continue;
             }
 
-            // **#96 re-anchor:** Pre-commit shadow observation draft — her iki lane
-            // AYNI native bundle'dan (tek session; V1=authority native, V2=md1_shadow
-            // native) — gözlem yalnız subject farkı taşır. Finalize commit sonucuyla,
-            // yalnızca comparison-surviving yollarda (eligibility contract).
-            let drift_draft = crate::subject_authority::observe_subject_authority_drift(
-                self.engine,
-                finalized.claim(),
-                &task,
-                &native,
-                loss_before,
-                &self.target_vector,
-            );
             // **#96 MD-2 W5:** Pre-commit provenance drift draft — AYNI token üzerinde
             // native (otorite) ↔ uniform-Scip reference. Eligibility MD-1 ile aynı;
             // Q4SyntaxRejection arm'ı YOK (precedence correction).
@@ -955,18 +943,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     // **INV-T9 (reviewer P0-4)** — expected authorization bekleme. Agent
                     // retry DEĞİL. Budget tüketmez (continue YOK), LLM reinvocation YOK.
                     // Engine-owned AuthorizationContext kullanılır — placeholder YOK.
-                    //
-                    // **#95 MD-1 P2-1:** Held = comparison-surviving — observation
-                    // KAYBOLMAZ; `PendingAuthorization` telemetry sidecar'ında taşınır
-                    // (digest preimage'lerine girmez). authorization.outcome gerçek
-                    // PredicateGate sonucudur.
-                    let drift = drift_draft.finalize(
-                        crate::subject_authority::V1DownstreamObservation::Observed(
-                            crate::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
-                                &authorization.outcome,
-                            ),
-                        ),
-                    );
+                    // authorization.outcome gerçek PredicateGate sonucudur.
                     let prov = prov_draft.finalize(
                         crate::provenance_authority::ProvenanceDownstreamObservation::Observed {
                             predicate_completion: authorization.outcome.predicate_completion,
@@ -978,7 +955,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         reason,
                         snapshot,
                         attempt_num as u64,
-                        Some(drift),
+                        None,
                         Some(prov),
                     );
                 }
@@ -995,16 +972,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                     // YOK. Bu helper testler tarafından da çalıştırılır
                     // (`rejected_mapper_constructs_canonical_revision_evidence`).
                     // Q3 production reachability ayrı issue (#73).
-                    //
-                    // **#95 MD-1 P2-1:** Rejected = comparison-surviving — observation
-                    // `RevisionRequired` telemetry sidecar'ında taşınır (digest'e girmez).
-                    let drift = drift_draft.finalize(
-                        crate::subject_authority::V1DownstreamObservation::Observed(
-                            crate::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
-                                &authorization.outcome,
-                            ),
-                        ),
-                    );
                     let prov = prov_draft.finalize(
                         crate::provenance_authority::ProvenanceDownstreamObservation::Observed {
                             predicate_completion: authorization.outcome.predicate_completion,
@@ -1016,7 +983,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         reasons,
                         snapshot,
                         attempt_num as u64,
-                        Some(drift),
+                        None,
                         Some(prov),
                     ) {
                         Ok(revision) => NavigatorResult::RequiresRevision(revision),
@@ -1039,18 +1006,6 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         crate::task_measurement::NativeFailureSurface::RetryAgentProposal => {
                             let gd = gate_decision_from_engine_error(&e);
                             let hall = crate::agent::HallucinationType::from_engine_error(&e);
-                            // **#95 MD-1 P2-1:** Retryable commit error =
-                            // comparison-surviving — path→finalize eşlemesi
-                            // (subject_authority::v1_downstream_from_engine_commit_error):
-                            // VisionViolation → NotReached{Q5Violated};
-                            // RuleViolation → ReachedButUnavailable (sentetik
-                            // NotCompleted/Reject evidence değerleri AUTHORITATIVE
-                            // diye taşınmaz); SyntaxViolation → NotReached{Q4SyntaxRejection}.
-                            let drift_observation =
-                                crate::subject_authority::v1_downstream_from_engine_commit_error(
-                                    &e,
-                                )
-                                .map(|downstream| drift_draft.finalize(downstream));
                             // **#96 MD-2:** retryable path→finalize eşlemesi — Q4 arm'ı
                             // YOK (structural Q4 draft aşamasında; emission YOK kalır).
                             let prov_observation =
@@ -1079,7 +1034,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                                 mutation_decision: crate::trajectory::MutationDecision::Reject,
                                 token_cost,
                                 duration_ms: 0,
-                                subject_authority_drift: drift_observation,
+                                subject_authority_drift: None,
                                 provenance_authority_drift: prov_observation,
                             });
                             // D4 — Calibration feedback.
@@ -1157,17 +1112,8 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             let loss_after = task_result.loss_after;
             last_outcome = Some(outcome.clone());
 
-            // **#95 MD-1 P2-1:** Evaluated = comparison-surviving — gerçek outcome
-            // authoritative downstream olarak finalize edilir.
-            let drift_observation = Some(drift_draft.finalize(
-                crate::subject_authority::V1DownstreamObservation::Observed(
-                    crate::subject_authority::AuthoritativeDownstreamObservation::from_outcome(
-                        &outcome,
-                    ),
-                ),
-            ));
             // **#96 MD-2:** Evaluated = comparison-surviving — production outcome
-            // (authoritative) native lane downstream’ı olarak.
+            // (authoritative) native lane downstream'ı olarak.
             let prov_observation = Some(prov_draft.finalize(
                 crate::provenance_authority::ProvenanceDownstreamObservation::Observed {
                     predicate_completion: outcome.predicate_completion,
@@ -1191,7 +1137,7 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 mutation_decision: outcome.mutation_decision,
                 token_cost,
                 duration_ms: 0,
-                subject_authority_drift: drift_observation,
+                subject_authority_drift: None,
                 provenance_authority_drift: prov_observation,
             });
 
@@ -3056,140 +3002,10 @@ mod tests {
     // #95 MD-1 P2-1 — Subject-authority drift observation wiring
     // ═══════════════════════════════════════════════════════════════════════════════
 
-    /// #95 MD-1 P2-1: Completed attempt'in evidence kaydı finalize edilmiş gözlemi
-    /// taşır. Üretim tutarlılık cross-check'leri: authoritative downstream ==
-    /// evidence alanları; v1 raw bits == evidence.after bits (legacy.raw ==
-    /// claim.computed_raw == measured sözleşmesi); V1 lane uniform-Scip
-    /// compatibility projection.
-    #[test]
-    fn md1_completed_evidence_carries_finalized_drift_observation() {
-        let policy = TaskPolicy {
-            maneuver_limit: 3,
-            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
-            allow_progress_checkpoint: true,
-            ..Default::default()
-        };
-        let task = g2c3_coupling_task(1, &policy);
-        let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
-        let mock = MockLlmClient::new(incremental_coupling_proposals());
-        let mut engine = make_balanced_engine();
-        let mut evidence = vec![];
-        let mut nav = g2c3_nav(&mock, &resolver, &mut engine, &mut evidence);
-        let result = nav.run_task(1, 7);
-        assert!(matches!(result, NavigatorResult::Completed { .. }));
-
-        let last = evidence.last().expect("Completed produces evidence");
-        let obs = last
-            .subject_authority_drift
-            .as_ref()
-            .expect("MD-1: completed attempt carries finalized observation");
-        match &obs.v1.downstream {
-            crate::subject_authority::V1DownstreamObservation::Observed(auth) => {
-                assert_eq!(auth.predicate_completion, last.predicate_completion);
-                assert_eq!(auth.mutation_decision, last.mutation_decision);
-            }
-            other => panic!("completed attempt downstream must be Observed: {other:?}"),
-        }
-        assert_eq!(
-            obs.v1.raw.bits,
-            [
-                last.after.x.to_bits(),
-                last.after.y.to_bits(),
-                last.after.z.to_bits(),
-                last.after.w.to_bits(),
-                last.after.v.to_bits(),
-            ],
-            "v1 raw bits == evidence.after bits (legacy.raw == claim.computed_raw == measured)"
-        );
-        // **#96 MD-2 re-anchor (regolden):** V1 lane artık NATIVE per-axis kaynaklar
-        // taşır (eski pin: uniform [Scip;5] compatibility projection — tarihsel).
-        // make_balanced_engine axis seti: coupling=Scip (#96 fixture düzeltmesi),
-        // cohesion=Placeholder, instability=Scip, entropy=Heuristic, witness=Heuristic.
-        assert_eq!(
-            obs.v1.raw.sources,
-            [
-                crate::coords::MetricSource::Scip,
-                crate::coords::MetricSource::Placeholder,
-                crate::coords::MetricSource::Scip,
-                crate::coords::MetricSource::Heuristic,
-                crate::coords::MetricSource::Heuristic,
-            ],
-            "V1 lane native per-axis sources (re-anchor — provenance iki lane'de native)"
-        );
-        assert_eq!(obs.task_id, last.task_id);
-    }
-
-    /// #95 MD-1 P2-1: Held = comparison-surviving — observation
-    /// `PendingAuthorization` telemetry sidecar'ında KAYBOLMAZ; digest
-    /// preimage'lerine girmez (recompute equality + eski-wire backward-compat).
-    #[test]
-    fn md1_held_pending_authorization_carries_drift_observation() {
-        use crate::authorization::{PendingAuthorization, SuspendedAttemptEvidenceDigest};
-
-        // inv_t9 fixture mirror — Production witness policy (boş set → Held).
-        let policy = TaskPolicy {
-            maneuver_limit: 5,
-            predicate_failure_policy: PredicateFailurePolicy::AcceptImprovement,
-            allow_progress_checkpoint: true,
-            ..Default::default()
-        };
-        let task = g2c3_coupling_task(1, &policy);
-        let mut resolver = InMemoryTaskRegistry::new();
-        resolver.insert(task);
-        let proposals = incremental_coupling_proposals();
-        let mock = MockLlmClient::new(proposals);
-        let mut engine = make_balanced_engine();
-        let mut evidence = vec![];
-        let mut nav = g2c3_nav(&mock, &resolver, &mut engine, &mut evidence);
-        nav.witness_policy = NavigatorWitnessPolicy::Production;
-
-        let result = nav.run_task(1, 7);
-        let pending = match result {
-            NavigatorResult::AwaitingWitnesses { pending, .. } => pending,
-            other => panic!("MD-1 Held fixture must reach AwaitingWitnesses: {other:?}"),
-        };
-
-        let obs = pending
-            .subject_authority_drift
-            .as_ref()
-            .expect("Held = comparison-surviving → observation kaybolmaz");
-        match &obs.v1.downstream {
-            crate::subject_authority::V1DownstreamObservation::Observed(auth) => {
-                // authorization.outcome gerçek PredicateGate sonucu — pending
-                // kaydının predicate/mutation alanlarıyla aynı kaynak.
-                assert_eq!(auth.predicate_completion, pending.predicate_completion);
-                assert_eq!(auth.mutation_decision, pending.mutation_decision);
-            }
-            other => panic!("Held downstream must be Observed: {other:?}"),
-        }
-
-        // Digest independence — sidecar digest preimage'ine GIRMEZ.
-        let recomputed =
-            SuspendedAttemptEvidenceDigest::compute(&pending.suspended_attempt_evidence)
-                .expect("evidence digest recompute");
-        assert_eq!(
-            Some(&recomputed),
-            Some(&pending.evidence_digest),
-            "observation sidecar must not enter digest preimage"
-        );
-
-        // Wire round-trip: creation → serialize → load sidecar korunur.
-        let json = serde_json::to_string(&pending).expect("pending serializes");
-        let parsed: PendingAuthorization =
-            serde_json::from_str(&json).expect("pending wire round-trip (validate_internal dahil)");
-        assert!(parsed.subject_authority_drift.is_some());
-
-        // Eski wire (alan yok) → None; digest identity unchanged.
-        let mut old = serde_json::to_value(&pending).expect("to_value");
-        old.as_object_mut()
-            .expect("pending wire is an object")
-            .remove("subject_authority_drift");
-        let old_pending: PendingAuthorization =
-            serde_json::from_value(old).expect("old wire deserializes (serde default)");
-        assert!(old_pending.subject_authority_drift.is_none());
-        assert_eq!(old_pending.evidence_digest, pending.evidence_digest);
-    }
+    // #95-B: `md1_completed_evidence_carries_finalized_drift_observation` ve
+    // `md1_held_pending_authorization_carries_drift_observation` testleri silindi —
+    // MD-1 comparison testleri (navigator observer çağrısı kaldırıldı; tarihçe:
+    // #95-A PR #128 + karar kaydı faz8-p2-migration-decisions.md MD-1 bölümü).
 
     /// INV-T9: witness quorum eksikliği ExceededManeuverLimit üretmez.
     ///
