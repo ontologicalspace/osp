@@ -93,8 +93,8 @@ jobs:
       # çağırır (yukarıdaki adımların warm target cache'ini kullanır) ve MANIFEST
       # sha256 ↔ git blob + run-metadata.md ↔ .json çapraz kontrollerini yapar.
       # Exit != 0 => matrix ↔ canlı kod drift: evidence claim'i artık geçersiz.
-      # Bilinçli kabul: pull_request event'i workflow tanımını base branch'ten alır;
-      # bu adımın ilk canlı koşumu merge sonrası main push'undadır.
+      # pull_request event'inde workflow tanımı PR merge ref'inden alınır; bu adım
+      # her PR'da yürütülür — matrix ↔ canlı kod drift'i merge ÖNCESİ gate edilir.
       - name: Verify invariant evidence matrix
         run: python3 scripts/verify_invariant_evidence.py
 
