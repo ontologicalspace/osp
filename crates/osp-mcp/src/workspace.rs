@@ -13,6 +13,7 @@
 //! Tool'lar her çağrıda re-analyze ETMEZ — performans + determinizm için.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use osp_analyzer::contract::{AnalysisConfig, RepoMetrics, SemanticCoverage};
@@ -53,6 +54,11 @@ pub struct Workspace {
     pub node_count: usize,
     /// Edge sayısı.
     pub edge_count: usize,
+    /// **#133:** Server-ömürlü monotonic claim id kaynağı. Motorun in-flight
+    /// `suspended_cold_starts` map'i claim_id ile anahtarlanır — benzersizlik
+    /// yoksa eşzamanlı askılar birbirini ezer (Run D F1). Atomic: mutex
+    /// bağımsız benzersizlik; Relaxed yeterli (yalnız tekillilik sözleşmesi).
+    next_claim_id: AtomicU64,
 }
 
 impl Workspace {
@@ -120,7 +126,16 @@ impl Workspace {
             semantic_coverage,
             node_count,
             edge_count,
+            // İlk submit claim_id 1 alır (#133 öncesi tek-submit kanıtlarıyla
+            // wire-uyumlu); sonraki submit'ler 2, 3, … monotonic.
+            next_claim_id: AtomicU64::new(1),
         })
+    }
+
+    /// **#133:** Benzersiz claim id üret — her çağrı önceki değerden büyüğünü
+    /// döndürür (server ömrü boyunca tekillik; `submit_delta_attempt` tüketir).
+    pub fn next_claim_id(&self) -> u64 {
+        self.next_claim_id.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Engine'e mutable reference al (commit_task_claim için — osp-core sync).
