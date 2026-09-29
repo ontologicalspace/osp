@@ -892,7 +892,24 @@ impl Workspace {
         //    (Run D F1). Agent id 1 bilinçli kalır: MCP tek agent lane —
         //    AgentId gönderen özneyi, ClaimId attempt'i adlandırır; ikincil
         //    submit'ler aynı yüzeyden geldiği için agent kimliği değişmez.
-        let claim_id = self.next_claim_id();
+        //    **Review P1:** id uzayı tükenirse allocation fail-closed —
+        //    wrap'le id yeniden ÜRETİLMEZ; terminal `system_failure`
+        //    (operational/TCB family — ölçüme/commit'e ULAŞILMAZ).
+        let claim_id = match self.next_claim_id() {
+            Ok(id) => id,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "system_failure": {
+                        "class": "ClaimIdExhausted",
+                        "retryable": false,
+                    },
+                    "apply_target": "NotApplied",
+                    "loss_after": null,
+                    "measured_after": null,
+                    "message": format!("claim id allocation: {e}"),
+                }));
+            }
+        };
         let draft = match osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
             proposal,
             RawPosition::default(),
