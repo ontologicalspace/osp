@@ -178,8 +178,8 @@ provenance**: a predicate cannot complete on a measurement from the wrong
 source, no matter what the number says. (Verified with an isolated-module
 proposal that leaves node 0 numerically untouched — still `NotCompleted`.)
 Through this CLI path the demo task is therefore **structurally
-unsatisfiable today** — that gap and the possible fix (`--scip` wiring) are
-tracked in [#144](https://github.com/ontologicalspace/osp/issues/144).
+unsatisfiable today** — that gap is tracked in
+[#144](https://github.com/ontologicalspace/osp/issues/144).
 
 The agent retried five times (the default maneuver limit — INV-T7 caps
 agent-correctable retries), was refused five times, and OSP ended the run
