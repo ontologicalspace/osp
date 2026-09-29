@@ -40,12 +40,13 @@ field is marked D*, it exists only after the corresponding freeze decision.
 | Execution latency | `attempt_submitted_at − execution_started_at` per attempt | cost timestamps (§9) |
 | Attempt count | `#attempt_started` per task | execution events |
 | Rework count | `#rework_requested` per task | G꜀ events |
+| Rework-attempt burden | `Σ duration(rework attempts)`, where a rework attempt is an `attempt_started` causally following a `rework_requested`, and `duration = attempt_submitted_at − attempt_started_at` | execution events + cost timestamps (§9) |
 | Replan count | `#plan_revision_superseded` where successor is a *revision* (not rejection) per task | Gₚ events |
 | Review disagreement | share of decisions whose reviewer note is marked contested (D3) | `plan_review_decided`, `completion_review_decided` + note structure (D3) |
-| Scope drift frequency | `#basis_drift_detected` with `drifted_component == scope_digest` (D1) | execution events + D1 |
-| Commit drift frequency | same event type with `drifted_component == commit` (D1) | execution events + D1 |
+| Scope drift frequency | share of `basis_checked` rows with `component == scope_digest, changed == true` (D1) | `basis_checked` component rows (D1) |
+| Commit drift frequency | share of `basis_checked` rows with `component == commit, changed == true` (D1) | `basis_checked` component rows (D1) |
 | Verification obligation density | obligations in binding ÷ scope items, per accepted plan | `plan_artifact_submitted` + binding |
-| Undeclared deviation rate | `ReviewerDiscovered + EngineDetected` ÷ all deviations, per task / overall | `deviation_discovered` vs `deviation_declared` |
+| Undeclared deviation rate | `ReviewerDiscovered + EngineDetected` ÷ all deviations, per task / overall — **counted by unique `deviation_id` (D7), never by event count** | `deviation_declared` / `deviation_discovered` + D7 |
 | Completion lead time | `task_completed − task_created` per task | intake + G꜀ events |
 | Plan richness | verification obligation count per plan (primary); constraint count (secondary) | binding fields |
 
@@ -84,11 +85,20 @@ inferential work — out of scope for Paper 4 v1.
 - **H3:** scope-digest drift fires substantially less often than commit-digest
   drift; the ratio quantifies what scope derivation buys over "revalidate on
   every merge".
-- **Design:** log both digest kinds on every `basis_drift_detected` (D1).
-  Unrelated merges that change the commit digest but not the scope digest are
-  the free control group (design §11).
-- **Falsification signal:** scope drift ≈ commit drift frequency — scope
-  derivation buys nothing.
+- **Instrument (D1 — `basis_checked`, not a single drifted_component enum):**
+  the control condition "commit changed, scope unchanged" requires observing
+  *both* components at the same check. Each basis check therefore emits one
+  `basis_checked` event carrying **a mandatory row per component**
+  (`check_id`, `component`, `before`, `after`, `changed`) — no component may
+  be silently absent. A `changed == true` row is the drift signal for that
+  component.
+- **Denominator:** drift frequencies are shares over `basis_checked` events
+  (per-component rows share the `check_id`). Merge count is *not* the
+  denominator; it is itself observable as commit-changed rows, which keeps
+  "how many checks were triggered by unrelated merges" a separate,
+  answerable question.
+- **Falsification signal:** scope-changed share ≈ commit-changed share —
+  scope derivation buys nothing.
 
 ### RQ-P4 — Undeclared deviation rate
 
@@ -99,17 +109,24 @@ inferential work — out of scope for Paper 4 v1.
 - **Falsification signal:** undeclared rate ≈ 0 across tasks — conformance
   self-reporting is trustworthy (also a valuable finding).
 
-### RQ-P5 — Cost
+### RQ-P5 — Cost (descriptive)
 
-- **H5:** plan authoring + review cost is offset by rework cost avoided.
-- **Operationalization (proxy, honestly limited):** plan cost = authoring +
-  review latency (timestamps); avoided-cost proxy = rework events ×
-  execution latency. **No counterfactual exists** (the same task was not also
-  run plan-less), so this RQ reports the ratio pattern and its trend, not a
-  causal claim.
-- **Falsification signal:** overhead exceeds avoided-cost proxy stably as
-  task count grows — the "process overhead" objection wins and the risk-based
-  policy tiers must tighten.
+- **H5 (descriptive, no counterfactual):** how does plan overhead compare
+  with the *observed* rework burden? The original "cost avoided" framing is
+  **not measurable** in this design: observed rework cost is what happened
+  *with* a plan; how much rework would have occurred plan-less is unknowable
+  without a comparator. A counterfactual strategy (plan-less paired tasks /
+  historical matched comparators) is explicitly out of scope for Paper 4 v1
+  and recorded as future work.
+- **Operationalization:** plan overhead = authoring + review latency
+  (timestamps); rework burden = **`Σ duration(rework attempts)`** (metrics
+  table) — summed actual attempt durations, not `count × mean latency`, so
+  tasks with differently-sized attempts do not distort the proxy.
+- **Falsification signal:** overhead exceeds observed rework burden stably as
+  task count grows — the "process overhead" objection wins for this protocol
+  and the risk-based policy tiers must tighten. (Note: this falsifies the
+  *descriptive* balance claim, not a causal avoidance claim, which this
+  design never makes.)
 
 ### RQ-P6 — Restrictiveness vs solution quality
 
@@ -131,7 +148,10 @@ inferential work — out of scope for Paper 4 v1.
 - **Method:** every deviation from "no modification" required during Phase
   2/3 implementation is logged as a structured finding: what changed, which
   invariant/session assumed single-kind, whether the fix generalized the
-  machinery or special-cased the plan kind.
+  machinery or special-cased the plan kind. **Baseline frozen first (D6):**
+  findings are judged against a pinned baseline (commit + component set +
+  modification definition + attribution rules), so later refactors cannot be
+  post-hoc reclassified as "would have been needed anyway" or vice versa.
 - **Outcome framing:** near-zero modifications = generality evidence; a map
   of required changes = boundary characterization. Both are findings; neither
   is a failure. The log lives next to the ledger (same dogfood directory),
@@ -161,18 +181,39 @@ recorded digest, following the project's frozen-characterization discipline.
 After the tag, changes require a new version tag plus migration note.
 
 - [ ] **F1 — Event schema (`planbound-ledger-v1`):** the 16 event types of
-  design §9 plus the decision fields below, JSON Schema-ized.
-- [ ] **D1 — `basis_drift_detected.drifted_component`** enum:
-  `commit | store_schema | api_digest | task_digest | plan_digest | scope_digest`
-  (required by RQ-P3).
+  design §9 plus the decisions below, JSON Schema-ized. **D1 replaces the
+  drift event:** `basis_drift_detected` as a single-component event cannot
+  express "commit changed while scope did not" — see D1.
+- [ ] **D1 — `basis_checked` event (replaces single `drifted_component`
+  enum):** one event per basis check with **mandatory per-component rows**
+  (`check_id`, `component ∈ {commit, store_schema, api_digest, task_digest,
+  plan_digest, scope_digest}`, `before`, `after`, `changed`). Cardinality:
+  exactly one event per check; every component present in every event. Drift
+  = a row with `changed == true`. (Required by RQ-P3; single-enum design was
+  rejected in review round-1 — it loses the joint observation.)
 - [ ] **D2 — `completion_review_decided.solution_quality_rating`** (optional
   integer 1–5; required by RQ-P6).
 - [ ] **D3 — Reviewer-note structure:** how a note marks a decision as
   *contested* and references evidence (required by RQ-P2).
 - [ ] **D4 — Meta-RQ modification log schema** (finding: component, change,
-  invariant touched, generalization-vs-special-case classification).
+  invariant touched, generalization-vs-special-case classification). Every
+  finding **must reference the D6 baseline**.
 - [ ] **D5 — `task_created.risk_tier`** (`low | medium | high`) so the
   risk-policy censoring is reconstructible (required by RQ-P1 covariates).
+- [ ] **D6 — Meta-RQ baseline (freeze artifact, not just a field):**
+  `baseline_commit` (the machinery state Phase 2 starts from), the machinery
+  component/module set considered "Paper 3 machinery", the definition of
+  *modification* (core machinery change), the boundary between extension /
+  new client code and core change, and the attribution rule deciding whether
+  a change was required by plan-kind support. Recorded and digest-pinned
+  before the first Phase 2 commit; without it, "near-zero modifications"
+  degrades into post-hoc classification.
+- [ ] **D7 — Deviation identity & dedup:** every deviation carries a stable
+  `deviation_id` and exactly one `discovery_source`. If a declared deviation
+  is later independently re-caught (reviewer/engine), the discovery event
+  **links to the same `deviation_id`** (lineage field) instead of creating a
+  new deviation — event counts are never the RQ-P4 denominator, unique
+  `deviation_id`s are.
 - [ ] **F2 — RQ set (`planbound-rq-v1`):** RQ-P1..P6 + Meta-RQ as worded in
   §3 of this document (hypotheses may be refined; RQ identity does not
   change).

@@ -70,6 +70,12 @@
 ### 6. Implementation (phased; Meta-RQ as evidence)
 - Phase 0–4 plan; artifact+ledger schemas never change across phases
   (design §12).
+- **Measurement instrument: the event ledger** — 16 event types grouped by
+  phase, frozen schema, derivation script as the sole source of numbers
+  (design §9; experiment plan §6).
+- **Reuse boundary: inherited Paper 1–3 machinery** — which acceptance /
+  session / TOCTOU machinery the plan layer inherits zero-copy, and where
+  the extension boundary sits (design §10).
 - Meta-RQ: modifications required to absorb a second decision-object kind
   into Paper 3's machinery, as a generality finding (design §11).
 
