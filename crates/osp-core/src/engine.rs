@@ -1525,15 +1525,19 @@ pub enum ColdStartApprovalError {
     /// Q5 vision context üretilemedi (INV-T9 Step 4b — terminal).
     VisionContextInvalid(String),
     /// **#97 MD-3 revalidation:** baseline sınıfı değişti — artık
-    /// `AllMembersIntroducedByDelta` değil. **#131 P3-5 kararı: V2 altında
-    /// dokümante-unreachable** — onay sınıflandırması artifact'tan rekonstrükte
-    /// edilir (`engine_measurement.before()` = `token.baseline()`; tek üretim:
-    /// ölçüm anı) ve askı tam bu değerin `AllMembersIntroducedByDelta` olduğu
-    /// artifact ile açıldı; onay anında okunan değer yapısal olarak aynıdır.
-    /// Space değişiminde ise 5-fence önce `StaleBinding` düşürür (pin:
-    /// `md3_approve_cold_start_stale_space_fails_closed`). Varyant bilinçli
-    /// kalır: uzaydan yeniden sınıflandırma üretimi geri gelirse fail-closed
-    /// savunma kolu hazır dursun (MCP `baseline_changed` mapping korunur).
+    /// `AllMembersIntroducedByDelta` değil. **#131 P3-5 kararı: mevcut #100
+    /// V2 rekonstrüksiyon yolunda erişilemez** (implementation-scoped gözlem —
+    /// tip sistemiyle zorlanan bir guarantee değil): onay adımı 6'daki
+    /// `engine_measurement.before()` değeri, askıyı açan artifact'ın
+    /// `token.baseline()` alanından rekonstrükte edilir (`verify_task_measurement_binding`)
+    /// ve askı tam bu değerin `AllMembersIntroducedByDelta` olduğu artifact ile
+    /// açıldığından onay anında okunan değer aynı artifact'tan gelir. Bu
+    /// erişilemezlik bir rekonstrüksiyon detayına bağlıdır — `EngineMeasurement`
+    /// kurulumu değişirse kol tekrar reachable olabilir; o zaman bu yorum da
+    /// güncellenmelidir (PR #136 review P1). Space değişiminde ise 5-fence önce
+    /// `StaleBinding` düşürür (pin: `md3_approve_cold_start_stale_space_fails_closed`).
+    /// Varyant bilinçli kalır: defense-in-depth (MCP `baseline_changed`
+    /// mapping korunur).
     BaselineChanged { current: BaselineAvailabilityClass },
     /// **#97 MD-3 revalidation:** task politikası artık
     /// `RequireOperatorApproval` değil (registry'de değişti) — onayın dayanağı kalktı.
@@ -2339,11 +2343,13 @@ impl SpaceEngine {
         // 6. MD-3 revalidation — sınıflandırma hâlâ AllMembersIntroducedByDelta.
         // **#100:** sınıflandırma artifact'tan (`engine_measurement.before()` —
         // `token.baseline()` rekonstrüksiyonu; ikinci partition üretimi yok).
-        // **#131 P3-5:** bu kol V2 altında dokümante-unreachable — (a) okunan
-        // değer askıyı açan artifact'ın birebir kendisidir (tek üretim: ölçüm
-        // anı), (b) space değişimini 4. adımdaki 5-fence önce `StaleBinding`
-        // ile yakalar. Kol bilinçli kalır: uzaydan yeniden sınıflandırma
-        // üretimi geri gelirse fail-closed savunma hazır.
+        // **#131 P3-5:** mevcut V2 rekonstrüksiyon yolunda bu kol erişilemez
+        // (implementation-scoped — PR #136 review P1): (a) okunan değer askıyı
+        // açan artifact'ın kendisidir (rekonstrüksiyon detayı — kurulum
+        // değişirse kol reachable olabilir), (b) space değişimini 4. adımdaki
+        // 5-fence önce `StaleBinding` ile yakalar. Kol bilinçli kalır:
+        // defense-in-depth — uzaydan yeniden sınıflandırma üretimi geri
+        // gelirse fail-closed savunma hazır.
         let baseline_reason = match engine_measurement.before() {
             crate::measurement::MeasurementBaseline::Unavailable {
                 reason:
