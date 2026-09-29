@@ -515,6 +515,12 @@ fn walk_dir(
                         | "site-packages"
                         | "vendor"
                         | ".git"
+                        // C# (#137 Run E): bin/obj üretim artifact'ları — obj/ altında
+                        // compiler-generated .cs dosyaları (AssemblyInfo, *.GlobalUsings)
+                        // node sayısını kirletir (Nexus Run E'de gözlendi; ölçüm ayrıntısı
+                        // canonical kayıtta: docs/notes/run-e-csharp-substrate.md).
+                        | "bin"
+                        | "obj"
                 )
             {
                 continue;
