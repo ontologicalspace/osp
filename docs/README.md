@@ -5,7 +5,7 @@ This directory contains the research artifacts, specifications, and results for 
 navigable conceptual spaces with physics-like rules and BFT-inspired witnessing.
 
 **Getting started:** [`quickstart.md`](quickstart.md) — 2-minute tour: first analysis
-→ first gate rejection, with copy-paste blocks.
+→ first rejected proposal, with copy-paste blocks.
 
 ## Structure
 

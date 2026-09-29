@@ -1,4 +1,4 @@
-# OSP Quickstart — First Analysis, First Gate Rejection
+# OSP Quickstart — First Analysis, First Rejected Proposal
 
 **Time budget:** the three steps below run in about **2 minutes**. The one-time
 build in Step 0 takes a few minutes on first run.
@@ -7,9 +7,10 @@ build in Step 0 takes a few minutes on first run.
 
 1. **Analyze** a tiny Python repository — every module positioned in OSP's
    five-axis conceptual space, with per-metric provenance.
-2. **Play the agent**: submit scripted change proposals and watch OSP's
-   deterministic gate **reject** every one of them.
-3. **Prove it:** the gate never touched your repository.
+2. **Play the agent**: submit scripted change proposals and watch OSP **reject
+   every one of them** — fail-closed on measurement provenance, not on numbers.
+3. **Read the evidence:** what OSP refused, which decision layer refused it,
+   and what that does (and does not yet) mean for your files.
 
 All commands and outputs below are real — captured from a live run against
 OSP `main` on 2026-09-30 (commit `fea02f5`). Commands work in any POSIX shell
@@ -51,9 +52,13 @@ def helper():
     return 42
 EOF
 
-git add main.py utils.py && git commit -m "fixture"
+git add main.py utils.py
+git -c user.name="OSP Quickstart" -c user.email="quickstart@local" commit -m "fixture"
 cd ..
 ```
+
+(The inline identity flags make the block work on a fresh machine with no
+git identity configured.)
 
 Analyze it (adjust the path to your OSP checkout):
 
@@ -95,7 +100,7 @@ Two things to notice:
   `placeholder` for cohesion. In OSP, *where a number comes from* is a
   first-class citizen. That matters in the next step.
 
-## Step 2 — First gate rejection (~60 s)
+## Step 2 — First rejected proposal (~60 s)
 
 Now act as the coding agent. You will submit five identical scripted
 proposals — "add a new module connected to node 0" — through a **mock LLM**
@@ -150,25 +155,47 @@ that matter):
 exit code: 12
 ```
 
-**What just happened?** Task 1 is the built-in demo task (defined in
+**What just happened — three separate decisions.** OSP deliberately reports
+the outcome as three distinct layers, and the evidence shows each one:
+
+| Decision layer | Evidence field | Observed | Meaning |
+|---|---|---|---|
+| Hard claim gates | `gate_decision` | `PassedAll` | syntax / vision / rule checks on the proposal all passed |
+| Task predicate | `predicate_completion` | `NotCompleted` | the task's measurement condition could not be established |
+| Mutation policy | `mutation_decision` | `Reject` | predicate unmet + StrictReject policy ⇒ the proposed conceptual-space mutation was refused |
+
+So this run is **not** a hard-gate rejection — the gates passed. It is a
+**fail-closed predicate rejection**: the proposal died at the predicate
+layer, and the mutation policy turned that into a refusal.
+
+Task 1 is the built-in demo task (defined in
 [`crates/osp-cli/src/commands/mod.rs`](../crates/osp-cli/src/commands/mod.rs)):
-it demands `coupling ≤ 0.55` on node 0 (`main.py`) **with SCIP provenance**.
-The quickstart runs Tier-1 analysis only, so the after-state measurement
-carries a `tree_sitter` coupling — and OSP **fails closed on provenance**:
-the predicate cannot complete on a measurement from the wrong source, so the
-mutation is rejected no matter what the number says. (This was verified with
-an isolated-module proposal that leaves node 0 numerically untouched — still
-`NotCompleted`.)
+it demands `coupling ≤ 0.55` on node 0 (`main.py`) **with SCIP provenance**
+(`required_source: Scip`). The `trajectory attempt` path currently performs
+Tier-1 analysis only — it accepts no SCIP index — so the after-state
+measurement carries a `tree_sitter` coupling, and OSP **fails closed on
+provenance**: a predicate cannot complete on a measurement from the wrong
+source, no matter what the number says. (Verified with an isolated-module
+proposal that leaves node 0 numerically untouched — still `NotCompleted`.)
+Through this CLI path the demo task is therefore **structurally
+unsatisfiable today** — that gap and the possible fix (`--scip` wiring) are
+tracked in [#144](https://github.com/ontologicalspace/osp/issues/144).
 
 The agent retried five times (the default maneuver limit — INV-T7 caps
-agent-correctable retries), the gate rejected five times, and OSP ended the
-run with exit code **12** (`EXCEEDED_MANEUVER_LIMIT`, part of the stable CLI
-exit-code contract). With a Tier-2 SCIP index the same predicate becomes
-evaluable — see the README section *Generating SCIP Indices*.
+agent-correctable retries), was refused five times, and OSP ended the run
+with exit code **12** (`EXCEEDED_MANEUVER_LIMIT`, part of the stable CLI
+exit-code contract).
 
-## Step 3 — Nothing was mutated
+## Step 3 — What the refusal did (and did not) touch
 
-The whole point of OSP: gates run **before** mutation.
+- **The conceptual space was not mutated.** `mutation_decision: "Reject"` is
+  the evidence: OSP refused to apply the proposed change to its in-memory
+  model of your architecture. That refusal is the OSP guarantee in action.
+- **This CLI flow does not apply source-code patches.** Proposals are
+  structural (nodes and edges in the conceptual space); translating an
+  accepted structural delta into real code edits is a separate, not-yet-built
+  layer. Even an accepted proposal would not have rewritten `main.py`.
+- **The worktree check confirms the run left no incidental writes:**
 
 ```bash
 git -C demo log --oneline
@@ -179,9 +206,9 @@ git -C demo status --short
 c23cec5 fixture
 ```
 
-One commit — exactly what you created. Five proposals went in, zero mutations
-came out; the working tree is clean. An OSP-gated agent cannot mutate your
-mainline until its proposal survives the deterministic gates.
+One commit — exactly what you created — and an empty `git status`. The
+honest summary: five proposals in, five refusals out, zero accepted
+conceptual-space mutations, zero filesystem changes.
 
 ---
 
@@ -192,9 +219,11 @@ mainline until its proposal survives the deterministic gates.
   coverage.
 - **Task = measurement predicate:** work is expressed as conditions on the
   space (e.g. "coupling ≤ 0.55 on this node, measured by SCIP"), not as text.
-- **Navigator loop:** proposal → claim gates → measure the after-state →
-  predicate evaluation → mutation decision. Rejected proposals never reach
-  the repository.
+- **Navigator loop:** proposal → hard claim gates → measure the after-state →
+  predicate evaluation → mutation decision — three distinct layers
+  (`gate_decision`, `predicate_completion`, `mutation_decision`).
+- **Structural, not source:** proposals mutate the conceptual space; applying
+  accepted deltas as source-code patches is a future layer.
 - **Exit codes are a contract:** `0` completed, `10` awaiting witnesses,
   `11` requires revision, `12` maneuver limit exceeded, `13` operator
   approval required, `14` cold-start approval required (full list:

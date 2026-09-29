@@ -19,7 +19,8 @@
 ## Quick Start
 
 > **New here?** Try the [2-minute quickstart](docs/quickstart.md): first analysis →
-> first gate rejection, from a clean clone, with copy-paste blocks.
+> first rejected proposal (fail-closed on measurement provenance), from a clean
+> clone, with copy-paste blocks.
 
 ### Prerequisites
 
