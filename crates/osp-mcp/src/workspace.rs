@@ -43,7 +43,7 @@ pub enum WorkspaceError {
 /// claim ÜRETİLMEZ).
 #[derive(Debug, thiserror::Error)]
 pub enum ClaimIdAllocationError {
-    #[error("claim id space exhausted (u64::MAX allocated) — refusing to wrap and reuse ids")]
+    #[error("claim id space exhausted (u64::MAX reached — sentinel, never allocated) — refusing to wrap and reuse ids")]
     Exhausted,
 }
 
@@ -64,13 +64,13 @@ pub struct Workspace {
     pub node_count: usize,
     /// Edge sayısı.
     pub edge_count: usize,
-    /// **#133:** Server-ömürlü monotonic claim id kaynağı (bir sonraki
-    /// atanacak id = depolanan değer + 1). Motorun in-flight
-    /// `suspended_cold_starts` map'i claim_id ile anahtarlanır — benzersizlik
-    /// yoksa eşzamanlı askılar birbirini ezer (Run D F1). Atomic: mutex
-    /// bağımsız benzersizlik; Relaxed yeterli (yalnız tekillilik sözleşmesi).
-    /// **Review P1:** tükenmede wrap YOK — `next_claim_id` Err döner
-    /// (`checked_add`; benzersizlik fail-closed).
+    /// **#133:** Server-ömürlü monotonic claim id kaynağı (atanan id =
+    /// depolanan değer; depolama `checked_add` ile bir sonrakine ilerler).
+    /// Motorun in-flight `suspended_cold_starts` map'i claim_id ile
+    /// anahtarlanır — benzersizlik yoksa eşzamanlı askılar birbirini ezer
+    /// (Run D F1). Atomic: mutex bağımsız benzersizlik; Relaxed yeterli
+    /// (yalnız tekillilik sözleşmesi). **Review P1:** tükenmede wrap YOK —
+    /// `next_claim_id` Err döner (benzersizlik fail-closed).
     next_claim_id: AtomicU64,
 }
 
