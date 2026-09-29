@@ -1525,8 +1525,19 @@ pub enum ColdStartApprovalError {
     /// Q5 vision context üretilemedi (INV-T9 Step 4b — terminal).
     VisionContextInvalid(String),
     /// **#97 MD-3 revalidation:** baseline sınıfı değişti — artık
-    /// `AllMembersIntroducedByDelta` değil (pratikte 5-fence önce yakalar;
-    /// savunma yolu).
+    /// `AllMembersIntroducedByDelta` değil. **#131 P3-5 kararı: mevcut #100
+    /// V2 rekonstrüksiyon yolunda erişilemez** (implementation-scoped gözlem —
+    /// tip sistemiyle zorlanan bir guarantee değil): onay adımı 6'daki
+    /// `engine_measurement.before()` değeri, askıyı açan artifact'ın
+    /// `token.baseline()` alanından rekonstrükte edilir (`verify_task_measurement_binding`)
+    /// ve askı tam bu değerin `AllMembersIntroducedByDelta` olduğu artifact ile
+    /// açıldığından onay anında okunan değer aynı artifact'tan gelir. Bu
+    /// erişilemezlik bir rekonstrüksiyon detayına bağlıdır — `EngineMeasurement`
+    /// kurulumu değişirse kol tekrar reachable olabilir; o zaman bu yorum da
+    /// güncellenmelidir (PR #136 review P1). Space değişiminde ise 5-fence önce
+    /// `StaleBinding` düşürür (pin: `md3_approve_cold_start_stale_space_fails_closed`).
+    /// Varyant bilinçli kalır: defense-in-depth (MCP `baseline_changed`
+    /// mapping korunur).
     BaselineChanged { current: BaselineAvailabilityClass },
     /// **#97 MD-3 revalidation:** task politikası artık
     /// `RequireOperatorApproval` değil (registry'de değişti) — onayın dayanağı kalktı.
@@ -2331,9 +2342,14 @@ impl SpaceEngine {
 
         // 6. MD-3 revalidation — sınıflandırma hâlâ AllMembersIntroducedByDelta.
         // **#100:** sınıflandırma artifact'tan (`engine_measurement.before()` —
-        // token baseline; ikinci partition üretimi yok). (Pratikte 4. adımdaki
-        // 5-fence space değişimini önce yakalar; bu kol savunma derinliği —
-        // baseline artifact'ı ile binding farklı preimage'lara bakar.)
+        // `token.baseline()` rekonstrüksiyonu; ikinci partition üretimi yok).
+        // **#131 P3-5:** mevcut V2 rekonstrüksiyon yolunda bu kol erişilemez
+        // (implementation-scoped — PR #136 review P1): (a) okunan değer askıyı
+        // açan artifact'ın kendisidir (rekonstrüksiyon detayı — kurulum
+        // değişirse kol reachable olabilir), (b) space değişimini 4. adımdaki
+        // 5-fence önce `StaleBinding` ile yakalar. Kol bilinçli kalır:
+        // defense-in-depth — uzaydan yeniden sınıflandırma üretimi geri
+        // gelirse fail-closed savunma hazır.
         let baseline_reason = match engine_measurement.before() {
             crate::measurement::MeasurementBaseline::Unavailable {
                 reason:
@@ -10341,6 +10357,103 @@ v = 0.5
             }
         );
         assert!(!engine.space().nodes.contains_key(&10_000));
+    }
+
+    /// #131 P3-5 fixture kuralı — deterministik ihlal üretir (her çağrıda
+    /// Some). Askı yolu Q6'ya ULAŞMADAN döndüğü için üretim askısını
+    /// engellemez; onay anındaki Q6 revalidation'ı bu kurala takılır.
+    struct AlwaysRejectRule {
+        id: crate::rule::RuleId,
+    }
+
+    impl crate::rule::Rule for AlwaysRejectRule {
+        fn id(&self) -> &crate::rule::RuleId {
+            &self.id
+        }
+        fn descriptor(&self) -> crate::authorization::RuleDescriptor {
+            crate::authorization::RuleDescriptor {
+                rule_id: self.id.clone(),
+                semantics_version: 1,
+                canonical_parameters: vec![],
+            }
+        }
+        fn evaluate(
+            &self,
+            _new_nodes: &[crate::space::Node],
+            _new_edges: &[crate::space::Edge],
+            _space: &crate::space::Space,
+        ) -> Option<crate::rule::RuleViolation> {
+            Some(crate::rule::RuleViolation {
+                rule_id: self.id.clone(),
+                detail: "fixture: deterministic rejection (#131 P3-5)".to_string(),
+                severity: crate::rule::RuleSeverity::Hard,
+            })
+        }
+    }
+
+    /// **Fail-closed (#131 P3-5):** askı Q6'dan ÖNCE üretildiği için reddeden
+    /// bir kural askının açılmasını engelleMEZ (pipeline gate sırası bilinçli —
+    /// PR #130 P3 notu: operatör deterministik reddedilecek bir onaya davet
+    /// edilebilir). Güvenlik ONAY ANINDA kapanır: Q6 revalidation →
+    /// `RuleViolation`; mutasyon YOK, askı kaydı yerinde kalır (tek kullanım
+    /// tükenmez — operatör durumu değerlendirip akışı normal commit yoluna
+    /// yönlendirir).
+    #[test]
+    fn md3_approve_cold_start_rule_violation_fails_closed_at_approval() {
+        use crate::engine::{
+            ColdStartApprovalError, ColdStartApprovalInput, ColdStartAuthorizationId,
+            ColdStartOperatorId,
+        };
+
+        let mut engine = md3_engine_user_vision();
+        // Kural ASKIDAN ÖNCE kayıtlı — yine de askı üretilir (sıralama pin'i:
+        // askı Q6 öncesi return ile açılır, kural ihlali askıyı sessizce
+        // engellemez).
+        engine
+            .register_rule(Box::new(AlwaysRejectRule {
+                id: "test.always_reject".to_string(),
+            }))
+            .expect("kural kaydı");
+        let registry = md3_registry_require_operator();
+        let claim_id = md3_suspend_cold_start(&mut engine, &registry, 100);
+
+        let digest_before = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        let err = engine
+            .approve_cold_start(ColdStartApprovalInput::new(
+                1,
+                claim_id,
+                ColdStartOperatorId::new("op-alice").unwrap(),
+                ColdStartAuthorizationId::new("APR-97-1").unwrap(),
+                &registry as &dyn crate::trajectory::TaskResolver,
+            ))
+            .expect_err("onay Q6 kural kapısını bypass ETMEZ");
+        match err {
+            ColdStartApprovalError::RuleViolation(detail) => assert!(
+                detail.contains("test.always_reject"),
+                "ihlal detayı reddeden kuralın kimliğini taşır: {detail}"
+            ),
+            other => panic!("RuleViolation bekleniyordu; got: {other:?}"),
+        }
+
+        // Mutasyon YOK — uzay digest'i değişmez, t_c ilerleMEZ.
+        let digest_after = crate::authorization::SpaceDigest::compute(engine.space()).unwrap();
+        assert_eq!(digest_before, digest_after);
+        assert!(!engine.space().nodes.contains_key(&10_000));
+        assert_eq!(engine.t_c, 0, "başarısız onay zaman sayacını ilerletmez");
+
+        // Askı kaydı yerinde — hata yolunda kayıt DÜŞÜRÜLMEZ; tekrar deneme
+        // yine RuleViolation (UnknownSuspension DEĞİL).
+        assert!(engine.suspended_cold_starts.contains_key(&claim_id));
+        let again = engine
+            .approve_cold_start(ColdStartApprovalInput::new(
+                1,
+                claim_id,
+                ColdStartOperatorId::new("op-alice").unwrap(),
+                ColdStartAuthorizationId::new("APR-97-2").unwrap(),
+                &registry as &dyn crate::trajectory::TaskResolver,
+            ))
+            .expect_err("kayıt yerinde kalmalı");
+        assert!(matches!(again, ColdStartApprovalError::RuleViolation(_)));
     }
 
     /// **#95-A W4 — affected-irrelevance TAM YOL (executable theorem):** Δ

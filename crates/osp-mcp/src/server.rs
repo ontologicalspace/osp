@@ -1419,4 +1419,63 @@ mod tests {
             _ => panic!("should have blocked"),
         }
     }
+
+    /// **#131 P3-5 — per-tool INV-T2 pin (`osp_approve_cold_start`):** agent
+    /// mode'da gerçek tool handler reddedilir (mode-seviye test
+    /// `g2_inv_t2_gate_operator_tool_rejected_in_agent_mode` gate'i public
+    /// API'den göremez — router private; bu test handler'ı doğrudan çağırır).
+    /// Operator mode'da gate geçer, akış domain katmanına iner (bilinmeyen
+    /// claim → typed `unknown_suspension`, mutasyon YOK) — Run D'deki canlı
+    /// `OPERATOR_CAPABILITY_REQUIRED` kanıtının otomatik karşılığı.
+    #[tokio::test]
+    async fn osp_approve_cold_start_agent_mode_denied_per_tool_inv_t2() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("main.py"), "x = 1\n").expect("fixture repo");
+        let llm: std::sync::Arc<dyn osp_core::navigator::LlmClient> =
+            std::sync::Arc::new(osp_core::navigator::MockLlmClient::new(Vec::new()));
+        let make_server = |mode: crate::mode::ServerMode| {
+            let workspace = Workspace::analyze(dir.path(), None).expect("workspace analyze");
+            OspMcpServer::new(workspace, mode, std::sync::Arc::clone(&llm))
+        };
+
+        let input = Parameters(ApproveColdStartInput {
+            task_id: 1,
+            claim_id: 1,
+            operator_id: "op-alice".into(),
+            authorization_id: "APR-97-1".into(),
+        });
+
+        // Agent mode — INV-T2 gate: Err kanalında OperatorCapabilityRequired
+        // envelope (gate, domain katmanına ULAŞMAZ — workspace lock bile alınmaz).
+        let denied = make_server(crate::mode::ServerMode::Agent)
+            .osp_approve_cold_start(input)
+            .await
+            .expect_err("agent mode — onay operatör eylemidir (INV-T2)");
+        assert!(
+            denied.contains("OPERATOR_CAPABILITY_REQUIRED"),
+            "typed error code: {denied}"
+        );
+        assert!(
+            denied.contains("osp_approve_cold_start"),
+            "envelope reddedilen tool'u adlandırır: {denied}"
+        );
+        assert!(denied.contains("INV-T2"), "invariant kökeni: {denied}");
+
+        // Operator mode — gate geçer; domain katmanı typed sonuç döner
+        // (bilinmeyen claim → unknown_suspension; mutasyon YOK).
+        let operator = make_server(crate::mode::ServerMode::Operator)
+            .osp_approve_cold_start(Parameters(ApproveColdStartInput {
+                task_id: 1,
+                claim_id: 999,
+                operator_id: "op-alice".into(),
+                authorization_id: "APR-97-1".into(),
+            }))
+            .await
+            .expect("operator mode — gate geçer, domain sonucu Ok kanalı");
+        assert!(
+            operator.contains("unknown_suspension"),
+            "gate sonrası akış domain katmanına iner: {operator}"
+        );
+        assert!(operator.contains("\"applied\":false"));
+    }
 }
