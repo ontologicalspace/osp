@@ -88,5 +88,15 @@ jobs:
       - name: Run tests
         run: cargo test --locked --workspace --verbose --exclude osp-desktop
 
+      # #140 (hedef kartı P1): Paper 3 invariant-evidence matrix'ini her push/PR'da
+      # canlı doğrula. Script stdlib-only Python; her entry için cargo test -- --exact
+      # çağırır (yukarıdaki adımların warm target cache'ini kullanır) ve MANIFEST
+      # sha256 ↔ git blob + run-metadata.md ↔ .json çapraz kontrollerini yapar.
+      # Exit != 0 => matrix ↔ canlı kod drift: evidence claim'i artık geçersiz.
+      # Bilinçli kabul: pull_request event'i workflow tanımını base branch'ten alır;
+      # bu adımın ilk canlı koşumu merge sonrası main push'undadır.
+      - name: Verify invariant evidence matrix
+        run: python3 scripts/verify_invariant_evidence.py
+
       - name: Build examples
         run: cargo build --locked --workspace --examples --exclude osp-desktop
