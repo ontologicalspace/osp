@@ -26,6 +26,9 @@ pub struct RepoContext {
     pub go_module_path: Option<String>,
     /// Go: package directory → files index (O(1) import lookup). Non-Go repo'da boş.
     pub go_package_index: GoPackageIndex,
+    /// C# (#137): namespace → declaring files index (`using N.S;` çözümlemesi).
+    /// Non-C# repo'da boş (build yalnız `.cs` dosyalarını parse eder).
+    pub csharp_namespace_index: crate::adapters::shared::CSharpNamespaceIndex,
 }
 
 impl RepoContext {
@@ -33,12 +36,15 @@ impl RepoContext {
         let resolver = ImportResolver::build(&all_files);
         let go_module_path = crate::adapters::shared::detect_go_module_path(&repo_root);
         let go_package_index = GoPackageIndex::build(&repo_root, &all_files);
+        let csharp_namespace_index =
+            crate::adapters::shared::CSharpNamespaceIndex::build(&all_files);
         Self {
             repo_root,
             all_files,
             resolver,
             go_module_path,
             go_package_index,
+            csharp_namespace_index,
         }
     }
 }
@@ -50,12 +56,12 @@ impl RepoContext {
 /// Her dil için syntactic analiz arayüzü (Tier 1).
 ///
 /// Implementasyonlar: `PythonAdapter`, `TypeScriptAdapter`, `JavaScriptAdapter`,
-/// `RustAdapter` 🆕, `GoAdapter` 🆕 — Faz 3.2+.
+/// `RustAdapter`, `GoAdapter`, `CSharpAdapter` (#137) — Faz 3.2+.
 pub trait LanguageAdapter: Send + Sync {
-    /// Dil adı: "python", "typescript", "rust", "go".
+    /// Dil adı: "python", "typescript", "rust", "go", "csharp".
     fn name(&self) -> &str;
 
-    /// Desteklenen dosya uzantıları: [".py"], [".rs"], [".go"].
+    /// Desteklenen dosya uzantıları: [".py"], [".rs"], [".go"], [".cs"].
     fn extensions(&self) -> &[&str];
 
     /// Import deyimlerini çıkar (syntactic).

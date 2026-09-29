@@ -241,6 +241,26 @@ fn extract_import_path(node: &Node, source: &[u8], imports: &mut Vec<String>) {
                 }
             }
         }
+    } else if kind == "using_directive" {
+        // C# (#137): `using N.T;` / `using static N.T.M;` / `global using N;` /
+        // `using Alias = N.T;` — alias formunda BAĞIMLILIK hedeftedir (sol taraf
+        // yerel addır). Grammar'ın plain formunda name field yoktur (yalnız alias
+        // dalında vardır — node-types); bu yüzden text-bazlı işleme (use_declaration
+        // kalıbı): önekler soyulur, '=' varsa sağ taraf alınır.
+        if let Ok(text) = node.utf8_text(source) {
+            let mut t = text.trim().trim_end_matches(';').trim();
+            for prefix in ["global", "using", "static", "unsafe"] {
+                if let Some(rest) = t.strip_prefix(prefix) {
+                    t = rest.trim();
+                }
+            }
+            if let Some((_, target)) = t.split_once('=') {
+                t = target.trim();
+            }
+            if !t.is_empty() {
+                imports.push(t.to_string());
+            }
+        }
     }
 }
 
@@ -522,8 +542,21 @@ fn find_methods(node: &Node, source: &[u8]) -> Vec<String> {
     let mut methods = Vec::new();
     let mut stack = vec![*node];
     while let Some(n) = stack.pop() {
-        if n.kind() == "function_definition" || n.kind() == "method_definition" {
-            if let Some(name) = find_first_identifier(&n, source) {
+        // `method_declaration` = C# (#137). Go'da da aynı kind adı vardır ama Go
+        // metotları top-level'dır — type_declaration alt ağacına girmezler, bu
+        // yüzden Go çıktısı değişmez. Name-field önceliği Python/JS için nötrdür
+        // (ad alanları == ilk identifier); C# için gereklidir — dönüş tipi de
+        // identifier olabilir (`MyResult Send()` → "Send", "MyResult" DEĞİL).
+        if matches!(
+            n.kind(),
+            "function_definition" | "method_definition" | "method_declaration"
+        ) {
+            let name = n
+                .child_by_field_name("name")
+                .and_then(|nm| nm.utf8_text(source).ok())
+                .map(|s| s.trim().to_string())
+                .or_else(|| find_first_identifier(&n, source));
+            if let Some(name) = name {
                 methods.push(name);
             }
         }
@@ -812,6 +845,106 @@ impl ImportResolver {
     /// HashMap boş mu (clippy len_without_is_empty).
     pub fn is_empty(&self) -> bool {
         self.map.is_empty()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// C# namespace index (#137) — namespace → dosyalar
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// C# namespace'lerini dosyalarıyla indeksleyen harita — `using N.S;`
+/// (namespace-form, C#'ta baskın form) çözümlemesi için.
+///
+/// GoPackageIndex ile aynı ilke: C#'ta bir namespace birden çok dosyaya yayılır
+/// ve dizin yoluyla birebir örtüşmek zorunda değildir; repo İÇİNDE declare
+/// edilmek internal olmanın kanıtıdır (Rust'ın `crate::` işaretine karşılık
+/// C#'ta sözdizimsel işaret yoktur — declare edilmişlik o işareti sağlar).
+/// Kenar hedefi temsilci dosyadır (sorted-first, deterministik).
+///
+/// Build maliyeti: her `.cs` dosyası bir kez parse edilir (namespace_declaration
+/// ağacı için). Non-C# repo'da boş indeks — maliyet sıfır.
+#[derive(Debug, Clone, Default)]
+pub struct CSharpNamespaceIndex {
+    map: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+}
+
+impl CSharpNamespaceIndex {
+    /// Tüm `.cs` dosyalarını parse edip `namespace_declaration` isimlerini
+    /// indeksle. Dosya-başına (`namespace A;`) VE blok (`namespace A { }`)
+    /// formları desteklenir; iç içe bloklarda üst adlar önek olarak birleştirilir
+    /// (`namespace A { namespace B { } }` → "A" ve "A.B").
+    pub fn build(all_files: &[std::path::PathBuf]) -> Self {
+        let mut map: std::collections::HashMap<String, Vec<std::path::PathBuf>> =
+            std::collections::HashMap::new();
+        for f in all_files {
+            if f.extension().and_then(|e| e.to_str()) != Some("cs") {
+                continue;
+            }
+            let source = match std::fs::read_to_string(f) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let tree = match parse_root(&source, tree_sitter_c_sharp::LANGUAGE.into()) {
+                Some(t) => t,
+                None => continue,
+            };
+            let mut names = Vec::new();
+            collect_namespace_names(tree.root_node(), source.as_bytes(), "", &mut names);
+            for name in names {
+                map.entry(name).or_default().push(f.clone());
+            }
+        }
+        for files in map.values_mut() {
+            files.sort();
+        }
+        Self { map }
+    }
+
+    /// İndekslenen namespace sayısı (diagnostic).
+    pub fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
+    /// `using N.S;` → o namespace'i declare eden temsilci dosya (sorted-first).
+    /// Exact match — önek/kısaltma denemesi YOK (namespace'ler tam adlarla eşleşir).
+    pub fn resolve(&self, namespace: &str) -> Option<&std::path::PathBuf> {
+        self.map.get(namespace).and_then(|files| files.first())
+    }
+}
+
+/// `namespace_declaration` (blok formu) VE `file_scoped_namespace_declaration`
+/// (`namespace X;` — C# 10+, modern default) ağaçlarından isimleri topla —
+/// iç içe bloklarda önek birleştirmeli recursive walk. İki kind da `name`
+/// field'ı taşır (node-types).
+fn collect_namespace_names(node: Node, source: &[u8], prefix: &str, out: &mut Vec<String>) {
+    for i in 0..node.child_count() {
+        if let Some(c) = node.child(i) {
+            let k = c.kind();
+            if k == "namespace_declaration" || k == "file_scoped_namespace_declaration" {
+                if let Some(name_node) = c.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        let name = text.trim();
+                        let full = if prefix.is_empty() {
+                            name.to_string()
+                        } else {
+                            format!("{prefix}.{name}")
+                        };
+                        out.push(full.clone());
+                        // Blok içindekiler (nested namespaces / using'ler) declaration_list'te.
+                        collect_namespace_names(c, source, &full, out);
+                        continue;
+                    }
+                }
+                // İsim okunamadıysa bile alt ağacı tara (öneksiz).
+                collect_namespace_names(c, source, prefix, out);
+            } else {
+                collect_namespace_names(c, source, prefix, out);
+            }
+        }
     }
 }
 
@@ -1178,6 +1311,74 @@ mod tests {
             target2,
             Some(&pb("/repo/internal/pkg/util/internal_util.go"))
         );
+    }
+
+    // --- CSharpNamespaceIndex (#137) ---
+
+    #[test]
+    fn csharp_namespace_index_file_scoped_and_block_forms() {
+        let dir = tempdir();
+        std::fs::write(
+            dir.join("Svc.cs"),
+            "namespace Fixture.Services;\n\npublic class MailService { }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Models.cs"),
+            "namespace Fixture.Models\n{\n    public record Mail(int Id);\n}\n",
+        )
+        .unwrap();
+        let files = vec![dir.join("Svc.cs"), dir.join("Models.cs")];
+        let idx = CSharpNamespaceIndex::build(&files);
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.resolve("Fixture.Services"), Some(&dir.join("Svc.cs")));
+        assert_eq!(idx.resolve("Fixture.Models"), Some(&dir.join("Models.cs")));
+        assert_eq!(
+            idx.resolve("Fixture"),
+            None,
+            "exact match — önek kısaltması yok"
+        );
+    }
+
+    #[test]
+    fn csharp_namespace_index_nested_block_prefixes_composed() {
+        // `namespace A { namespace B { } }` → "A" VE "A.B" indekslenir.
+        let dir = tempdir();
+        std::fs::write(
+            dir.join("Deep.cs"),
+            "namespace Outer\n{\n    namespace Inner\n    {\n        public class X { }\n    }\n}\n",
+        )
+        .unwrap();
+        let files = vec![dir.join("Deep.cs")];
+        let idx = CSharpNamespaceIndex::build(&files);
+        assert_eq!(idx.len(), 2);
+        assert_eq!(idx.resolve("Outer.Inner"), Some(&dir.join("Deep.cs")));
+        assert_eq!(idx.resolve("Outer"), Some(&dir.join("Deep.cs")));
+    }
+
+    #[test]
+    fn csharp_namespace_index_representative_is_deterministic() {
+        // Aynı namespace birden çok dosyada declare edilebilir (C# serbestliği)
+        // — temsilci sorted-first, deterministik.
+        let dir = tempdir();
+        std::fs::write(dir.join("B.cs"), "namespace Ns;\nclass B { }\n").unwrap();
+        std::fs::write(dir.join("A.cs"), "namespace Ns;\nclass A { }\n").unwrap();
+        let files = vec![dir.join("B.cs"), dir.join("A.cs")]; // sıra bilinçli ters
+        let idx = CSharpNamespaceIndex::build(&files);
+        assert_eq!(
+            idx.resolve("Ns"),
+            Some(&dir.join("A.cs")),
+            "sorted-first temsilci"
+        );
+    }
+
+    #[test]
+    fn csharp_namespace_index_non_cs_repo_is_empty() {
+        // Non-C# repo'da build .cs filtresiyle boş — maliyet sıfır.
+        let dir = tempdir();
+        std::fs::write(dir.join("main.py"), "import os\n").unwrap();
+        let idx = CSharpNamespaceIndex::build(&[dir.join("main.py")]);
+        assert!(idx.is_empty());
     }
 
     fn tempdir() -> std::path::PathBuf {
