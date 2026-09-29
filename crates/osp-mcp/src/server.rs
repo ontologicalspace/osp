@@ -887,12 +887,35 @@ impl Workspace {
         //    boundary `osp_core::task_measurement`; Q4 logic KOPYALANMAZ — tek
         //    truth). Structural Q4 fallible scope/measurement'tan ÖNCE
         //    (Q4-vs-measurement precedence — yarış testi MCP için de pinli).
+        //    **#133:** claim_id server-ömürlü monotonic sayaçtan — eski sabit 1
+        //    eşzamanlı askıları `suspended_cold_starts` map'inde eziyordu
+        //    (Run D F1). Agent id 1 bilinçli kalır: MCP tek agent lane —
+        //    AgentId gönderen özneyi, ClaimId attempt'i adlandırır; ikincil
+        //    submit'ler aynı yüzeyden geldiği için agent kimliği değişmez.
+        //    **Review P1:** id uzayı tükenirse allocation fail-closed —
+        //    wrap'le id yeniden ÜRETİLMEZ; terminal `system_failure`
+        //    (operational/TCB family — ölçüme/commit'e ULAŞILMAZ).
+        let claim_id = match self.next_claim_id() {
+            Ok(id) => id,
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "system_failure": {
+                        "class": "ClaimIdExhausted",
+                        "retryable": false,
+                    },
+                    "apply_target": "NotApplied",
+                    "loss_after": null,
+                    "measured_after": null,
+                    "message": format!("claim id allocation: {e}"),
+                }));
+            }
+        };
         let draft = match osp_core::task_measurement::StructurallyValidatedClaimDraft::try_new(
             proposal,
             RawPosition::default(),
             task,
             1,
-            1,
+            claim_id,
         ) {
             Ok(d) => d,
             Err(osp_core::task_measurement::ClaimDraftError::TaskSubjectScope(e)) => {

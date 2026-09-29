@@ -5,6 +5,10 @@
 //! otoritesi — witness quorum değil) → `AcceptAsColdStart` + Sandbox apply +
 //! `ColdStartAcceptanceEvidence`. Mainline promotion mekanizması YOK
 //! (INV-T8 extension); improvement iddiası taşınmaz (INV-T6 extension).
+//!
+//! **#133:** eşzamanlı askılar benzersiz claim id alır (server-ömürlü
+//! monotonic sayaç) — ikinci askı `stale_binding` ile fail-closed; çapraz-task
+//! askılar birbirini ezmez.
 
 use std::fs;
 use std::sync::Arc;
@@ -163,4 +167,112 @@ fn mcp_cold_start_approval_rejects_empty_identities() {
         .expect("json kanalı");
     assert_eq!(bad["error"], "empty_operator_id", "{bad}");
     assert_eq!(bad["applied"], false);
+}
+
+/// **#133:** Eşzamanlı askılar benzersiz claim id alır (server-ömürlü monotonic
+/// sayaç — eski sabit 1 ikinci askı kaydını ilkinin üzerine yazıyordu). İlki
+/// onaylanıp uzay ilerleyince ikincisi `stale_binding` ile fail-closed düşer
+/// (motor-parite: `md3_approve_cold_start_stale_space_fails_closed`); kayıt
+/// yerinde kalır — tekrar deneme yine stale (UnknownSuspension DEĞİL).
+#[test]
+fn mcp_concurrent_cold_start_suspensions_unique_claim_ids_second_stale() {
+    let handle = make_server_handle();
+    let task = cold_start_task();
+    let proposal = cold_start_proposal();
+
+    // 1. İki eşzamanlı askı — id'ler benzersiz ve monotonic.
+    let (claim_a, claim_b) = {
+        let mut ws = handle.lock().unwrap();
+        let a = ws
+            .submit_delta_attempt(&proposal, &task)
+            .expect("askı A json");
+        assert_eq!(a["commit_result"], "SuspendedColdStart", "{a}");
+        let b = ws
+            .submit_delta_attempt(&proposal, &task)
+            .expect("askı B json");
+        assert_eq!(b["commit_result"], "SuspendedColdStart", "{b}");
+        (
+            a["claim_id"].as_u64().expect("claim_id u64"),
+            b["claim_id"].as_u64().expect("claim_id u64"),
+        )
+    };
+    assert_eq!(claim_a, 1, "ilk submit claim_id 1 — wire-uyumlu start");
+    assert_eq!(claim_b, 2, "ikinci submit monotonic benzersiz id alır");
+
+    // 2. A'yı onayla — uygulanır, uzay ilerler (t_c 1).
+    let mut registry = osp_core::trajectory::InMemoryTaskRegistry::new();
+    registry.insert(task);
+    let mut ws = handle.lock().unwrap();
+    let approved = ws
+        .approve_cold_start(1, claim_a, "op-alice", "APR-133-A", &registry)
+        .expect("onay A json");
+    assert_eq!(approved["applied"], true, "{approved}");
+    assert_eq!(approved["commit_result"], "AcceptAsColdStart");
+    assert_eq!(approved["t_c"], 1);
+
+    // 3. B'nin onayı — askı anındaki uzay revizyonu bayat (#96 5-fence replay).
+    let stale = ws
+        .approve_cold_start(1, claim_b, "op-alice", "APR-133-B", &registry)
+        .expect("onay B json kanalı");
+    assert_eq!(stale["error"], "stale_binding", "{stale}");
+    assert_eq!(stale["applied"], false);
+    assert_eq!(stale["retryable"], false);
+
+    // 4. Kayıt yerinde — tekrar deneme yine stale (motor-parite pin).
+    let again = ws
+        .approve_cold_start(1, claim_b, "op-alice", "APR-133-B2", &registry)
+        .expect("json kanalı");
+    assert_eq!(again["error"], "stale_binding", "{again}");
+}
+
+/// **#133 çapraz-task pin:** farklı task'ların eşzamanlı askıları birbirini
+/// EZMEZ — pre-fix tek claim_id (1) task B submit'inin kaydı task A'nın
+/// kaydının üzerine yazıp A'nın onayını `task_mismatch`'a düşürürdü. Benzersiz
+/// id'lerle A'nın onayı aradaki B askısından etkilenmeden uygulanır; B uzay
+/// ilerlediği için `stale_binding` ile reddedilir.
+#[test]
+fn mcp_cross_task_cold_start_suspensions_do_not_clobber() {
+    let handle = make_server_handle();
+    let task_a = cold_start_task();
+    let mut task_b = cold_start_task();
+    task_b.id = 2;
+    task_b.label = "md3 cold-start MCP contract (task B)".into();
+    let proposal = cold_start_proposal();
+
+    // Task A askısı → claim 1; araya Task B askısı girer → claim 2.
+    let (claim_a, claim_b) = {
+        let mut ws = handle.lock().unwrap();
+        let a = ws
+            .submit_delta_attempt(&proposal, &task_a)
+            .expect("askı A json");
+        assert_eq!(a["commit_result"], "SuspendedColdStart", "{a}");
+        let b = ws
+            .submit_delta_attempt(&proposal, &task_b)
+            .expect("askı B json");
+        assert_eq!(b["commit_result"], "SuspendedColdStart", "{b}");
+        (
+            a["claim_id"].as_u64().expect("claim_id u64"),
+            b["claim_id"].as_u64().expect("claim_id u64"),
+        )
+    };
+    assert_ne!(claim_a, claim_b, "#133: çapraz-task askılar ayrı id alır");
+
+    let mut registry = osp_core::trajectory::InMemoryTaskRegistry::new();
+    registry.insert(task_a);
+    registry.insert(task_b);
+    let mut ws = handle.lock().unwrap();
+
+    // A'nın onayı B'nin askısından ETKİLENMEZ (pre-fix: task_mismatch).
+    let approved = ws
+        .approve_cold_start(1, claim_a, "op-alice", "APR-133-XA", &registry)
+        .expect("onay A json");
+    assert_eq!(approved["applied"], true, "{approved}");
+    assert_eq!(approved["evidence"]["task_id"], 1);
+
+    // B'nin onayı — uzay A'nın onayıyla ilerledi → bayat.
+    let stale = ws
+        .approve_cold_start(2, claim_b, "op-alice", "APR-133-XB", &registry)
+        .expect("onay B json kanalı");
+    assert_eq!(stale["error"], "stale_binding", "{stale}");
+    assert_eq!(stale["applied"], false);
 }

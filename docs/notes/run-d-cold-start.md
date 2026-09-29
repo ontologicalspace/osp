@@ -54,7 +54,8 @@ kanıtlıyordu; Run D aynı zinciri **canlı süreç + canlı JSON-RPC** ile tek
 > **Not (planned vs observed evidence):** Adım 4 canlıda F1 (#133) nedeniyle
 > gerçekleştirilemedi (canlı gözlem: `unknown_suspension` — askı kaydı zaten
 > ezilmiş/tüketilmişti). Gerçek gözlenen zincir aşağıdaki "Kanıt" bölümünde
-> verilmiştir; plan ile gözlem ayrı tutulur.
+> verilmiştir; plan ile gözlem ayrı tutulur. **(#133 sonrası bu adım canlı
+> koştu — "Ek" bölümüne bakınız.)**
 
 ## Fixture
 
@@ -180,6 +181,35 @@ zaten ezilmiş/tüketilmiş). Davranış motor-seviyesinde test-pinned
 (`md3_approve_cold_start_stale_space_fails_closed`); #133 düzelince canlı doğrulama
 mümkün olur.
 
+## Ek — #133 sonrası canlı stale zinciri (2026-09-29)
+
+**F1/F2 kapanışı** (issue #133, branch `feat/133-mcp-claim-id`):
+`submit_delta_attempt` claim id'yi artık server-ömürlü monotonic sayaçtan alır
+(`Workspace.next_claim_id`, AtomicU64, ilk submit 1 — Run D kanıtlarıyla wire-uyumlu).
+Run D'nin "planlanan fakat canlıda ulaşılamayan" 4. adımı aynı gün **canlı koştu** —
+tek operator server oturumu (motor süreç-bellekli), Run D sürücü kalıbı
+(`Temp/osp-133/`, aynı fixture; task 7 ve delta payload'ları birebir):
+
+1. submit A → `SuspendedColdStart`, **claim_id 1**
+2. submit B → `SuspendedColdStart`, **claim_id 2** — F1 kapanışı: eşzamanlı askılar
+   benzersiz id alır (pre-fix ikisi de 1'di ve B'nin kaydı A'nınkini eziyordu)
+3. approve A → `AcceptAsColdStart`, `applied: true`, `t_c: 1`
+4. **approve B → `stale_binding` fail-closed — F2 kapanışı.** `detail` 5-fence
+   kanıtı taşır: askı `SpaceViewRevision { Ephemeral(0), sequence: 0 }` anına bağlı,
+   onay anında uzay `Ephemeral(1), sequence: 1`'de (A'nın onayı ilerletti);
+   `applied: false`, `retryable: false`
+5. approve B tekrar → yine `stale_binding` (kayıt yerinde — motor-parite:
+   `md3_approve_cold_start_stale_space_fails_closed`)
+6. approve A tekrar → `unknown_suspension` (tek kullanım korunur)
+
+Agent id 1 bilinçli kaldı: MCP tek agent lane — `AgentId` gönderen özneyi,
+`ClaimId` attempt'i adlandırır; aynı yüzeyden ikinci submit agent kimliğini
+değiştirmez. Contract pin'leri: `crates/osp-mcp/tests/md3_cold_start_approval.rs`
+(`mcp_concurrent_cold_start_suspensions_unique_claim_ids_second_stale` +
+`mcp_cross_task_cold_start_suspensions_do_not_clobber`). Kanıt dosyaları
+`Temp/osp-133/evidence/r133-*.json` (disposable; kritik alanlar yukarıda donuk).
+
+
 ## Sonuç
 
 **Zincir canlı doğrulandı:** (1) askı (`SuspendedColdStart`, mutation yok, typed
@@ -195,6 +225,7 @@ sapma F1/F2 bulguları olarak kayda geçti.
 Dogfood geri bildirimi: **F1** (issue #133 — claim-id clobber), **F2** (yüzey
 karakterizasyonu: canlı stale_binding erişilemez; motor-seviye kanıt mevcut). CLI
 run-envelope yüzeyi cold-start için yapısal kapalı (yukarıda) — Run B emsali.
+**F1/F2 aynı gün #133 ile kapatıldı — canlı stale zinciri "Ek" bölümünde.**
 
 Run A/B/C/D seti tamam: A (Completed, MD-2 confound canlı), B (Held — CLI yüzey
 kapalı, ProcessLocal store), C (divergent fixture, subject cutover), **D (cold-start
