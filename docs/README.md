@@ -4,6 +4,9 @@ This directory contains the research artifacts, specifications, and results for 
 **Ontological Space Protocol (OSP)** — a framework that models software projects as
 navigable conceptual spaces with physics-like rules and BFT-inspired witnessing.
 
+**Getting started:** [`quickstart.md`](quickstart.md) — 2-minute tour: first analysis
+→ first rejected proposal, with copy-paste blocks.
+
 ## Structure
 
 ### `papers/` — Three companion preprints

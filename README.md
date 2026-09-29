@@ -18,6 +18,10 @@
 
 ## Quick Start
 
+> **New here?** Try the [2-minute quickstart](docs/quickstart.md): first analysis →
+> first rejected proposal (fail-closed on measurement provenance), from a clean
+> clone, with copy-paste blocks.
+
 ### Prerequisites
 
 - **Rust** 1.75+ ([rustup.rs](https://rustup.rs))
@@ -41,10 +45,10 @@ cargo test --workspace --exclude osp-desktop   # 1153+ tests across 7 crates
 
 ```bash
 # Tier 1 only (tree-sitter: coupling, abstractness, instability)
-cargo run -p osp-cli -- analyze --repo /path/to/repo
+cargo run -p osp-cli -- analyze /path/to/repo
 
 # Tier 1 + Tier 2 (SCIP semantic: real LCOM4 cohesion)
-cargo run -p osp-cli -- analyze --repo /path/to/repo --scip /path/to/index.scip
+cargo run -p osp-cli -- analyze /path/to/repo --scip /path/to/index.scip
 ```
 
 ### Run the MCP Server (Claude / Cursor)
