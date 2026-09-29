@@ -102,7 +102,7 @@
 | RQ-P2 boundary stability | 7.2 | decision distribution, contested share | review disagreement |
 | RQ-P3 drift granularity | 7.3 | scope vs commit drift frequency | drift frequencies (D1) |
 | RQ-P4 undeclared deviations | 7.4 | deviation source split | undeclared deviation rate |
-| RQ-P5 cost | 7.5 | plan cost vs avoided-rework proxy | review/execution latency |
+| RQ-P5 cost (descriptive) | 7.5 | plan overhead vs observed rework-attempt burden | review latency, rework-attempt burden (D8) |
 | RQ-P6 restrictiveness | 7.6 | tightness vs deviations/quality | binding tightness, rating (D2) |
 | Meta-RQ | 6 | modification log | D4 findings |
 

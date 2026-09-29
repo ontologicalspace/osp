@@ -40,7 +40,7 @@ field is marked D*, it exists only after the corresponding freeze decision.
 | Execution latency | `attempt_submitted_at − execution_started_at` per attempt | cost timestamps (§9) |
 | Attempt count | `#attempt_started` per task | execution events |
 | Rework count | `#rework_requested` per task | G꜀ events |
-| Rework-attempt burden | `Σ duration(rework attempts)`, where a rework attempt is an `attempt_started` causally following a `rework_requested`, and `duration = attempt_submitted_at − attempt_started_at` | execution events + cost timestamps (§9) |
+| Rework-attempt burden | `Σ duration(rework attempts)`, where a rework attempt is an `attempt_started` whose `origin_decision_event_id` (D8) references a `rework_requested` decision event, and `duration = attempt_submitted_at − attempt_started_at` | execution events + cost timestamps (§9) + D8 |
 | Replan count | `#plan_revision_superseded` where successor is a *revision* (not rejection) per task | Gₚ events |
 | Review disagreement | share of decisions whose reviewer note is marked contested (D3) | `plan_review_decided`, `completion_review_decided` + note structure (D3) |
 | Scope drift frequency | share of `basis_checked` rows with `component == scope_digest, changed == true` (D1) | `basis_checked` component rows (D1) |
@@ -62,11 +62,13 @@ inferential work — out of scope for Paper 4 v1.
 
 - **H1:** higher plan richness (verification obligations) associates with
   fewer attempts and lower rework rate.
-- **IV:** plan richness. **DV:** attempt count, rework count.
-- **Procedure:** correlate across dogfooded plan-bound tasks.
-- **Confound — task difficulty** affects both IV and DV (harder tasks earn
-  richer plans *and* more rework). Recorded covariates: risk tier (D5),
-  scope size, allowed-operation count.
+- **Variables:** predictor = plan richness; outcomes = attempt count,
+  rework count; covariates = risk tier (D5), scope size, allowed-operation
+  count — task difficulty confounds predictor and outcomes alike (harder
+  tasks earn richer plans *and* more rework).
+- **Analysis:** descriptive association across dogfooded plan-bound tasks —
+  direction of effect, checked within covariate strata; no inferential
+  statistics (§3 preamble).
 - **Falsification signal:** no association, or positive association
   (richer plans ↔ more rework) stable across covariate strata.
 
@@ -74,11 +76,16 @@ inferential work — out of scope for Paper 4 v1.
 
 - **H2:** the rework-vs-replan boundary is stable: decisions are rarely
   contested and rarely revised after the fact.
-- **Observables:** distribution of `CompletionReviewDecision` values;
-  contested-share (D3); revisions of decisions (later events contradicting
-  earlier classification, detected in analysis).
-- **Falsification signal:** high contested share, or systematic reclassification
-  of rework as replan under time pressure (checked via timestamps).
+- **Variables:** predictor = decision kind (`CompletionReviewDecision`) plus
+  contested flag (D3); outcome = **reclassification** — a later decision
+  whose `supersedes_decision_id` (D9) references an earlier decision of a
+  different classification.
+- **Analysis:** decision-kind distribution; contested share (D3);
+  reclassification rate **measured via the D9 lineage relation only** —
+  never inferred from textual contradiction between event bodies; time
+  pressure checked via decision timestamps.
+- **Falsification signal:** high contested share, or systematic
+  reclassification of rework as replan under time pressure.
 
 ### RQ-P3 — Drift granularity
 
@@ -97,6 +104,12 @@ inferential work — out of scope for Paper 4 v1.
   denominator; it is itself observable as commit-changed rows, which keeps
   "how many checks were triggered by unrelated merges" a separate,
   answerable question.
+- **Variables:** per component, outcome = share of rows with
+  `changed == true`; the joint distribution of (commit-changed,
+  scope-changed) across checks is itself the object of study.
+- **Analysis:** per-component changed-shares and their ratio; cross-tab of
+  joint outcomes — the "commit changed, scope unchanged" cell is the
+  free-control cell.
 - **Falsification signal:** scope-changed share ≈ commit-changed share —
   scope derivation buys nothing.
 
@@ -104,8 +117,12 @@ inferential work — out of scope for Paper 4 v1.
 
 - **H4:** executor self-reporting undercounts deviations
   (`undeclared rate > 0`).
-- **Observables:** deviation counts by `DeviationDiscoverySource`
-  (ExecutorDeclared / ReviewerDiscovered / EngineDetected).
+- **Variables:** outcome = deviation composition by
+  `DeviationDiscoverySource` (ExecutorDeclared / ReviewerDiscovered /
+  EngineDetected), counted by unique `deviation_id` (D7); stratifier = task
+  and task ordinal (learning effects).
+- **Analysis:** undeclared deviation rate per task and overall; trend over
+  task ordinals before any pooling.
 - **Falsification signal:** undeclared rate ≈ 0 across tasks — conformance
   self-reporting is trustworthy (also a valuable finding).
 
@@ -120,8 +137,13 @@ inferential work — out of scope for Paper 4 v1.
   and recorded as future work.
 - **Operationalization:** plan overhead = authoring + review latency
   (timestamps); rework burden = **`Σ duration(rework attempts)`** (metrics
-  table) — summed actual attempt durations, not `count × mean latency`, so
-  tasks with differently-sized attempts do not distort the proxy.
+  table, D8-linked) — summed actual attempt durations, not `count × mean
+  latency`, so tasks with differently-sized attempts do not distort the
+  proxy.
+- **Variables:** predictor = plan overhead; outcome = observed rework-attempt
+  burden.
+- **Analysis:** per-task overhead-to-burden comparison; ratio pattern and
+  its trend as task count grows.
 - **Falsification signal:** overhead exceeds observed rework burden stably as
   task count grows — the "process overhead" objection wins for this protocol
   and the risk-based policy tiers must tighten. (Note: this falsifies the
@@ -135,8 +157,12 @@ inferential work — out of scope for Paper 4 v1.
   more material deviations and lower reviewer-rated solution quality —
   better/simpler alternatives blocked.
 - **IV:** binding tightness (allowed-op count, constraint count).
-  **DV:** material-deviation count, solution quality rating (D2), attempt
-  count.
+  **DV:** material-deviation count, solution quality rating (D2, with its
+  missingness contract), attempt count.
+- **Analysis:** descriptive association of tightness with each outcome
+  *separately* — H6a and H6b evaluated independently (both-outcome framing);
+  every analysis reports rating coverage per the D2 contract and runs a
+  complete-case sensitivity check against the all-decisions baseline.
 - **Either outcome is valuable** (design §11); the RQ is written so that
   confirming H6a, confirming H6b, or both-weak is publishable.
 - **Falsification signal:** no association in either direction.
@@ -191,8 +217,15 @@ After the tag, changes require a new version tag plus migration note.
   exactly one event per check; every component present in every event. Drift
   = a row with `changed == true`. (Required by RQ-P3; single-enum design was
   rejected in review round-1 — it loses the joint observation.)
-- [ ] **D2 — `completion_review_decided.solution_quality_rating`** (optional
-  integer 1–5; required by RQ-P6).
+- [ ] **D2 — `completion_review_decided.solution_quality_rating` +
+  missingness contract (required by RQ-P6):** integer 1–5, **mandatory on
+  decision kinds that evaluate the solution** (`AcceptCompleted`,
+  `AcceptAsProgress`, `RequestRework`); on kinds that do not evaluate it
+  (`RejectAttempt`, `AbortTask`, `ReplanRequired`), the event carries
+  `rating_status: not_rated` + a `not_rated_reason` enum — absence is never
+  silent. Every RQ-P6 analysis reports rating coverage and runs a
+  complete-case sensitivity check; without this contract, selective
+  missingness (MNAR) would bias the DV irrecoverably.
 - [ ] **D3 — Reviewer-note structure:** how a note marks a decision as
   *contested* and references evidence (required by RQ-P2).
 - [ ] **D4 — Meta-RQ modification log schema** (finding: component, change,
@@ -214,6 +247,18 @@ After the tag, changes require a new version tag plus migration note.
   **links to the same `deviation_id`** (lineage field) instead of creating a
   new deviation — event counts are never the RQ-P4 denominator, unique
   `deviation_id`s are.
+- [ ] **D8 — Attempt→decision causal link:** `attempt_started` carries
+  `origin_decision_event_id`, referencing the decision event that made this
+  attempt necessary — the `rework_requested` decision for rework attempts,
+  the permit issuance for first attempts. Rework-attempt burden (metrics
+  table, RQ-P5) is derived from this typed reference alone; timestamp
+  ordering is never used as causal evidence (ambiguous across multiple
+  review/rework cycles).
+- [ ] **D9 — Decision identity & lineage:** every `plan_review_decided` and
+  `completion_review_decided` carries a stable `decision_id`; a later
+  decision that revises or reclassifies an earlier one references it via
+  `supersedes_decision_id`. RQ-P2 reclassification is measured only through
+  this typed relation.
 - [ ] **F2 — RQ set (`planbound-rq-v1`):** RQ-P1..P6 + Meta-RQ as worded in
   §3 of this document (hypotheses may be refined; RQ identity does not
   change).
