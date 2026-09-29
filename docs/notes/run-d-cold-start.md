@@ -25,7 +25,7 @@ kanıtlıyordu; Run D aynı zinciri **canlı süreç + canlı JSON-RPC** ile tek
   kanıt yüzeyi MCP envelope'larıdır. `CliRunResultKind::AwaitingColdStartApproval` +
   exit 14 map'i birim testlerle pinli yaşamaya devam eder.
 
-## Zincir (hedef kanıtlar)
+## Planlanan zincir / hedef kanıtlar
 
 1. **Task ekle** — `osp_task_add` (operator, INV-T2): id 7, Coupling ≤ −1.0 scope
    `Node(10_000)` (base'te yok → delta ile girer → daima NotCompleted),
@@ -35,16 +35,26 @@ kanıtlıyordu; Run D aynı zinciri **canlı süreç + canlı JSON-RPC** ile tek
    `RequireOperatorApproval` + `allow_progress_checkpoint: true`.
 2. **Askı ×2** — `osp_submit_delta` (tek `new_nodes[Module]`; allocator sözleşmesi
    10_000+): her ikisi `SuspendedColdStart` döner (`commit_state: cold_start_suspended`,
-   `mainline_mutation: not_applied`, `next_action: operator_approval`) → claim A + B.
+   `mainline_mutation: not_applied`, `next_action: operator_approval`) → amaç: iki
+   bağımsız askı (claim A + B).
 3. **Onay (A)** — `osp_approve_cold_start` (operator otoritesi): `AcceptAsColdStart`
    + `apply_target: Sandbox` + evidence 8 alan + `improvement_claimed: false` (INV-T6)
    + `mainline_promotion: not_available` (INV-T8). Bu onay uzayı ilerletir (t_c +1).
-4. **Stale fail-closed (B)** — aynı onay penceresinde uzay ilerledi: `stale_binding`
-   (#96 5-fence replay), `applied: false`, kayıt yerinde (unknown_suspension DEĞİL).
+4. **Planlanan fakat canlıda ulaşılamayan adım — stale fail-closed (B).**
+   İki eşzamanlı suspension gerektirir: A onaylanıp uzay ilerleyince B'nin onayı
+   `stale_binding` (#96 5-fence replay) ile fail-closed düşmeli. MCP claim_id
+   çakışması (**F1 → #133**) nedeniyle Run D sırasında canlıda
+   gerçekleştirilemedi; davranış motor-seviyesinde test-pinned
+   (`md3_approve_cold_start_stale_space_fails_closed`).
 5. **Tek kullanım (A')** — tüketilmiş askının ikinci onayı: `unknown_suspension`.
 6. **INV-T2 canlı pin** — agent-mode süreçte `osp_approve_cold_start` →
    `OperatorCapabilityRequired` (operator tool çağrılamaz; #131'deki per-tool pin
    adayının canlı karşılığı).
+
+> **Not (planned vs observed evidence):** Adım 4 canlıda F1 (#133) nedeniyle
+> gerçekleştirilemedi (canlı gözlem: `unknown_suspension` — askı kaydı zaten
+> ezilmiş/tüketilmişti). Gerçek gözlenen zincir aşağıdaki "Kanıt" bölümünde
+> verilmiştir; plan ile gözlem ayrı tutulur.
 
 ## Fixture
 
@@ -62,7 +72,7 @@ tam olarak verilidir). Oturum 1: operator mode zinciri; oturum 2: onay-sonrası 
 oturum 3: agent mode INV-T2 reddi. Kanıt dosyaları `C:/Users/ervol/AppData/Local/Temp/
 osp-97-rund/evidence/rund-*.json` (disposable; kritik alanlar aşağıda donduruldu).
 
-**Tool registry (operator mode, `rund-00-tools-list.json`):** 8 tool — `osp_trajectory_init`,
+**Tool registry (operator mode, `rund-00-tools-list.json`):** 9 tool — `osp_trajectory_init`,
 `osp_task_add`, `osp_check_predicate`, `osp_analyze_workspace`, `osp_get_agent_task_view`,
 `osp_approve_cold_start`, `osp_submit_delta`, `osp_get_attempt_history`, `osp_run_task`.
 
@@ -176,8 +186,11 @@ mümkün olur.
 baseline reason), (2) operatör onayı (`AcceptAsColdStart` + Sandbox apply + evidence
 8 alan + INV-T6/T8 pin'leri), (3) tek kullanım (`unknown_suspension`), (4) INV-T2
 agent-mode reddi, (5) onay sonrası normal V2 derived-loss yolu — tamamı #100 Faz 8a
-cutover zinciri üzerinden, gerçek binary + gerçek analyze + gerçek motor. MCP contract
-test'lerinin kanıtladığı zincir canlı süreçte birebir tekrarlandı.
+cutover zinciri üzerinden, gerçek binary + gerçek analyze + gerçek motor. MCP
+contract test'lerinin **ana cold-start zinciri** (askı → onay → tek kullanım) canlı
+süreçte birebir doğrulandı; **stale-binding kolu #133 nedeniyle canlıda koşulamadı
+ve yalnız motor-seviyesinde test-pinned kaldı** (F2) — gözlem ile plan arasındaki
+sapma F1/F2 bulguları olarak kayda geçti.
 
 Dogfood geri bildirimi: **F1** (issue #133 — claim-id clobber), **F2** (yüzey
 karakterizasyonu: canlı stale_binding erişilemez; motor-seviye kanıt mevcut). CLI
