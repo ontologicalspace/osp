@@ -553,6 +553,7 @@ mod tests {
             },
             semantic_coverage: SemanticCoverage::none("testhead".into()),
             diagnostics: vec![],
+            completeness: osp_analyzer::language::AnalysisCompleteness::Complete,
         };
         let index = AnalysisProjectionIndex::for_tests(index_entries).unwrap();
         (analysis, index)
@@ -871,6 +872,7 @@ mod tests {
             },
             semantic_coverage: SemanticCoverage::none("testhead".into()),
             diagnostics: vec![],
+            completeness: osp_analyzer::language::AnalysisCompleteness::Complete,
         };
         let index = AnalysisProjectionIndex::for_tests(vec![(
             1,
@@ -976,6 +978,7 @@ mod tests {
             },
             semantic_coverage: SemanticCoverage::none("testhead".into()),
             diagnostics: vec![],
+            completeness: osp_analyzer::language::AnalysisCompleteness::Complete,
         };
         // İki analyzer node → aynı ConceptNodeId (many-to-one).
         let shared_concept_id = ConceptNodeId("CodeEntityCandidate:src/shared.rs".into());

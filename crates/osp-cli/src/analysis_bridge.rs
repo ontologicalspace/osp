@@ -491,6 +491,7 @@ mod tests {
             },
             semantic_coverage: SemanticCoverage::none("testhead".into()),
             diagnostics: vec![],
+            completeness: osp_analyzer::language::AnalysisCompleteness::Complete,
         }
     }
 
@@ -736,6 +737,7 @@ mod tests {
             },
             semantic_coverage: SemanticCoverage::none("testhead".into()),
             diagnostics: vec![],
+            completeness: osp_analyzer::language::AnalysisCompleteness::Complete,
         };
         let err = project_analysis(
             &analysis,
