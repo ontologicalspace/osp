@@ -1,10 +1,11 @@
-//! Language Adapter System — Python/TypeScript/JavaScript (Faz 3.2).
+//! Language Adapter System — Python/TypeScript/JavaScript/Rust/Go/C#.
 //!
 //! osp-spike'tan tree-sitter entegrasyonu migrate edildi. Her dil kendi adapter'ı:
 //! - `extract_imports`: AST'den import deyimleri
 //! - `resolve_import`: internal/external/stdlib ayrımı
 //! - `extract_class_defs`: class tanımları (abstractness için)
 
+pub mod csharp;
 pub mod go;
 pub mod javascript;
 pub mod python;
@@ -15,7 +16,7 @@ pub mod typescript;
 use crate::language::AdapterRegistry;
 
 impl AdapterRegistry {
-    /// Tüm Tier 1 adapter'ları (Python + TypeScript + JavaScript + Rust + Go).
+    /// Tüm Tier 1 adapter'ları (Python + TypeScript + JavaScript + Rust + Go + C#).
     pub fn default_all() -> Self {
         Self::new()
             .with(python::PythonAdapter)
@@ -23,5 +24,6 @@ impl AdapterRegistry {
             .with(javascript::JavaScriptAdapter)
             .with(rust::RustAdapter)
             .with(go::GoAdapter)
+            .with(csharp::CSharpAdapter)
     }
 }

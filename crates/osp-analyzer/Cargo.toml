@@ -30,6 +30,7 @@ tree-sitter-go = "0.23"
 # Faz 3.6: SCIP semantic index parsing (SourceGraph official crate)
 scip = "0.5"
 protobuf = "3"
+tree-sitter-c-sharp = "0.23"
 # Faz 3.6: prost (SCIP protobuf partial parse)
 
 [dev-dependencies]
