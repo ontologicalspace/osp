@@ -57,6 +57,16 @@ Sandbox apply + evidence 8 alan; (4) ikinci onay → unknown_suspension; (5) ona
 (`crates/osp-mcp/tests/md3_cold_start_approval.rs`) aynı zinciri zaten kanıtlıyor —
 Run D bunu canlı repo üzerinde envelope üretimiyle tekrarlar (Run A/B/C kalıbı).
 
+**(#100 sonrası güncelleme, 2026-09-29): Run D TAMAMLANDI** — kayıt:
+`docs/notes/run-d-cold-start.md`. Zincir canlı doğrulandı (askı → onay + evidence 8
+alan → tek kullanım → INV-T2 agent-mode reddi → onay sonrası normal V2 derived-loss
+yolu — #100 cutover canlı bonus kanıtı). Araç: canlı `osp-mcp` (stdio JSON-RPC,
+operator mode); CLI envelope yüzeyi cold-start için yapısal kapalı (harness
+scope-binding eşitliği base node seti gerektirir — Run B emsali). Dogfood bulguları:
+**F1** — `osp_submit_delta` claim_id sabit 1 → eşzamanlı askılar birbirini ezer
+(**issue #133**); **F2** — canlı MCP yüzeyinde stale_binding erişilemez (motor-seviye
+test-pinned; #133 düzelince canlı doğrulanabilir).
+
 ## #97 MD-3 envanter (2026-09-28 tarama — mevcut durum)
 
 - **V2 tip modeli ZATEN VAR:** `MeasurementBaseline::{Available, Unavailable}`
