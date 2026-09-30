@@ -36,22 +36,27 @@ dogfood/runs/<YYYY-MM-DD>-<task-slug>/
 **yeniden üretilebilir** olmalı. OSP bu kontratla static analyzer'dan **decision
 provenance system**'e geçer.
 
-## 2. Task dosyası: constraints vs predicates + authority declaration
+## 2. Task dosyası: authority profile (exhaustive matris) + constraints vs predicates
 
 Task dosyası şeması = CLI harness formatı (`schema_version: 1`, HEAD-bound;
-şablon: `docs/quickstart.md` Step 2a). İki ekleme disiplini:
+şablon: `docs/quickstart.md` Step 2a). İki disiplin:
 
-1. **Authority declaration zorunludur.** Her predicate kullandığı ölçütün
-   `required_source`'unu declare eder. Uyuşmazlık task yüklenirken
-   `UnsupportedMeasurementAuthority` / `ScipMeasurementUnavailable` ile reddedilir
-   (sessiz fallback yok — PR #153). Geçerli kombinasyonlar (v1, attempt pipeline):
+1. **Her axis, Live Contract v1 authority profile'ına uymak zorundadır**
+   (attempt pipeline'da preflight uygular — `validate_attempt_measurement_authority`;
+   sessiz geçiş yok, matris exhaustive'tir):
 
-   | Eksen | Attempt authority | Not |
+   | Eksen | v1 kuralı | Uymayan durum |
    |---|---|---|
-   | coupling | `TreeSitter` | INV-T9 #70: topology source coupling+instability'i birlikte bağlar |
-   | instability | `TreeSitter` | — " — |
-   | cohesion | (kullanılamaz) | `ScipMeasurementUnavailable` — `analyze --scip` sağlar (#144-C ikinci iterasyon) |
-   | entropy / witness_depth | unset bırak | ölçüm anında INV-T4 değerlendirir |
+   | coupling | `required_source: TreeSitter` **declare edilmeli** | başka değer VEYA None → `UnsupportedMeasurementAuthority` |
+   | instability | `required_source: TreeSitter` **declare edilmeli** | — " — |
+   | cohesion | attempt v1'de **kullanılamaz** (Tier-1, Scip ölçüm yok) | her durumda → `ScipMeasurementUnavailable` |
+   | entropy | `required_source` **declare EDİLMEMELİ** (pipeline-derived preset; INV-T4 ölçümde değerlendirir) | declare edilirse → `UnsupportedMeasurementAuthority` |
+   | witness_depth | `required_source` **declare EDİLMEMELİ** | — " — |
+   | RiskScore / MainSequenceDistance / Custom | attempt v1'de **reddedilir** | `UnsupportedPredicateAxis` — `MeasuredRawPosition::axis()` bu eksenlerde legacy coupling fallback'u yapar; sessiz ontolojik fallback önlenir |
+
+   Gerekçe (INV-T9 #70): topology source coupling + instability provenance'ını birlikte
+   bağlar — SCIP index yüklemek bu authority'yi değiştirmez. "SCIP index'ten veri
+   yüklendi" ≠ "bu eksenin authoritative kaynağı Scip".
 
 2. **`constraints` insan-taraflı taahhütlerdir, `predicates` ölçülebilir
    koşullardır.** "Yeni dependency cycle yok" gibi taahhütler task `constraints`
@@ -75,6 +80,13 @@ OSP → Decision → İnsan / coding agent → Patch → Reanalysis
 
 ## 4. Ledger (canonical: `dogfood/ledger.jsonl`)
 
+**Raw dogfood artifact'ları lokal ve versiyonsuzdur** (`/dogfood/` → `.gitignore`):
+`applied.patch`, `baseline.json` ve path'ler gerçek projeden bilgi taşır; public
+repo'ya YAYIN yalnızca açık bir **sanitized export** ile yapılır (Paper 4 için:
+`raw dogfood → sanitize/export → docs/results/paper4-dataset/`). Aynı gerekçe
+self-hosting (Faz 2) içindir: OSP kendi checkout'unda harness clean-worktree ister —
+dogfood checkout dışında/ignore'lı kalmalıdır.
+
 Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
 `load_dogfood_runs()` ile JSONL'den okur):
 
@@ -85,12 +97,20 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "contract_version": "v1",
   "repository": "nexus",
   "repository_head": "<sha>",
+  "osp_revision": "<osp-checkout-HEAD-sha>",
+  "osp_version": "<crate-version>",
+  "analysis_profile": "tier1 | tier2-scip",
+  "analysis_command": "osp trajectory attempt 1 --repo … --task …",
+  "scip_index_digest": null,
   "task_ref": "dogfood/runs/<run>/task.json",
+  "task_digest": "sha256:… | null",
   "baseline_ref": "…/baseline.json",
   "proposal_refs": ["…/proposals.json"],
+  "proposal_digest": "sha256:… | null",
   "attempt_ref": "…/attempt.json",
   "decision": "accept | reject | defer",
   "patch_ref": "…/applied.patch | null",
+  "patch_digest": "sha256:… | null",
   "after_ref": "…/after.json | null",
   "decision_utility": "decision-changed | decision-confirmed | none",
   "counterfactual": "verified-bad | inspected-ok | unverified | null",
@@ -99,6 +119,13 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "notes": "…"
 }
 ```
+
+**Reproducibility alanları zorunludur:** aynı `repository_head + task + proposal`
+farklı OSP revizyonlarında farklı measurement/decision üretebilir; `osp_revision` /
+`osp_version` / `analysis_profile` / `analysis_command` / (`tier2-scip`'te)
+`scip_index_digest` olmadan "aynı girdi → aynı karar" denetlenemez. `*_digest`
+alanları v1'de opsiyoneldir (null), Paper 4 dataset'ine export edilmeden önce
+doldurulurlar.
 
 `decision_utility` / `counterfactual` programın iki **kritik-eşik olayının**
 alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"

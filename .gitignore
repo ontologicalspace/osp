@@ -62,3 +62,7 @@ repos/
 # SCIP index (dogfooding — 16MB+ binary, lokalde üretilir, commit edilmez)
 index.scip
 *.scip.tmp
+
+# Live-use raw dogfood artifacts (#151 Live Contract: local/non-versioned;
+# publication requires explicit sanitized export — docs/design/live-contract.md)
+/dogfood/

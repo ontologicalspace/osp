@@ -17,9 +17,11 @@ build in Step 0 takes a few minutes on first run.
 
 All commands and outputs below are real — captured from a live run on
 2026-09-30 against the `fix/144-attempt-authority-alignment` branch (issue
-[#144](https://github.com/ontologicalspace/osp/issues/144): the demo task's
-measurement authority is now declared explicitly). Commands work in any
-POSIX shell (Git Bash on Windows included). `osp` is `osp.exe` on Windows.
+[#144](https://github.com/ontologicalspace/osp/issues/144) resolved here: the
+demo task's measurement authority is now declared explicitly; the live-use
+program continues in
+[#151](https://github.com/ontologicalspace/osp/issues/151)). Commands work in
+any POSIX shell (Git Bash on Windows included). `osp` is `osp.exe` on Windows.
 
 ---
 
@@ -201,7 +203,7 @@ as three distinct layers, and the evidence shows each one:
 | Decision layer | Evidence field | Observed | Meaning |
 |---|---|---|---|
 | Hard claim gates | `gate_decision` | `PassedAll` | syntax / vision / rule checks on the proposal all passed |
-| Task predicate | `predicate_completion` | `Completed` | coupling measured 0.5 ≤ 0.55 **from TreeSitter** — the required source, so the condition was established |
+| Task predicate | `predicate_completion` | `Completed` | coupling fell to 0.0 ≤ 0.55 **measured from TreeSitter** — the required source, so the condition was established |
 | Mutation policy | `mutation_decision` | `AcceptAsCompleted` | predicate met ⇒ the proposed conceptual-space mutation was accepted |
 
 The after-state moved measurably: `x` fell 0.7 → 0.0 (the import edge is
@@ -228,7 +230,7 @@ echo "exit code: $?"
 Output (real):
 
 ```
-Error: UnsupportedMeasurementAuthority: Coupling in the attempt pipeline is measured from tree_sitter (INV-T9 #70: the topology source binds coupling and instability provenance together — loading a SCIP index would not change this authority), but the task requires scip. Restructure the task predicate or see issue #144
+Error: UnsupportedMeasurementAuthority: Coupling in the attempt pipeline is measured from tree_sitter (INV-T9 #70: the topology source binds coupling and instability provenance together — loading a SCIP index would not change this authority), but the task requires scip. Restructure the task predicate (Live Contract v1 authority profile: docs/design/live-contract.md; live-use program #151)
 exit code: 1
 ```
 
