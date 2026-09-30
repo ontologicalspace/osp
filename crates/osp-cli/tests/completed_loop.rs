@@ -503,7 +503,10 @@ fn harness_valid_completed_loop_runs() {
 
 #[test]
 fn harness_dirty_worktree_rejected() {
-    // ensure_snapshot_eligible (P0-3): dirty worktree → attempt rejected before run.
+    // P0-3 (#155 analyzed-scope güncellemesi): ÖLÇÜLEN dosya modified → attempt
+    // yine reddedilir; mesaj artık analyzed-scope fence'inden gelir ("analyzed
+    // path is modified or untracked" + commit/stash önerisi). İlgisiz dosyaların
+    // kirli olması artık run'ı bloklamaz (analyzed_scope_fence_allows_* testleri).
     let fx = HarnessFixture::new();
     fs::write(fx.repo_path().join("main.rs"), "pub fn main() {}\n").expect("dirty main.rs");
     let env = task_envelope(&fx.head, 0);
@@ -512,12 +515,14 @@ fn harness_dirty_worktree_rejected() {
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(
         !output.status.success(),
-        "dirty worktree must fail pre-flight"
+        "modified analyzed file must fail pre-flight"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("dirty") || stderr.contains("clean"),
-        "stderr explains clean-worktree requirement: {stderr}"
+        stderr.contains("analyzed path is modified or untracked")
+            && stderr.contains("main.rs")
+            && stderr.contains("commit/stash"),
+        "stderr explains the analyzed-scope fence with a remedy: {stderr}"
     );
 }
 
@@ -865,5 +870,57 @@ fn completed_loop_exact_pin_via_json_envelope() {
     assert!(
         before_coupling > 0.55,
         "before coupling > threshold (was unsatisfied): before={before_coupling}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #155 — analyzed-scope clean fence (Faz 1 ilk run friction: gerçek monorepo)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn analyzed_scope_fence_allows_untracked_outside_analysis() {
+    // Faz 1 vaka: analiz kapsamı DIŞINDA aktif iş (untracked not/submodule işi),
+    // ölçülen dosyalar HEAD-tracked ve değişmemiş → attempt ÇALIŞMALI
+    // (eski global clean-worktree fence bu durumda reddediyordu).
+    let fx = HarnessFixture::new();
+    std::fs::write(fx.repo_path().join("notes-local.md"), "active dev work\n")
+        .expect("write out-of-scope untracked file");
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        output.status.success(),
+        "out-of-scope untracked file must not block the attempt. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Task completed"), "got: {stdout}");
+}
+
+#[test]
+fn analyzed_scope_fence_rejects_modified_analyzed_path() {
+    // Fence'in epistemik çekirdeği korunur: ÖLÇÜLEN dosya modified ise
+    // spesifik, eyleme dönüştürülebilir red (path + commit/stash önerisi).
+    let fx = HarnessFixture::new();
+    let a_path = fx.repo_path().join("a.rs");
+    let original = std::fs::read_to_string(&a_path).expect("read a.rs");
+    std::fs::write(&a_path, format!("{original}// local edit\n")).expect("modify analyzed file");
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "modified analyzed file must fail the fence"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("analyzed path is modified or untracked"),
+        "expected analyzed-scope fence message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("a.rs") && stderr.contains("commit/stash"),
+        "expected actionable path + remedy, got: {stderr}"
     );
 }
