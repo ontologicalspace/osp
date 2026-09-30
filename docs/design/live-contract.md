@@ -39,7 +39,7 @@ provenance system**'e geçer.
 ## 2. Task dosyası: authority profile (exhaustive matris) + constraints vs predicates
 
 Task dosyası şeması = CLI harness formatı (`schema_version: 1`, HEAD-bound;
-şablon: `docs/quickstart.md` Step 2a). İki disiplin:
+şablon: `docs/quickstart.md` Step 2a). Üç disiplin:
 
 1. **Her axis, Live Contract v1 authority profile'ına uymak zorundadır**
    (attempt pipeline'da preflight uygular — `validate_attempt_measurement_authority`;
@@ -58,7 +58,31 @@ Task dosyası şeması = CLI harness formatı (`schema_version: 1`, HEAD-bound;
    bağlar — SCIP index yüklemek bu authority'yi değiştirmez. "SCIP index'ten veri
    yüklendi" ≠ "bu eksenin authoritative kaynağı Scip".
 
-2. **`constraints` insan-taraflı taahhütlerdir, `predicates` ölçülebilir
+   *Validation-sırası notu:* `required_source: Mixed` çoğu durumda bu preflight'tan
+   DAHA ÖNCE reddedilir — core `task.validate()` (harness loader'ın çağırdığı)
+   `InvalidRequiredMetricSource` ile fail-closed yapar. Daha erken fail-closed'dür;
+   preflight satırı, Mixed'in core'dan geçtiği varsayımsal yollar için yedek savunmadır.
+
+3. **Operation profile: v1 op-matrix (delta alanı ↔ OpKind karşılığı).**
+   `allowed_operations` policy'si navigator'da **her delta alanı için karşılık gelen
+   OpKind'i ister** — sessiz yapısal genişletme yoktur:
+
+   | DeltaProposal alanı | Gerekli OpKind |
+   |---|---|
+   | `removed_edges` | `RemoveImport` |
+   | `new_nodes` | `AddNode` |
+   | `new_edges` | `AddEdge` |
+   | `modified_entities` | `ModifyEntity` |
+
+   (`connected_to`, `new_nodes` spesifikasyonunun parçasıdır — `AddNode` kapsamında.)
+   İzin verilmeyen op → `RejectedByRule` (gate katmanı), task'ın izin poliçesiyle
+   denetlenmeyen conceptual genişletme imkânsızdır. Diğer `OpKind` varyantları
+   (`AddImport`, `AddAbstraction`, `ExtractModule`, `RemoveNode`, `RemoveEdge`…)
+   delta-alan karşılığı gelmedikçe task'ta listelense de hiçbir alanı açmaz.
+   Agent, task'ın izin vermediği structural operation'ları yapamaz; ilk dogfood
+   dataset'inin epistemik temizliği bu matrix'e dayanır.
+
+4. **`constraints` insan-taraflı taahhütlerdir, `predicates` ölçülebilir
    koşullardır.** "Yeni dependency cycle yok" gibi taahhütler task `constraints`
    alanında METİN olarak kalır ve `notes.md`'de insani olarak değerlendirilir;
    ölçülebilir koşullar `predicates`'te metric+operator+threshold+scope ile
@@ -100,7 +124,11 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "osp_revision": "<osp-checkout-HEAD-sha>",
   "osp_version": "<crate-version>",
   "analysis_profile": "tier1 | tier2-scip",
-  "analysis_command": "osp trajectory attempt 1 --repo … --task …",
+  "commands": {
+    "baseline_analysis": "osp analyze <repo>",
+    "attempt": "osp trajectory attempt 1 --repo … --task … --execution-mode harness …",
+    "after_analysis": "osp analyze <repo> | null"
+  },
   "scip_index_digest": null,
   "task_ref": "dogfood/runs/<run>/task.json",
   "task_digest": "sha256:… | null",
@@ -122,10 +150,10 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
 
 **Reproducibility alanları zorunludur:** aynı `repository_head + task + proposal`
 farklı OSP revizyonlarında farklı measurement/decision üretebilir; `osp_revision` /
-`osp_version` / `analysis_profile` / `analysis_command` / (`tier2-scip`'te)
-`scip_index_digest` olmadan "aynı girdi → aynı karar" denetlenemez. `*_digest`
-alanları v1'de opsiyoneldir (null), Paper 4 dataset'ine export edilmeden önce
-doldurulurlar.
+`osp_version` / `analysis_profile` / `commands` (üç adım ayrı ayrı — baseline
+analizi, attempt, after analizi) / (`tier2-scip`'te) `scip_index_digest` olmadan
+"aynı girdi → aynı karar" denetlenemez. `*_digest` alanları v1'de opsiyoneldir
+(null), Paper 4 dataset'ine export edilmeden önce doldurulurlar.
 
 `decision_utility` / `counterfactual` programın iki **kritik-eşik olayının**
 alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"
@@ -135,10 +163,13 @@ kaydedilir.
 
 ## 5. İlk görev adayı — Nexus (Faz 1 başlangıç taslağı)
 
-Tip: **refactoring** (greenfield değil — karşılaştırılabilir "before").
-Aday: provider-özel erişimi adapter boundary arkasına alma. Task iskeleti
-(değerler ilk baseline koşusuyla dolar; `node_id`/path binding'ler Nexus
-analizinden gelir):
+Tip: **refactoring — gereksiz/doğrudan bir bağımlılığı kaldırarak coupling'i düşürme**
+(küçük, ölçülebilir, RemoveImport ile representable ilk görev). "Adapter extraction"
+(`Service → Adapter → Provider`): v1 op-matrix'te dürüstçe temsil edilebilir hâldedir
+(`AddNode` + `AddEdge` izniyle) ama ilk görev olarak bilinçli olarak İKİNCİ sıradadır —
+delta-alan karşılığı yeni açıldı; ilk run tek-op (RemoveImport) profilinde kalsın.
+Task iskeleti (değerler ilk baseline koşusuyla dolar; `node_id`/path binding'ler
+Nexus analizinden gelir):
 
 ```json
 {
@@ -146,7 +177,7 @@ analizinden gelir):
   "repository_head": "<nexus-HEAD>",
   "scope_bindings": [{ "node_id": 0, "expected_path": "<PricingService-path>" }],
   "task": {
-    "id": 1, "milestone_id": 1, "label": "extract provider access behind adapter boundary",
+    "id": 1, "milestone_id": 1, "label": "remove unnecessary direct provider dependency (coupling ↓)",
     "target_predicate_set": {
       "mode": "All",
       "predicates": [

@@ -704,6 +704,67 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 continue;
             }
 
+            // #151 Live Contract v1 (PR #153 R2): delta alanı ↔ OpKind karşılık tablosu.
+            // allowed_operations policy'si bugün yalnız removed_edges → RemoveImport'ı
+            // enforce ediyordu; new_nodes/new_edges/modified_entities task'ın izin
+            // poliçesiyle DENETLENMEDEN conceptual after-state'e uygulanıyordu (sessiz
+            // yapısal genişletme — ilk dogfood dataset'ini epistemik olarak kirletirdi).
+            // v1 op-matrix her delta alanını kendi OpKind'ine bağlar:
+            //   removed_edges → RemoveImport · new_nodes → AddNode ·
+            //   new_edges → AddEdge · modified_entities → ModifyEntity
+            // (connected_to, new_nodes spesifikasyonunun parçasıdır — AddNode kapsamında.)
+            // İzin verilmeyen op → RejectedByRule; sessiz geçiş yok.
+            let mut op_violations: Vec<&str> = Vec::new();
+            if !proposal.new_nodes.is_empty()
+                && !task
+                    .allowed_operations
+                    .contains(&crate::trajectory::OpKind::AddNode)
+            {
+                op_violations.push("new_nodes requires OpKind::AddNode");
+            }
+            if !proposal.new_edges.is_empty()
+                && !task
+                    .allowed_operations
+                    .contains(&crate::trajectory::OpKind::AddEdge)
+            {
+                op_violations.push("new_edges requires OpKind::AddEdge");
+            }
+            if !proposal.modified_entities.is_empty()
+                && !task
+                    .allowed_operations
+                    .contains(&crate::trajectory::OpKind::ModifyEntity)
+            {
+                op_violations.push("modified_entities requires OpKind::ModifyEntity");
+            }
+            if !op_violations.is_empty() {
+                last_outcome = Some(crate::trajectory::AttemptOutcome {
+                    gate_decision: GateDecision::RejectedByRule,
+                    predicate_completion: PredicateCompletion::NotCompleted,
+                    mutation_decision: MutationDecision::Reject,
+                    witness_status: None,
+                });
+                let before_raw = self.current_measured.to_raw();
+                self.evidence.push(TrajectoryEvidence {
+                    trajectory_id: self.trajectory_id,
+                    milestone_id: self.milestone_id,
+                    task_id,
+                    attempt_id: attempt_num as u64,
+                    before: before_raw,
+                    after: before_raw,
+                    gate_decision: GateDecision::RejectedByRule,
+                    predicate_completion: PredicateCompletion::NotCompleted,
+                    mutation_decision: MutationDecision::Reject,
+                    token_cost,
+                    duration_ms: 0,
+                });
+                feedback_history.push(format!(
+                    "Attempt {attempt_num}: Policy violation — {} \
+                     (task.allowed_operations, Live Contract v1 op-matrix).",
+                    op_violations.join("; ")
+                ));
+                continue;
+            }
+
             // 4. **#96 MD-2 → #95-A (MD-1):** Draft — probe Claim + Q4 STRUCTURAL
             //    validation + **canonical task scope capture** tek adımda (pub shared
             //    boundary `task_measurement`; claim_id tek inkrement; placeholder raw —
@@ -2634,6 +2695,70 @@ mod tests {
         );
     }
 
+    /// #151 Live Contract v1 (PR #153 R2): delta alanı ↔ OpKind karşılık tablosu —
+    /// new_nodes taşıyan proposal, task.allowed_operations AddNode içermiyorsa
+    /// RejectedByRule ile reddedilir (sessiz yapısal genişletme kapalıdır).
+    #[test]
+    fn live_contract_v1_op_matrix_rejects_unpermitted_new_nodes() {
+        let policy = TaskPolicy {
+            maneuver_limit: 1,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
+        // Task yalnız RemoveImport'a izin veriyor → new_nodes policy ihlalidir.
+        let mut task = coupling_task(1, 0.55, policy);
+        task.allowed_operations = vec![OpKind::RemoveImport];
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let proposal = DeltaProposal {
+            new_nodes: vec![crate::agent::NewNodeSpec {
+                kind: crate::space::NodeKind::Module,
+                initial_mass: 100.0,
+                connected_to: vec![(0, crate::space::EdgeKind::Imports)],
+            }],
+            new_edges: vec![],
+            removed_edges: vec![],
+            affected_nodes: vec![0],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "add module connected to node 0".into(),
+        };
+        let mock = MockLlmClient::new(vec![proposal]);
+        let mut engine = make_real_engine();
+        let mut evidence = vec![];
+        let mut nav = AgentNavigator {
+            llm: &mock,
+            resolver: &resolver,
+            engine: &mut engine,
+            evidence: &mut evidence,
+            trajectory_id: 1,
+            milestone_id: 1,
+            target_vector: RawPosition {
+                x: 0.55,
+                y: 0.6,
+                z: 0.4,
+                w: 0.5,
+                v: 0.3,
+            },
+            current_measured: measured_pos(0.5),
+            output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
+            clock: Box::new(crate::authorization::FixedClock(1700000000)),
+        };
+        let _ = nav.run_task(1, 7);
+        assert!(!evidence.is_empty());
+        assert!(
+            evidence
+                .iter()
+                .any(|e| e.gate_decision == GateDecision::RejectedByRule),
+            "new_nodes without AddNode in allowed_operations must be RejectedByRule \
+             (Live Contract v1 op-matrix)"
+        );
+    }
+
     /// G2c-2 #3: compute_raw_from_delta removed_edges ile coupling düşer (arkadaş review 7 #7).
     /// make_real_engine: node 0→1 import (coupling 0.5). remove edince coupling 0.
     #[test]
@@ -4105,7 +4230,7 @@ mod tests {
                 cold_start_policy: ColdStartPolicy::RequireOperatorApproval,
                 ..Default::default()
             },
-            allowed_operations: vec![],
+            allowed_operations: vec![OpKind::AddNode], // Live Contract v1 op-matrix: delta-introduced node (proposal new_nodes) AddNode ister
             constraints: vec![],
             status: TaskStatus::Pending,
         };
