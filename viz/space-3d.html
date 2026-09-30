@@ -80,6 +80,8 @@
   .wt-layer .val { font-family: monospace; font-size: 13px; font-weight: 700; }
   .ok { color: #3fb950; } .bad { color: #f85149; } .warn { color: #d29922; }
   .wt-hint { position: absolute; right: 12px; bottom: 10px; font-size: 11px; color: #484f58; pointer-events: none; }
+  .wt-note { position: absolute; left: 12px; bottom: 10px; font-size: 10px; color: #6e7681;
+             max-width: 65%; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -146,6 +148,7 @@
     <div class="wt-stage">
       <div id="wtStage"></div>
       <div class="wt-hint">drag = orbit · scroll = zoom</div>
+      <div class="wt-note">Schematic topology layout — display coordinates are illustrative, not OSP RawPosition {x,y,z,w,v}.</div>
     </div>
     <div class="wt-panel">
       <div class="wt-step-ind" id="wtStepInd"></div>
@@ -171,7 +174,8 @@
   · Paper v2.3 · A = abstractness, I = instability (Martin), D = |A+I−1| computed from the embedded A/I
   (the source doc's D column is not reproducible from its displayed A/I), y = LCOM4 cohesion
   · 3D edition — the A+I=1 main-sequence plane is drawn when X = A and Y = I (Z free)
-  · Rejection walkthrough: real CLI outputs from docs/quickstart.md (live run 2026-09-30, commit fea02f5)
+  · Rejection walkthrough: task-space & decision values are real CLI outputs from docs/quickstart.md
+  (live run 2026-09-30, commit fea02f5); the 3D layout is an illustrative schematic, not OSP RawPosition
 </div>
 
 <script type="module">
@@ -588,9 +592,12 @@ function animate() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Rejection walkthrough (P4 Stage 2) — every value below is a real CLI output
-// from docs/quickstart.md (live run 2026-09-30, commit fea02f5). The simulation
-// invents nothing; it animates the recorded scenario.
+// Rejection walkthrough (P4 Stage 2) — every domain/evidence value below
+// (task-space coordinates, measurements, decision layers, exit code) is a real
+// CLI output from docs/quickstart.md (live run 2026-09-30, commit fea02f5).
+// The 3D scene layout — node positions, ghost placement, colors, sizes — is an
+// illustrative schematic chosen by the visualization; it is NOT a rendering of
+// OSP RawPosition {x,y,z,w,v}.
 // ═══════════════════════════════════════════════════════════════════════════
 const WT = { inited: false, active: false, step: 0 };
 const wtData = {
@@ -650,7 +657,9 @@ const wtSteps = [
       says. Fail-closed provenance refuses to be fooled by a good number from the
       wrong place.</p>
       <p>Verified adversarially: an isolated-module proposal that leaves node 0
-      numerically untouched still gets <code>NotCompleted</code>.</p>`,
+      numerically untouched still gets <code>NotCompleted</code>.</p>
+      <p>(There is also a deeper reason this predicate cannot complete on this
+      path at all — step 7.)</p>`,
   },
   {
     title: "6 · Mutation decision — the space is not touched",
@@ -671,12 +680,23 @@ const wtSteps = [
       agent retried up to the maneuver limit (INV-T7 caps agent-correctable
       retries); OSP ends the run: exit code <code>12</code>
       (<code>EXCEEDED_MANEUVER_LIMIT</code>).</p>
-      <p>Honest gap: through this CLI path the demo task is <b>structurally
-      unsatisfiable</b> — <code>trajectory attempt</code> performs Tier-1 analysis
-      only and accepts no SCIP index. Tracked in
-      <a class="ref-link" href="https://github.com/ontologicalspace/osp/issues/144">#144</a>.</p>
-      <p>All values on this page are real CLI outputs —
-      <code>docs/quickstart.md</code>, live run 2026-09-30, commit <code>fea02f5</code>.</p>`,
+      <p>Honest gap — this task is <b>structurally unsatisfiable</b> on this path
+      for <b>two</b> reasons (<a class="ref-link" href="https://github.com/ontologicalspace/osp/issues/144">#144</a>):</p>
+      <p><b>(1)</b> <code>trajectory attempt</code> performs Tier-1 analysis only —
+      it accepts no SCIP index, so the after-state coupling is always measured
+      <code>tree_sitter</code>.</p>
+      <p><b>(2) More fundamental:</b> coupling's <b>axis authority</b> is TreeSitter.
+      The attempt path builds <code>CoordinateSystem::default_raw_five(MetricSource::TreeSitter, …)</code>:
+      under the INV-T9 #70 contract the topology source sets the provenance of
+      coupling <i>and</i> instability together, and SCIP is authoritative for
+      cohesion only today. Even with a SCIP index wired into the attempt path,
+      <code>coupling … required_source: Scip</code> would stay unsatisfiable until
+      the task or the axis-authority contract changes.</p>
+      <p>Principle: <b>"a SCIP index was loaded" ≠ "this axis's authoritative source
+      is Scip"</b>. #144 tracks the product decision (options A–D).</p>
+      <p>All task-space and decision values on this page are real CLI outputs —
+      <code>docs/quickstart.md</code>, live run 2026-09-30, commit <code>fea02f5</code>.
+      The 3D layout is an illustrative schematic, not OSP raw coordinates.</p>`,
   },
 ];
 
