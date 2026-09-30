@@ -65,8 +65,11 @@ impl std::fmt::Display for GitCommitId {
 
 /// Repository snapshot — HEAD + tracked paths + dirty-path set.
 ///
-/// `capture(repo)` Git komutlarıyla bu üç bilgiyi toplar. İki snapshot'ın `PartialEq`
-/// karşılaştırması drift detection için kullanılır (pre/post analysis fence).
+/// `capture(repo)` Git komutlarıyla bu üç bilgiyi toplar. Snapshot equality
+/// (`PartialEq`) yalnızca **clean-bound analyze** sözleşmesinde kullanılır
+/// (`--require-clean-snapshot`: pre/post eşitlik fence'i); `trajectory attempt`
+/// bunun yerine [`validate_post_attempt_snapshot`]'ı kullanır (HEAD + tracked-set
+/// global eşitlik + analyzed-scope içerik fence'i).
 ///
 /// #155 (analyzed-scope clean semantics): `clean` artık global bir boolean değil,
 /// `dirty_paths` kümesinden türetilir. Drift fence'i analyzed-scope'ta çalışır:
@@ -274,9 +277,21 @@ pub(crate) fn parse_porcelain_z(raw: &str) -> BTreeSet<String> {
 
 fn capture_dirty_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
     // -z: NUL-ayrı, quote/escape'siz, deterministik (#155 P1-2).
+    // --ignore-submodules=none (#156 R2 P1-1): `submodule.<name>.ignore = dirty/all`
+    // config'i submodule worktree değişikliklerini status'tan GİZLER — flag bunu
+    // override eder. Aksi halde HEAD == gitlink durumunda nested tracked dosyalar
+    // sete girer, analyzer değiştirilmiş içeriği okur ama dirty kümesi boş kalır:
+    // "HEAD'e bağlı" iddia edilen ölçüm commit'siz içerikten üretilebilir (epistemik
+    // bypass). Yeni invariant'ın "repository config davranışı değiştiremez" koşulu.
     let output = run_git_raw(
         repo,
-        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        &[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        ],
         "status",
     )?;
     Ok(parse_porcelain_z(&output))
@@ -380,7 +395,11 @@ pub fn validate_analyzed_paths_tracked(
         if !snapshot.tracked_paths.contains(path) {
             return Err(RepoSnapshotError::GitCommandFailed {
                 command: "ls-tree",
-                detail: format!("analyzed path not tracked in HEAD: {path}"),
+                detail: format!(
+                    "analyzed path not tracked in HEAD: {path} — commit/add it \
+                     (git add + commit) or exclude it from the analysis scope; a \
+                     measurement bound to HEAD cannot depend on uncommitted files"
+                ),
             });
         }
     }

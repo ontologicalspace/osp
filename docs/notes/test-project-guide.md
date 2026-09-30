@@ -17,7 +17,7 @@ Harness mode, controlled experiment için witness quorum'unu gevşetir (Complete
 üretir), ama bunu güvenli sınırlar içinde yapar:
 - **Snapshot-bound task**: HEAD binding + NodeId→path scope binding + Node-only V1 scope
 - **State-dir outside repo**: Held artifacts analyzed repo'yu dirty yapamaz
-- **Clean worktree zorunlu**: analysis sırasında drift fail-closed
+- **Analyzed content HEAD-bound olmalı** (#155): analyzed path'ler (hiyerarşik, submodule-aware) tracked **ve** clean olmalı; analysis kapsamı dışındaki dirty/untracked içerik attempt'i engellemez
 
 ## Kurulum
 

@@ -217,6 +217,10 @@ fn task_envelope(head: &str, anchor_node_id: u64) -> serde_json::Value {
         0 => "a.rs",
         1 => "b.rs",
         2 => "main.rs",
+        // Submodule fixture: alfabetik keşif sırası a.rs, b.rs, clients/fe/src/main.ts,
+        // main.rs → main.rs node 3'e kayar (#156 R2 P1-2: exact kontrat gerçek
+        // node kimliğine bağlanır).
+        3 => "main.rs",
         _ => "a.rs",
     };
     serde_json::json!({
@@ -1015,21 +1019,57 @@ fn real_submodule_clean_nested_analyzed_paths_pass() {
     );
     // HEAD task'e bağlanır: parent HEAD submodule eklenmesiyle DEĞİŞTİ —
     // fixture kendi fx.parent.head'ini taşır.
-    let env = task_envelope(&fx.parent.head, 2);
+    let env = task_envelope(&fx.parent.head, 3);
     let task_path = fx.parent.write_task(&env);
-    let proposals_path = fx.parent.write_proposals(2, 1);
+    let proposals_path = fx.parent.write_proposals(3, 1);
     let output = fx
         .parent
         .run_attempt(&task_path, &proposals_path, 7, "human");
     let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Exact kontrat (#156 R2 P1-2): clean initialized submodule → attempt
+    // BAŞARILI olmalı ve Task completed üretmeli. Zayıf `success || !contains`
+    // assertion'ı yanlış-pozitife açıktı — scope-binding/node-id/ başka bir
+    // preflight hatası da geçerdi.
     assert!(
-        output.status.success() || !stderr.contains("not tracked in HEAD"),
-        "clean initialized submodule must not trip the tracked fence. stderr={stderr}"
+        output.status.success(),
+        "clean initialized submodule must complete the attempt. stderr={stderr}"
     );
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Task completed"), "got: {stdout}");
-    }
+    assert!(stdout.contains("Task completed"), "got: {stdout}");
+}
+
+#[test]
+fn real_submodule_ignore_config_cannot_silence_the_fence() {
+    // #156 R2 P1-1 (epistemik bypass): `submodule.<name>.ignore = dirty` config'i
+    // submodule worktree değişikliklerini `git status`tan gizler. Fence
+    // `--ignore-submodules=none` ile bunu override etmezse: HEAD == gitlink →
+    // nested tracked sette, analyzer değiştirilmiş içeriği okur, dirty kümesi
+    // boş → ölçüm commit'siz içerikten üretilebilir. Bu test config'in fence'i
+    // susturamadığını pinler.
+    let fx = SubmoduleFixture::new();
+    std::fs::write(&fx.sub_nested, "export const x = 3; // local edit\n")
+        .expect("modify nested ts");
+    let st = Command::new("git")
+        .args(["-C", fx.parent.repo_path().to_str().unwrap()])
+        .args(["config", "submodule.clients/fe.ignore", "dirty"])
+        .status()
+        .expect("git config submodule ignore");
+    assert!(st.success(), "set submodule ignore=dirty");
+    let env = task_envelope(&fx.parent.head, 3);
+    let task_path = fx.parent.write_task(&env);
+    let proposals_path = fx.parent.write_proposals(3, 1);
+    let output = fx
+        .parent
+        .run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "submodule ignore config must NOT silence the dirty-submodule fence"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dirty submodule/directory") && stderr.contains("clients/fe"),
+        "expected dirty-submodule fence despite ignore=dirty config, got: {stderr}"
+    );
 }
 
 #[test]
@@ -1039,9 +1079,9 @@ fn real_submodule_dirty_nested_analyzed_paths_reject() {
     let fx = SubmoduleFixture::new();
     std::fs::write(&fx.sub_nested, "export const x = 2; // local edit\n")
         .expect("modify nested ts");
-    let env = task_envelope(&fx.parent.head, 2);
+    let env = task_envelope(&fx.parent.head, 3);
     let task_path = fx.parent.write_task(&env);
-    let proposals_path = fx.parent.write_proposals(2, 1);
+    let proposals_path = fx.parent.write_proposals(3, 1);
     let output = fx
         .parent
         .run_attempt(&task_path, &proposals_path, 7, "human");
