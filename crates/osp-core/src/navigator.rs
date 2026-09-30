@@ -671,50 +671,35 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                 continue;
             }
 
-            // G2c-2 (arkadaş review 7 #8 — güvenlik kritik): removed_edges için
-            // allowed_operations kontrolü. OpKind::RemoveImport yoksa policy ihlali → RejectedByRule.
-            if !proposal.removed_edges.is_empty()
-                && !task
-                    .allowed_operations
-                    .contains(&crate::trajectory::OpKind::RemoveImport)
-            {
-                last_outcome = Some(crate::trajectory::AttemptOutcome {
-                    gate_decision: GateDecision::RejectedByRule,
-                    predicate_completion: PredicateCompletion::NotCompleted,
-                    mutation_decision: MutationDecision::Reject,
-                    witness_status: None,
-                });
-                let before_raw = self.current_measured.to_raw();
-                self.evidence.push(TrajectoryEvidence {
-                    trajectory_id: self.trajectory_id,
-                    milestone_id: self.milestone_id,
-                    task_id,
-                    attempt_id: attempt_num as u64,
-                    before: before_raw,
-                    after: before_raw,
-                    gate_decision: GateDecision::RejectedByRule,
-                    predicate_completion: PredicateCompletion::NotCompleted,
-                    mutation_decision: MutationDecision::Reject,
-                    token_cost,
-                    duration_ms: 0,
-                });
-                feedback_history.push(format!(
-                    "Attempt {attempt_num}: Policy violation — removed_edges requires OpKind::RemoveImport in task.allowed_operations."
-                ));
-                continue;
-            }
-
-            // #151 Live Contract v1 (PR #153 R2): delta alanı ↔ OpKind karşılık tablosu.
+            // #151 Live Contract v1 (PR #153 R2+R3): delta alanı ↔ OpKind karşılık tablosu.
             // allowed_operations policy'si bugün yalnız removed_edges → RemoveImport'ı
             // enforce ediyordu; new_nodes/new_edges/modified_entities task'ın izin
             // poliçesiyle DENETLENMEDEN conceptual after-state'e uygulanıyordu (sessiz
             // yapısal genişletme — ilk dogfood dataset'ini epistemik olarak kirletirdi).
             // v1 op-matrix her delta alanını kendi OpKind'ine bağlar:
-            //   removed_edges → RemoveImport · new_nodes → AddNode ·
+            //   removed_edges(Imports) → RemoveImport · new_nodes → AddNode ·
             //   new_edges → AddEdge · modified_entities → ModifyEntity
             // (connected_to, new_nodes spesifikasyonunun parçasıdır — AddNode kapsamında.)
-            // İzin verilmeyen op → RejectedByRule; sessiz geçiş yok.
+            // R3: RemoveImport capability'si YALNIZCA Imports edge'lerini kaldırabilir —
+            // EdgeRef.kind denetlenmeden DependsOn/Calls/Approves… silinebiliyordu
+            // (permission=RemoveImport, actual=RemoveEdge(kind) capability mismatch).
+            // v1'de removed_edges alanı Imports-only'dir; generic edge-removal semantiği
+            // (OpKind::RemoveEdge) ayrı tasarımla açılır.
+            // İzin verilmeyen op / desteklenmeyen kind → RejectedByRule; sessiz geçiş yok.
             let mut op_violations: Vec<&str> = Vec::new();
+            for er in &proposal.removed_edges {
+                if er.kind != crate::space::EdgeKind::Imports {
+                    op_violations.push(
+                        "removed_edges v1 only supports Imports edges \
+                         (RemoveEdge for other kinds is not in the v1 op-matrix)",
+                    );
+                } else if !task
+                    .allowed_operations
+                    .contains(&crate::trajectory::OpKind::RemoveImport)
+                {
+                    op_violations.push("Imports removal requires OpKind::RemoveImport");
+                }
+            }
             if !proposal.new_nodes.is_empty()
                 && !task
                     .allowed_operations
@@ -2757,6 +2742,77 @@ mod tests {
             "new_nodes without AddNode in allowed_operations must be RejectedByRule \
              (Live Contract v1 op-matrix)"
         );
+    }
+
+    /// #151 Live Contract v1 (PR #153 R3): RemoveImport capability'si YALNIZCA
+    /// Imports edge'lerini kaldırabilir. task.allowed_operations = [RemoveImport]
+    /// iken DependsOn/Calls/Approves silme girişimi RejectedByRule olmalıdır
+    /// (permission ≠ actual operation capability mismatch — v1 removed_edges
+    /// alanı Imports-only; generic RemoveEdge ayrı tasarımla açılır).
+    #[test]
+    fn live_contract_v1_remove_import_permits_imports_edges_only() {
+        use crate::agent::EdgeRef;
+        for kind in [
+            crate::space::EdgeKind::DependsOn,
+            crate::space::EdgeKind::Calls,
+            crate::space::EdgeKind::Approves,
+        ] {
+            let policy = TaskPolicy {
+                maneuver_limit: 1,
+                predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+                ..Default::default()
+            };
+            let mut task = coupling_task(1, 0.55, policy);
+            task.allowed_operations = vec![OpKind::RemoveImport];
+            let mut resolver = InMemoryTaskRegistry::new();
+            resolver.insert(task);
+            let proposal = DeltaProposal {
+                new_nodes: vec![],
+                new_edges: vec![],
+                removed_edges: vec![EdgeRef {
+                    from: 0,
+                    to: 1,
+                    kind,
+                }],
+                affected_nodes: vec![0],
+                modified_entities: vec![],
+                position_hints: vec![],
+                reasoning: "remove non-import edge".into(),
+            };
+            let mock = MockLlmClient::new(vec![proposal]);
+            let mut engine = make_real_engine();
+            let mut evidence = vec![];
+            let mut nav = AgentNavigator {
+                llm: &mock,
+                resolver: &resolver,
+                engine: &mut engine,
+                evidence: &mut evidence,
+                trajectory_id: 1,
+                milestone_id: 1,
+                target_vector: RawPosition {
+                    x: 0.55,
+                    y: 0.6,
+                    z: 0.4,
+                    w: 0.5,
+                    v: 0.3,
+                },
+                current_measured: measured_pos(0.5),
+                output_contract: OutputContract::strict(),
+                witness_policy: NavigatorWitnessPolicy::default(),
+                pending_authorization_store: Box::new(
+                    crate::authorization::NullPendingAuthorizationStore,
+                ),
+                clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            };
+            let _ = nav.run_task(1, 7);
+            assert!(
+                !evidence.is_empty()
+                    && evidence
+                        .iter()
+                        .any(|e| e.gate_decision == GateDecision::RejectedByRule),
+                "removed_edges({kind:?}) under RemoveImport-only task must be RejectedByRule"
+            );
+        }
     }
 
     /// G2c-2 #3: compute_raw_from_delta removed_edges ile coupling düşer (arkadaş review 7 #7).

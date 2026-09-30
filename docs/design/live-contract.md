@@ -63,26 +63,28 @@ Task dosyası şeması = CLI harness formatı (`schema_version: 1`, HEAD-bound;
    `InvalidRequiredMetricSource` ile fail-closed yapar. Daha erken fail-closed'dür;
    preflight satırı, Mixed'in core'dan geçtiği varsayımsal yollar için yedek savunmadır.
 
-3. **Operation profile: v1 op-matrix (delta alanı ↔ OpKind karşılığı).**
+2. **Operation profile: v1 op-matrix (delta alanı ↔ OpKind karşılığı).**
    `allowed_operations` policy'si navigator'da **her delta alanı için karşılık gelen
-   OpKind'i ister** — sessiz yapısal genişletme yoktur:
+   OpKind'i ve removed_edges'te edge türünü** ister — sessiz yapısal genişletme ve
+   capability mismatch yoktur:
 
-   | DeltaProposal alanı | Gerekli OpKind |
-   |---|---|
-   | `removed_edges` | `RemoveImport` |
-   | `new_nodes` | `AddNode` |
-   | `new_edges` | `AddEdge` |
-   | `modified_entities` | `ModifyEntity` |
+   | DeltaProposal alanı | Gerekli OpKind | v1 kısıt |
+   |---|---|---|
+   | `removed_edges` (kind=Imports) | `RemoveImport` | **Imports-only** — diğer `EdgeKind`'ler v1'de reddedilir; generic edge-removal (`OpKind::RemoveEdge`) ayrı tasarımla açılır |
+   | `new_nodes` | `AddNode` | `connected_to` bu alanın parçasıdır (AddNode kapsamında) |
+   | `new_edges` | `AddEdge` | — |
+   | `modified_entities` | `ModifyEntity` | — |
 
-   (`connected_to`, `new_nodes` spesifikasyonunun parçasıdır — `AddNode` kapsamında.)
-   İzin verilmeyen op → `RejectedByRule` (gate katmanı), task'ın izin poliçesiyle
-   denetlenmeyen conceptual genişletme imkânsızdır. Diğer `OpKind` varyantları
-   (`AddImport`, `AddAbstraction`, `ExtractModule`, `RemoveNode`, `RemoveEdge`…)
-   delta-alan karşılığı gelmedikçe task'ta listelense de hiçbir alanı açmaz.
-   Agent, task'ın izin vermediği structural operation'ları yapamaz; ilk dogfood
-   dataset'inin epistemik temizliği bu matrix'e dayanır.
+   İzin verilmeyen op / desteklenmeyen kind → `RejectedByRule` (gate katmanı), task'ın
+   izin poliçesiyle denetlenmeyen conceptual genişletme imkânsızdır. Diğer `OpKind`
+   varyantları (`AddImport`, `AddAbstraction`, `ExtractModule`, `RemoveNode`,
+   `RemoveEdge`…) delta-alan karşılığı gelmedikçe task'ta listelense de hiçbir alanı
+   açmaz. Agent, task'ın izin vermediği structural operation'ları yapamaz; ilk dogfood
+   dataset'inin epistemik temizliği bu matrix'e dayanır. (Not: op-matrix şu an
+   navigator içinde uygulanır; MCP `submit_delta` yüzeyine taşınması P5 öncesi
+   ortak osp-core fonksiyonuyla yapılacaktır — #151 takibinde.)
 
-4. **`constraints` insan-taraflı taahhütlerdir, `predicates` ölçülebilir
+3. **`constraints` insan-taraflı taahhütlerdir, `predicates` ölçülebilir
    koşullardır.** "Yeni dependency cycle yok" gibi taahhütler task `constraints`
    alanında METİN olarak kalır ve `notes.md`'de insani olarak değerlendirilir;
    ölçülebilir koşullar `predicates`'te metric+operator+threshold+scope ile
@@ -127,7 +129,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "commands": {
     "baseline_analysis": "osp analyze <repo>",
     "attempt": "osp trajectory attempt 1 --repo … --task … --execution-mode harness …",
-    "after_analysis": "osp analyze <repo> | null"
+    "after_analysis": null,
   },
   "scip_index_digest": null,
   "task_ref": "dogfood/runs/<run>/task.json",
