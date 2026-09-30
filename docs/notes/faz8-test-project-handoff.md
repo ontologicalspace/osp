@@ -4,6 +4,12 @@ Tarih: 2026-08-01
 Branch: `faz8-test-project/completed-loop` (main'den, merge edilmemiş)
 Plan: 8 revizyon turu sonunda APPROVE (9.8/10) — `docs/notes/` içinde plan history.
 
+> **Tarihsel belge.** Snapshot-fence bölümleri (`ensure_snapshot_eligible` global
+> clean-worktree, `trajectory attempt` pre/post snapshot equality) #155 tarafından
+> superseded edildi: attempt akışı artık analyzed-scope clean fence + hiyerarşik
+> (submodule-aware) tracked set kullanır (`crates/osp-cli/src/commands/repo_snapshot.rs`,
+> PR #156). Kalan içerik bağlam içindir.
+
 ## Oturum özeti
 
 ### Tamamlanan işler

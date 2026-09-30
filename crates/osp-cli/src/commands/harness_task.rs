@@ -318,7 +318,7 @@ mod tests {
         RepositorySnapshot {
             head: head.to_string().try_into().unwrap(),
             tracked_paths: std::collections::BTreeSet::from(["src/a.rs".to_string()]),
-            clean: true,
+            dirty_paths: std::collections::BTreeSet::new(),
         }
     }
 

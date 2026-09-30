@@ -339,7 +339,7 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
         },
         "repository": {
             "head": snapshot_after.head.as_str(),
-            "clean": snapshot_after.clean,
+            "clean": snapshot_after.clean(),
             "binding": binding
         },
         // Tek truth source (P2-1): count'lar DTO listelerinden gelir, space'den değil.
@@ -566,11 +566,12 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     let state_dir = resolve_state_dir(args.state_dir.as_deref(), args.execution_mode, &args.repo)?;
 
     // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
-    // Pre-capture repository snapshot (HEAD + tracked paths + clean state).
+    // Pre-capture repository snapshot (HEAD + tracked paths + dirty-path set).
+    // #155 (analyzed-scope clean semantics): global clean-worktree pre-fence KALDIRILDI —
+    // fence artık analyze sonrası analyzed-scope'ta çalışır (ölçülen dosyalar
+    // HEAD-tracked + değişmemiş olmalı; ilgisiz aktif iş/submodule run'ı bloklamaz).
     let snapshot_before =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    // P0-3: harness requires clean worktree (drift fence prerequisite).
-    repo_snapshot::ensure_snapshot_eligible(&snapshot_before).map_err(|e| anyhow::anyhow!(e))?;
 
     // 1. Analyze -> space.
     let registry = AdapterRegistry::default_all();
@@ -580,6 +581,15 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // P1-2: analyzed path ⊆ HEAD tracked-path invariant (fail-closed for untracked files).
     repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
         .map_err(|e| anyhow::anyhow!(e))?;
+
+    // #155: analyzed-scope pre-fence — ölçülen dosyalar dirty/untracked olamaz
+    // (modified veya submodule-altı kapsam etkilenmişse educational red).
+    repo_snapshot::validate_analyzed_paths_clean(
+        &result.node_paths,
+        &snapshot_before,
+        "before attempt",
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     // 2. Engine (D2 gerçek measure).
     let cs = CoordinateSystem::default_raw_five(
@@ -642,16 +652,16 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         }
     }
 
-    // 5. Post-capture drift fence: repository must be unchanged during analysis+run
-    //    (review P0-3). Equal snapshots ⇒ no transient mutation crossed the boundary.
+    // 5. Post-capture drift fence (review P0-3). #155: HEAD + tracked-set eşitliği
+    //    global, içerik drift'i analyzed-scope'ta (saf fonksiyon — exact matrix testli).
     let snapshot_after =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    if snapshot_before != snapshot_after {
-        anyhow::bail!(
-            "repository changed during trajectory attempt (head/tracked/clean drift) — \
-             analysis-run consistency violated"
-        );
-    }
+    repo_snapshot::validate_post_attempt_snapshot(
+        &snapshot_before,
+        &snapshot_after,
+        &result.node_paths,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
 }
 
@@ -1088,7 +1098,7 @@ mod mode_matrix_tests {
                 .try_into()
                 .unwrap(),
             tracked_paths: std::collections::BTreeSet::from(["src/a.rs".to_string()]),
-            clean: true,
+            dirty_paths: std::collections::BTreeSet::new(),
         }
     }
 

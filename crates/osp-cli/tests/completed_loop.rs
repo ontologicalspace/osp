@@ -217,6 +217,10 @@ fn task_envelope(head: &str, anchor_node_id: u64) -> serde_json::Value {
         0 => "a.rs",
         1 => "b.rs",
         2 => "main.rs",
+        // Submodule fixture: alfabetik keşif sırası a.rs, b.rs, clients/fe/src/main.ts,
+        // main.rs → main.rs node 3'e kayar (#156 R2 P1-2: exact kontrat gerçek
+        // node kimliğine bağlanır).
+        3 => "main.rs",
         _ => "a.rs",
     };
     serde_json::json!({
@@ -503,7 +507,10 @@ fn harness_valid_completed_loop_runs() {
 
 #[test]
 fn harness_dirty_worktree_rejected() {
-    // ensure_snapshot_eligible (P0-3): dirty worktree → attempt rejected before run.
+    // P0-3 (#155 analyzed-scope güncellemesi): ÖLÇÜLEN dosya modified → attempt
+    // yine reddedilir; mesaj artık analyzed-scope fence'inden gelir ("analyzed
+    // path is modified or untracked" + commit/stash önerisi). İlgisiz dosyaların
+    // kirli olması artık run'ı bloklamaz (analyzed_scope_fence_allows_* testleri).
     let fx = HarnessFixture::new();
     fs::write(fx.repo_path().join("main.rs"), "pub fn main() {}\n").expect("dirty main.rs");
     let env = task_envelope(&fx.head, 0);
@@ -512,12 +519,14 @@ fn harness_dirty_worktree_rejected() {
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(
         !output.status.success(),
-        "dirty worktree must fail pre-flight"
+        "modified analyzed file must fail pre-flight"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("dirty") || stderr.contains("clean"),
-        "stderr explains clean-worktree requirement: {stderr}"
+        stderr.contains("analyzed path is modified or untracked")
+            && stderr.contains("main.rs")
+            && stderr.contains("commit/stash"),
+        "stderr explains the analyzed-scope fence with a remedy: {stderr}"
     );
 }
 
@@ -865,5 +874,226 @@ fn completed_loop_exact_pin_via_json_envelope() {
     assert!(
         before_coupling > 0.55,
         "before coupling > threshold (was unsatisfied): before={before_coupling}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #155 — analyzed-scope clean fence (Faz 1 ilk run friction: gerçek monorepo)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn analyzed_scope_fence_allows_untracked_outside_analysis() {
+    // Faz 1 vaka: analiz kapsamı DIŞINDA aktif iş (untracked not/submodule işi),
+    // ölçülen dosyalar HEAD-tracked ve değişmemiş → attempt ÇALIŞMALI
+    // (eski global clean-worktree fence bu durumda reddediyordu).
+    let fx = HarnessFixture::new();
+    std::fs::write(fx.repo_path().join("notes-local.md"), "active dev work\n")
+        .expect("write out-of-scope untracked file");
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        output.status.success(),
+        "out-of-scope untracked file must not block the attempt. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Task completed"), "got: {stdout}");
+}
+
+#[test]
+fn analyzed_scope_fence_rejects_modified_analyzed_path() {
+    // Fence'in epistemik çekirdeği korunur: ÖLÇÜLEN dosya modified ise
+    // spesifik, eyleme dönüştürülebilir red (path + commit/stash önerisi).
+    let fx = HarnessFixture::new();
+    let a_path = fx.repo_path().join("a.rs");
+    let original = std::fs::read_to_string(&a_path).expect("read a.rs");
+    std::fs::write(&a_path, format!("{original}// local edit\n")).expect("modify analyzed file");
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "modified analyzed file must fail the fence"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("analyzed path is modified or untracked"),
+        "expected analyzed-scope fence message, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("a.rs") && stderr.contains("commit/stash"),
+        "expected actionable path + remedy, got: {stderr}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #155 P1-1 — gerçek git submodule: hiyerarşik tracked set + prefix dirty fence
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Parent repo (main.rs + a.rs + b.rs) + İÇİNDE gerçek `git submodule` (clients/fe,
+/// içinde src/main.ts). Analyzer .ts analiz eder → nested dosya analyzed setinde.
+struct SubmoduleFixture {
+    parent: HarnessFixture,
+    sub_nested: std::path::PathBuf,
+}
+
+impl SubmoduleFixture {
+    fn new() -> Self {
+        let mut parent = HarnessFixture::new();
+        // 1) Submodule olacak repo: ayrı tempdir'de git init + ts dosyası + commit.
+        let sub_repo = tempfile::tempdir().expect("sub tempdir");
+        let s = sub_repo.path();
+        let git = |args: &[&str], cwd: &std::path::Path| {
+            let st = Command::new("git")
+                .args(["-C", cwd.to_str().unwrap()])
+                .args(args)
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .status()
+                .expect("git");
+            assert!(st.success(), "git {args:?} failed");
+        };
+        Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(s)
+            .status()
+            .expect("git init sub");
+        git(&["config", "user.email", "osp-test@example.invalid"], s);
+        git(&["config", "user.name", "OSP Test"], s);
+        git(&["config", "core.autocrlf", "false"], s);
+        std::fs::create_dir_all(s.join("src")).expect("mkdir src");
+        std::fs::write(s.join("src/main.ts"), "export const x = 1;\n").expect("write ts");
+        git(&["add", "-A"], s);
+        git(&["commit", "-qm", "sub init"], s);
+
+        // 2) Parent'a gerçek submodule olarak ekle (file:// URL) + parent commit.
+        // Git 2.38+ file-protocol kısıtı: clone SÜB-PROSES'i repo config'ini görmez —
+        // GIT_CONFIG_* env'i (süb-proseslere iner) ile aç.
+        let st = Command::new("git")
+            .args(["-C", parent.repo_path().to_str().unwrap()])
+            .args(["submodule", "add"])
+            // file:/// + slash'lı mutlak path (Windows "C:/..." ve Linux "/..." ikisinde de geçerli).
+            .arg(format!(
+                "file:///{}",
+                s.to_str().unwrap().replace('\\', "/")
+            ))
+            .arg("clients/fe")
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .status()
+            .expect("git submodule add");
+        assert!(st.success(), "git submodule add failed");
+        git(&["add", "-A"], parent.repo_path());
+        git(&["commit", "-qm", "add submodule"], parent.repo_path());
+        // Submodule ekleme commit'i parent HEAD'i değiştirdi — task binding
+        // yeni HEAD'e bağlanmalı (fixture alanını güncelle).
+        let new_head = String::from_utf8(
+            Command::new("git")
+                .args(["-C", parent.repo_path().to_str().unwrap()])
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .expect("git rev-parse")
+                .stdout,
+        )
+        .expect("utf8 head");
+        let sub_nested = parent.repo_path().join("clients/fe/src/main.ts");
+        parent.head = new_head.trim().to_string();
+        Self { parent, sub_nested }
+    }
+}
+
+#[test]
+fn real_submodule_clean_nested_analyzed_paths_pass() {
+    // Clean + initialized submodule: gitlink SHA == sub HEAD → nested tree
+    // `<sub>/…` önekiyle tracked sete girer → analyzed nested ts P1-2 fence'ini
+    // GEÇMELİ (parent ls-tree'de görünmediği için eskiden hep red ediyordu).
+    let fx = SubmoduleFixture::new();
+    assert!(
+        fx.sub_nested.exists(),
+        "initialized submodule worktree expected"
+    );
+    // HEAD task'e bağlanır: parent HEAD submodule eklenmesiyle DEĞİŞTİ —
+    // fixture kendi fx.parent.head'ini taşır.
+    let env = task_envelope(&fx.parent.head, 3);
+    let task_path = fx.parent.write_task(&env);
+    let proposals_path = fx.parent.write_proposals(3, 1);
+    let output = fx
+        .parent
+        .run_attempt(&task_path, &proposals_path, 7, "human");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Exact kontrat (#156 R2 P1-2): clean initialized submodule → attempt
+    // BAŞARILI olmalı ve Task completed üretmeli. Zayıf `success || !contains`
+    // assertion'ı yanlış-pozitife açıktı — scope-binding/node-id/ başka bir
+    // preflight hatası da geçerdi.
+    assert!(
+        output.status.success(),
+        "clean initialized submodule must complete the attempt. stderr={stderr}"
+    );
+    assert!(stdout.contains("Task completed"), "got: {stdout}");
+}
+
+#[test]
+fn real_submodule_ignore_config_cannot_silence_the_fence() {
+    // #156 R2 P1-1 (epistemik bypass): `submodule.<name>.ignore = dirty` config'i
+    // submodule worktree değişikliklerini `git status`tan gizler. Fence
+    // `--ignore-submodules=none` ile bunu override etmezse: HEAD == gitlink →
+    // nested tracked sette, analyzer değiştirilmiş içeriği okur, dirty kümesi
+    // boş → ölçüm commit'siz içerikten üretilebilir. Bu test config'in fence'i
+    // susturamadığını pinler.
+    let fx = SubmoduleFixture::new();
+    std::fs::write(&fx.sub_nested, "export const x = 3; // local edit\n")
+        .expect("modify nested ts");
+    let st = Command::new("git")
+        .args(["-C", fx.parent.repo_path().to_str().unwrap()])
+        .args(["config", "submodule.clients/fe.ignore", "dirty"])
+        .status()
+        .expect("git config submodule ignore");
+    assert!(st.success(), "set submodule ignore=dirty");
+    let env = task_envelope(&fx.parent.head, 3);
+    let task_path = fx.parent.write_task(&env);
+    let proposals_path = fx.parent.write_proposals(3, 1);
+    let output = fx
+        .parent
+        .run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "submodule ignore config must NOT silence the dirty-submodule fence"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dirty submodule/directory") && stderr.contains("clients/fe"),
+        "expected dirty-submodule fence despite ignore=dirty config, got: {stderr}"
+    );
+}
+
+#[test]
+fn real_submodule_dirty_nested_analyzed_paths_reject() {
+    // Submodule İÇİNDEKI dosya modify → parent porcelain ` m clients/fe` girdisi
+    // üretir → analyzed nested path dirty-önek fence'inde RED (tam path + öneri).
+    let fx = SubmoduleFixture::new();
+    std::fs::write(&fx.sub_nested, "export const x = 2; // local edit\n")
+        .expect("modify nested ts");
+    let env = task_envelope(&fx.parent.head, 3);
+    let task_path = fx.parent.write_task(&env);
+    let proposals_path = fx.parent.write_proposals(3, 1);
+    let output = fx
+        .parent
+        .run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "dirty submodule content in analysis scope must reject the attempt"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dirty submodule/directory")
+            && stderr.contains("clients/fe")
+            && stderr.contains("commit/stash"),
+        "expected actionable dirty-submodule fence message, got: {stderr}"
     );
 }
