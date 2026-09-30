@@ -119,7 +119,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
 ```json
 {
   "schema_version": "live-ledger-v1",
-  "run_id": "2026-09-30-extract-pricing-adapter",
+  "run_id": "2026-09-30-remove-direct-provider-dependency",
   "contract_version": "v1",
   "repository": "nexus",
   "repository_head": "<sha>",
@@ -129,7 +129,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "commands": {
     "baseline_analysis": "osp analyze <repo>",
     "attempt": "osp trajectory attempt 1 --repo … --task … --execution-mode harness …",
-    "after_analysis": null,
+    "after_analysis": null
   },
   "scip_index_digest": null,
   "task_ref": "dogfood/runs/<run>/task.json",
