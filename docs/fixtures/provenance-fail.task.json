@@ -1,0 +1,36 @@
+{
+  "_comment": "Provenance-fail fixture (#144, live-contract Faz 0) — educational, deliberately unsatisfiable. The coupling predicate demands `required_source: Scip`, but the attempt pipeline's coupling authority is TreeSitter (INV-T9 #70: the topology source binds coupling + instability provenance together; loading a SCIP index would not change this). Loading this task now fails EARLY with `UnsupportedMeasurementAuthority` instead of burning maneuver limit on fail-closed predicate rejections. `repository_head` MUST be your fixture repo's exact HEAD SHA — regenerate it per repo (see docs/quickstart.md).",
+  "schema_version": 1,
+  "repository_head": "REPLACE_WITH_YOUR_FIXTURE_REPO_HEAD_SHA",
+  "scope_bindings": [{ "node_id": 0, "expected_path": "main.py" }],
+  "task": {
+    "id": 1,
+    "milestone_id": 1,
+    "label": "provenance-fail fixture (educational, deliberately unsatisfiable)",
+    "target_predicate_set": {
+      "mode": "All",
+      "predicates": [{
+        "predicate": {
+          "metric": "Coupling",
+          "operator": "Le",
+          "threshold": 0.55,
+          "scope": { "Node": 0 },
+          "required_source": "Scip",
+          "tolerance": 0.0
+        },
+        "weight": null
+      }],
+      "preferred_vector": { "x": 0.55, "y": 0.6, "z": 0.4, "w": 0.5, "v": 0.3 }
+    },
+    "policy": {
+      "predicate_failure_policy": "StrictReject",
+      "min_improvement_delta": 0.02,
+      "max_axis_regression": 0.15,
+      "maneuver_limit": 5,
+      "allow_progress_checkpoint": false
+    },
+    "allowed_operations": ["RemoveImport"],
+    "constraints": [],
+    "status": "Pending"
+  }
+}

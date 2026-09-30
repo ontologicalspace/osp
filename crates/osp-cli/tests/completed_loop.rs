@@ -235,7 +235,11 @@ fn task_envelope(head: &str, anchor_node_id: u64) -> serde_json::Value {
                         "operator": "Le",
                         "threshold": 0.55,
                         "scope": {"Node": anchor_node_id},
-                        "required_source": null, // #96 MD-2 regolden: Scip-gereklilik tesadüfiydi (legacy projeksiyon karşıladı); native TreeSitter coupling dürüstçe SourceInsufficient üretirdi (dogfood Run A)
+                        // Live Contract v1 authority profile (#151 Faz 0): coupling
+                        // attempt pipeline'da TreeSitter ölçülür — declare edilmesi zorunlu
+                        // (eski null, #96 MD-2 regolden bağlamındaydı; preflight artık
+                        // coupling'de declaration'ı şart koşuyor).
+                        "required_source": "TreeSitter",
                         "tolerance": 0.0
                     },
                     "weight": null

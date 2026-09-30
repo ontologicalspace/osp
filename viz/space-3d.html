@@ -175,7 +175,7 @@
   (the source doc's D column is not reproducible from its displayed A/I), y = LCOM4 cohesion
   · 3D edition — the A+I=1 main-sequence plane is drawn when X = A and Y = I (Z free)
   · Rejection walkthrough: task-space & decision values are real CLI outputs from docs/quickstart.md
-  (live run 2026-09-30, commit fea02f5); the 3D layout is an illustrative schematic, not OSP RawPosition
+  (live run 2026-09-30, commit fea02f5 — pre-#144 behavior, recorded); the 3D layout is an illustrative schematic, not OSP RawPosition
 </div>
 
 <script type="module">
@@ -694,6 +694,11 @@ const wtSteps = [
       the task or the axis-authority contract changes.</p>
       <p>Principle: <b>"a SCIP index was loaded" ≠ "this axis's authoritative source
       is Scip"</b>. #144 tracks the product decision (options A–D).</p>
+      <p>Postscript: #144 has since been resolved (decision A) — the demo task's
+      <code>required_source</code> now declares <code>TreeSitter</code>, and such
+      authority mismatches fail at task-load time with
+      <code>UnsupportedMeasurementAuthority</code> instead of burning retries. This
+      walkthrough records the pre-change run.</p>
       <p>All task-space and decision values on this page are real CLI outputs —
       <code>docs/quickstart.md</code>, live run 2026-09-30, commit <code>fea02f5</code>.
       The 3D layout is an illustrative schematic, not OSP raw coordinates.</p>`,

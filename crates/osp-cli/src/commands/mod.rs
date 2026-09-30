@@ -672,17 +672,16 @@ fn resolve_task(
         ComparisonOp, MetricPredicate, OpKind, PredicateAxis, PredicateFailurePolicy,
         PredicateMode, PredicateScope, PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
     };
-    match (args.execution_mode, args.task.as_ref()) {
+    let task = match (args.execution_mode, args.task.as_ref()) {
         (CliExecutionMode::Harness, Some(task_path)) => {
-            let task = harness_task::load_and_validate_harness_task(
+            harness_task::load_and_validate_harness_task(
                 task_path,
                 args.task_id,
                 snapshot,
                 node_paths,
                 args.maneuver_limit,
             )
-            .map_err(|e| anyhow::anyhow!(e))?;
-            Ok(task)
+            .map_err(|e| anyhow::anyhow!(e))?
         }
         (CliExecutionMode::Harness, None) => {
             // P0-2: harness REQUIRES snapshot-bound task file — legacy fallback bypass edemez.
@@ -693,15 +692,14 @@ fn resolve_task(
         }
         (CliExecutionMode::Production, Some(task_path)) => {
             // Production + task file: snapshot-bound task, witness Production (trusted operator).
-            let task = harness_task::load_and_validate_harness_task(
+            harness_task::load_and_validate_harness_task(
                 task_path,
                 args.task_id,
                 snapshot,
                 node_paths,
                 args.maneuver_limit,
             )
-            .map_err(|e| anyhow::anyhow!(e))?;
-            Ok(task)
+            .map_err(|e| anyhow::anyhow!(e))?
         }
         (CliExecutionMode::Production, None) => {
             // Legacy hardcoded fallback (Node(0), coupling ≤ 0.55). D1 backward-compat.
@@ -710,7 +708,7 @@ fn resolve_task(
                 predicate_failure_policy: PredicateFailurePolicy::StrictReject,
                 ..Default::default()
             };
-            Ok(osp_core::trajectory::Task {
+            osp_core::trajectory::Task {
                 id: args.task_id,
                 milestone_id: 1,
                 label: "CLI trajectory attempt".into(),
@@ -722,7 +720,12 @@ fn resolve_task(
                             operator: ComparisonOp::Le,
                             threshold: 0.55,
                             scope: PredicateScope::Node(0),
-                            required_source: Some(osp_core::coords::MetricSource::Scip),
+                            // #144 (karar A, live-contract Faz 0): attempt pipeline'ın
+                            // coupling authority'si TreeSitter'dır (INV-T9 #70 — topology
+                            // source coupling + instability provenance'ını birlikte bağlar);
+                            // legacy task bunu declare eder. Provenance-fail öğretici
+                            // örneği ayrı, adlandırılmış fixture'tır (docs/fixtures/).
+                            required_source: Some(osp_core::coords::MetricSource::TreeSitter),
                             tolerance: 0.0,
                         },
                         weight: None,
@@ -739,9 +742,95 @@ fn resolve_task(
                 allowed_operations: vec![OpKind::RemoveImport],
                 constraints: vec![],
                 status: TaskStatus::Pending,
-            })
+            }
+        }
+    };
+    // #144 (live-contract Faz 0): measurement-authority preflight — yapısal uyuşmazlığı
+    // task-load anında educational hatayla bildir (INV-T4 runtime fail-closed korunur;
+    // bu kontrol onun ÖNÜNE geçer, sessiz fallback yok).
+    validate_attempt_measurement_authority(&task)?;
+    Ok(task)
+}
+
+/// #144 / #151 (live-contract Faz 0): attempt pipeline authority-profile preflight.
+///
+/// INV-T4 ölçüm anında fail-closed red uygular (runtime savunma); bu preflight aynı
+/// yapısal uyuşmazlıkları task yükleme anında, hatanın *sebebiyle* bildirir.
+/// Preflight **exhaustive Live Contract v1 authority matrisidir** — sessiz geçiş
+/// (`_ => {}`) YOKTUR; her axis × required_source kombinasyonu açıkça sınıflanır:
+///
+/// - **Coupling / Instability**: attempt pipeline'da ölçüm daima TreeSitter kaynaklıdır
+///   (INV-T9 #70: topology source coupling + instability provenance'ını birlikte bağlar;
+///   SCIP index bağlansa bile değişmez). Bu yüzden `required_source: TreeSitter`
+///   **declare edilmesi zorunludur** — Scip istemek authority sözleşmesiyle çelişir,
+///   None/Placeholder/Heuristic/Mixed ise pipeline authority'siyle yapısal uyuşmazdır.
+/// - **Cohesion**: Scip-authoritative'dır ama attempt Tier-1 analizle çalışır ve Scip
+///   ölçüm üretmez (placeholder cohesion) → declare edilse de edilmese de bu pipeline'da
+///   asla tamamlanamaz (`ScipMeasurementUnavailable`).
+/// - **Entropy / WitnessDepth**: commit-entropy / witness preset'lerinden pipeline
+///   türetilir; v1 kontratta `required_source` declare EDİLMEMELİDİR (ölçüm INV-T4'te
+///   değerlendirilir).
+/// - **RiskScore / MainSequenceDistance / Custom**: derived/custom axis'tir;
+///   `MeasuredRawPosition::axis()` bunlar için legacy coupling fallback'u yapar
+///   (P2-2, ayrı takipte) — sessiz ontolojik fallback'i önlemek için yükleme anında
+///   reddedilir (`UnsupportedPredicateAxis`).
+fn validate_attempt_measurement_authority(task: &osp_core::trajectory::Task) -> anyhow::Result<()> {
+    use osp_core::coords::MetricSource;
+    use osp_core::trajectory::PredicateAxis;
+    for wp in &task.target_predicate_set.predicates {
+        let p = &wp.predicate;
+        match p.metric {
+            PredicateAxis::Coupling | PredicateAxis::Instability => match p.required_source {
+                Some(MetricSource::TreeSitter) => {}
+                Some(MetricSource::Scip) => anyhow::bail!(
+                    "UnsupportedMeasurementAuthority: {:?} in the attempt pipeline is measured \
+                     from tree_sitter (INV-T9 #70: the topology source binds coupling and \
+                     instability provenance together — loading a SCIP index would not change \
+                     this authority), but the task requires scip. Restructure the task \
+                     predicate (Live Contract v1 authority profile: docs/design/live-contract.md; \
+                     live-use program #151)",
+                    p.metric
+                ),
+                other => anyhow::bail!(
+                    "UnsupportedMeasurementAuthority: {:?} in the attempt pipeline is measured \
+                     from tree_sitter — the task MUST declare `required_source: TreeSitter` \
+                     (Live Contract v1 authority profile; no silent fallback), found {:?}",
+                    p.metric,
+                    other
+                ),
+            },
+            PredicateAxis::Cohesion => anyhow::bail!(
+                "ScipMeasurementUnavailable: cohesion is Scip-authoritative, but \
+                 `trajectory attempt` runs Tier-1 analysis and accepts no SCIP index — \
+                 a cohesion predicate can never complete here, with or without a declared \
+                 source. Use `osp analyze --scip` for Scip cohesion measurements \
+                 (live-use program #151 tracks attempt-side SCIP)"
+            ),
+            PredicateAxis::Entropy | PredicateAxis::WitnessDepth => {
+                if let Some(src) = p.required_source {
+                    anyhow::bail!(
+                        "UnsupportedMeasurementAuthority: {:?} is pipeline-derived in attempt \
+                         v1 (commit-entropy / witness presets) and must NOT declare \
+                         required_source — the produced measurement is evaluated by INV-T4 at \
+                         measurement time, found {:?}",
+                        p.metric,
+                        src
+                    );
+                }
+            }
+            PredicateAxis::RiskScore
+            | PredicateAxis::MainSequenceDistance
+            | PredicateAxis::Custom => anyhow::bail!(
+                "UnsupportedPredicateAxis: {:?} is a derived/custom axis — the attempt \
+                 pipeline would silently evaluate it against the coupling measurement \
+                 (legacy fallback) and therefore refuses it up front. Attempt v1 supports \
+                 coupling / cohesion / instability / entropy / witness_depth only \
+                 (Live Contract v1)",
+                p.metric
+            ),
         }
     }
+    Ok(())
 }
 
 /// Navigator çalıştır (generic LlmClient — mock veya real).
@@ -1046,6 +1135,209 @@ mod mode_matrix_tests {
             task.allowed_operations,
             vec![osp_core::trajectory::OpKind::RemoveImport]
         );
+        // #144 (karar A): legacy demo task, attempt pipeline'ın gerçek coupling
+        // authority'sini declare eder — TreeSitter (INV-T9 #70).
+        assert_eq!(
+            task.target_predicate_set.predicates[0]
+                .predicate
+                .required_source,
+            Some(osp_core::coords::MetricSource::TreeSitter)
+        );
+    }
+
+    // ═══ #144 (live-contract Faz 0): measurement-authority preflight ═══
+
+    fn authority_task(
+        metric: osp_core::trajectory::PredicateAxis,
+        required_source: Option<osp_core::coords::MetricSource>,
+    ) -> osp_core::trajectory::Task {
+        use osp_core::trajectory::{
+            ComparisonOp, MetricPredicate, PredicateMode, PredicateScope, PredicateSet, TaskPolicy,
+            TaskStatus, WeightedPredicate,
+        };
+        osp_core::trajectory::Task {
+            id: 1,
+            milestone_id: 1,
+            label: "authority preflight test".into(),
+            target_predicate_set: PredicateSet {
+                mode: PredicateMode::All,
+                predicates: vec![WeightedPredicate {
+                    predicate: MetricPredicate {
+                        metric,
+                        operator: ComparisonOp::Le,
+                        threshold: 0.5,
+                        scope: PredicateScope::Node(0),
+                        required_source,
+                        tolerance: 0.0,
+                    },
+                    weight: None,
+                }],
+                preferred_vector: Some(osp_core::coords::RawPosition {
+                    x: 0.5,
+                    y: 0.5,
+                    z: 0.5,
+                    w: 0.5,
+                    v: 0.3,
+                }),
+            },
+            policy: TaskPolicy::default(),
+            allowed_operations: vec![],
+            constraints: vec![],
+            status: TaskStatus::Pending,
+        }
+    }
+
+    #[test]
+    fn authority_preflight_rejects_coupling_required_scip() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Coupling,
+            Some(osp_core::coords::MetricSource::Scip),
+        ))
+        .expect_err("coupling + required_source:Scip must fail the preflight");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UnsupportedMeasurementAuthority"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("tree_sitter") && msg.contains("would not change this authority"),
+            "expected educational authority explanation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn authority_preflight_rejects_instability_required_scip() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Instability,
+            Some(osp_core::coords::MetricSource::Scip),
+        ))
+        .expect_err("instability + required_source:Scip must fail the preflight");
+        assert!(format!("{err}").contains("UnsupportedMeasurementAuthority"));
+    }
+
+    #[test]
+    fn authority_preflight_rejects_cohesion_required_scip_with_unavailable() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Cohesion,
+            Some(osp_core::coords::MetricSource::Scip),
+        ))
+        .expect_err("cohesion + required_source:Scip must fail the preflight (Tier-1 attempt)");
+        let msg = format!("{err}");
+        assert!(msg.contains("ScipMeasurementUnavailable"), "got: {msg}");
+        assert!(
+            msg.contains("analyze --scip"),
+            "expected pointer to analyze --scip, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn authority_preflight_accepts_coupling_required_treesitter() {
+        validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Coupling,
+            Some(osp_core::coords::MetricSource::TreeSitter),
+        ))
+        .expect("coupling + required_source:TreeSitter matches the attempt pipeline authority");
+    }
+
+    #[test]
+    fn authority_preflight_rejects_coupling_without_declared_source() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Coupling,
+            None,
+        ))
+        .expect_err("coupling must DECLARE required_source:TreeSitter (exhaustive matrix)");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UnsupportedMeasurementAuthority"),
+            "got: {msg}"
+        );
+        assert!(
+            msg.contains("MUST declare `required_source: TreeSitter`") && msg.contains("None"),
+            "expected declaration-required explanation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn authority_preflight_rejects_coupling_placeholder_source() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Coupling,
+            Some(osp_core::coords::MetricSource::Placeholder),
+        ))
+        .expect_err("coupling + required_source:Placeholder is structurally incompatible");
+        assert!(format!("{err}").contains("UnsupportedMeasurementAuthority"));
+    }
+
+    #[test]
+    fn authority_preflight_rejects_cohesion_without_declared_source() {
+        // Live Contract v1: cohesion attempt pipeline'da KULLANILAMAZ — INV-T4'ün
+        // "None → constraint yok" semantiği Tier-1 placeholder cohesion ölçümüyle
+        // birleşince sessiz Completed kapısı açardı; preflight bunu kapatır.
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Cohesion,
+            None,
+        ))
+        .expect_err("cohesion must fail preflight even without a declared source");
+        let msg = format!("{err}");
+        assert!(msg.contains("ScipMeasurementUnavailable"), "got: {msg}");
+        assert!(
+            msg.contains("with or without a declared source"),
+            "expected None-covered explanation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn authority_preflight_accepts_entropy_without_declared_source() {
+        validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Entropy,
+            None,
+        ))
+        .expect("entropy is pipeline-derived in v1; unset required_source is the contract");
+    }
+
+    #[test]
+    fn authority_preflight_accepts_witness_depth_without_declared_source() {
+        validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::WitnessDepth,
+            None,
+        ))
+        .expect("witness-depth is pipeline-derived in v1; unset required_source is the contract");
+    }
+
+    #[test]
+    fn authority_preflight_rejects_entropy_with_declared_source() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::Entropy,
+            Some(osp_core::coords::MetricSource::TreeSitter),
+        ))
+        .expect_err("entropy must NOT declare required_source in attempt v1");
+        assert!(format!("{err}").contains("UnsupportedMeasurementAuthority"));
+    }
+
+    #[test]
+    fn authority_preflight_rejects_derived_axis_risk_score() {
+        let err = validate_attempt_measurement_authority(&authority_task(
+            osp_core::trajectory::PredicateAxis::RiskScore,
+            None,
+        ))
+        .expect_err("RiskScore would silently evaluate against coupling (legacy fallback)");
+        let msg = format!("{err}");
+        assert!(msg.contains("UnsupportedPredicateAxis"), "got: {msg}");
+        assert!(
+            msg.contains("coupling measurement") && msg.contains("refuses it up front"),
+            "expected no-silent-fallback explanation, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn authority_preflight_rejects_derived_and_custom_axes() {
+        for axis in [
+            osp_core::trajectory::PredicateAxis::MainSequenceDistance,
+            osp_core::trajectory::PredicateAxis::Custom,
+        ] {
+            let err = validate_attempt_measurement_authority(&authority_task(axis, None))
+                .expect_err("derived/custom axes must fail the preflight");
+            assert!(format!("{err}").contains("UnsupportedPredicateAxis"));
+        }
     }
 }
 

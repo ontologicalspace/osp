@@ -4,8 +4,8 @@ This directory contains the research artifacts, specifications, and results for 
 **Ontological Space Protocol (OSP)** — a framework that models software projects as
 navigable conceptual spaces with physics-like rules and BFT-inspired witnessing.
 
-**Getting started:** [`quickstart.md`](quickstart.md) — 2-minute tour: first analysis
-→ first rejected proposal, with copy-paste blocks.
+**Getting started:** [`quickstart.md`](quickstart.md) — first analysis → first
+accepted proposal → first provenance refusal, with copy-paste blocks.
 
 ## Structure
 
@@ -33,6 +33,13 @@ All three are published on Zenodo:
 
 - [`roadmap/paper2-roadmap.md`](roadmap/paper2-roadmap.md) — Paper 2 development roadmap (motivation, ontology, INV-T1..T8, §8 stage plan)
 - [`roadmap/paper3-design.md`](roadmap/paper3-design.md) — Paper 3 design document (concept anchoring layers)
+
+### `design/` — Active design documents
+
+- [`design/plan-bound-task-lifecycle.md`](design/plan-bound-task-lifecycle.md) — Plan-Bound Task Lifecycle design (Gp/Gc gates, §11 RQs, §12 phased plan; Paper 4 basis)
+- [`design/plan-bound-experiment-plan.md`](design/plan-bound-experiment-plan.md) — Paper 4 experiment plan (RQ-P1..P6 operationalization, 12 derived metrics, Phase 0 freeze checklist F1-F4 + D1-D9)
+- [`design/plan-bound-paper-outline.md`](design/plan-bound-paper-outline.md) — Paper 4 outline (writing-last)
+- [`design/live-contract.md`](design/live-contract.md) — Live-use behavior contract v1 (#151 Phase 0: run artifacts, task authority declaration, ledger schema, patch bridge)
 
 ### `results/` — Empirical results and benchmarks
 
