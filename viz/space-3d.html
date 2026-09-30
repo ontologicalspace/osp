@@ -54,8 +54,8 @@
 <div class="header">
   <h1>OSP Space Browser 3D</h1>
   <p>15 repositories positioned in conceptual space — <span id="axis-desc"></span>.
-     Data from SCIP semantic analysis (13,031 classes). Same corpus as the
-     <a class="ref-link" href="space-browser.html">2D browser</a>.</p>
+     Data from SCIP semantic analysis (<span id="class-total"></span> classes).
+     Same corpus as the <a class="ref-link" href="space-browser.html">2D browser</a>.</p>
 </div>
 
 <div class="controls">
@@ -105,7 +105,8 @@
 
 <div class="footer">
   OSP — Ontological Space Protocol · <a class="ref-link" href="https://github.com/ontologicalspace/osp">github.com/ontologicalspace/osp</a>
-  · Paper v2.3 · A = abstractness, I = instability (Martin), D = |A+I−1|, y = LCOM4 cohesion
+  · Paper v2.3 · A = abstractness, I = instability (Martin), D = |A+I−1| computed from the embedded A/I
+  (the source doc's D column predates this rule), y = LCOM4 cohesion
   · 3D edition — the A+I=1 main-sequence plane is drawn when X = A and Y = I (Z free)
 </div>
 
@@ -119,25 +120,35 @@ try {
   throw e;
 }
 
-// ═══ Data: 15-repo corpus — identical values to space-browser.html (docs/scip-cohesion-results.md) ═══
+// ═══ Data: 15-repo corpus — A/I/y/nodes/edges/classes/cov/status copied from
+// docs/results/scip-cohesion.md (2026-06-22 snapshot). D is NOT copied: the source
+// doc's D column does not reproduce from its own A/I (upstream data debt), so D is
+// derived below from the canonical OSP definition D = |A+I−1| to stay consistent
+// with the geometrically drawn A+I=1 plane. ═══
 const repos = [
-  {name:"click",        lang:"Py",  nodes:63,   edges:61,   classes:133,   A:0.02, I:0.63, D:0.36, y:0.67, cov:1.00, status:"Witnessed"},
-  {name:"django",       lang:"Py",  nodes:2966, edges:4659, classes:10054, A:0.00, I:0.66, D:0.18, y:0.66, cov:0.98, status:"Unobservable"},
-  {name:"flask",        lang:"Py",  nodes:83,   edges:131,  classes:115,   A:0.01, I:0.71, D:0.34, y:0.63, cov:1.00, status:"Witnessed"},
-  {name:"fastapi",      lang:"Py",  nodes:1133, edges:831,  classes:673,   A:0.01, I:0.70, D:0.13, y:0.62, cov:1.00, status:"Unobservable"},
-  {name:"httpx",        lang:"Py",  nodes:60,   edges:4,    classes:81,    A:0.07, I:0.50, D:0.45, y:0.62, cov:1.00, status:"Unobservable"},
-  {name:"rich",         lang:"Py",  nodes:213,  edges:404,  classes:213,   A:0.04, I:0.71, D:0.36, y:0.60, cov:1.00, status:"Witnessed"},
-  {name:"pydantic",     lang:"Py",  nodes:534,  edges:1016, classes:323,   A:0.02, I:0.70, D:0.22, y:0.52, cov:0.19, status:"Unobservable"},
-  {name:"requests",     lang:"Py",  nodes:37,   edges:21,   classes:25,    A:0.05, I:0.43, D:0.49, y:0.49, cov:0.51, status:"Witnessed"},
-  {name:"worms-supabase",lang:"Py", nodes:26,   edges:17,   classes:0,     A:0.00, I:0.45, D:0.35, y:0.50, cov:0,    status:"Unwitnessed", placeholder:true},
-  {name:"date-fns",     lang:"TS",  nodes:1550, edges:3579, classes:105,   A:0.05, I:0.93, D:0.02, y:0.51, cov:0.96, status:"Unobservable"},
-  {name:"svelte",       lang:"TS",  nodes:3450, edges:4232, classes:376,   A:0.00, I:0.92, D:0.21, y:0.51, cov:0.02, status:"Witnessed"},
-  {name:"vitest",       lang:"TS",  nodes:2236, edges:1881, classes:705,   A:0.02, I:0.57, D:0.35, y:0.54, cov:0.91, status:"Unobservable"},
-  {name:"chalk",        lang:"JS",  nodes:13,   edges:11,   classes:10,    A:0.00, I:0.81, D:0.35, y:0.54, cov:0.38, status:"Unobservable"},
-  {name:"commander.js", lang:"JS",  nodes:159,  edges:135,  classes:23,    A:0.00, I:0.81, D:0.16, y:0.52, cov:0.08, status:"Witnessed"},
-  {name:"lodash",       lang:"JS",  nodes:27,   edges:0,    classes:0,     A:0.50, I:0.50, D:0.00, y:0.50, cov:0,    status:"Unobservable", placeholder:true},
+  {name:"click",        lang:"Py",  nodes:63,   edges:61,   classes:133,   A:0.02, I:0.63, y:0.67, cov:1.00, status:"Witnessed"},
+  {name:"django",       lang:"Py",  nodes:2966, edges:4659, classes:10054, A:0.00, I:0.66, y:0.66, cov:0.98, status:"Unobservable"},
+  {name:"flask",        lang:"Py",  nodes:83,   edges:131,  classes:115,   A:0.01, I:0.71, y:0.63, cov:1.00, status:"Witnessed"},
+  {name:"fastapi",      lang:"Py",  nodes:1133, edges:831,  classes:673,   A:0.01, I:0.70, y:0.62, cov:1.00, status:"Unobservable"},
+  {name:"httpx",        lang:"Py",  nodes:60,   edges:4,    classes:81,    A:0.07, I:0.50, y:0.62, cov:1.00, status:"Unobservable"},
+  {name:"rich",         lang:"Py",  nodes:213,  edges:404,  classes:213,   A:0.04, I:0.71, y:0.60, cov:1.00, status:"Witnessed"},
+  {name:"pydantic",     lang:"Py",  nodes:534,  edges:1016, classes:323,   A:0.02, I:0.70, y:0.52, cov:0.19, status:"Unobservable"},
+  {name:"requests",     lang:"Py",  nodes:37,   edges:21,   classes:25,    A:0.05, I:0.43, y:0.49, cov:0.51, status:"Witnessed"},
+  {name:"worms-supabase",lang:"Py", nodes:26,   edges:17,   classes:0,     A:0.00, I:0.45, y:0.50, cov:0,    status:"Unwitnessed", placeholder:true},
+  {name:"date-fns",     lang:"TS",  nodes:1550, edges:3579, classes:105,   A:0.05, I:0.93, y:0.51, cov:0.96, status:"Unobservable"},
+  {name:"svelte",       lang:"TS",  nodes:3450, edges:4232, classes:376,   A:0.00, I:0.92, y:0.51, cov:0.02, status:"Witnessed"},
+  {name:"vitest",       lang:"TS",  nodes:2236, edges:1881, classes:705,   A:0.02, I:0.57, y:0.54, cov:0.91, status:"Unobservable"},
+  {name:"chalk",        lang:"JS",  nodes:13,   edges:11,   classes:10,    A:0.00, I:0.81, y:0.54, cov:0.38, status:"Unobservable"},
+  {name:"commander.js", lang:"JS",  nodes:159,  edges:135,  classes:23,    A:0.00, I:0.81, y:0.52, cov:0.08, status:"Witnessed"},
+  {name:"lodash",       lang:"JS",  nodes:27,   edges:0,    classes:0,     A:0.50, I:0.50, y:0.50, cov:0,    status:"Unobservable", placeholder:true},
 ];
-repos.forEach(r => r.coupling = r.nodes > 0 ? r.edges / r.nodes : 0);
+repos.forEach(r => {
+  r.coupling = r.nodes > 0 ? r.edges / r.nodes : 0;
+  r.D = Math.abs(r.A + r.I - 1); // canonical OSP definition, consistent with the drawn plane
+});
+// header aggregate is derived from the payload (source doc's 13,031 summary ≠ its own table sum)
+document.getElementById("class-total").textContent =
+  repos.reduce((s, r) => s + r.classes, 0).toLocaleString("en-US");
 
 // ═══ Axis definitions — same keys and ranges as the 2D browser ═══
 const axes = {
@@ -253,15 +264,18 @@ function makeTextSprite(text, { size = 13, color = "#c9d1d9", bg = "rgba(13,17,2
   spr.renderOrder = 20;
   return spr;
 }
-function disposeGroup(group) {
-  group.traverse(o => {
-    if (o.geometry) o.geometry.dispose();
-    if (o.material) {
-      if (o.material.map) o.material.map.dispose();
-      o.material.dispose();
-    }
-  });
-  scene.remove(group);
+// Persistent groups stay attached to the scene; rebuilds clear children only.
+function clearGroup(group) {
+  for (const child of [...group.children]) {
+    child.traverse(o => {
+      if (o.geometry) o.geometry.dispose();
+      if (o.material) {
+        if (o.material.map) o.material.map.dispose();
+        o.material.dispose();
+      }
+    });
+    group.remove(child);
+  }
 }
 
 // ═══ Nice ticks (d3-style) ═══
@@ -296,7 +310,7 @@ const axesGroup = new THREE.Group(); scene.add(axesGroup);
 const planeGroup = new THREE.Group(); scene.add(planeGroup);
 
 function buildAxes(xKey, yKey, zKey) {
-  disposeGroup(axesGroup);
+  clearGroup(axesGroup);
   const tickMat = new THREE.LineBasicMaterial({ color: 0x484f58 });
   const axisPts = [];
   // axis rails from origin corner
@@ -330,7 +344,7 @@ function buildAxes(xKey, yKey, zKey) {
 }
 
 function buildMainSeqPlane(xKey, yKey) {
-  disposeGroup(planeGroup);
+  clearGroup(planeGroup);
   if (xKey !== "A" || yKey !== "I") return;
   // A+I=1 line in the X-Y plane (A ∈ [0, 0.55] ⇒ I ∈ [0.45, 1]), swept along Z
   const [aMin, aMax] = axes.A.range;
