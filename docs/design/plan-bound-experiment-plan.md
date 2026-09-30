@@ -159,8 +159,9 @@ inferential work — out of scope for Paper 4 v1.
   more material deviations and lower reviewer-rated solution quality —
   better/simpler alternatives blocked.
 - **IV:** binding tightness (allowed-op count, constraint count).
-  **DV:** material-deviation count, solution quality rating (D2, with its
-  missingness contract), attempt count.
+  **DV:** material-deviation count, engineering-quality rating (D2 —
+  rubric isolated from conformance/predicates, with its missingness
+  contract), attempt count.
 - **Analysis:** descriptive association of tightness with each outcome
   *separately* — H6a and H6b evaluated independently (both-outcome framing);
   every analysis reports rating coverage per the D2 contract and runs a
@@ -219,25 +220,36 @@ After the tag, changes require a new version tag plus migration note.
   exactly one event per check; every component present in every event. Drift
   = a row with `changed == true`. (Required by RQ-P3; single-enum design was
   rejected in review round-1 — it loses the joint observation.)
-- [ ] **D2 — `completion_review_decided.solution_quality_rating` +
-  missingness contract + anchored rubric (required by RQ-P6):** integer
-  1–5, **mandatory on decision kinds that evaluate the solution**
-  (`AcceptCompleted`, `AcceptAsProgress`, `RequestRework`); on kinds that
-  do not evaluate it (`RejectAttempt`, `AbortTask`, `ReplanRequired`), the
-  event carries `rating_status: not_rated` + a `not_rated_reason` enum —
-  absence is never silent. Every RQ-P6 analysis reports rating coverage
-  and runs a complete-case sensitivity check; without this contract,
-  selective missingness (MNAR) would bias the DV irrecoverably.
-  **Scale semantics are part of the freeze** — draft rubric v1:
-  1 = below acceptability (plan-conformance failure or introduced
-  regressions); 2 = marginal (predicates met, notable quality concerns);
-  3 = acceptable (meets plan and predicates, ordinary engineering quality);
-  4 = strong (clearly exceeds plan expectations without material-deviation
-  cost); 5 = superior (notably better or simpler than the accepted
-  approach envisioned). Every rating event pins
-  `rating_rubric_version: v1`; rubric text is a freeze artifact (F1).
-  Unanchored 1–5 would make a 3↔3 comparison across time untrustworthy
-  under rater learning/drift — unrecoverable after data collection.
+- [ ] **D2 — `completion_review_decided` quality rating: value space,
+  missingness contract, anchored rubric (required by RQ-P6):**
+  `rating_status ∈ {rated, not_rated, not_rateable}` — absence is never
+  silent. **rated** (integer 1–5) is mandatory on decision kinds that
+  evaluate the solution (`AcceptCompleted`, `AcceptAsProgress`,
+  `RequestRework`); **not_rated** (+ `not_rated_reason` enum) on kinds that
+  do not evaluate it (`RejectAttempt`, `AbortTask`, `ReplanRequired`);
+  **not_rateable** (+ reason) when the work was evaluated but engineering
+  quality is not meaningfully assessable in isolation (e.g. `OutsidePlan`
+  work) — a low score must mean "assessed and poor", never "non-conformant".
+  Every RQ-P6 analysis reports the full status distribution and runs a
+  complete-case sensitivity check; without this contract, selective
+  missingness (MNAR) would bias the DV irrecoverably.
+  **Rubric v1 — engineering quality ONLY** (correctness, maintainability,
+  simplicity, robustness): 1 = poor — correctness/robustness defects
+  dominate, the work should not stand as-is; 2 = weak — functions, but
+  notable maintainability or simplicity problems; 3 = acceptable — sound,
+  ordinary engineering quality; 4 = strong — clean, simple, robust,
+  noticeably above typical; 5 = superior — exemplary simplicity and
+  robustness that elevates the surrounding code.
+  **Isolation rule:** predicate satisfaction and plan conformance are
+  recorded in their own fields (`predicate_results`, `plan_conformance`)
+  and must not influence the score — design §6 evaluates the three
+  separately, and a rubric that embeds conformance would make
+  tighter-binding → more-deviations → lower-rating partially true by
+  definition, contaminating exactly the effect RQ-P6 sets out to measure.
+  Every rating event pins `rating_rubric_version: v1`; rubric text is a
+  freeze artifact (F1). Unanchored or conformance-tainted 1–5 would make
+  ratings untrustworthy across time and across binding tightness —
+  unrecoverable after data collection.
 - [ ] **D3 — Reviewer-note structure:** how a note marks a decision as
   *contested* and references evidence (required by RQ-P2).
 - [ ] **D4 — Meta-RQ modification log schema** (finding: component, change,
