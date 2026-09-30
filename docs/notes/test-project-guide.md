@@ -185,7 +185,7 @@ Task dosyası yüklenirken şu kontroller fail-closed uygulanır:
 | scope binding Node ID analyze'de yok | `UnknownScopeBindingNode` |
 | duplicate/extra scope binding | `DuplicateScopeBinding` / `ScopeBindingSetMismatch` |
 | malformed JSON | `Parse` |
-| dirty worktree | `ensure_snapshot_eligible` reject |
+| **analyzed** path modified/untracked (pre veya post) | `validate_analyzed_paths_clean` reject (#155 — analyzed-scope fence; ilgisiz dosyaların kirli olması artık reddetmez) |
 
 ## Integration test isolation pattern'i
 
@@ -194,16 +194,19 @@ iki tuzağa karşı izole edilmeli. Bu bölüm, `HarnessFixture` pattern'ini
 (`crates/osp-cli/tests/completed_loop.rs`) dokümante eder — gelecek integration
 test yazarlarının aynı teşhis sürecini yaşamaması için.
 
-### Tuzak 1: `.osp/` writes → repo dirty → snapshot eligibility fail
+### Tuzak 1: `.osp/` writes → repo dirty → analyzed-scope fence fail
 
 `FilesystemPendingAuthorizationStore::new(root)` `root` altında
 `.osp/pending-authorizations/` dizinine Held artifact yazıyor. Production
 default (`--state-dir` verilmezse) **CWD**'ye yazar.
 
 Eğer test CWD'yi analyzed repo içine ayarlarsa (`current_dir(repo_path)`):
-`.osp/` analyzed repo'ya yazılır → `git status` dirty → `ensure_snapshot_eligible`
-reject → test fail. Bu bir workaround değil, **production fix**'tir (PR #104):
-`--state-dir` harness mode'da zorunlu ve analyzed repo **dışında** olmalı.
+`.osp/` analyzed repo'ya yazılır → `git status` dirty → **analyzed-scope fence**
+(#155: dirty path'ler analiz kapsamına düştüğünde `validate_analyzed_paths_clean`
+reject eder; `ensure_snapshot_eligible` global fence'i artık yalnızca clean-bound
+`--require-clean-snapshot` analyze sözleşmesinde kullanılır) → test fail.
+Bu bir workaround değil, **production fix**'tir (PR #104): `--state-dir`
+harness mode'da zorunlu ve analyzed repo **dışında** olmalı.
 
 ### Tuzak 2: Paralel test CWD contamination
 

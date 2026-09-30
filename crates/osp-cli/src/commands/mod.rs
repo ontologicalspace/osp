@@ -652,26 +652,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         }
     }
 
-    // 5. Post-capture drift fence (review P0-3). #155: HEAD eşitliği global kalır;
-    //    içerik drift'i analyzed-scope'ta denetlenir — attempt sırasında ölçÜlen
-    //    dosyalar değişmişse red, ölçülmeyen dosyaların değişimi kabul edilir.
+    // 5. Post-capture drift fence (review P0-3). #155: HEAD + tracked-set eşitliği
+    //    global, içerik drift'i analyzed-scope'ta (saf fonksiyon — exact matrix testli).
     let snapshot_after =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    if snapshot_after.head != snapshot_before.head {
-        anyhow::bail!(
-            "repository HEAD moved during trajectory attempt — analysis-run consistency violated"
-        );
-    }
-    if snapshot_after.tracked_paths != snapshot_before.tracked_paths {
-        anyhow::bail!(
-            "repository tracked-path set changed during trajectory attempt — \
-             analysis-run consistency violated"
-        );
-    }
-    repo_snapshot::validate_analyzed_paths_clean(
-        &result.node_paths,
+    repo_snapshot::validate_post_attempt_snapshot(
+        &snapshot_before,
         &snapshot_after,
-        "after attempt",
+        &result.node_paths,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     Ok(())

@@ -1,12 +1,23 @@
-//! Repository snapshot — Git HEAD binding + clean worktree + tracked-path verification.
+//! Repository snapshot — Git HEAD binding + hierarchical tracked paths + analyzed-scope clean fence.
 //!
-//! Faz 8 test-project (review v6-v7): task-subject binding doğruluğu için analyzed
-//! repository snapshot'ına bağlama. NodeId→path binding, repo HEAD drift detection,
-//! ve analyzed-path ⊆ HEAD tracked-path invariant'ları.
+//! #155 (analyzed-scope clean semantics): garanti edilen şey tüm worktree'nin temizliği
+//! değil, **ölçülen içeriğin bağlı olduğu revision tarafından tanımlanabilir olması ve
+//! ölçüm/karar penceresinde drift etmemesidir**. Snapshot authority tek SHA değil,
+//! repository-root → revision mapping'idir (superproject HEAD → gitlink SHA → submodule
+//! tree → analyzed file; `capture_tracked_paths` submodule-aware genişletir).
 //!
-//! Bu modül "atomic snapshot" iddia ETMEZ — pre/post repository snapshot equality ile
-//! drift-detected consistent analysis sağlar. Transient ABA (clean A → B → clean A)
-//! yakalanmayabilir; controlled temp fixture'da eşzamanlı yazıcı olmadığı için yeterli.
+//! Fence katmanları (`trajectory attempt`):
+//! - `validate_analyzed_paths_tracked` — analyzed ⊆ (hiyerarşik) HEAD tracked set,
+//! - `validate_analyzed_paths_clean` (pre/post) — analyzed kapsam dirty değil
+//!   (modified/untracked/submodule girdisi önek eşleşmesiyle),
+//! - `validate_post_attempt_snapshot` — HEAD + tracked-set global eşitlik + post analyzed-scope.
+//!
+//! Bu modül "atomic snapshot" iddia ETMEZ — pre/post fence ile drift-detected consistent
+//! analysis sağlar. Transient ABA (clean A → B → clean A) yakalanmayabilir; controlled
+//! temp fixture'da eşzamanlı yazıcı olmadığı için yeterli.
+//!
+//! `ensure_snapshot_eligible` (global clean) yalnızca clean-bound
+//! `--require-clean-snapshot` analyze sözleşmesinde yaşar (B-3 task üretimi).
 
 #![allow(
     dead_code,
@@ -136,12 +147,67 @@ fn capture_head(repo: &Path) -> Result<GitCommitId, RepoSnapshotError> {
 }
 
 fn capture_tracked_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
-    let output = run_git(repo, &["ls-tree", "-r", "--name-only", "HEAD"], "ls-tree")?;
-    Ok(output
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(String::from)
-        .collect())
+    // Parent HEAD tree (düz dosyalar). Submodule içeride DEĞİLDİR: parent `ls-tree -r`
+    // yalnızca gitlink'i (`160000 commit <sha>\t<path>`) listeler — nested dosyalar
+    // parent HEAD tree'sinde yok (#155 P1-1: bu yüzden analyzed nested path'ler
+    // `validate_analyzed_paths_tracked`'den geçemiyordu).
+    let mut paths: BTreeSet<String> =
+        run_git(repo, &["ls-tree", "-r", "--name-only", "HEAD"], "ls-tree")?
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect();
+
+    // Submodule-aware genişletme (#155 P1-1): initialized submodule'un worktree HEAD'i
+    // parent gitlink SHA'sıyla EŞLEŞİYORSA, submodule HEAD tree'sini `<submodule>/`
+    // önekiyle tracked sete kat — revision identity hiyerarşiktir
+    // (superproject HEAD → gitlink SHA → submodule tree → analyzed file).
+    // Eşleşmiyorsa içerik parent revizyonundan farklıdır; `git status` submodule'u
+    // dirty listeler → analyzed-scope prefix fence reddeder (aşağıda).
+    let long_format = run_git_raw(repo, &["ls-tree", "-r", "HEAD"], "ls-tree")?;
+    for line in long_format.lines() {
+        let Some((meta, sub_path)) = line.split_once('\t') else {
+            continue;
+        };
+        let mut parts = meta.split_whitespace();
+        let (Some(mode), Some(kind), Some(gitlink_sha)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        if mode != "160000" || kind != "commit" {
+            continue;
+        }
+        let sub_dir = repo.join(sub_path);
+        if !sub_dir.join(".git").exists() {
+            // Uninitialized submodule: worktree boş → analyzer nested dosya bulamaz;
+            // tracked sete katmak anlamsız (analiz edilecek içerik yok).
+            continue;
+        }
+        let Ok(sub_head) = run_git(
+            &sub_dir,
+            &["rev-parse", "HEAD"],
+            "rev-parse HEAD (submodule)",
+        ) else {
+            continue;
+        };
+        if sub_head != gitlink_sha {
+            // HEAD ≠ gitlink: submodule içeriği parent'ın bağladığı revizyondan farklı.
+            // Porcelain bunu dirty girdi olarak raporlar → prefix fence devreye girer.
+            continue;
+        }
+        let Ok(nested) = run_git(
+            &sub_dir,
+            &["ls-tree", "-r", "--name-only", "HEAD"],
+            "ls-tree (submodule)",
+        ) else {
+            continue;
+        };
+        for p in nested.lines().filter(|l| !l.is_empty()) {
+            paths.insert(format!("{sub_path}/{p}"));
+        }
+    }
+    Ok(paths)
 }
 
 /// `run_git`'in trim'siz varyantı — porcelain gibi BAŞTAKİ boşluk anlamlı olan
@@ -173,34 +239,47 @@ fn run_git_raw(
     })
 }
 
-fn capture_dirty_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
-    // NOT: ham çıktı trim EDİLMEZ — `XY <path>` formatında X boşluk olabilir
-    // (` M a.rs` worktree-modified); trim önceki sürümde ".rs" gibi bozuk
-    // path parse'ına yol açıyordu (#155).
-    let output = run_git_raw(
-        repo,
-        &["status", "--porcelain", "--untracked-files=all"],
-        "status",
-    )?;
+/// `git status --porcelain=v1 -z` kayıtlarını dirty-path kümesine çevirir (saf fonksiyon).
+///
+/// `-z` formatı (#155 P1-2): kayıtlar NUL ile ayrılır, path'ler HAM'dır — quote/C-escape
+/// YOKTUR (`quo"te.rs`, `türkçe.rs` olduğu gibi gelir). Klasik porcelain'un quote'lu
+/// çıktısında `trim_matches('"')` escape'leri çözmezdi ve fence fail-open olabilirdi.
+/// Rename (`R`) ve copy (`C`) kayıtları `<new>\0<old>` şeklinde İKİ NUL'lu kayıttır —
+/// her iki uç da kirli kapsama alınır.
+pub(crate) fn parse_porcelain_z(raw: &str) -> BTreeSet<String> {
     let mut paths = BTreeSet::new();
-    for line in output.lines() {
-        if line.len() < 4 {
+    let mut records = raw.split('\0');
+    while let Some(record) = records.next() {
+        // Kayıt en az `XY ` + 1 karakter path.
+        if record.len() < 4 {
             continue;
         }
-        // `XY <path>` — XY iki durum karakteri (??, ` M`, ` m`, …); path 3. kolon.
-        // Rename (`R  old -> new`) her iki ucu da kirli kapsama alır.
-        let entry = line[3..].trim();
-        if entry.is_empty() {
+        let xy = &record[..2];
+        let path = &record[3..];
+        if path.is_empty() {
             continue;
         }
-        if let Some((old, new)) = entry.split_once(" -> ") {
-            paths.insert(old.trim_matches('"').to_string());
-            paths.insert(new.trim_matches('"').to_string());
-        } else {
-            paths.insert(entry.trim_matches('"').to_string());
+        paths.insert(path.to_string());
+        if xy.starts_with('R') || xy.starts_with('C') {
+            // Rename/copy: izleyen ek kayıt eski path'tir.
+            if let Some(old) = records.next() {
+                if !old.is_empty() {
+                    paths.insert(old.to_string());
+                }
+            }
         }
     }
-    Ok(paths)
+    paths
+}
+
+fn capture_dirty_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
+    // -z: NUL-ayrı, quote/escape'siz, deterministik (#155 P1-2).
+    let output = run_git_raw(
+        repo,
+        &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        "status",
+    )?;
+    Ok(parse_porcelain_z(&output))
 }
 
 /// Harness eligibility: clean worktree zorunlu (review P0-3).
@@ -258,6 +337,37 @@ pub fn validate_analyzed_paths_clean(
     Ok(())
 }
 
+/// #155: post-attempt drift fence — saf fonksiyon (test edilebilir exact matrix).
+///
+/// Sözleşme (#155 kabul kriterleri):
+/// - HEAD değişti → red (revision identity bozuldu; global),
+/// - tracked-path seti değişti → red (revision tanımladığı dosya seti değişti; global),
+/// - analyzed kapsam dirty'leşti → red (ölçülen içerik attempt penceresinde drift etti),
+/// - analiz DIŞINDAKİ bir path dirty'leşti → kabul (ölçüm ondan türetilmedi).
+pub fn validate_post_attempt_snapshot(
+    before: &RepositorySnapshot,
+    after: &RepositorySnapshot,
+    node_paths: &std::collections::HashMap<u64, String>,
+) -> Result<(), RepoSnapshotError> {
+    if after.head != before.head {
+        return Err(RepoSnapshotError::GitCommandFailed {
+            command: "rev-parse HEAD",
+            detail: "repository HEAD moved during trajectory attempt — \
+                     analysis-run consistency violated"
+                .to_string(),
+        });
+    }
+    if after.tracked_paths != before.tracked_paths {
+        return Err(RepoSnapshotError::GitCommandFailed {
+            command: "ls-tree",
+            detail: "repository tracked-path set changed during trajectory attempt — \
+                     analysis-run consistency violated"
+                .to_string(),
+        });
+    }
+    validate_analyzed_paths_clean(node_paths, after, "after attempt")
+}
+
 /// Analyzed path ⊆ HEAD tracked-path invariant (review P1-2).
 ///
 /// Analyzer'ın ürettiği `node_paths` içinde HEAD tree'de tracked olmayan path varsa
@@ -297,16 +407,92 @@ mod analyzed_scope_fence_tests {
     }
 
     #[test]
-    fn porcelain_parse_extracts_paths_including_rename_and_quotes() {
-        // capture_dirty_paths filesystem gerektirir; parse mantığını çıktı
-        // biçimleriyle sabitleriz (satır formatı `XY <path>`).
-        // Burada snapshot türevi üzerinden clean() semantiği + rename çifti
-        // validate fonksiyonu üzerinden kapsanır; ham parse için
-        // completed_loop E2E fixture gerçek git çıktısını kullanır.
-        let snap = snapshot_with_dirty(&["a/b.cs", "\"quo te.cs\"", "old.cs", "new.cs"]);
-        assert!(!snap.clean());
-        assert_eq!(snap.dirty_paths.len(), 4);
-        assert!(snapshot_with_dirty(&[]).clean());
+    fn porcelain_z_parse_pins_real_git_output_shapes() {
+        // Gerçek `git status --porcelain=v1 -z` çıktı biçimleri birebir pinlenir
+        // (#155 P1-2 review: önceki test parse'ı değil hazır set'i sınıyordu).
+        // -z'de path'ler HAMDIR: quote/C-escape yoktur.
+        let raw = " M a.rs\0?? e2e/new.spec.ts\0 m clients/nexus-backoffice\0";
+        let parsed = parse_porcelain_z(raw);
+        assert_eq!(
+            parsed,
+            BTreeSet::from([
+                "a.rs".to_string(),
+                "e2e/new.spec.ts".to_string(),
+                "clients/nexus-backoffice".to_string(),
+            ])
+        );
+
+        // Quote/unicode path'ler klasik porcelain'da escape edilirdi ("t\303\274rk...");
+        // -z'de kayıpsız gelir — fail-open kapanır.
+        let tricky = " M quo\"te.rs\0 M türkçe.rs\0";
+        let parsed = parse_porcelain_z(tricky);
+        assert!(parsed.contains("quo\"te.rs"), "got: {parsed:?}");
+        assert!(parsed.contains("türkçe.rs"), "got: {parsed:?}");
+
+        // Rename: `R  new\0old` — iki NUL'lu kayıt, iki uç da kirli kapsamda.
+        let rename = "R  src/new.rs\0src/old.rs\0";
+        let parsed = parse_porcelain_z(rename);
+        assert_eq!(
+            parsed,
+            BTreeSet::from(["src/new.rs".to_string(), "src/old.rs".to_string()])
+        );
+
+        // Boş/çok kısa kayıtlar sessizce atlanır; boş çıktı → boş küme (clean).
+        assert!(parse_porcelain_z("").is_empty());
+        assert!(parse_porcelain_z("\0\0").is_empty());
+        assert!(snapshot_with_dirty(&[]).clean()); // clean() derived: boş küme → clean
+    }
+
+    #[test]
+    fn post_fence_matrix_exact_contract() {
+        // #155 kabul kriterleri — saf fonksiyonda exact matrix (timing-flaky E2E yerine):
+        // analyzed clean→dirty RED · unrelated clean→dirty PASS · HEAD changed RED ·
+        // tracked set changed RED.
+        let mk = |dirty: &[&str]| RepositorySnapshot {
+            head: GitCommitId::try_from("b".repeat(40)).unwrap(),
+            tracked_paths: BTreeSet::from(["a.rs".to_string(), "b.rs".to_string()]),
+            dirty_paths: dirty.iter().map(|s| s.to_string()).collect(),
+        };
+        let head_variant = |snap: &RepositorySnapshot| RepositorySnapshot {
+            head: GitCommitId::try_from("c".repeat(40)).unwrap(),
+            ..snap.clone()
+        };
+        let tracked_variant = |snap: &RepositorySnapshot| {
+            let mut tracked = snap.tracked_paths.clone();
+            tracked.insert("c.rs".to_string());
+            RepositorySnapshot {
+                tracked_paths: tracked,
+                ..snap.clone()
+            }
+        };
+        let analyzed = paths(&[(0, "a.rs"), (1, "b.rs")]);
+
+        // Hepsi clean → geçer.
+        validate_post_attempt_snapshot(&mk(&[]), &mk(&[]), &analyzed)
+            .expect("clean→clean must pass");
+
+        // Analyzed kapsam dirty'leşti → red.
+        let err = validate_post_attempt_snapshot(&mk(&[]), &mk(&["a.rs"]), &analyzed)
+            .expect_err("analyzed path dirty after attempt must reject");
+        assert!(format!("{err}").contains("after attempt"), "{err}");
+
+        // Analiz DIŞI path dirty'leşti → kabul (ölçüm ondan türetilmedi).
+        validate_post_attempt_snapshot(&mk(&[]), &mk(&["notes/local.md"]), &analyzed)
+            .expect("out-of-scope drift after attempt must be accepted");
+
+        // HEAD değişti → red.
+        let before = mk(&[]);
+        let err = validate_post_attempt_snapshot(&before, &head_variant(&before), &analyzed)
+            .expect_err("HEAD moved during attempt must reject");
+        assert!(format!("{err}").contains("HEAD moved"), "{err}");
+
+        // Tracked set değişti → red.
+        let err = validate_post_attempt_snapshot(&before, &tracked_variant(&before), &analyzed)
+            .expect_err("tracked set change during attempt must reject");
+        assert!(
+            format!("{err}").contains("tracked-path set changed"),
+            "{err}"
+        );
     }
 
     #[test]
