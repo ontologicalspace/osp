@@ -106,7 +106,7 @@
 <div class="footer">
   OSP — Ontological Space Protocol · <a class="ref-link" href="https://github.com/ontologicalspace/osp">github.com/ontologicalspace/osp</a>
   · Paper v2.3 · A = abstractness, I = instability (Martin), D = |A+I−1| computed from the embedded A/I
-  (the source doc's D column predates this rule), y = LCOM4 cohesion
+  (the source doc's D column is not reproducible from its displayed A/I), y = LCOM4 cohesion
   · 3D edition — the A+I=1 main-sequence plane is drawn when X = A and Y = I (Z free)
 </div>
 
@@ -120,9 +120,11 @@ try {
   throw e;
 }
 
-// ═══ Data: 15-repo corpus — A/I/y/nodes/edges/classes/cov/status copied from
-// docs/results/scip-cohesion.md (2026-06-22 snapshot). D is NOT copied: the source
-// doc's D column does not reproduce from its own A/I (upstream data debt), so D is
+// ═══ Data: 15-repo corpus — measurement fields (A/I/y/nodes/edges/classes) from
+// docs/results/scip-cohesion.md (2026-06-22 snapshot); witness `status` from the
+// Paper 1 witness classification (not part of that doc); `cov` values as displayed
+// there, rounded for display (e.g. fastapi 99.6%→1.00, django 98.4%→0.98). D is NOT
+// copied: the source doc's D column does not reproduce from its own A/I, so D is
 // derived below from the canonical OSP definition D = |A+I−1| to stay consistent
 // with the geometrically drawn A+I=1 plane. ═══
 const repos = [
