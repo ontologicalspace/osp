@@ -40,7 +40,7 @@ field is marked D*, it exists only after the corresponding freeze decision.
 | Execution latency | `attempt_submitted_at − execution_started_at` per attempt | cost timestamps (§9) |
 | Attempt count | `#attempt_started` per task | execution events |
 | Rework count | `#rework_requested` per task | G꜀ events |
-| Rework-attempt burden | `Σ duration(rework attempts)`, where a rework attempt is an `attempt_started` whose `origin_decision_event_id` (D8) references a `rework_requested` decision event, and `duration = attempt_submitted_at − attempt_started_at` | execution events + cost timestamps (§9) + D8 |
+| Rework-attempt burden | `Σ duration(rework attempts)`, where a rework attempt is an `attempt_started` whose `origin_event_id` (D8) references a `rework_requested` decision event, and `duration = attempt_submitted_at − attempt_started_at` | execution events + cost timestamps (§9) + D8 |
 | Replan count | `#plan_revision_superseded` where successor is a *revision* (not rejection) per task | Gₚ events |
 | Review disagreement | share of decisions whose reviewer note is marked contested (D3) | `plan_review_decided`, `completion_review_decided` + note structure (D3) |
 | Scope drift frequency | share of `basis_checked` rows with `component == scope_digest, changed == true` (D1) | `basis_checked` component rows (D1) |
@@ -61,7 +61,9 @@ inferential work — out of scope for Paper 4 v1.
 ### RQ-P1 — Rework hypothesis
 
 - **H1:** higher plan richness (verification obligations) associates with
-  fewer attempts and lower rework rate.
+  fewer attempts and a lower rework count. (Count, not rate — no rate
+  denominator is frozen; at per-task granularity a rate over tasks carries
+  no information beyond the count.)
 - **Variables:** predictor = plan richness; outcomes = attempt count,
   rework count; covariates = risk tier (D5), scope size, allowed-operation
   count — task difficulty confounds predictor and outcomes alike (harder
@@ -218,14 +220,24 @@ After the tag, changes require a new version tag plus migration note.
   = a row with `changed == true`. (Required by RQ-P3; single-enum design was
   rejected in review round-1 — it loses the joint observation.)
 - [ ] **D2 — `completion_review_decided.solution_quality_rating` +
-  missingness contract (required by RQ-P6):** integer 1–5, **mandatory on
-  decision kinds that evaluate the solution** (`AcceptCompleted`,
-  `AcceptAsProgress`, `RequestRework`); on kinds that do not evaluate it
-  (`RejectAttempt`, `AbortTask`, `ReplanRequired`), the event carries
-  `rating_status: not_rated` + a `not_rated_reason` enum — absence is never
-  silent. Every RQ-P6 analysis reports rating coverage and runs a
-  complete-case sensitivity check; without this contract, selective
-  missingness (MNAR) would bias the DV irrecoverably.
+  missingness contract + anchored rubric (required by RQ-P6):** integer
+  1–5, **mandatory on decision kinds that evaluate the solution**
+  (`AcceptCompleted`, `AcceptAsProgress`, `RequestRework`); on kinds that
+  do not evaluate it (`RejectAttempt`, `AbortTask`, `ReplanRequired`), the
+  event carries `rating_status: not_rated` + a `not_rated_reason` enum —
+  absence is never silent. Every RQ-P6 analysis reports rating coverage
+  and runs a complete-case sensitivity check; without this contract,
+  selective missingness (MNAR) would bias the DV irrecoverably.
+  **Scale semantics are part of the freeze** — draft rubric v1:
+  1 = below acceptability (plan-conformance failure or introduced
+  regressions); 2 = marginal (predicates met, notable quality concerns);
+  3 = acceptable (meets plan and predicates, ordinary engineering quality);
+  4 = strong (clearly exceeds plan expectations without material-deviation
+  cost); 5 = superior (notably better or simpler than the accepted
+  approach envisioned). Every rating event pins
+  `rating_rubric_version: v1`; rubric text is a freeze artifact (F1).
+  Unanchored 1–5 would make a 3↔3 comparison across time untrustworthy
+  under rater learning/drift — unrecoverable after data collection.
 - [ ] **D3 — Reviewer-note structure:** how a note marks a decision as
   *contested* and references evidence (required by RQ-P2).
 - [ ] **D4 — Meta-RQ modification log schema** (finding: component, change,
@@ -247,13 +259,17 @@ After the tag, changes require a new version tag plus migration note.
   **links to the same `deviation_id`** (lineage field) instead of creating a
   new deviation — event counts are never the RQ-P4 denominator, unique
   `deviation_id`s are.
-- [ ] **D8 — Attempt→decision causal link:** `attempt_started` carries
-  `origin_decision_event_id`, referencing the decision event that made this
-  attempt necessary — the `rework_requested` decision for rework attempts,
-  the permit issuance for first attempts. Rework-attempt burden (metrics
-  table, RQ-P5) is derived from this typed reference alone; timestamp
-  ordering is never used as causal evidence (ambiguous across multiple
-  review/rework cycles).
+- [ ] **D8 — Attempt origin relation (total, typed):** `attempt_started`
+  carries `origin_event_id`, referencing the event that made this attempt
+  possible. The permitted origin kinds are **exhaustive and frozen**:
+  (a) execution-permit issuance — first attempt; (b) a `rework_requested`
+  decision — rework attempt; (c) an `AcceptAsProgress` decision —
+  progress-continuation attempt under the same accepted plan (the task
+  stays open; design §6). An `attempt_started` whose origin is none of
+  these kinds is a schema violation (fail-closed — no silent fourth
+  origin). Rework-attempt burden (metrics table, RQ-P5) is derived from
+  this typed reference alone; timestamp ordering is never used as causal
+  evidence (ambiguous across multiple review/rework cycles).
 - [ ] **D9 — Decision identity & lineage:** every `plan_review_decided` and
   `completion_review_decided` carries a stable `decision_id`; a later
   decision that revises or reclassifies an earlier one references it via
