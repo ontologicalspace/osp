@@ -70,7 +70,7 @@ osp analyze . --format json | grep -E '"node_id"|"path"'
           "operator": "Le",
           "threshold": 0.55,
           "scope": {"Node": 2},
-          "required_source": "Scip",
+          "required_source": "TreeSitter",
           "tolerance": 0.0
         },
         "weight": null
