@@ -151,7 +151,7 @@ osp/
 │   └── osp-spike/         # Faz 0 frozen reference (tri-state witness validation)
 ├── docs/                  # Paper v2.6 + Paper 2 roadmap + invariant spec + MCP design
 ├── scripts/               # Reproducibility scripts (corpus clone + SCIP + analyze)
-├── viz/                   # Paper figures (commit pipeline, space topology, graveyard)
+├── viz/                   # Paper figures + interactive space browsers (2D D3, 3D Three.js)
 ├── Cargo.toml             # Workspace root (7 crates)
 └── SoftwarePhysics.txt    # Vision source (immutable)
 ```

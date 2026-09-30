@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OSP Space Browser 3D — Conceptual Space of 15 Open-Source Repositories</title>
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #c9d1d9; }
+  .header { padding: 20px 30px; border-bottom: 1px solid #30363d; }
+  .header h1 { font-size: 20px; color: #58a6ff; }
+  .header p { font-size: 13px; color: #8b949e; margin-top: 4px; }
+  .controls { display: flex; gap: 20px; padding: 15px 30px; flex-wrap: wrap; align-items: center; }
+  .control-group { display: flex; align-items: center; gap: 6px; }
+  .control-group label { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; }
+  select { background: #161b22; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 8px; border-radius: 4px; font-size: 13px; }
+  .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 12px;
+         border-radius: 4px; font-size: 13px; cursor: pointer; }
+  .btn:hover { background: #30363d; }
+  .check { display: flex; align-items: center; gap: 5px; font-size: 13px; color: #8b949e; cursor: pointer; }
+  .check input { accent-color: #58a6ff; }
+  .stage-wrap { display: flex; justify-content: center; padding: 6px 10px 2px; }
+  #stage { position: relative; width: 960px; height: 620px; }
+  #stage canvas { display: block; width: 100%; height: 100%; outline: none; touch-action: none;
+                  border: 1px solid #21262d; border-radius: 8px; }
+  .hint { position: absolute; right: 14px; bottom: 12px; font-size: 11px; color: #484f58; pointer-events: none; }
+  .tooltip { position: fixed; background: #161b22; border: 1px solid #58a6ff; padding: 10px 14px;
+             border-radius: 6px; font-size: 12px; pointer-events: none; opacity: 0;
+             transition: opacity 0.15s; box-shadow: 0 4px 12px rgba(0,0,0,0.4); max-width: 280px; z-index: 10; }
+  .tooltip .repo-name { font-weight: 700; color: #58a6ff; font-size: 14px; margin-bottom: 6px; }
+  .tooltip .metric { display: flex; justify-content: space-between; gap: 12px; }
+  .tooltip .metric .label { color: #8b949e; }
+  .tooltip .metric .value { color: #c9d1d9; font-family: monospace; }
+  .legend { display: flex; gap: 16px; padding: 10px 30px 6px; font-size: 12px; align-items: center; flex-wrap: wrap; }
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .legend-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .legend-bar { width: 90px; height: 10px; border-radius: 5px; }
+  .footer { padding: 15px 30px; border-top: 1px solid #30363d; font-size: 11px; color: #484f58; margin-top: 8px; }
+  .ref-link { color: #58a6ff; text-decoration: none; }
+  .load-error { display: none; margin: 40px auto; max-width: 560px; padding: 16px 20px;
+                border: 1px solid #f85149; border-radius: 8px; color: #f85149; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>OSP Space Browser 3D</h1>
+  <p>15 repositories positioned in conceptual space — <span id="axis-desc"></span>.
+     Data from SCIP semantic analysis (13,031 classes). Same corpus as the
+     <a class="ref-link" href="space-browser.html">2D browser</a>.</p>
+</div>
+
+<div class="controls">
+  <div class="control-group">
+    <label>X axis</label>
+    <select id="xAxis"></select>
+  </div>
+  <div class="control-group">
+    <label>Y axis (vertical)</label>
+    <select id="yAxis"></select>
+  </div>
+  <div class="control-group">
+    <label>Z axis (depth)</label>
+    <select id="zAxis"></select>
+  </div>
+  <div class="control-group">
+    <label>Color</label>
+    <select id="colorBy">
+      <option value="y">Cohesion (y)</option>
+      <option value="D">Main-seq dist (D)</option>
+      <option value="status">Witness status</option>
+      <option value="lang">Language</option>
+    </select>
+  </div>
+  <div class="control-group">
+    <label>Size</label>
+    <select id="sizeBy">
+      <option value="nodes">Node count</option>
+      <option value="classes">Class count</option>
+      <option value="none">Uniform</option>
+    </select>
+  </div>
+  <label class="check"><input type="checkbox" id="showLabels" checked> Labels</label>
+  <button class="btn" id="resetCam">Reset camera</button>
+</div>
+
+<div class="legend" id="legend"></div>
+
+<div class="stage-wrap">
+  <div id="stage">
+    <div class="load-error" id="loadError">Failed to load Three.js (CDN unreachable). Check your internet connection and reload.</div>
+    <div class="hint">drag = orbit · scroll = zoom · right-drag = pan · hover = details</div>
+  </div>
+</div>
+
+<div class="tooltip" id="tooltip"></div>
+
+<div class="footer">
+  OSP — Ontological Space Protocol · <a class="ref-link" href="https://github.com/ontologicalspace/osp">github.com/ontologicalspace/osp</a>
+  · Paper v2.3 · A = abstractness, I = instability (Martin), D = |A+I−1|, y = LCOM4 cohesion
+  · 3D edition — the A+I=1 main-sequence plane is drawn when X = A and Y = I (Z free)
+</div>
+
+<script type="module">
+let THREE, OrbitControls;
+try {
+  THREE = await import("three");
+  ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+} catch (e) {
+  document.getElementById("loadError").style.display = "block";
+  throw e;
+}
+
+// ═══ Data: 15-repo corpus — identical values to space-browser.html (docs/scip-cohesion-results.md) ═══
+const repos = [
+  {name:"click",        lang:"Py",  nodes:63,   edges:61,   classes:133,   A:0.02, I:0.63, D:0.36, y:0.67, cov:1.00, status:"Witnessed"},
+  {name:"django",       lang:"Py",  nodes:2966, edges:4659, classes:10054, A:0.00, I:0.66, D:0.18, y:0.66, cov:0.98, status:"Unobservable"},
+  {name:"flask",        lang:"Py",  nodes:83,   edges:131,  classes:115,   A:0.01, I:0.71, D:0.34, y:0.63, cov:1.00, status:"Witnessed"},
+  {name:"fastapi",      lang:"Py",  nodes:1133, edges:831,  classes:673,   A:0.01, I:0.70, D:0.13, y:0.62, cov:1.00, status:"Unobservable"},
+  {name:"httpx",        lang:"Py",  nodes:60,   edges:4,    classes:81,    A:0.07, I:0.50, D:0.45, y:0.62, cov:1.00, status:"Unobservable"},
+  {name:"rich",         lang:"Py",  nodes:213,  edges:404,  classes:213,   A:0.04, I:0.71, D:0.36, y:0.60, cov:1.00, status:"Witnessed"},
+  {name:"pydantic",     lang:"Py",  nodes:534,  edges:1016, classes:323,   A:0.02, I:0.70, D:0.22, y:0.52, cov:0.19, status:"Unobservable"},
+  {name:"requests",     lang:"Py",  nodes:37,   edges:21,   classes:25,    A:0.05, I:0.43, D:0.49, y:0.49, cov:0.51, status:"Witnessed"},
+  {name:"worms-supabase",lang:"Py", nodes:26,   edges:17,   classes:0,     A:0.00, I:0.45, D:0.35, y:0.50, cov:0,    status:"Unwitnessed", placeholder:true},
+  {name:"date-fns",     lang:"TS",  nodes:1550, edges:3579, classes:105,   A:0.05, I:0.93, D:0.02, y:0.51, cov:0.96, status:"Unobservable"},
+  {name:"svelte",       lang:"TS",  nodes:3450, edges:4232, classes:376,   A:0.00, I:0.92, D:0.21, y:0.51, cov:0.02, status:"Witnessed"},
+  {name:"vitest",       lang:"TS",  nodes:2236, edges:1881, classes:705,   A:0.02, I:0.57, D:0.35, y:0.54, cov:0.91, status:"Unobservable"},
+  {name:"chalk",        lang:"JS",  nodes:13,   edges:11,   classes:10,    A:0.00, I:0.81, D:0.35, y:0.54, cov:0.38, status:"Unobservable"},
+  {name:"commander.js", lang:"JS",  nodes:159,  edges:135,  classes:23,    A:0.00, I:0.81, D:0.16, y:0.52, cov:0.08, status:"Witnessed"},
+  {name:"lodash",       lang:"JS",  nodes:27,   edges:0,    classes:0,     A:0.50, I:0.50, D:0.00, y:0.50, cov:0,    status:"Unobservable", placeholder:true},
+];
+repos.forEach(r => r.coupling = r.nodes > 0 ? r.edges / r.nodes : 0);
+
+// ═══ Axis definitions — same keys and ranges as the 2D browser ═══
+const axes = {
+  A:       {label:"Abstractness (A)",      range:[0, 0.55]},
+  I:       {label:"Instability (I)",       range:[0, 1]},
+  D:       {label:"Main-seq distance (D)", range:[0, 0.55]},
+  y:       {label:"Cohesion (y, LCOM4)",   range:[0.45, 0.70]},
+  nodes:   {label:"Node count",            range:[0, 3600]},
+  classes: {label:"SCIP classes",          range:[0, 11000]},
+  coupling:{label:"Coupling (edges/nodes)",range:[0, 2.5]},
+};
+const axisOptions = [
+  {key:"A", label:"Abstractness (A)"},
+  {key:"I", label:"Instability (I)"},
+  {key:"D", label:"Main-seq distance (D)"},
+  {key:"y", label:"Cohesion (y)"},
+  {key:"coupling", label:"Coupling (edges/nodes)"},
+  {key:"nodes", label:"Node count"},
+  {key:"classes", label:"SCIP classes"},
+];
+
+// ═══ Colors (d3 interpolateRdYlGn approximation, same intent as 2D) ═══
+const RDYLG_STOPS = [
+  [0.00, "#a50026"], [0.25, "#fdae61"], [0.50, "#ffffbf"],
+  [0.75, "#a6d96a"], [1.00, "#006837"],
+];
+function hexToRgb(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+}
+function rampColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 1; i < RDYLG_STOPS.length; i++) {
+    if (t <= RDYLG_STOPS[i][0]) {
+      const [t0, c0] = RDYLG_STOPS[i - 1], [t1, c1] = RDYLG_STOPS[i];
+      const f = (t - t0) / (t1 - t0);
+      const a = hexToRgb(c0), b = hexToRgb(c1);
+      return new THREE.Color(
+        (a[0] + (b[0] - a[0]) * f) / 255,
+        (a[1] + (b[1] - a[1]) * f) / 255,
+        (a[2] + (b[2] - a[2]) * f) / 255);
+    }
+  }
+  return new THREE.Color(RDYLG_STOPS.at(-1)[1]);
+}
+const STATUS_COLORS = { Witnessed: "#3fb950", Unobservable: "#d29922", Unwitnessed: "#8b949e" };
+const LANG_COLORS   = { Py: "#3776ab", TS: "#3178c6", JS: "#f7df1e" };
+const PLACEHOLDER_COLOR = "#f85149";
+
+function targetColor(d, colorKey) {
+  if (d.placeholder) return new THREE.Color(PLACEHOLDER_COLOR);
+  if (colorKey === "y") return rampColor((d.y - 0.45) / (0.70 - 0.45));
+  if (colorKey === "D") return rampColor((0.5 - d.D) / 0.5);
+  if (colorKey === "status") return new THREE.Color(STATUS_COLORS[d.status] || "#8b949e");
+  return new THREE.Color(LANG_COLORS[d.lang] || "#8b949e");
+}
+
+// ═══ Scene setup ═══
+const S = 9.5;                          // plot volume edge length in world units
+const stage = document.getElementById("stage");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(stage.clientWidth, stage.clientHeight);
+renderer.setClearColor(0x0d1117);
+stage.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, stage.clientWidth / stage.clientHeight, 0.1, 200);
+const HOME_POS = new THREE.Vector3(16.5, 12.5, 18.5);
+const HOME_TARGET = new THREE.Vector3(S / 2, S / 2, S / 2);
+camera.position.copy(HOME_POS);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.copy(HOME_TARGET);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.update();
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.1);
+dirLight.position.set(6, 12, 8);
+scene.add(dirLight);
+
+// Ground grid + bounding box — spatial anchors (same intent as the desktop 3D panel)
+const grid = new THREE.GridHelper(S, 10, 0x21262d, 0x21262d);
+grid.position.set(S / 2, 0, S / 2);
+scene.add(grid);
+const boxEdges = new THREE.LineSegments(
+  new THREE.EdgesGeometry(new THREE.BoxGeometry(S, S, S)),
+  new THREE.LineBasicMaterial({ color: 0x30363d, transparent: true, opacity: 0.6 }));
+boxEdges.position.set(S / 2, S / 2, S / 2);
+scene.add(boxEdges);
+
+// ═══ Sprite text helper (canvas texture) ═══
+function makeTextSprite(text, { size = 13, color = "#c9d1d9", bg = "rgba(13,17,23,0.72)" } = {}) {
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  const font = `${size}px -apple-system, system-ui, sans-serif`;
+  ctx.font = font;
+  const pad = 4;
+  canvas.width = Math.ceil(ctx.measureText(text).width) + pad * 2;
+  canvas.height = size + pad * 2;
+  ctx.font = font;
+  if (bg) { ctx.fillStyle = bg; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  spr.scale.set(canvas.width * 0.022, canvas.height * 0.022, 1);
+  spr.renderOrder = 20;
+  return spr;
+}
+function disposeGroup(group) {
+  group.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      if (o.material.map) o.material.map.dispose();
+      o.material.dispose();
+    }
+  });
+  scene.remove(group);
+}
+
+// ═══ Nice ticks (d3-style) ═══
+function niceStep(range, count) {
+  const raw = range / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const norm = raw / mag;
+  const step = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+  return step * mag;
+}
+function ticksFor(min, max, count = 5) {
+  const step = niceStep(max - min, count);
+  const start = Math.ceil(min / step - 1e-9) * step;
+  const out = [];
+  for (let v = start; v <= max + step * 1e-6; v += step) out.push(+v.toFixed(6));
+  return out;
+}
+function fmtTick(v) {
+  if (Math.abs(v) >= 1000) {
+    const k = v / 1000;
+    return (k % 1 ? k.toFixed(1) : String(k)) + "k";
+  }
+  return String(+v.toFixed(2));
+}
+function axisPos(key, val) { // data value → 0..S along its axis
+  const [min, max] = axes[key].range;
+  return Math.max(0, Math.min(1, (val - min) / (max - min))) * S;
+}
+
+// ═══ Axes + main-sequence plane (rebuilt on axis change) ═══
+const axesGroup = new THREE.Group(); scene.add(axesGroup);
+const planeGroup = new THREE.Group(); scene.add(planeGroup);
+
+function buildAxes(xKey, yKey, zKey) {
+  disposeGroup(axesGroup);
+  const tickMat = new THREE.LineBasicMaterial({ color: 0x484f58 });
+  const axisPts = [];
+  // axis rails from origin corner
+  axisPts.push(0, 0, 0, S, 0, 0, 0, 0, 0, 0, S, 0, 0, 0, 0, 0, 0, S);
+  const defs = [
+    { key: xKey, dir: "x", name: `X · ${axes[xKey].label}` },
+    { key: yKey, dir: "y", name: `Y · ${axes[yKey].label}` },
+    { key: zKey, dir: "z", name: `Z · ${axes[zKey].label}` },
+  ];
+  for (const d of defs) {
+    for (const t of ticksFor(...axes[d.key].range)) {
+      const p = axisPos(d.key, t);
+      if (d.dir === "x") axisPts.push(p, 0, 0, p, -0.22, 0, p, 0, 0, p, 0, -0.22);
+      if (d.dir === "y") axisPts.push(0, p, 0, -0.22, p, 0, 0, p, 0, 0, p, -0.22);
+      if (d.dir === "z") axisPts.push(0, 0, p, -0.22, 0, p, 0, 0, p, 0, -0.22, p);
+      const lbl = makeTextSprite(fmtTick(t), { size: 11, color: "#8b949e" });
+      if (d.dir === "x") lbl.position.set(p, -0.55, -0.55);
+      if (d.dir === "y") lbl.position.set(-0.7, p, -0.7);
+      if (d.dir === "z") lbl.position.set(-0.7, -0.55, p);
+      axesGroup.add(lbl);
+    }
+    const name = makeTextSprite(d.name, { size: 14, color: "#58a6ff" });
+    if (d.dir === "x") name.position.set(S / 2, -1.35, -1.35);
+    if (d.dir === "y") name.position.set(-1.7, S / 2, -1.7);
+    if (d.dir === "z") name.position.set(-1.7, -1.35, S / 2);
+    axesGroup.add(name);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.Float32BufferAttribute(axisPts, 3));
+  axesGroup.add(new THREE.LineSegments(geo, tickMat));
+}
+
+function buildMainSeqPlane(xKey, yKey) {
+  disposeGroup(planeGroup);
+  if (xKey !== "A" || yKey !== "I") return;
+  // A+I=1 line in the X-Y plane (A ∈ [0, 0.55] ⇒ I ∈ [0.45, 1]), swept along Z
+  const [aMin, aMax] = axes.A.range;
+  const x1 = axisPos("A", aMin), y1 = axisPos("I", 1 - aMin);
+  const x2 = axisPos("A", aMax), y2 = axisPos("I", 1 - aMax);
+  const verts = new Float32Array([
+    x1, y1, 0,  x2, y2, 0,  x2, y2, S,
+    x1, y1, 0,  x2, y2, S,  x1, y1, S,
+  ]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(verts, 3));
+  planeGroup.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    color: 0x58a6ff, transparent: true, opacity: 0.05, side: THREE.DoubleSide, depthWrite: false })));
+  const outline = new THREE.LineLoop(
+    new THREE.BufferGeometry().setAttribute("position", new THREE.Float32BufferAttribute([
+      x1, y1, 0, x2, y2, 0, x2, y2, S, x1, y1, S], 3)),
+    new THREE.LineDashedMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.45, dashSize: 0.22, gapSize: 0.14 }));
+  outline.computeLineDistances();
+  planeGroup.add(outline);
+  const lbl = makeTextSprite("Martin Main Sequence (A + I = 1)", { size: 13, color: "#58a6ff", bg: null });
+  lbl.position.set((x1 + x2) / 2, (y1 + y2) / 2 + 0.55, S + 0.4);
+  planeGroup.add(lbl);
+}
+
+// ═══ Repo spheres (persistent meshes, animated toward targets) ═══
+const sphereGeo = new THREE.SphereGeometry(1, 24, 16);
+const R_MIN = 0.13, R_MAX = 0.42;
+const sizeMax = { nodes: Math.max(...repos.map(r => r.nodes)), classes: Math.max(...repos.map(r => r.classes)) };
+function targetRadius(d, sizeKey) {
+  if (sizeKey === "none") return 0.22;
+  return R_MIN + (R_MAX - R_MIN) * Math.sqrt(d[sizeKey] / sizeMax[sizeKey]);
+}
+
+const repoObjs = repos.map(d => {
+  const mat = new THREE.MeshStandardMaterial({ color: 0x30363d, roughness: 0.45, metalness: 0.15 });
+  const mesh = new THREE.Mesh(sphereGeo, mat);
+  mesh.position.copy(HOME_TARGET); // grow out of the center on first paint
+  mesh.scale.setScalar(0.001);
+  mesh.userData.repo = d;
+  scene.add(mesh);
+  const label = makeTextSprite(d.name, { size: 12, color: "#8b949e" });
+  scene.add(label);
+  return { d, mesh, label, targetPos: new THREE.Vector3(), targetScale: 0.22, targetCol: new THREE.Color() };
+});
+
+// ═══ Mapping update (selectors → targets) ═══
+const tooltip = document.getElementById("tooltip");
+let hovered = null;
+
+function currentSelection() {
+  return {
+    xKey: document.getElementById("xAxis").value,
+    yKey: document.getElementById("yAxis").value,
+    zKey: document.getElementById("zAxis").value,
+    colorKey: document.getElementById("colorBy").value,
+    sizeKey: document.getElementById("sizeBy").value,
+  };
+}
+
+function updateMapping() {
+  const { xKey, yKey, zKey, colorKey, sizeKey } = currentSelection();
+  document.getElementById("axis-desc").textContent =
+    `${axes[xKey].label} × ${axes[yKey].label} × ${axes[zKey].label}, colored by ` +
+    (colorKey === "status" ? "witness status" : colorKey === "lang" ? "language" :
+     colorKey === "y" ? "cohesion (y)" : "main-seq distance (D)");
+  for (const o of repoObjs) {
+    o.targetPos.set(axisPos(xKey, o.d[xKey]), axisPos(yKey, o.d[yKey]), axisPos(zKey, o.d[zKey]));
+    o.targetScale = targetRadius(o.d, sizeKey);
+    o.targetCol.copy(targetColor(o.d, colorKey));
+  }
+  buildAxes(xKey, yKey, zKey);
+  buildMainSeqPlane(xKey, yKey);
+  renderLegend(colorKey);
+}
+
+function renderLegend(colorKey) {
+  const el = document.getElementById("legend");
+  const item = (color, text) =>
+    `<div class="legend-item"><span class="legend-dot" style="background:${color}"></span>${text}</div>`;
+  const grad = (from, to, lo, hi) =>
+    `<div class="legend-item"><span class="legend-bar" style="background:linear-gradient(90deg,${from},${to})"></span>${lo} → ${hi}</div>`;
+  let html = "";
+  if (colorKey === "y") html = grad("#a50026", "#006837", "y 0.45", "y 0.70");
+  else if (colorKey === "D") html = grad("#a50026", "#006837", "D 0.5 (off-seq)", "D 0.0 (on-seq)");
+  else if (colorKey === "status")
+    html = item(STATUS_COLORS.Witnessed, "Witnessed") + item(STATUS_COLORS.Unobservable, "Unobservable-locally")
+         + item(STATUS_COLORS.Unwitnessed, "Unwitnessed");
+  else
+    html = item(LANG_COLORS.Py, "Python") + item(LANG_COLORS.TS, "TypeScript") + item(LANG_COLORS.JS, "JavaScript");
+  el.innerHTML = html + item(PLACEHOLDER_COLOR, "Placeholder y*");
+}
+
+// ═══ Hover / tooltip (raycast) ═══
+const raycaster = new THREE.Raycaster();
+const pointerNDC = new THREE.Vector2();
+let pointerPx = { x: 0, y: 0 };
+
+renderer.domElement.addEventListener("pointermove", ev => {
+  const rect = renderer.domElement.getBoundingClientRect();
+  pointerNDC.set(((ev.clientX - rect.left) / rect.width) * 2 - 1,
+                 -((ev.clientY - rect.top) / rect.height) * 2 + 1);
+  pointerPx = { x: ev.clientX, y: ev.clientY };
+  raycaster.setFromCamera(pointerNDC, camera);
+  const hit = raycaster.intersectObjects(repoObjs.map(o => o.mesh))[0];
+  const obj = hit ? repoObjs.find(o => o.mesh === hit.object) : null;
+  if (obj !== hovered) hovered = obj;
+  if (hovered) {
+    const d = hovered.d;
+    tooltip.style.opacity = 1;
+    tooltip.innerHTML = `
+      <div class="repo-name">${d.name}</div>
+      <div class="metric"><span class="label">Language</span><span class="value">${d.lang}</span></div>
+      <div class="metric"><span class="label">Nodes / Edges</span><span class="value">${d.nodes} / ${d.edges}</span></div>
+      <div class="metric"><span class="label">SCIP classes</span><span class="value">${d.classes}</span></div>
+      <div class="metric"><span class="label">A (abstractness)</span><span class="value">${d.A.toFixed(3)}</span></div>
+      <div class="metric"><span class="label">I (instability)</span><span class="value">${d.I.toFixed(3)}</span></div>
+      <div class="metric"><span class="label">D (main-seq dist)</span><span class="value">${d.D.toFixed(3)}</span></div>
+      <div class="metric"><span class="label">y (cohesion)</span><span class="value">${d.placeholder ? d.y.toFixed(2) + " *" : d.y.toFixed(3)}</span></div>
+      <div class="metric"><span class="label">SCIP coverage</span><span class="value">${(d.cov * 100).toFixed(0)}%</span></div>
+      <div class="metric"><span class="label">Witness status</span><span class="value">${d.status}</span></div>
+      ${d.placeholder ? '<div style="margin-top:6px;color:#f85149;">* placeholder (no classes)</div>' : ''}`;
+    const pad = 14;
+    tooltip.style.left = Math.min(pointerPx.x + pad, window.innerWidth - 300) + "px";
+    tooltip.style.top = (pointerPx.y - 12) + "px";
+  } else {
+    tooltip.style.opacity = 0;
+  }
+});
+renderer.domElement.addEventListener("pointerleave", () => {
+  hovered = null;
+  tooltip.style.opacity = 0;
+});
+
+// ═══ Controls wiring ═══
+["xAxis", "yAxis", "zAxis"].forEach(id => {
+  const sel = document.getElementById(id);
+  axisOptions.forEach(opt => {
+    const o = document.createElement("option");
+    o.value = opt.key; o.textContent = opt.label;
+    sel.appendChild(o);
+  });
+});
+document.getElementById("xAxis").value = "A";
+document.getElementById("yAxis").value = "I";
+document.getElementById("zAxis").value = "y";
+["xAxis", "yAxis", "zAxis", "colorBy", "sizeBy"].forEach(id =>
+  document.getElementById(id).addEventListener("change", updateMapping));
+document.getElementById("showLabels").addEventListener("change", ev => {
+  for (const o of repoObjs) o.label.visible = ev.target.checked;
+});
+document.getElementById("resetCam").addEventListener("click", () => {
+  camera.position.copy(HOME_POS);
+  controls.target.copy(HOME_TARGET);
+});
+window.addEventListener("resize", () => {
+  camera.aspect = stage.clientWidth / stage.clientHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(stage.clientWidth, stage.clientHeight);
+});
+
+// ═══ Animation loop ═══
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  for (const o of repoObjs) {
+    o.mesh.position.lerp(o.targetPos, 0.16);
+    const hov = o === hovered ? 1.22 : 1.0;
+    const s = o.mesh.scale.x + (o.targetScale * hov - o.mesh.scale.x) * 0.16;
+    o.mesh.scale.setScalar(s);
+    o.mesh.material.color.lerp(o.targetCol, 0.2);
+    o.mesh.material.emissive.copy(o.mesh.material.color).multiplyScalar(0.38);
+    o.label.position.set(o.mesh.position.x, o.mesh.position.y + s + 0.14, o.mesh.position.z);
+  }
+  renderer.render(scene, camera);
+}
+
+updateMapping();
+animate();
+</script>
+</body>
+</html>
