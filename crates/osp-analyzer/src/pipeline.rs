@@ -488,7 +488,59 @@ fn collect_source_files(repo: &Path, registry: &AdapterRegistry) -> anyhow::Resu
     let mut files = Vec::new();
     walk_dir(repo, &mut files, registry)?;
     files.sort();
+    filter_gitignored(repo, &mut files);
     Ok(files)
+}
+
+/// #157: gitignore-aware discovery — git ignore kurallarına uyan (untracked+ignored)
+/// dosyaları analiz kapsamından çıkarır. Ölçüm, git'in "proje içeriği" tanımıyla
+/// hizalanır (HEAD tree); aksi halde ignore'lu-ama-diskte olan içerik uzaya girer ve
+/// attempt fence'i `not tracked in HEAD` ile doğru ama gereksiz şekilde reddederdi
+/// (Nexus vakası: repo kökünde bilinçli `.gitignore`'lu `Nexus.AppHost/`).
+///
+/// `git ls-files --others --ignored --exclude-standard` yalnız UNTRACKED+ignored
+/// dosyaları listeler — tracked olup ignore desenine uyanlar listelenmez ve analizde
+/// KALIR (doğru: HEAD tree'nin parçasıdır). Submodule içi ignore kuralları v1'de
+/// kapsam dışıdır (parent listesi submodule'a inmez).
+///
+/// Git yoksa / komut başarısızsa filtre uygulanmaz (eski davranış korunur; attempt
+/// fence'i yine tracked-check ile fail-closed korur).
+fn filter_gitignored(repo: &Path, files: &mut Vec<PathBuf>) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "ls-files",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output();
+    let Ok(output) = output else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let Ok(list) = String::from_utf8(output.stdout) else {
+        return;
+    };
+    let ignored: std::collections::BTreeSet<String> = list
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    if ignored.is_empty() {
+        return;
+    }
+    files.retain(|f| match f.strip_prefix(repo) {
+        Ok(rel) => {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            !ignored.contains(&rel)
+        }
+        Err(_) => true,
+    });
 }
 
 fn walk_dir(
@@ -1231,5 +1283,90 @@ mod tests {
         };
         assert_eq!(admitted_node_cohesion(&v1), Some(0.3));
         assert_eq!(admitted_node_cohesion(&v2), Some(1.0));
+    }
+}
+
+#[cfg(test)]
+mod gitignore_discovery_tests {
+    //! #157: gitignore-aware discovery — ignore'lu içerik uzaya girmez;
+    //! tracked-ama-ignore-desenine-uyan içerik kalır (HEAD tree'nin parçası).
+
+    use super::*;
+
+    fn git_init(repo: &std::path::Path) {
+        let st = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(repo)
+            .status()
+            .expect("git init");
+        assert!(st.success());
+        for (k, v) in [("user.email", "t@t.invalid"), ("user.name", "t")] {
+            let st = std::process::Command::new("git")
+                .args(["-C", repo.to_str().unwrap(), "config", k, v])
+                .status()
+                .expect("git config");
+            assert!(st.success());
+        }
+    }
+
+    fn registry_rs() -> AdapterRegistry {
+        // Minimum: .rs destekleyen registry (varsayılan setin alt kümesi yeterli).
+        AdapterRegistry::default_all()
+    }
+
+    #[test]
+    fn gitignored_untracked_files_are_excluded_from_discovery() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "ignoredir/\nlegacy.rs\n").unwrap();
+        std::fs::create_dir_all(repo.join("ignoredir")).unwrap();
+        std::fs::write(repo.join("ignoredir/x.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(repo.join("legacy.rs"), "fn b() {}\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["main.rs".to_string()],
+            "ignored content must be excluded"
+        );
+    }
+
+    #[test]
+    fn tracked_file_matching_ignore_pattern_is_kept() {
+        // Ignore desenine SONRADAN uyan ama tracked olan dosya analizde kalmalı
+        // (HEAD tree'nin parçası; `--others --ignored` bunu listelemez).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "*.gen.rs\n").unwrap();
+        std::fs::write(repo.join("kept.gen.rs"), "fn a() {}\n").unwrap();
+        let add = std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap(), "add", "-f", "kept.gen.rs"])
+            .status()
+            .expect("git add");
+        assert!(add.success());
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        assert!(
+            files
+                .iter()
+                .any(|f| f.file_name().unwrap() == "kept.gen.rs"),
+            "tracked-but-pattern-matching file must stay in discovery"
+        );
+    }
+
+    #[test]
+    fn non_git_directory_keeps_old_behavior() {
+        // Git olmayan dizinde filtre fail-soft: dosyalar aynen toplanır.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        assert_eq!(files.len(), 1);
     }
 }
