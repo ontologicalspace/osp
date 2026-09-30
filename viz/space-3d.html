@@ -25,6 +25,8 @@
   .btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 4px 12px;
          border-radius: 4px; font-size: 13px; cursor: pointer; }
   .btn:hover { background: #30363d; }
+  .btn:disabled { opacity: 0.35; cursor: default; }
+  .btn:disabled:hover { background: #21262d; }
   .check { display: flex; align-items: center; gap: 5px; font-size: 13px; color: #8b949e; cursor: pointer; }
   .check input { accent-color: #58a6ff; }
   .stage-wrap { display: flex; justify-content: center; padding: 6px 10px 2px; }
@@ -47,6 +49,39 @@
   .ref-link { color: #58a6ff; text-decoration: none; }
   .load-error { display: none; margin: 40px auto; max-width: 560px; padding: 16px 20px;
                 border: 1px solid #f85149; border-radius: 8px; color: #f85149; font-size: 14px; }
+  .view-bar { display: flex; gap: 8px; padding: 12px 30px 0; }
+  .view-btn { background: #161b22; color: #8b949e; border: 1px solid #30363d; padding: 6px 16px;
+              border-radius: 6px; font-size: 13px; cursor: pointer; }
+  .view-btn:hover { color: #c9d1d9; }
+  .view-btn.active { color: #58a6ff; border-color: #58a6ff; background: #0d1117; font-weight: 600; }
+  .wt-layout { display: flex; gap: 22px; padding: 14px 30px; justify-content: center;
+               align-items: flex-start; flex-wrap: wrap; }
+  .wt-stage { position: relative; }
+  .wt-stage canvas { display: block; border: 1px solid #21262d; border-radius: 8px;
+                     touch-action: none; outline: none; }
+  .wt-panel { width: 540px; max-width: 95vw; }
+  .wt-step-ind { font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .wt-card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px 18px; min-height: 300px; }
+  .wt-card h3 { color: #58a6ff; font-size: 16px; margin-bottom: 10px; }
+  .wt-card p { font-size: 13px; line-height: 1.55; color: #c9d1d9; margin-bottom: 10px; }
+  .wt-card code, .wt-card .v { font-family: monospace; color: #79c0ff; }
+  .wt-card table { width: 100%; border-collapse: collapse; font-family: monospace; font-size: 12px; margin: 8px 0; }
+  .wt-card td { padding: 3px 8px; border-bottom: 1px solid #21262d; }
+  .wt-card td:first-child { color: #8b949e; }
+  .wt-card .ref-link { color: #58a6ff; }
+  .wt-nav { display: flex; gap: 10px; margin-top: 12px; }
+  .wt-layers { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  .wt-layer { flex: 1; min-width: 150px; background: #161b22; border: 1px solid #30363d;
+              border-radius: 6px; padding: 8px 10px; font-size: 11px; opacity: 0.35;
+              transition: opacity 0.3s; }
+  .wt-layer.on { opacity: 1; }
+  .wt-layer.dim { opacity: 0.6; }
+  .wt-layer .k { color: #8b949e; font-family: monospace; display: block; font-size: 10px; }
+  .wt-layer .val { font-family: monospace; font-size: 13px; font-weight: 700; }
+  .ok { color: #3fb950; } .bad { color: #f85149; } .warn { color: #d29922; }
+  .wt-hint { position: absolute; right: 12px; bottom: 10px; font-size: 11px; color: #484f58; pointer-events: none; }
+  .wt-note { position: absolute; left: 12px; bottom: 10px; font-size: 10px; color: #6e7681;
+             max-width: 65%; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -58,6 +93,12 @@
      Same corpus as the <a class="ref-link" href="space-browser.html">2D browser</a>.</p>
 </div>
 
+<div class="view-bar">
+  <button class="view-btn active" id="btnViewSpace">Space Browser</button>
+  <button class="view-btn" id="btnViewReject">Rejection Walkthrough</button>
+</div>
+
+<div id="viewSpace">
 <div class="controls">
   <div class="control-group">
     <label>X axis</label>
@@ -100,6 +141,31 @@
     <div class="hint">drag = orbit · scroll = zoom · right-drag = pan · hover = details</div>
   </div>
 </div>
+</div><!-- /viewSpace -->
+
+<div id="viewReject" style="display:none">
+  <div class="wt-layout">
+    <div class="wt-stage">
+      <div id="wtStage"></div>
+      <div class="wt-hint">drag = orbit · scroll = zoom</div>
+      <div class="wt-note">Schematic topology layout — display coordinates are illustrative, not OSP RawPosition {x,y,z,w,v}.</div>
+    </div>
+    <div class="wt-panel">
+      <div class="wt-step-ind" id="wtStepInd"></div>
+      <div class="wt-card" id="wtCard"></div>
+      <div class="wt-nav">
+        <button class="btn" id="wtPrev">← Prev</button>
+        <button class="btn" id="wtNext">Next →</button>
+        <button class="btn" id="wtReplay">↺ Replay</button>
+      </div>
+      <div class="wt-layers" id="wtLayers">
+        <div class="wt-layer" id="wtL0"><span class="k">gate_decision</span><span class="val ok">PassedAll</span></div>
+        <div class="wt-layer" id="wtL1"><span class="k">predicate_completion</span><span class="val bad">NotCompleted</span></div>
+        <div class="wt-layer" id="wtL2"><span class="k">mutation_decision</span><span class="val bad">Reject</span></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="tooltip" id="tooltip"></div>
 
@@ -108,6 +174,8 @@
   · Paper v2.3 · A = abstractness, I = instability (Martin), D = |A+I−1| computed from the embedded A/I
   (the source doc's D column is not reproducible from its displayed A/I), y = LCOM4 cohesion
   · 3D edition — the A+I=1 main-sequence plane is drawn when X = A and Y = I (Z free)
+  · Rejection walkthrough: task-space & decision values are real CLI outputs from docs/quickstart.md
+  (live run 2026-09-30, commit fea02f5); the 3D layout is an illustrative schematic, not OSP RawPosition
 </div>
 
 <script type="module">
@@ -522,6 +590,253 @@ function animate() {
   }
   renderer.render(scene, camera);
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Rejection walkthrough (P4 Stage 2) — every domain/evidence value below
+// (task-space coordinates, measurements, decision layers, exit code) is a real
+// CLI output from docs/quickstart.md (live run 2026-09-30, commit fea02f5).
+// The 3D scene layout — node positions, ghost placement, colors, sizes — is an
+// illustrative schematic chosen by the visualization; it is NOT a rendering of
+// OSP RawPosition {x,y,z,w,v}.
+// ═══════════════════════════════════════════════════════════════════════════
+const WT = { inited: false, active: false, step: 0 };
+const wtData = {
+  before: { x: 0.7, y: 0.5, z: 0.5, w: 0.5, v: 0.3 },
+  after:  { x: 0.5, y: 0.5, z: 0.5, w: 0.46153846153846156, v: 0.3496052731635571 },
+  coupling: { value: 0.5, source: "tree_sitter", confidence: 0.75, coverage: 1.0 },
+};
+const wtSteps = [
+  {
+    title: "1 · The task — a measurement predicate",
+    html: `
+      <p>The built-in demo task (<code>task 1</code>) demands:</p>
+      <p><code>coupling ≤ 0.55 on node 0 (main.py)</code> — <b>with SCIP provenance</b>
+      (<code>required_source: Scip</code>).</p>
+      <p>In OSP a task is a condition on the conceptual space, not text. Note the
+      provenance requirement: the number must come from a SCIP measurement — where a
+      number comes from is a first-class citizen.</p>`,
+  },
+  {
+    title: "2 · The proposal — structural, not source",
+    html: `
+      <p>Five identical scripted proposals (mock LLM, no API key):</p>
+      <p><code>add a new Module (mass 100.0) connected to node 0 with an Imports edge</code></p>
+      <p>A proposal mutates the <b>conceptual space</b> (nodes and edges) — it is not a
+      source-code patch. The dashed sphere is the proposed node; OSP has not accepted
+      it yet.</p>
+      <table><tr><td>task-space before</td><td>x ${wtData.before.x} · y ${wtData.before.y} · z ${wtData.before.z} · w ${wtData.before.w} · v ${wtData.before.v}</td></tr></table>`,
+  },
+  {
+    title: "3 · Hard claim gates — nothing rejected here",
+    html: `
+      <p><span class="verdict ok">gate_decision: PassedAll</span></p>
+      <p>Syntax, vision and rule checks on the proposal all passed.</p>
+      <p>This walkthrough is <b>not a gate rejection</b> — the gates passed. The
+      refusal happens at a different layer, next.</p>`,
+  },
+  {
+    title: "4 · Measure the after-state",
+    html: `
+      <p>With the proposal applied hypothetically, the task-space would move:</p>
+      <table>
+        <tr><td>x</td><td>${wtData.before.x} → ${wtData.after.x}</td></tr>
+        <tr><td>y · z</td><td>${wtData.before.y} · ${wtData.before.z} (unchanged)</td></tr>
+        <tr><td>w</td><td>${wtData.before.w} → ${wtData.after.w}</td></tr>
+        <tr><td>v</td><td>${wtData.before.v} → ${wtData.after.v}</td></tr>
+      </table>
+      <p>Node 0 coupling after: <code>${wtData.coupling.value}</code> — numerically
+      ≤ 0.55. But the measurement's <b>source is <span class="warn">${wtData.coupling.source}</span></b>
+      (Tier-1), and the task requires <code>Scip</code>.</p>`,
+  },
+  {
+    title: "5 · Predicate evaluation — fail-closed on provenance",
+    html: `
+      <p><span class="verdict bad">predicate_completion: NotCompleted</span></p>
+      <p><code>0.5 ≤ 0.55</code> is numerically true — but a predicate <b>cannot
+      complete on a measurement from the wrong source</b>, no matter what the number
+      says. Fail-closed provenance refuses to be fooled by a good number from the
+      wrong place.</p>
+      <p>Verified adversarially: an isolated-module proposal that leaves node 0
+      numerically untouched still gets <code>NotCompleted</code>.</p>
+      <p>(There is also a deeper reason this predicate cannot complete on this
+      path at all — step 7.)</p>`,
+  },
+  {
+    title: "6 · Mutation decision — the space is not touched",
+    html: `
+      <p><span class="verdict bad">mutation_decision: Reject</span></p>
+      <p>Predicate unmet + <code>StrictReject</code> policy ⇒ the proposed
+      conceptual-space mutation is refused. The ghost node disappears; the space
+      keeps its before state.</p>
+      <p>Your files were never touched: this flow does not apply source patches —
+      translating an accepted structural delta into code edits is a separate,
+      not-yet-built layer. The worktree check in the quickstart confirms zero
+      filesystem changes.</p>`,
+  },
+  {
+    title: "7 · Retries, exit code, and the honest gap",
+    html: `
+      <p>5 proposals → 5 refusals (all three layers identical in every entry). The
+      agent retried up to the maneuver limit (INV-T7 caps agent-correctable
+      retries); OSP ends the run: exit code <code>12</code>
+      (<code>EXCEEDED_MANEUVER_LIMIT</code>).</p>
+      <p>Honest gap — this task is <b>structurally unsatisfiable</b> on this path
+      for <b>two</b> reasons (<a class="ref-link" href="https://github.com/ontologicalspace/osp/issues/144">#144</a>):</p>
+      <p><b>(1)</b> <code>trajectory attempt</code> performs Tier-1 analysis only —
+      it accepts no SCIP index, so the after-state coupling is always measured
+      <code>tree_sitter</code>.</p>
+      <p><b>(2) More fundamental:</b> coupling's <b>axis authority</b> is TreeSitter.
+      The attempt path builds <code>CoordinateSystem::default_raw_five(MetricSource::TreeSitter, …)</code>:
+      under the INV-T9 #70 contract the topology source sets the provenance of
+      coupling <i>and</i> instability together, and SCIP is authoritative for
+      cohesion only today. Even with a SCIP index wired into the attempt path,
+      <code>coupling … required_source: Scip</code> would stay unsatisfiable until
+      the task or the axis-authority contract changes.</p>
+      <p>Principle: <b>"a SCIP index was loaded" ≠ "this axis's authoritative source
+      is Scip"</b>. #144 tracks the product decision (options A–D).</p>
+      <p>All task-space and decision values on this page are real CLI outputs —
+      <code>docs/quickstart.md</code>, live run 2026-09-30, commit <code>fea02f5</code>.
+      The 3D layout is an illustrative schematic, not OSP raw coordinates.</p>`,
+  },
+];
+
+function initWt() {
+  if (WT.inited) return;
+  WT.inited = true;
+  const holder = document.getElementById("wtStage");
+  const w = 520, h = 440;
+  WT.renderer = new THREE.WebGLRenderer({ antialias: true });
+  WT.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  WT.renderer.setSize(w, h);
+  WT.renderer.setClearColor(0x0d1117);
+  holder.appendChild(WT.renderer.domElement);
+  WT.scene = new THREE.Scene();
+  WT.camera = new THREE.PerspectiveCamera(45, w / h, 0.1, 100);
+  WT.camera.position.set(2.2, 2.6, 7.2);
+  WT.controls = new OrbitControls(WT.camera, WT.renderer.domElement);
+  WT.controls.target.set(0, 0.4, 0);
+  WT.controls.enableDamping = true;
+  WT.controls.dampingFactor = 0.08;
+  WT.scene.add(new THREE.AmbientLight(0xffffff, 0.9));
+  const dl = new THREE.DirectionalLight(0xffffff, 1.1);
+  dl.position.set(4, 8, 6);
+  WT.scene.add(dl);
+
+  const nodeMat = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.45, metalness: 0.15, emissive: new THREE.Color(c).multiplyScalar(0.35) });
+  const mkNode = (x, y, z, c, name, nameColor) => {
+    const m = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 16), nodeMat(c));
+    m.position.set(x, y, z);
+    WT.scene.add(m);
+    const lbl = makeTextSprite(name, { size: 13, color: nameColor || "#c9d1d9" });
+    lbl.position.set(x, y - 0.95, z);
+    WT.scene.add(lbl);
+    return m;
+  };
+  WT.n0 = mkNode(-1.4, 0, 0, "#3776ab", "main.py · node 0");
+  WT.n1 = mkNode(1.4, 0, 0, "#3776ab", "utils.py · node 1");
+
+  const edgeMat = new THREE.LineBasicMaterial({ color: 0x8b949e });
+  const edgeGeo = new THREE.BufferGeometry().setAttribute("position",
+    new THREE.Float32BufferAttribute([-1.4, 0, 0, 1.4, 0, 0], 3));
+  WT.scene.add(new THREE.Line(edgeGeo, edgeMat));
+  const eLbl = makeTextSprite("imports", { size: 11, color: "#8b949e" });
+  eLbl.position.set(0, 0.35, 0);
+  WT.scene.add(eLbl);
+
+  // Proposed node (ghost) + dashed proposal edge — faded in/out per step
+  WT.ghost = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 16),
+    new THREE.MeshStandardMaterial({ color: 0xc9d1d9, transparent: true, opacity: 0,
+      roughness: 0.45, metalness: 0.1, emissive: 0x30363d }));
+  WT.ghost.position.set(-1.4, 2.1, 0.6);
+  WT.scene.add(WT.ghost);
+  const gLbl = makeTextSprite("proposed module (not accepted)", { size: 11, color: "#c9d1d9" });
+  gLbl.position.set(-1.4, 3.1, 0.6);
+  gLbl.material.opacity = 0;
+  WT.gLbl = gLbl;
+  WT.scene.add(gLbl);
+  const gEdge = new THREE.Line(
+    new THREE.BufferGeometry().setAttribute("position",
+      new THREE.Float32BufferAttribute([-1.4, 0, 0, -1.4, 2.1, 0.6], 3)),
+    new THREE.LineDashedMaterial({ color: 0xc9d1d9, dashSize: 0.18, gapSize: 0.12, transparent: true, opacity: 0 }));
+  gEdge.computeLineDistances();
+  WT.gEdge = gEdge;
+  WT.scene.add(gEdge);
+
+  // Measurement badge over node 0 (step 4+), turns red when the source mismatch is revealed
+  WT.badge = makeTextSprite("coupling 0.5 · tree_sitter", { size: 12, color: "#8b949e" });
+  WT.badge.position.set(-1.4, 1.1, 0);
+  WT.badge.material.opacity = 0;
+  WT.scene.add(WT.badge);
+
+  document.getElementById("wtPrev").addEventListener("click", () => setWtStep(WT.step - 1));
+  document.getElementById("wtNext").addEventListener("click", () => setWtStep(WT.step + 1));
+  document.getElementById("wtReplay").addEventListener("click", () => setWtStep(0));
+  wtAnimate();
+}
+
+// Per-step targets: ghost opacity, badge state, badge color
+function wtSceneFor(step) {
+  return {
+    ghost: step >= 1 && step <= 4 ? 0.45 : 0,           // visible proposal → predicate; fades out at Reject
+    pulse: step === 2,                                   // gates passed — proposal "cleared" to be measured
+    badge: step >= 3 && step <= 4 ? 1 : 0,               // measurement shown at Measure/Predicate steps
+    badgeRed: step >= 4,                                 // source ≠ Scip revealed
+  };
+}
+
+function setWtStep(i) {
+  WT.step = Math.max(0, Math.min(wtSteps.length - 1, i));
+  const s = wtSteps[WT.step];
+  document.getElementById("wtStepInd").textContent =
+    `Step ${WT.step + 1} of ${wtSteps.length} — first rejected proposal (docs/quickstart.md)`;
+  document.getElementById("wtCard").innerHTML = `<h3>${s.title}</h3>` + s.html;
+  // three decision layers: revealed progressively, exactly as the CLI reports them
+  document.getElementById("wtL0").className = "wt-layer" + (WT.step >= 2 ? " on" : "");
+  document.getElementById("wtL1").className = "wt-layer" + (WT.step >= 4 ? " on" : "");
+  document.getElementById("wtL2").className = "wt-layer" + (WT.step >= 5 ? " on" : "");
+  document.getElementById("wtPrev").disabled = WT.step === 0;
+  document.getElementById("wtNext").disabled = WT.step === wtSteps.length - 1;
+  WT.targets = wtSceneFor(WT.step);
+  if (WT.badge) {
+    WT.badge["material"].map.dispose();
+    WT.badge["material"].dispose();
+    WT.scene.remove(WT.badge);
+    WT.badge = makeTextSprite(
+      WT.targets.badgeRed ? "coupling 0.5 · tree_sitter ≠ Scip" : "coupling 0.5 · tree_sitter",
+      { size: 12, color: WT.targets.badgeRed ? "#f85149" : "#8b949e" });
+    WT.badge.position.set(-1.4, 1.1, 0);
+    WT.badge.material.opacity = WT.targets.badge ? 1 : 0;
+    WT.scene.add(WT.badge);
+  }
+}
+
+function wtAnimate() {
+  requestAnimationFrame(wtAnimate);
+  if (!WT.active || !WT.inited) return;
+  WT.controls.update();
+  const t = WT.targets || wtSceneFor(0);
+  const pulse = t.pulse ? 0.5 + 0.5 * Math.sin(performance.now() / 260) : 1;
+  WT.ghost.material.opacity += (t.ghost * pulse - WT.ghost.material.opacity) * 0.15;
+  WT.gEdge.material.opacity += (t.ghost * pulse - WT.gEdge.material.opacity) * 0.15;
+  WT.gLbl.material.opacity += (t.ghost * pulse - WT.gLbl.material.opacity) * 0.15;
+  WT.renderer.render(WT.scene, WT.camera);
+}
+
+// ═══ View switching ═══
+function showView(name) {
+  const space = name === "space";
+  document.getElementById("viewSpace").style.display = space ? "" : "none";
+  document.getElementById("viewReject").style.display = space ? "none" : "";
+  document.getElementById("btnViewSpace").classList.toggle("active", space);
+  document.getElementById("btnViewReject").classList.toggle("active", !space);
+  WT.active = !space;
+  if (!space) {
+    initWt();
+    setWtStep(WT.step);
+  }
+}
+document.getElementById("btnViewSpace").addEventListener("click", () => showView("space"));
+document.getElementById("btnViewReject").addEventListener("click", () => showView("reject"));
 
 updateMapping();
 animate();
