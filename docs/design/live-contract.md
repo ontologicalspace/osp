@@ -9,11 +9,12 @@
 > Değişiklik disiplini: bu kontrat canlı koşular toplandıkça **versiyonlanır**
 > (`v1 → v2`); her run hangi kontrat sürümünde üretildiğini ledger'da kaydeder.
 >
-> **v1.1 (2026-10-01, #159):** accept→apply arası **zorunlu derleme kapısı** ve
-> tümleyici ad-çözümleme denetim kuralı (§3); ledger'da `build_verification`
-> alanı (§4). Tetikleyen: run 1'in kabul edilen yaması derlemeyi kırdı —
-> post-mortem #159'da. Ekleme niteliğindedir; v1'de üretilmiş run satırları
-> geçerliliğini korur (`build_verification: null`).
+> **v1.1 (2026-10-01, #159):** accept→apply arası **aday-state derleme kapısı**,
+> karar/realization ayrımı (`patch_outcome`) ve preflight ad-çözümleme denetimi (§3);
+> ledger'da `build_verification` (state-bound) + `patch_outcome` alanları (§4).
+> Tetikleyen: run 1'in kabul edilen yaması derlemeyi kırdı — post-mortem #159'da.
+> Ekleme niteliğindedir; v1'de üretilmiş run satırları geçerliliğini korur
+> (`contract_version: "v1"`, `build_verification: null`).
 
 ## 1. Karar zinciri ve artifact'ler
 
@@ -114,24 +115,48 @@ OSP → Decision → İnsan / coding agent → Patch → Reanalysis
 
 Run 1'de kabul edilen RemoveImport yaması derlemeyi KIRDI: `AiGenerateTextRequest`
 gövdede üç kez kullanılıyordu (iç içe nitelikli erişim `AiGenerateTextRequest.AiMessage`
-dahil), elle grep+okuma denetimi bunu kaçırdı ve yama sonrası hiç derleme koşulmadı;
-kırıklık ancak sonraki apply partisinin derleme doğrulamasında görüldü (onarım:
-kaynak repoda using restore; ledger'da `accept-reverted` + amendment). Ölçüm doğru
+dahil), elle grep+okuma denetimi bunu kaçırdı ve yama sonrası derleme hiç koşulmadı;
+kırıklık ancak sonraki apply partisinin derleme doğrulamasında görüldü. Ölçüm doğru
 kalmaya devam etti — coupling tam öngörüldüğü gibi düştü. Yanlış olan "using ölü"
-hükmüydü: **ölçüm doğruluğu ≠ değişiklik geçerliliği.** Köprü bu yüzden iki kapı kazanır:
+hükmüydü: **ölçüm doğruluğu ≠ değişiklik geçerliliği.** Köprü bu yüzden üç kural kazanır:
 
-1. **Derleme kapısı (zorunlu):** `applied.patch` uygulanmadan ÖNCE hedef çözüm/proje
-   derlenir; yama yalnızca **0 hata** üzerinde uygulanır ve sonuç ledger'da
-   `build_verification` olarak kaydedilir (§4). Kırmızı derleme = yama uygulanmaz;
-   öneri ve denetim gözden geçirilir, karar kaydı düzeltilir.
-2. **Tümleyici ad-çözümleme denetimi:** "using ölü" tarzı ad-çözümleme hükümleri
-   grep/okuma izlenimiyle DEĞİL, namespace'in bildirdiği tip listesinin **tümleyici
-   dökümü**nün gövde tanımlayıcılarıyla kesişimi boş olmasıyla gerekçelendirilir;
-   extension-method riski (jenerik imzalar dahil) ayrıca elenir. Run 1'in kaçırdığı
-   `DışTip.İçTip` nitelikli erişimi bu yöntemle görünür olur.
+1. **Derleme kapısı (zorunlu; ADAY state üzerinde):** doğrulanan state, patch'lenmemiş
+   baseline DEĞİLDİR — `Build(S0)` yalnızca önkoşul kanıtlar (opsiyonel; run 1'in
+   baseline'ı da yeşildi, kırıklığı yama oluşturdu). Kapının invariant'ı
+   `Build(Apply(S0, patch))`'tir:
+
+   ```
+   S0 build green (önkoşul — S0'yu doğrular, yamayı değil)
+   → aday yama izole/worktree state'e uygulanır (candidate state)
+   → Build(Apply(S0, patch))
+   → yeşil: canonical apply + applied.patch + reanalysis (M(S1))
+   → kırmızı: aday state discard/revert — patch_outcome = build-failed-reverted
+   ```
+
+   Sonuç ledger'da `build_verification` olarak kaydedilir (§4); hangi **exact patched
+   state**'in derlendiği bağlanır (commit SHA'sı yoksa `repository_head + patch_digest`).
+
+2. **Karar ile realization ayrımı:** Live Contract'ın bilinçli zinciri
+   (`OSP → Decision → İnsan/agent → Patch → Reanalysis`) korunur. Derleme kapısı kırmızı
+   çıktığında `decision` (accept / reject / defer — OSP'nin **structural** kararı) olduğu
+   gibi kalir; sonucu ayrı bir `patch_outcome` alanı taşır (`applied |
+   build-failed-reverted | null`). İki failure mode Paper 4 dataset'inde ayrışmak
+   zorundadır: **decision-invalid** (OSP structural kararı yanlış) ≠
+   **realization-invalid** (structural karar ölçüm olarak doğru, üretilen kaynak yaması
+   geçersiz — run 1'in durumu). OSP kararının kendisi sonradan yeniden değerlendirilirse
+   bu, ayrıca `decision_amendment` olarak modellenir; varsayılan akışta yapılmaz.
+
+3. **Preflight ad-çözümleme denetimi (yardımcı; otorite değil):** "using ölü" tarzı
+   hükümler için namespace'in bildirdiği tip listesinin **tümleyici dökümü**nün gövde
+   tanımlayıcılarıyla kesişiminin boş olması güçlü bir **preflight** sinyalidir (run 1'in
+   kaçırdığı `DışTip.İçTip` nitelikli erişimini yakalar; extension-method riski — jenerik
+   imzalar dahil — ayrıca elenir). Fakat C# ad çözümlemesinin tamamı leksik kesişimle
+   ispatlanamaz (attribute shorthand, generated/forwarded semboller vb.); **son otorite
+   aday state üzerinde koşan derleyici/build kapısıdır** — preflight erken sinyal ve
+   denetim disiplini sağlar, geçerlilik vermez.
 
 Araçlaştırma bilinçli olarak ikinci aşamadır: süreç kuralı oturmadan wrapper
-sertleştirilmez (soğuk başlatma dersi, PR #153 R2). Takibi #159'da.
+sertleştirilmez (soğuk başlatma dersi, PR #153 R2). Takibi #151'de.
 
 ## 4. Ledger (canonical: `dogfood/ledger.jsonl`)
 
@@ -149,7 +174,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
 {
   "schema_version": "live-ledger-v1",
   "run_id": "2026-09-30-remove-direct-provider-dependency",
-  "contract_version": "v1",
+  "contract_version": "v1.1",
   "repository": "nexus",
   "repository_head": "<sha>",
   "osp_revision": "<osp-checkout-HEAD-sha>",
@@ -168,10 +193,11 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "proposal_digest": "sha256:… | null",
   "attempt_ref": "…/attempt.json",
   "decision": "accept | reject | defer",
+  "patch_outcome": "applied | build-failed-reverted | null (henüz uygulanmadı / reddedildi)",
   "patch_ref": "…/applied.patch | null",
   "patch_digest": "sha256:… | null",
   "after_ref": "…/after.json | null",
-  "build_verification": "dotnet build <sln> → 0 errors @<patch-commit> | null (v1 run'ları ve reddedilen run'lar)",
+  "build_verification": { "command": "dotnet build <sln>", "verified_state": "repository_head + patch_digest (veya aday commit SHA'sı)", "outcome": "green: 0 errors | red: N errors (…)" } | null (v1 run'ları ve reddedilen run'lar),
   "decision_utility": "decision-changed | decision-confirmed | none",
   "counterfactual": "verified-bad | inspected-ok | unverified | null",
   "human_override": false,
@@ -187,10 +213,21 @@ analizi, attempt, after analizi) / (`tier2-scip`'te) `scip_index_digest` olmadan
 "aynı girdi → aynı karar" denetlenemez. `*_digest` alanları v1'de opsiyoneldir
 (null), Paper 4 dataset'ine export edilmeden önce doldurulurlar.
 
-`build_verification` (v1.1, #159): kabul edilen yamanın uygulandığı partide
-koşulan derleme doğrulamasının komut-sonuç özeti (§3 derleme kapısı). v1'de
-üretilmiş run'larda ve `decision: reject` run'larda `null`'dur; `schema_version`
-`live-ledger-v1` olarak kalır (alan ekleme niteliğinde, geriye dönük uyumlu).
+`build_verification` (v1.1, #159): derleme kapısının **state-bound** kaydı — üç bilgi
+ayrışır: `command`, `verified_state` (hangi exact patched state derlendi: aday commit
+SHA'sı varsa o; henüz commit yoksa `repository_head + patch_digest`), `outcome`
+(yeşil/kırmızı + hata sayısı/özeti). Kapı aday state üzerinde koşar (§3);
+`Build(S0)` önkoşuldur, yama geçerliliği kanıtı DEĞİLDİR.
+
+`patch_outcome` (v1.1, #159): realization/application sonucu — `decision`'dan (OSP
+structural kararı) ayrı yaşar. `build-failed-reverted`: aday yama derleme kapısında
+kırmızı çıktı ve revert edildi (run 1 örneği; `decision: accept` olduğu gibi kalır,
+failure mode **realization-invalid**'dir). `decision_amendment` yalnızca OSP kararının
+kendisi yeniden değerlendirilirse yazılır.
+
+v1'de üretilmiş run satırları `contract_version: "v1"` ve `build_verification: null`
+olarak geçerliliğini korur; `schema_version` `live-ledger-v1` kalır (alan eklemeleri
+geriye dönük uyumludur).
 
 `decision_utility` / `counterfactual` programın iki **kritik-eşik olayının**
 alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"
