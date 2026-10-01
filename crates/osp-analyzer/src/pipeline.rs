@@ -669,21 +669,28 @@ fn scope_git_state(
 }
 
 /// Parent HEAD'teki gitlink girdileri (`160000 commit <sha>\t<path>`).
+///
+/// #158 R4 P1: çıktı `-z` ile alınır — klasik `ls-tree` Unicode/özel karakterli
+/// path'leri C-quote'lar (`clients/türkçe` → `"clients/t\303\274rk\303\247e"`);
+/// quoted prefix, filesystem/analyzer path'iyle eşleşmez, root scope submodule
+/// alanını tanıyamaz ve parent ignore nested HEAD-tracked dosyayı sessizce
+/// düşürebilirdi. `-z` kayıtları NUL-ayrı ve path'ler HAM gelir — escape
+/// çözmeye gerek yok.
 fn gitlink_entries(repo: &Path) -> Vec<(String, String)> {
     let mut entries = Vec::new();
-    let Ok(long) = std::process::Command::new("git")
+    let Ok(raw) = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
-        .args(["ls-tree", "-r", "HEAD"])
+        .args(["ls-tree", "-r", "-z", "HEAD"])
         .output()
     else {
         return entries;
     };
-    let Ok(long) = String::from_utf8(long.stdout) else {
+    let Ok(raw) = String::from_utf8(raw.stdout) else {
         return entries;
     };
-    for line in long.lines() {
-        let Some((meta, path)) = line.split_once('\t') else {
+    for record in raw.split('\0').filter(|r| !r.is_empty()) {
+        let Some((meta, path)) = record.split_once('\t') else {
             continue;
         };
         let mut parts = meta.split_whitespace();
@@ -1698,9 +1705,10 @@ mod gitignore_discovery_tests {
     }
 
     /// R2 P1 (scope-authority) fixture: parent + içinde initialized submodule.
-    /// Parent .gitignore İÇERİĞİ parametrik — parent'ın ignore politikasının
-    /// submodule HEAD-tracked dosyasını DÜŞÜREMEMESİ pinlenir.
-    fn scope_authority_parent_gitignore_cannot_drop_submodule_files(pattern: &str) {
+    /// Parent .gitignore İÇERİĞİ ve submodule PATH'i parametrik — parent'ın
+    /// ignore politikasının submodule HEAD-tracked dosyasını DÜŞÜREMEMESİ
+    /// pinlenir.
+    fn scope_authority_parent_gitignore_cannot_drop_submodule_files(pattern: &str, sub_path: &str) {
         let parent = tempfile::tempdir().expect("parent tempdir");
         let sub = tempfile::tempdir().expect("sub tempdir");
         git_init(sub.path());
@@ -1735,7 +1743,7 @@ mod gitignore_discovery_tests {
         );
         let st = std::process::Command::new("git")
             .args(["-C", parent.path().to_str().unwrap()])
-            .args(["submodule", "add", &url, "clients/fe"])
+            .args(["submodule", "add", &url, sub_path])
             .env("GIT_CONFIG_COUNT", "1")
             .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
             .env("GIT_CONFIG_VALUE_0", "always")
@@ -1751,7 +1759,7 @@ mod gitignore_discovery_tests {
             .collect();
         assert!(
             names.contains(&"kept.ts".to_string()),
-            "submodule HEAD-tracked file must survive parent ignore pattern {pattern:?}; got {names:?}"
+            "submodule HEAD-tracked file must survive parent ignore pattern {pattern:?} at {sub_path:?}; got {names:?}"
         );
         assert!(
             names.contains(&"main.rs".to_string()),
@@ -1768,14 +1776,24 @@ mod gitignore_discovery_tests {
     /// submodule prefix'leri çıkarılır; ignore authority repository-scoped).
     #[test]
     fn parent_star_ts_ignore_cannot_drop_submodule_tracked_file() {
-        scope_authority_parent_gitignore_cannot_drop_submodule_files("*.ts");
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("*.ts", "clients/fe");
     }
 
     /// R2 P1 ikinci varyant: parent `.gitignore = clients/fe/**` — submodule
     /// dizinini hedefleyen pattern bile: içerik gitlink'in, authority parent'ın değil.
     #[test]
     fn parent_dir_ignore_cannot_drop_submodule_tracked_file() {
-        scope_authority_parent_gitignore_cannot_drop_submodule_files("clients/fe/**");
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("clients/fe/**", "clients/fe");
+    }
+
+    /// R4 P1: Unicode submodule path'i (`clients/türkçe`). Non-`-z` `ls-tree`
+    /// bu path'i C-quote'lardı (`"clients/t\303\274rk\303\247e"`) → quoted prefix
+    /// analyzer path'iyle eşleşmez → root scope boundary'yi kaçırır → parent
+    /// `*.ts` nested HEAD-tracked dosyayı sessizce düşürürdü. `-z` + NUL parse
+    /// path'i HAM getirir — boundary tanınır, kept.ts KALIR.
+    #[test]
+    fn unicode_submodule_path_boundary_is_recognized() {
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("*.ts", "clients/türkçe");
     }
 
     /// R3 P1 (repository boundary ≠ revision validity): gitlink → sub
