@@ -533,12 +533,22 @@ fn filter_gitignored(repo: &Path, files: &mut Vec<PathBuf>) {
     // rel_path (repo-köküne göre, slash'lı) → keep?
     //
     // #158 R2 P1 — scope-authority: her dosya YALNIZ kendi repository scope'unda
-    // değerlendirilir. Root scope'un aday havuzundan submodule prefix'leri ÇIKARILIR;
+    // değerlendirilir. Root scope'un aday havuzundan submodule alanları ÇIKARILIR;
     // aksi halde parent `.gitignore` (ör. `*.ts` ya da `clients/fe/**`) submodule'un
     // HEAD-tracked dosyasını match eder ve union `excluded` seti onu doğru scope'un
     // KEEP kararı kurtaramadan düşürürdü — "hangi repository'nin ignore kuralları bu
     // dosya hakkında söz sahibi?" sorusu da revision zinciriyle aynı sınırı izler.
-    let submodule_prefixes: Vec<String> = scopes.iter().skip(1).map(|s| s.prefix.clone()).collect();
+    //
+    // #158 R3 P1 — repository boundary ≠ revision validity: root exclusion TÜM
+    // gitlink prefix'lerini (parent HEAD'teki her `160000 commit` girdisi) kullanır;
+    // yalnızca GEÇERLİ (initialized + HEAD == gitlink) olanları değil. Aksi halde
+    // revision-mismatch submodule (worktree HEAD = B, gitlink = A) scope'suz
+    // kalır, alanı root aday havuzuna geri düşer ve parent ignore onu sessizce
+    // düşürebilirdi — #156 fence'inin kontrol edeceği node kalmazdı. Mismatch
+    // durumunda doğru akış: parent authority'si de GEÇERLİ sub filtresi de
+    // uygulanmaz → nested dosyalar discovery'de KALIR → fence (tracked-set /
+    // dirty-prefix) fail-closed reddeder.
+    let gitlink_prefixes = all_gitlink_prefixes(repo);
     let mut excluded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for scope in &scopes {
         // Bu kapsama düşen aday dosyalar (scope-relative).
@@ -552,8 +562,9 @@ fn filter_gitignored(repo: &Path, files: &mut Vec<PathBuf>) {
                     .replace('\\', "/");
                 if scope.prefix.is_empty() {
                     // Root scope: submodule alanı başka bir repository'nin
-                    // ignore/HEAD authority'sidir — aday DEĞİL.
-                    if submodule_prefixes
+                    // ignore/HEAD authority'sidir — aday DEĞİL (TÜM gitlink'ler,
+                    // revision geçerliliğinden bağımsız — R3 P1).
+                    if gitlink_prefixes
                         .iter()
                         .any(|p| repo_rel.starts_with(&format!("{p}/")))
                     {
@@ -657,34 +668,54 @@ fn scope_git_state(
     Some((head_tracked, ignored))
 }
 
-/// Initialized (worktree HEAD == gitlink SHA) birinci-seviye submodule'lar.
-fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
-    let mut scopes = Vec::new();
+/// Parent HEAD'teki gitlink girdileri (`160000 commit <sha>\t<path>`).
+fn gitlink_entries(repo: &Path) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
     let Ok(long) = std::process::Command::new("git")
         .arg("-C")
         .arg(repo)
         .args(["ls-tree", "-r", "HEAD"])
         .output()
     else {
-        return scopes;
+        return entries;
     };
     let Ok(long) = String::from_utf8(long.stdout) else {
-        return scopes;
+        return entries;
     };
     for line in long.lines() {
         let Some((meta, path)) = line.split_once('\t') else {
             continue;
         };
         let mut parts = meta.split_whitespace();
-        let (Some(mode), Some(kind), Some(gitlink_sha)) =
-            (parts.next(), parts.next(), parts.next())
-        else {
+        let (Some(mode), Some(kind), Some(sha)) = (parts.next(), parts.next(), parts.next()) else {
             continue;
         };
         if mode != "160000" || kind != "commit" {
             continue;
         }
-        let sub_dir = repo.join(path);
+        entries.push((sha.to_string(), path.to_string()));
+    }
+    entries
+}
+
+/// #158 R3 P1 — repository boundary: parent HEAD'teki TÜM gitlink prefix'leri.
+/// Revision validity'den BAĞIMSIZ — gitlink'in varlığı, alanın parent'ın değil
+/// başka bir repository'nin ignore/HEAD authority'si olduğunu tanımlar.
+/// (Worktree HEAD == gitlink ayrı bir geçerlilik sorusudur; mismatch halinde
+/// nested dosyalar discovery'de KALIR ve #156 fence'i fail-closed reddeder.)
+fn all_gitlink_prefixes(repo: &Path) -> Vec<String> {
+    gitlink_entries(repo)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+/// Geçerli (initialized + worktree HEAD == gitlink SHA) birinci-seviye
+/// submodule'lar — ignore filtresinin uygulanacağı scope'lar.
+fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
+    let mut scopes = Vec::new();
+    for (gitlink_sha, path) in gitlink_entries(repo) {
+        let sub_dir = repo.join(&path);
         if !sub_dir.join(".git").exists() {
             continue;
         }
@@ -704,7 +735,7 @@ fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
         }
         scopes.push(IgnoreScope {
             dir: sub_dir,
-            prefix: path.to_string(),
+            prefix: path,
         });
     }
     scopes
@@ -1745,6 +1776,98 @@ mod gitignore_discovery_tests {
     #[test]
     fn parent_dir_ignore_cannot_drop_submodule_tracked_file() {
         scope_authority_parent_gitignore_cannot_drop_submodule_files("clients/fe/**");
+    }
+
+    /// R3 P1 (repository boundary ≠ revision validity): gitlink → sub
+    /// commit A, sub worktree HEAD → commit B (mismatch). Parent .gitignore
+    /// pattern'i `clients/fe` altındaki dosyayı discovery'den DÜŞÜREMEZ —
+    /// alan parent'ın değil, gitlink'in; mismatch bir validity sorunudur ve
+    /// doğru yanıt fail-closed fence (#156), sessiz exclusion değil.
+    fn revision_mismatch_submodule_files_survive_parent_ignore(pattern: &str) {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let sub = tempfile::tempdir().expect("sub tempdir");
+        git_init(sub.path());
+        std::fs::write(
+            sub.path().join("seed.ts"),
+            "export const seed = 0;
+",
+        )
+        .unwrap();
+        git_cmd(sub.path(), &["add", "-A"]);
+        git_cmd(sub.path(), &["commit", "-qm", "sub commit A"]);
+        git_init(parent.path());
+        std::fs::write(
+            parent.path().join(".gitignore"),
+            format!(
+                "{pattern}
+"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            parent.path().join("main.rs"),
+            "fn c() {}
+",
+        )
+        .unwrap();
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "parent init"]);
+        let url = format!(
+            "file:///{}",
+            sub.path().to_str().unwrap().replace(chr_bs(), "/")
+        );
+        let st = std::process::Command::new("git")
+            .args(["-C", parent.path().to_str().unwrap()])
+            .args(["submodule", "add", &url, "clients/fe"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .status()
+            .expect("git submodule add");
+        assert!(st.success(), "submodule add failed");
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(
+            parent.path(),
+            &["commit", "-qm", "add submodule (gitlink -> A)"],
+        );
+        // Submodule'ta yeni commit B — worktree HEAD artık gitlink'ten farklı.
+        std::fs::write(
+            parent.path().join("clients/fe/kept.ts"),
+            "export const a = 1;
+",
+        )
+        .unwrap();
+        git_cmd(parent.path().join("clients/fe").as_path(), &["add", "-A"]);
+        git_cmd(
+            parent.path().join("clients/fe").as_path(),
+            &["commit", "-qm", "sub commit B"],
+        );
+        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"kept.ts".to_string()),
+            "revision-mismatch submodule file must NOT be dropped by parent ignore {pattern:?}; got {names:?}"
+        );
+        // Mismatch'ta submodule filtresi de uygulanmaz (validity sorunu) —
+        // seed.ts dahil içerik discovery'de kalır; fail-closed yanıt
+        // #156 fence'inin işi (tracked-set / dirty-prefix), sessiz exclusion değil.
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "parent file must stay; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_submodule_survives_parent_star_ts_ignore() {
+        revision_mismatch_submodule_files_survive_parent_ignore("*.ts");
+    }
+
+    #[test]
+    fn mismatched_submodule_survives_parent_dir_ignore() {
+        revision_mismatch_submodule_files_survive_parent_ignore("clients/fe/**");
     }
 
     #[test]
