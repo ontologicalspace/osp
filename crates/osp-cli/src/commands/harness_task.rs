@@ -961,9 +961,12 @@ mod tests {
     }
 
     #[test]
-    fn v2_survives_id_shift_without_file_change() {
-        // B5 özü: dosya seti değişti (src/z.rs eklendi → a.rs'nin id'si 1'den 5'e kaydı),
-        // task dosyası AYNI — path-keyed olduğu için re-bind deterministik.
+    fn v2_rebinds_path_to_current_analysis_node_id() {
+        // R1 P2-1: garanti = "aynı exact repository snapshot içinde id'leri elle
+        // bilmek gerekmez; path, güncel analysis NodeId'sine bind edilir" (burada
+        // src/z.rs aynı snapshot içinde keşfedilmiş → a.rs'nin id'si 1'den 5'e kaymış).
+        // Cross-commit task portability DEĞİL: dosya seti commit'ler arası değişirse
+        // Git HEAD de değişir ve HEAD fence re-bind'ten ÖNCE reddeder.
         let env = v2_envelope(
             serde_json::json!([{"path": "src/a.rs"}]),
             serde_json::json!({"Path": "src/a.rs"}),
@@ -971,7 +974,7 @@ mod tests {
         let mut np = HashMap::new();
         np.insert(5u64, "src/a.rs".to_string());
         np.insert(6u64, "src/z.rs".to_string());
-        let task = load_v2(&env, &np).expect("id shift is invisible to path-keyed task");
+        let task = load_v2(&env, &np).expect("path binds to current analysis id");
         assert_eq!(
             task.target_predicate_set.predicates[0].predicate.scope,
             PredicateScope::Node(5)

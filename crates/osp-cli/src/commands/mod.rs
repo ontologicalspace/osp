@@ -639,10 +639,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("--proposals required for --llm mock"))?;
             // #161 (B5): v1 çıplak array (id-keyed) veya v2 object envelope
-            // (path-keyed — attempt anındaki baseline'a karşı re-bind).
+            // (path-keyed — HEAD fence + attempt anindeki baseline'a karşı re-bind).
             let proposals: Vec<osp_core::agent::DeltaProposal> =
-                path_keyed_proposals::load_proposals_file(proposals_path, &result.node_paths)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+                path_keyed_proposals::load_proposals_file(
+                    proposals_path,
+                    snapshot_before.head.as_str(),
+                    &result.node_paths,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
             let llm = crate::mock_llm::FileMockLlm::new(proposals);
             run_navigator(
                 &llm,

@@ -126,11 +126,13 @@ impl HarnessFixture {
     }
 
     /// Write a path-keyed proposals v2 envelope (one RemoveImport from_path→to_path).
-    /// #161/B5: NodeId alanları repo-relative path; çözümleme attempt anındaki
-    /// baseline'a karşı CLI'da yapılır.
-    fn write_proposals_v2(&self, from_path: &str, to_path: &str) -> std::path::PathBuf {
+    /// #161/B5: NodeId alanları repo-relative path; R1 P1-1 sonrası envelope
+    /// `repository_head` taşır — proposal'ın üretildiği state, re-bind'ten önce
+    /// exact-match fence'e girer.
+    fn write_proposals_v2(&self, head: &str, from_path: &str, to_path: &str) -> std::path::PathBuf {
         let proposals = serde_json::json!({
             "schema_version": 2,
+            "repository_head": head,
             "proposals": [{
                 "removed_edges": [{"from": from_path, "to": to_path, "kind": "Imports"}],
                 "affected_nodes": [from_path],
@@ -1174,7 +1176,7 @@ fn v2_path_keyed_completed_loop_exact_pin() {
     // → 1/2 = 0.5 ≤ 0.55 → Completed.
     let fx = HarnessFixture::new();
     let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
-    let proposals_path = fx.write_proposals_v2("main.rs", "b.rs");
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
 
     assert!(
@@ -1222,7 +1224,7 @@ fn v2_task_unknown_path_fails_closed_at_cli() {
     let fx = HarnessFixture::new();
     let env = task_envelope_v2(&fx.head, "src/nonexistent.rs");
     let task_path = fx.write_task(&env);
-    let proposals_path = fx.write_proposals_v2("main.rs", "b.rs");
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(
         !output.status.success(),
@@ -1241,7 +1243,7 @@ fn v2_task_unknown_path_fails_closed_at_cli() {
 fn v2_proposals_unknown_path_fails_closed_at_cli() {
     let fx = HarnessFixture::new();
     let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
-    let proposals_path = fx.write_proposals_v2("main.rs", "src/stale.rs");
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "src/stale.rs");
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
     assert!(!output.status.success(), "unknown proposal path must fail");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1257,7 +1259,7 @@ fn v1_task_with_v2_proposals_mix_works() {
     // geçerli (run 7-8 deseni: task el yazımı id'lerle, proposals taze).
     let fx = HarnessFixture::new();
     let task_path = fx.write_task(&task_envelope(&fx.head, 2));
-    let proposals_path = fx.write_proposals_v2("main.rs", "b.rs");
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
     assert!(
         output.status.success(),
@@ -1268,4 +1270,24 @@ fn v1_task_with_v2_proposals_mix_works() {
     let envelope: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|e| panic!("stdout not JSON envelope: {e}\n{stdout}"));
     assert_eq!(envelope["result"]["kind"], "completed");
+}
+
+#[test]
+fn v2_proposal_head_mismatch_rejected_at_cli() {
+    // R1 P1-1: proposals v2 envelope kendi üretim state'ini taşır; HEAD=A'da
+    // üretilmiş proposal HEAD=B'ye sessizce re-bind edilemez — fence re-bind'ten
+    // önce, path'ler geçerli olsa bile reddeder.
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
+    let proposals_path = fx.write_proposals_v2(&"f".repeat(40), "main.rs", "b.rs");
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "proposal HEAD mismatch must fail pre-flight"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("repository HEAD mismatch"),
+        "stderr explains the proposal provenance fence: {stderr}"
+    );
 }

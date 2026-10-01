@@ -126,7 +126,10 @@ taşıyan node, `to` = kaldırılacak dependency.
 Node id, sıralı dosya listesi üzerindeki **enumerasyon indeksidir** — dosya seti
 değişince kayar (yön tahmin edilemez). v2 formatında task ve proposals **dosya
 yoluyla** bağlanır; path→id çözümlemesi attempt anında, o anki baseline'a karşı
-deterministik yapılır. v1 dosyalar aynen çalışmaya devam eder; iki format
+deterministik yapılır. Garanti: **aynı exact repository snapshot içinde** id'leri
+elle bilmek gerekmez. Cross-commit task taşınabilirliği DEĞİLDİR — dosya seti
+commit'ler arası değişirse HEAD de değişir ve HEAD fence re-bind'ten önce reddeder
+(provenance korunur). v1 dosyalar aynen çalışmaya devam eder; iki format
 karışabilir (v1 task + v2 proposals geçerli).
 
 ### Task dosyası v2 (`task.v2.json`)
@@ -176,11 +179,15 @@ match, binding set ≡ predicate set, Node-only homojenlik) birebir aynı:
 
 ### Proposals v2 (`proposals.v2.json`)
 
-Çıplak array yerine `schema_version: 2` object envelope; NodeId alanları path:
+Çıplak array yerine `schema_version: 2` object envelope; NodeId alanları path.
+`repository_head` = proposal'ın **üretildiği** repo HEAD'i (full 40-char SHA);
+attempt anindeki snapshot'la exact-match fence'e girer — re-bind'ten ÖNCE.
+HEAD=A'da üretilmiş proposal HEAD=B'ye sessizce re-bind edilemez:
 
 ```json
 {
   "schema_version": 2,
+  "repository_head": "<full-40-char-SHA>",
   "proposals": [{
     "removed_edges": [{"from": "main.rs", "to": "b.rs", "kind": "Imports"}],
     "affected_nodes": ["main.rs"],
@@ -196,6 +203,17 @@ match, binding set ≡ predicate set, Node-only homojenlik) birebir aynı:
   çözümlenir; yeni node bağlantıları `new_nodes[].connected_to` üzerinden kurulur.
 - Çözülemeyen path → typed fail-closed (hata mesajı alan konumunu taşır, ör.
   `(removed_edges.to)`).
+- **Strict wire:** v2 envelope ve tüm nested DTO'lar `deny_unknown_fields` —
+  typo'lanmış structural alan (`removed_edge` gibi) parse error üretir, sessizce
+  yutulmaz. v1 çıplak array'in serde gevşekliği backward-compat için korunur.
+
+### Path wire kontratı (v2)
+
+Path artık identity key olduğu için spelling **donmuştur**: repo-relative,
+forward-slash (`/`), analyzer'ın `node_paths` çıktısındaki birebir yazım
+(analyzer `\` → `/` normalize eder), `./` prefix yok. Çözümleme **exact-match**
+tir — `src/foo.cs`, `src\foo.cs` ve `./src/foo.cs` aynı dosyayı işaret etse de
+aynı wire identity DEĞİLDİR; normalize edilmez, fail-closed kalır.
 
 ## Çalıştırma
 
