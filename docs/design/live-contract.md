@@ -1,4 +1,4 @@
-# OSP Live Contract — Canlı Kullanım Davranış Kontratı (v1)
+# OSP Live Contract — Canlı Kullanım Davranış Kontratı (v1.1)
 
 > **Durum:** #151 canlı kullanım programı Faz 0 artefaktı (2026-09-30).
 > Bu belge kod değil **davranış kontratı** dondurur: canlı koşularda hangi zincir
@@ -8,6 +8,13 @@
 >
 > Değişiklik disiplini: bu kontrat canlı koşular toplandıkça **versiyonlanır**
 > (`v1 → v2`); her run hangi kontrat sürümünde üretildiğini ledger'da kaydeder.
+>
+> **v1.1 (2026-10-01, #159):** accept→apply arası **aday-state derleme kapısı**,
+> karar/realization ayrımı (`patch_outcome`) ve preflight ad-çözümleme denetimi (§3);
+> ledger'da `build_verification` (state-bound) + `patch_outcome` alanları (§4).
+> Tetikleyen: run 1'in kabul edilen yaması derlemeyi kırdı — post-mortem #159'da.
+> Ekleme niteliğindedir; v1'de üretilmiş run satırları geçerliliğini korur
+> (`contract_version: "v1"`, `build_verification: null`).
 
 ## 1. Karar zinciri ve artifact'ler
 
@@ -104,6 +111,69 @@ OSP → Decision → İnsan / coding agent → Patch → Reanalysis
 - Reddedilen proposal'da `applied.patch` YOKTUR (`decision.json` "rejected" +
    boş bırakılır) — uzay ve dosyalar before durumunda kalır; bu da deneydir.
 
+### v1.1 — yama köprüsü kapıları (run 1 post-mortem, #159)
+
+Run 1'de kabul edilen RemoveImport yaması derlemeyi KIRDI: `AiGenerateTextRequest`
+gövdede üç kez kullanılıyordu (iç içe nitelikli erişim `AiGenerateTextRequest.AiMessage`
+dahil), elle grep+okuma denetimi bunu kaçırdı ve yama sonrası derleme hiç koşulmadı;
+kırıklık ancak sonraki apply partisinin derleme doğrulamasında görüldü. Ölçüm doğru
+kalmaya devam etti — coupling tam öngörüldüğü gibi düştü. Yanlış olan "using ölü"
+hükmüydü: **ölçüm doğruluğu ≠ değişiklik geçerliliği.** Köprü bu yüzden üç kural kazanır:
+
+1. **Derleme kapısı (zorunlu; ADAY state üzerinde):** doğrulanan state, patch'lenmemiş
+   baseline DEĞİLDİR — `Build(S0)` yalnızca önkoşul kanıtlar (opsiyonel; run 1'in
+   baseline'ı da yeşildi, kırıklığı yama oluşturdu). Kapının invariant'ı
+   `Build(Apply(S0, patch))`'tir:
+
+   ```
+   S0 build green (önkoşul — S0'yu doğrular, yamayı değil)
+   → aday yama izole/worktree state'e uygulanır (candidate state)
+   → Build(Apply(S0, patch))
+   → yeşil: canonical apply + applied.patch + reanalysis (M(S1))
+   → kırmızı: aday state discard/revert — patch_outcome = build-failed-reverted
+   ```
+
+   Kapının geçerliliği **state-identity bağı**na bağlıdır: yeşil build ancak doğrulanan
+   aday state ile canonical olarak uygulanan state aynıysa kanıttır
+   (`S_applied == S_candidate`). Base arada ilerlediyse aynı patch farklı bir
+   programdır — `Build(Apply(A, P))`, `Apply(B, P)`'yi kanıtlamaz (TOCTOU). Bu nedenle
+   canonical apply iki modelden biriyle bağlanır:
+   - **(a) exact-state promotion (önerilen):** derlenen aday worktree/commit doğrudan
+     canonical state olarak promote edilir — doğrulama ile uygulama arasında hiçbir
+     pencere yoktur; veya
+   - **(b) re-bind before apply:** canonical apply anında `current HEAD ==
+     verified_state.repository_head` VE patch digest eşitliği denetlenir; eşleşme
+     yoksa gate geçersizdir — aday yeni base üzerinde yeniden uygulanır ve yeniden
+     derlenir. Yalnızca `patch_digest` eşitliği YETERLİ DEĞİLDİR; base state de bağın
+     parçasıdır.
+
+   Sonuç ledger'da `build_verification` olarak kaydedilir (§4); hangi **exact patched
+   state**'in derlendiği bağlanır (`verified_state`: base `repository_head` +
+   `patch_digest`).
+
+2. **Karar ile realization ayrımı:** Live Contract'ın bilinçli zinciri
+   (`OSP → Decision → İnsan/agent → Patch → Reanalysis`) korunur. Derleme kapısı kırmızı
+   çıktığında `decision` (accept / reject / defer — OSP'nin **structural** kararı) olduğu
+   gibi kalir; sonucu ayrı bir `patch_outcome` alanı taşır (`applied |
+   build-failed-reverted | null`). İki failure mode Paper 4 dataset'inde ayrışmak
+   zorundadır: **decision-invalid** (OSP structural kararı yanlış) ≠
+   **realization-invalid** (structural karar ölçüm olarak doğru, üretilen kaynak yaması
+   geçersiz — run 1'in durumu). OSP kararının kendisi sonradan yeniden değerlendirilirse
+   bu `decision_amendment` olarak modellenir — v1.1'de **şema alanı değildir**, notes
+   düzeyinde taşınır (alan ihtiyacı takibi #151'de).
+
+3. **Preflight ad-çözümleme denetimi (yardımcı; otorite değil):** "using ölü" tarzı
+   hükümler için namespace'in bildirdiği tip listesinin **tümleyici dökümü**nün gövde
+   tanımlayıcılarıyla kesişiminin boş olması güçlü bir **preflight** sinyalidir (run 1'in
+   kaçırdığı `DışTip.İçTip` nitelikli erişimini yakalar; extension-method riski — jenerik
+   imzalar dahil — ayrıca elenir). Fakat C# ad çözümlemesinin tamamı leksik kesişimle
+   ispatlanamaz (attribute shorthand, generated/forwarded semboller vb.); **son otorite
+   aday state üzerinde koşan derleyici/build kapısıdır** — preflight erken sinyal ve
+   denetim disiplini sağlar, geçerlilik vermez.
+
+Araçlaştırma bilinçli olarak ikinci aşamadır: süreç kuralı oturmadan wrapper
+sertleştirilmez (soğuk başlatma dersi, PR #153 R2). Takibi #151'de.
+
 ## 4. Ledger (canonical: `dogfood/ledger.jsonl`)
 
 **Raw dogfood artifact'ları lokal ve versiyonsuzdur** (`/dogfood/` → `.gitignore`):
@@ -120,7 +190,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
 {
   "schema_version": "live-ledger-v1",
   "run_id": "2026-09-30-remove-direct-provider-dependency",
-  "contract_version": "v1",
+  "contract_version": "v1.1",
   "repository": "nexus",
   "repository_head": "<sha>",
   "osp_revision": "<osp-checkout-HEAD-sha>",
@@ -139,9 +209,15 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "proposal_digest": "sha256:… | null",
   "attempt_ref": "…/attempt.json",
   "decision": "accept | reject | defer",
+  "patch_outcome": "applied | build-failed-reverted | null (henüz uygulanmadı / reddedildi)",
   "patch_ref": "…/applied.patch | null",
   "patch_digest": "sha256:… | null",
   "after_ref": "…/after.json | null",
+  "build_verification": {
+    "command": "dotnet build <sln>",
+    "verified_state": { "repository_head": "<sha>", "patch_digest": "sha256:…" },
+    "outcome": { "result": "green", "error_count": 0 }
+  },
   "decision_utility": "decision-changed | decision-confirmed | none",
   "counterfactual": "verified-bad | inspected-ok | unverified | null",
   "human_override": false,
@@ -156,6 +232,27 @@ farklı OSP revizyonlarında farklı measurement/decision üretebilir; `osp_revi
 analizi, attempt, after analizi) / (`tier2-scip`'te) `scip_index_digest` olmadan
 "aynı girdi → aynı karar" denetlenemez. `*_digest` alanları v1'de opsiyoneldir
 (null), Paper 4 dataset'ine export edilmeden önce doldurulurlar.
+
+`build_verification` (v1.1, #159): derleme kapısının **state-bound** kaydı — nesne
+üç bilgiyi ayrıştırır: `command`; `verified_state` (hangi exact patched state
+derlendi: base `repository_head` + `patch_digest` — candidate state'i bağlamak için
+yeterli ikili); `outcome` (`result: green|red` + `error_count`). Kapı aday state
+üzerinde koşar ve canonical apply, state-identity bağıyla korunur (§3);
+`Build(S0)` önkoşuldur, yama geçerliliği kanıtı DEĞİLDİR. Alanın kendisi nullable'dır:
+v1 run'larında ve `decision: reject` run'larında `null`.
+
+`patch_outcome` (v1.1, #159): realization/application sonucu — `decision`'dan (OSP
+structural kararı) ayrı yaşar. `build-failed-reverted`: aday yama derleme kapısında
+kırmızı çıktı ve revert edildi (run 1 örneği; `decision: accept` olduğu gibi kalır,
+failure mode **realization-invalid**'dir). `decision_amendment` yalnızca OSP kararının
+kendisi yeniden değerlendirilirse yazılır (v1.1'de şema alanı değil, notes düzeyi).
+
+**Geriye dönük uyum (missing ≡ null):** `contract_version: "v1"` üretimiş satırlarda
+`build_verification` / `patch_outcome` alanları fiziksel olarak yoksa bu, `null` ile
+**aynı anlamdadır** — gelecek loader'lar missing-field ile explicit-null arasında ayrım
+yapamaz. Backfill isteğe bağlı bir annotasyondur (mevcut lokal ledger'da yapılmıştır),
+zorunlu değildir. `schema_version` `live-ledger-v1` kalır; alan eklemeleri geriye dönük
+uyumludur.
 
 `decision_utility` / `counterfactual` programın iki **kritik-eşik olayının**
 alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"
