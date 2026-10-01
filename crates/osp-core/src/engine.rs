@@ -1627,6 +1627,12 @@ pub struct SpaceEngine {
     /// (test/geriye uyumluluk). Production CLI load-or-create edip bağlar; D3
     /// (Ephemeral + CrossProcess store) fail-closed kalır.
     persisted_view_id: Option<crate::authorization::PersistedSpaceViewId>,
+    /// **#152 R2 P2-1:** `current_space_view_revision` en az bir kez çağrıldı
+    /// mı (Ephemeral revision yayınlandı mı). AtomicBool: üretim `&self`'te
+    /// işaretlenir; bind guard okur. Identity, revision YAYINLANMIŞ bir motora
+    /// bağlanamaz — geçmiş Ephemeral basis'ler + gelecekteki Persisted basis'ler
+    /// karışır (provenance bütünlüğü).
+    space_view_revision_emitted: std::sync::atomic::AtomicBool,
     snapshot_store: Option<SnapshotStore>,
     /// **#97 MD-3 S3:** in-flight cold-start suspension'ları — `commit_task_claim`
     /// `SuspendedColdStart` döndüğünde carrier burada bekler; `approve_cold_start`
@@ -1652,6 +1658,7 @@ impl SpaceEngine {
             config,
             t_c: 0,
             persisted_view_id: None,
+            space_view_revision_emitted: std::sync::atomic::AtomicBool::new(false),
             snapshot_store: None,
             suspended_cold_starts: std::collections::HashMap::new(),
         }
@@ -1662,15 +1669,20 @@ impl SpaceEngine {
     /// aynı). Builder: mevcut kurulum çağrıları ve testler değişmez (default
     /// `Ephemeral` davranışı korunur).
     ///
-    /// **R1 P2-1:** ikinci bağlama denemesi `IdentityAlreadyBound` ile reddedilir —
-    /// aynı engine'in identity'sini sonradan değiştirmek, üretilmiş suspension
-    /// provenance'ının (authorization basis digest'leri) sessizce geçersiz
-    /// kılınması demektir; fail-closed.
+    /// **R1 P2-1 + R2 P2-1:** bind-once, publish-öncesi — şu durumlarda reddedilir
+    /// (fail-closed): (a) identity zaten bağlı; (b) motor daha önce bir space
+    /// view revision yayınladı (Ephemeral bile olsa) — geçmiş basis'ler ile
+    /// gelecekteki Persisted basis'lerin karışması suspension provenance'ını
+    /// sessizce geçersiz kılar. Bind yalnızca kurulum anında, ilk revision'dan
+    /// önce (CLI akışı böyle yapar).
     pub fn with_persisted_view_id(
         mut self,
         id: crate::authorization::PersistedSpaceViewId,
     ) -> Result<Self, crate::authorization::SpaceIdentityError> {
-        if self.persisted_view_id.is_some() {
+        use std::sync::atomic::Ordering;
+        if self.persisted_view_id.is_some()
+            || self.space_view_revision_emitted.load(Ordering::Acquire)
+        {
             return Err(crate::authorization::SpaceIdentityError::IdentityAlreadyBound);
         }
         self.persisted_view_id = Some(id);
@@ -3181,6 +3193,9 @@ impl SpaceEngine {
         &self,
     ) -> Result<crate::authorization::SpaceViewRevision, String> {
         use crate::authorization::{SpaceDigest, SpaceViewId, SpaceViewRevision};
+        // R2 P2-1: revision yayınlandı — identity bağlama artık reddedilir.
+        self.space_view_revision_emitted
+            .store(true, std::sync::atomic::Ordering::Release);
         let content_digest = SpaceDigest::compute(&self.space).map_err(|e| e.to_string())?;
         let view_id = match &self.persisted_view_id {
             Some(persisted) => SpaceViewId::Persisted(persisted.clone()),

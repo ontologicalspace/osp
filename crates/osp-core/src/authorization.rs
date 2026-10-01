@@ -1410,9 +1410,13 @@ pub enum SpaceIdentityError {
     /// Identity dosyası I/O hatası.
     #[error("space identity file I/O failed: {0}")]
     IoFailed(String),
-    /// Engine'e identity ZATEN bağlı — yeniden bağlama reddi (R1 P2-1: sessiz
-    /// kimlik değişimi suspension provenance'ını bozar; fail-closed).
-    #[error("space view identity already bound — rebinding is rejected")]
+    /// Engine'e identity ZATEN bağlı veya motor bir space view revision
+    /// YAYINLAMIŞ — bağlama/yeniden bağlama reddi (R1+R2 P2-1: geçmiş
+    /// Ephemeral basis'ler ile gelecekteki Persisted basis'lerin karışması
+    /// suspension provenance'ını sessizce bozar; fail-closed).
+    #[error(
+        "space view identity already bound or revisions already published — bind only at construction, before any revision"
+    )]
     IdentityAlreadyBound,
 }
 

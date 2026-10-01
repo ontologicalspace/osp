@@ -1443,3 +1443,94 @@ fn production_state_dir_inside_repo_rejected() {
     );
     fx.assert_repo_clean();
 }
+
+#[test]
+fn state_dir_relative_missing_deep_path_rejected() {
+    // #152 R2 P1: relative + henüz VAR OLMAYAN path (--state-dir deep/missing,
+    // repo kökünden) eskiden parent canonicalize başarısız olduğunda raw
+    // relative kalıyordu → absolute repo ile karşılaştırma her zaman false →
+    // fence BYPASS → .osp/space-identity repoya yazılırdı. Artık mutlaklaştır +
+    // var olan atadan canonicalize → red, hiçbir yazma olmadan.
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope(&fx.head, 2));
+    let proposals_path = fx.write_proposals(2, 1);
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.repo_path()) // relative state-dir repo köküne çözümlenir
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("harness")
+        .arg("--witness")
+        .arg("harness-auto-approve")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg("deep/missing/nested") // deep/ repoda YOK — eski kod bypass ediyordu
+        .output()
+        .expect("run osp");
+    assert!(
+        !output.status.success(),
+        "relative missing state-dir inside repo must be rejected (R2 P1)"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        !fx.repo_path().join(".osp").exists(),
+        "no identity written into the repo (bypass closed)"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn state_dir_dotdot_path_resolved_before_fence() {
+    // ".." bileşenli state-dir lexically normalize edilir: sub/.. → repo kökü →
+    // RED. (Karşılaştırma ham prefix değil, normalize edilmiş mutlak yol.)
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope(&fx.head, 2));
+    let proposals_path = fx.write_proposals(2, 1);
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.repo_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("harness")
+        .arg("--witness")
+        .arg("harness-auto-approve")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg("a/../b/..") // lexical → repo kökü
+        .output()
+        .expect("run osp");
+    assert!(
+        !output.status.success(),
+        "dotdot-resolved-inside-repo state-dir must be rejected"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr: {stderr}"
+    );
+    fx.assert_repo_clean();
+}

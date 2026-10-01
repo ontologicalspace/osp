@@ -3719,6 +3719,20 @@ mod tests {
             ),
             "#152 R1 P2-1: rebinding must fail closed"
         );
+        // R2 P2-1: revision YAYINLANMIŞ bir motora İLK bind de reddedilir —
+        // geçmiş Ephemeral basis'ler ile gelecekteki Persisted basis'lerin
+        // karışması provenance'ı bozar. Bind yalnız kurulumda, ilk revision'dan önce.
+        let published = make_balanced_engine();
+        let _ = published
+            .current_space_view_revision()
+            .expect("emit one Ephemeral revision");
+        assert!(
+            matches!(
+                published.with_persisted_view_id(PersistedSpaceViewId::from_bytes([9u8; 16])),
+                Err(crate::authorization::SpaceIdentityError::IdentityAlreadyBound)
+            ),
+            "#152 R2 P2-1: bind-after-first-revision must fail closed"
+        );
         let rev = engine.current_space_view_revision().unwrap();
         assert_eq!(rev.view_id, SpaceViewId::Persisted(persisted_id));
         assert_eq!(
