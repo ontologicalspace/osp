@@ -1831,17 +1831,27 @@ mod gitignore_discovery_tests {
             &["commit", "-qm", "add submodule (gitlink -> A)"],
         );
         // Submodule'ta yeni commit B — worktree HEAD artık gitlink'ten farklı.
+        // (Submodule klonu parent'ın lokal config'ini TAŞIMAZ — CI'de global
+        // identity yok; commit için inline identity şart.)
         std::fs::write(
             parent.path().join("clients/fe/kept.ts"),
             "export const a = 1;
 ",
         )
         .unwrap();
-        git_cmd(parent.path().join("clients/fe").as_path(), &["add", "-A"]);
-        git_cmd(
-            parent.path().join("clients/fe").as_path(),
-            &["commit", "-qm", "sub commit B"],
-        );
+        let sub_dir = parent.path().join("clients/fe");
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "sub commit B"]] {
+            let st = std::process::Command::new("git")
+                .args(["-C", sub_dir.to_str().unwrap()])
+                .args(&args)
+                .env("GIT_AUTHOR_NAME", "OSP Test")
+                .env("GIT_AUTHOR_EMAIL", "osp-test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "OSP Test")
+                .env("GIT_COMMITTER_EMAIL", "osp-test@example.invalid")
+                .status()
+                .expect("git in submodule");
+            assert!(st.success(), "git {args:?} in submodule failed");
+        }
         let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
