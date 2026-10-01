@@ -125,6 +125,25 @@ impl HarnessFixture {
         path
     }
 
+    /// Write a path-keyed proposals v2 envelope (one RemoveImport from_path→to_path).
+    /// #161/B5: NodeId alanları repo-relative path; R1 P1-1 sonrası envelope
+    /// `repository_head` taşır — proposal'ın üretildiği state, re-bind'ten önce
+    /// exact-match fence'e girer.
+    fn write_proposals_v2(&self, head: &str, from_path: &str, to_path: &str) -> std::path::PathBuf {
+        let proposals = serde_json::json!({
+            "schema_version": 2,
+            "repository_head": head,
+            "proposals": [{
+                "removed_edges": [{"from": from_path, "to": to_path, "kind": "Imports"}],
+                "affected_nodes": [from_path],
+                "reasoning": "remove import to reduce coupling below threshold"
+            }]
+        });
+        let path = self.work_path().join("proposals.v2.json");
+        fs::write(&path, serde_json::to_string_pretty(&proposals).unwrap()).unwrap();
+        path
+    }
+
     /// Write raw string to the work CWD (for malformed-JSON tests).
     fn write_raw_task(&self, name: &str, content: &str) -> std::path::PathBuf {
         let path = self.work_path().join(name);
@@ -264,6 +283,46 @@ fn task_envelope(head: &str, anchor_node_id: u64) -> serde_json::Value {
     })
 }
 
+/// #161/B5: path-keyed harness task envelope (v2). Anchor path doğrudan dosya
+/// yoludur; node-id, attempt anındaki taze baseline'a karşı CLI'da çözümlenir.
+fn task_envelope_v2(head: &str, anchor_path: &str) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 2,
+        "repository_head": head,
+        "scope_bindings": [{"path": anchor_path}],
+        "task": {
+            "id": 7,
+            "milestone_id": 1,
+            "label": "completed-loop fixture (path-keyed v2)",
+            "target_predicate_set": {
+                "mode": "All",
+                "predicates": [{
+                    "predicate": {
+                        "metric": "Coupling",
+                        "operator": "Le",
+                        "threshold": 0.55,
+                        "scope": {"Path": anchor_path},
+                        "required_source": "TreeSitter",
+                        "tolerance": 0.0
+                    },
+                    "weight": null
+                }],
+                "preferred_vector": {"x": 0.55, "y": 0.6, "z": 0.5, "w": 0.5, "v": 0.3}
+            },
+            "policy": {
+                "predicate_failure_policy": "StrictReject",
+                "min_improvement_delta": 0.02,
+                "max_axis_regression": 0.15,
+                "maneuver_limit": 3,
+                "allow_progress_checkpoint": false
+            },
+            "allowed_operations": ["RemoveImport"],
+            "constraints": [],
+            "status": "Pending"
+        }
+    })
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // Matrix — mode-matrix guard (P0-1, P0-2)
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -365,13 +424,20 @@ fn harness_task_head_mismatch_rejected() {
 
 #[test]
 fn harness_task_schema_mismatch_rejected() {
+    // #161: schema_version 2 artık GEÇERLİ (path-keyed) — bilinmeyen sürüm reddi
+    // 3 üzerinden pinlenir.
     let fx = HarnessFixture::new();
     let mut env = task_envelope(&fx.head, 0);
-    env["schema_version"] = serde_json::json!(2);
+    env["schema_version"] = serde_json::json!(3);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(0, 1);
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
-    assert!(!output.status.success(), "schema mismatch must fail");
+    assert!(!output.status.success(), "unknown schema_version must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unsupported schema_version"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -1095,5 +1161,133 @@ fn real_submodule_dirty_nested_analyzed_paths_reject() {
             && stderr.contains("clients/fe")
             && stderr.contains("commit/stash"),
         "expected actionable dirty-submodule fence message, got: {stderr}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #161 (B5) — path-keyed v2: task + proposals uçtan uca
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn v2_path_keyed_completed_loop_exact_pin() {
+    // v1 exact-pin testinin path-keyed karşılığı: dosyalar id AVI gerektirmeden
+    // main.rs/b.rs yollarıyla bağlanır; Completed + coupling düşüşü aynı ölçülür.
+    // main.rs 2 outgoing imports → coupling 2/3 ≈ 0.667; RemoveImport main→b
+    // → 1/2 = 0.5 ≤ 0.55 → Completed.
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
+
+    assert!(
+        output.status.success(),
+        "path-keyed v2 Completed-loop must exit 0. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout not JSON envelope: {e}\n{stdout}"));
+
+    assert_eq!(envelope["run"]["task_source"], "harness_task_file");
+    assert_eq!(envelope["result"]["kind"], "completed", "v2 result kind");
+    assert_eq!(
+        envelope["result"]["attempts"].as_u64(),
+        Some(1),
+        "single-attempt Completed (path-keyed)"
+    );
+
+    let evidence = envelope["evidence"].as_array().expect("evidence array");
+    assert_eq!(evidence.len(), 1);
+    let entry = &evidence[0];
+    assert_eq!(entry["gate_decision"], "PassedAll");
+    assert_eq!(entry["predicate_completion"], "Completed");
+    assert_eq!(entry["mutation_decision"], "AcceptAsCompleted");
+
+    let before_coupling = entry["before"]["x"].as_f64().expect("before coupling");
+    let after_coupling = entry["after"]["x"].as_f64().expect("after coupling");
+    assert!(
+        before_coupling > 0.55,
+        "before > threshold: {before_coupling}"
+    );
+    assert!(
+        after_coupling <= 0.55,
+        "after ≤ threshold: {after_coupling}"
+    );
+    assert!(after_coupling < before_coupling, "coupling must decrease");
+
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn v2_task_unknown_path_fails_closed_at_cli() {
+    let fx = HarnessFixture::new();
+    let env = task_envelope_v2(&fx.head, "src/nonexistent.rs");
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "unknown path must fail pre-flight"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("not present in analysis node_paths")
+            && stderr.contains("src/nonexistent.rs"),
+        "stderr names the unresolvable path: {stderr}"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn v2_proposals_unknown_path_fails_closed_at_cli() {
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "src/stale.rs");
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(!output.status.success(), "unknown proposal path must fail");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("removed_edges.to") && stderr.contains("src/stale.rs"),
+        "stderr names the field + path: {stderr}"
+    );
+}
+
+#[test]
+fn v1_task_with_v2_proposals_mix_works() {
+    // Dispatch'ler bağımsız: v1 id-keyed task + v2 path-keyed proposals karışımı
+    // geçerli (run 7-8 deseni: task el yazımı id'lerle, proposals taze).
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope(&fx.head, 2));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
+    assert!(
+        output.status.success(),
+        "mixed v1-task + v2-proposals must run. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
+    let envelope: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("stdout not JSON envelope: {e}\n{stdout}"));
+    assert_eq!(envelope["result"]["kind"], "completed");
+}
+
+#[test]
+fn v2_proposal_head_mismatch_rejected_at_cli() {
+    // R1 P1-1: proposals v2 envelope kendi üretim state'ini taşır; HEAD=A'da
+    // üretilmiş proposal HEAD=B'ye sessizce re-bind edilemez — fence re-bind'ten
+    // önce, path'ler geçerli olsa bile reddeder.
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
+    let proposals_path = fx.write_proposals_v2(&"f".repeat(40), "main.rs", "b.rs");
+    let output = fx.run_attempt(&task_path, &proposals_path, 7, "human");
+    assert!(
+        !output.status.success(),
+        "proposal HEAD mismatch must fail pre-flight"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("repository HEAD mismatch"),
+        "stderr explains the proposal provenance fence: {stderr}"
     );
 }

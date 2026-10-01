@@ -45,6 +45,34 @@ pub struct CliScopeBinding {
     pub expected_path: String,
 }
 
+/// Path-keyed harness task file envelope (V2 — #161/B5).
+///
+/// V1 id-keyed binding'in path-keyed karşılığı: `node_id` YOK, sadece `path`.
+/// Re-bind (`rebind_task_v2`) attempt anındaki taze baseline `node_paths`'ten
+/// path→id çözümleyip V1-equivalent iç temsil üretir; mevcut fence zinciri
+/// (HEAD exact, set-equality, Node-only homogeneous) birebir işler. Core
+/// (`PredicateScope`, `Task`) değişmez — id, yalnızca bir baseline'ın iç
+/// koordinatıdır; path dosyanın kalıcı kimliğidir.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CliHarnessTaskFileV2 {
+    pub schema_version: u32,
+    pub repository_head: String,
+    pub scope_bindings: Vec<CliScopeBindingV2>,
+    /// Ham task JSON — re-bind sırasında predicate scope `{"Path": p}` →
+    /// `{"Node": id}` rewrite edilir, sonra core `Task`'a deserialize edilir.
+    pub task: serde_json::Value,
+}
+
+/// Path-keyed scope binding (V2 task file declaration).
+///
+/// `deny_unknown_fields`: yanlışlıkla `node_id` yazan kullanıcı sessiz
+/// yutulmak yerine net serde hatası alır (v2 = path-keyed).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CliScopeBindingV2 {
+    pub path: String,
+}
+
 /// Harness task load/validation hatası.
 #[derive(Debug, thiserror::Error)]
 pub enum HarnessTaskError {
@@ -57,6 +85,19 @@ pub enum HarnessTaskError {
     Parse(#[from] serde_json::Error),
     #[error("unsupported schema_version {found} (expected {expected})")]
     UnsupportedSchemaVersion { found: u32, expected: u32 },
+    #[error("task file is missing a numeric schema_version")]
+    MissingSchemaVersion,
+    #[error("scope binding path {path} not present in analysis node_paths")]
+    UnknownScopeBindingPath { path: String },
+    #[error(
+        "v2 task predicate scope must be Path-keyed ({{\"Path\": \"...\"}}), found {found} — \
+         Node-id scopes are v1; ids are not stable across file-set changes (#161/B5)"
+    )]
+    V2ScopeNotPathKeyed { found: String },
+    #[error(
+        "v2 task shape error: cannot walk target_predicate_set.predicates[*].predicate.scope ({detail})"
+    )]
+    V2TaskShape { detail: String },
     #[error("repository HEAD mismatch: task file {task_head}, repo {repo_head}")]
     RepositoryHeadMismatch {
         task_head: String,
@@ -110,8 +151,12 @@ pub enum HarnessTaskError {
 /// Guard sırası (review P1-2): maneuver override core validation'dan ÖNCE uygulanır —
 /// böylece override'ın ürettiği geçersiz policy core validator'da yakalanır.
 ///
-/// 1. Read + deserialize JSON
-/// 2. `schema_version == 1`
+/// 1. Read + peek `schema_version` → dispatch
+///    - **v1 (id-keyed):** deserialize `CliHarnessTaskFileV1` → adım 3'ten devam
+///    - **v2 (path-keyed, #161/B5):** deserialize `CliHarnessTaskFileV2` → HEAD fence
+///      (re-bind'ten ÖNCE, guard sırası korunur) → `rebind_task_v2`: path→id çözümleme
+///      + predicate scope rewrite → V1-equivalent iç temsil → adım 3'ten devam
+/// 2. (v1) `schema_version == 1` · (v2) peek sırasında == 2
 /// 3. repository HEAD matches snapshot (exact full SHA)
 /// 4. scope binding: her `{node_id, expected_path}` ⊆ analyzed `node_paths` + exact path match
 /// 5. scope binding set ≡ task predicate Node set (exact-set equality — review P1-3)
@@ -129,14 +174,47 @@ pub fn load_and_validate_harness_task(
     node_paths: &HashMap<NodeId, String>,
     maneuver_override: Option<u32>,
 ) -> Result<Task, HarnessTaskError> {
-    // 1. Read + deserialize.
+    // 1. Read + peek schema_version → dispatch (v1 id-keyed | v2 path-keyed).
     let raw = std::fs::read_to_string(path).map_err(|source| HarnessTaskError::Read {
         path: path.display().to_string(),
         source,
     })?;
-    let file: CliHarnessTaskFileV1 = serde_json::from_str(&raw)?;
+    let file = match peek_schema_version(&raw)? {
+        1 => serde_json::from_str::<CliHarnessTaskFileV1>(&raw)?,
+        2 => {
+            let v2: CliHarnessTaskFileV2 = serde_json::from_str(&raw)?;
+            // 3a. HEAD fence v2 re-bind'inden ÖNCE — path çözümlemesi yanlış bir
+            //     baseline'a karşı yapılmış olmasın (guard sırası: schema → HEAD → resolve).
+            if v2.repository_head != snapshot.head.as_str() {
+                return Err(HarnessTaskError::RepositoryHeadMismatch {
+                    task_head: v2.repository_head,
+                    repo_head: snapshot.head.as_str().to_string(),
+                });
+            }
+            rebind_task_v2(v2, node_paths)?
+        }
+        found => {
+            return Err(HarnessTaskError::UnsupportedSchemaVersion { found, expected: 2 });
+        }
+    };
+    validate_and_finalize_harness_task(
+        file,
+        positional_task_id,
+        snapshot,
+        node_paths,
+        maneuver_override,
+    )
+}
 
-    // 2. schema_version.
+/// V1-equivalent dosya üzerinde fence zinciri (adım 2-10; v2 → rebind sonrası buraya gelir).
+fn validate_and_finalize_harness_task(
+    file: CliHarnessTaskFileV1,
+    positional_task_id: TaskId,
+    snapshot: &RepositorySnapshot,
+    node_paths: &HashMap<NodeId, String>,
+    maneuver_override: Option<u32>,
+) -> Result<Task, HarnessTaskError> {
+    // 2. schema_version (v2 re-bind'i zaten 1 sabitlemiştir — defensive yeniden doğrulama).
     if file.schema_version != 1 {
         return Err(HarnessTaskError::UnsupportedSchemaVersion {
             found: file.schema_version,
@@ -182,6 +260,120 @@ pub fn load_and_validate_harness_task(
     // 10. Node-only homogeneous scope (CLI-owned) — anchor step 5'ten biliniyor.
     let _ = anchor;
     Ok(task)
+}
+
+/// Ham task JSON'undan `schema_version` peek (dispatch anahtarı).
+fn peek_schema_version(raw: &str) -> Result<u32, HarnessTaskError> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    match value.get("schema_version") {
+        Some(v) if v.is_u64() => Ok(v.as_u64().expect("checked is_u64") as u32),
+        Some(_) | None => Err(HarnessTaskError::MissingSchemaVersion),
+    }
+}
+
+/// V2 path-keyed task dosyasını V1-equivalent iç temsile re-bind et (#161/B5).
+///
+/// 1. `node_paths`'ten path→id haritası (bijection defensive)
+/// 2. predicate scope rewrite: `{"Path": p}` → `{"Node": id}` (başka varyant → reddi;
+///    v2 = Path-only) + rewritten Value → core `Task` deserialize
+/// 3. binding path set ≡ predicate path set (erken net mesaj; id düzeyindeki mevcut
+///    set-equality fence'i finalize'ta çift güvence olarak yeniden işler)
+/// 4. V1-equivalent `{node_id, expected_path}` binding'leri (unknown path fail-closed)
+fn rebind_task_v2(
+    v2: CliHarnessTaskFileV2,
+    node_paths: &HashMap<NodeId, String>,
+) -> Result<CliHarnessTaskFileV1, HarnessTaskError> {
+    use crate::commands::path_bindings::{build_path_to_id, resolve_path};
+
+    let path_to_id = build_path_to_id(node_paths).map_err(path_binding_error)?;
+
+    let mut task_value = v2.task;
+    let predicates = task_value
+        .get_mut("target_predicate_set")
+        .and_then(|tps| tps.get_mut("predicates"))
+        .and_then(|ps| ps.as_array_mut())
+        .ok_or_else(|| HarnessTaskError::V2TaskShape {
+            detail: "target_predicate_set.predicates missing or not an array".into(),
+        })?;
+    let mut predicate_paths = std::collections::BTreeSet::new();
+    for (i, predicate) in predicates.iter_mut().enumerate() {
+        let scope = predicate
+            .get_mut("predicate")
+            .and_then(|pr| pr.get_mut("scope"))
+            .ok_or_else(|| HarnessTaskError::V2TaskShape {
+                detail: format!("predicates[{i}].predicate.scope missing"),
+            })?;
+        let path = take_path_scope(scope)?;
+        let id = resolve_path(&path_to_id, &path, " (task predicate scope)")
+            .map_err(path_binding_error)?;
+        predicate_paths.insert(path);
+        *scope = serde_json::json!({ "Node": id });
+    }
+
+    let binding_paths: std::collections::BTreeSet<String> =
+        v2.scope_bindings.iter().map(|b| b.path.clone()).collect();
+    if binding_paths != predicate_paths {
+        return Err(HarnessTaskError::ScopeBindingSetMismatch);
+    }
+
+    let task: Task = serde_json::from_value(task_value)?;
+
+    let scope_bindings = v2
+        .scope_bindings
+        .into_iter()
+        .map(|b| {
+            let node_id = resolve_path(&path_to_id, &b.path, " (scope_bindings)")
+                .map_err(path_binding_error)?;
+            Ok(CliScopeBinding {
+                node_id,
+                expected_path: b.path,
+            })
+        })
+        .collect::<Result<Vec<_>, HarnessTaskError>>()?;
+
+    Ok(CliHarnessTaskFileV1 {
+        schema_version: 1,
+        repository_head: v2.repository_head,
+        scope_bindings,
+        task,
+    })
+}
+
+/// Scope object'ten `{"Path": "..."}` değerini al (rewrite öncesi guard).
+fn take_path_scope(scope: &mut serde_json::Value) -> Result<String, HarnessTaskError> {
+    if !scope.is_object() {
+        return Err(HarnessTaskError::V2ScopeNotPathKeyed {
+            found: scope.to_string(),
+        });
+    }
+    let obj = scope.as_object_mut().expect("is_object checked above");
+    if obj.len() != 1 || !obj.contains_key("Path") {
+        let found = obj
+            .keys()
+            .next()
+            .cloned()
+            .unwrap_or_else(|| "<empty scope object>".into());
+        return Err(HarnessTaskError::V2ScopeNotPathKeyed { found });
+    }
+    match obj.get("Path").expect("len==1 and key checked above") {
+        serde_json::Value::String(s) => Ok(s.clone()),
+        other => Err(HarnessTaskError::V2ScopeNotPathKeyed {
+            found: format!("Path={other}"),
+        }),
+    }
+}
+
+/// `PathBindingError` → `HarnessTaskError` (task tarafı eşlemesi).
+fn path_binding_error(err: crate::commands::path_bindings::PathBindingError) -> HarnessTaskError {
+    use crate::commands::path_bindings::PathBindingError;
+    match err {
+        PathBindingError::UnknownPath { path, .. } => {
+            HarnessTaskError::UnknownScopeBindingPath { path }
+        }
+        PathBindingError::NotPathInjective { path } => HarnessTaskError::V2TaskShape {
+            detail: format!("analysis node_paths not path-injective at {path}"),
+        },
+    }
 }
 
 /// Scope binding validation — NodeId→path ⊆ analyzed node_paths + exact path match.
@@ -694,5 +886,216 @@ mod tests {
     fn snap_and_node_paths_helpers_compile() {
         let _s = snap("0123456789abcdef0123456789abcdef01234567");
         let _n = node_paths_with(1, "src/a.rs");
+    }
+
+    // ── #161 (B5): path-keyed V2 task dosyası ──────────────────────────────────
+
+    const V2_HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn v2_envelope(
+        scope_bindings: serde_json::Value,
+        predicate_scope: serde_json::Value,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": V2_HEAD,
+            "scope_bindings": scope_bindings,
+            "task": {
+                "id": 7,
+                "milestone_id": 1,
+                "label": "t",
+                "target_predicate_set": {
+                    "mode": "All",
+                    "predicates": [{
+                        "predicate": {
+                            "metric": "Coupling",
+                            "operator": "Le",
+                            "threshold": 0.55,
+                            "scope": predicate_scope,
+                            "required_source": null,
+                            "tolerance": 0.0
+                        },
+                        "weight": null
+                    }],
+                    "preferred_vector": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.5}
+                },
+                "policy": {
+                    "predicate_failure_policy": "StrictReject",
+                    "min_improvement_delta": 0.02,
+                    "max_axis_regression": 0.15,
+                    "maneuver_limit": 5,
+                    "allow_progress_checkpoint": false
+                },
+                "allowed_operations": ["RemoveImport"],
+                "constraints": [],
+                "status": "Pending"
+            }
+        })
+    }
+
+    fn load_v2(
+        env: &serde_json::Value,
+        node_paths: &HashMap<NodeId, String>,
+    ) -> Result<Task, HarnessTaskError> {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), serde_json::to_string(env).unwrap()).unwrap();
+        // Snapshot = gerçek repo HEAD (V2_HEAD); env içindeki repository_head testin
+        // manipüle edeceği tarafa (görev yazarının beyanı) aittir.
+        let snapshot = snap(V2_HEAD);
+        load_and_validate_harness_task(tmp.path(), 7, &snapshot, node_paths, None)
+    }
+
+    #[test]
+    fn v2_happy_path_resolves_paths_to_current_baseline_ids() {
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        let task = load_v2(&env, &node_paths_with(1, "src/a.rs")).expect("v2 loads");
+        assert_eq!(task.id, 7);
+        assert_eq!(
+            task.target_predicate_set.predicates[0].predicate.scope,
+            PredicateScope::Node(1),
+            "Path → current baseline id re-bind"
+        );
+    }
+
+    #[test]
+    fn v2_rebinds_path_to_current_analysis_node_id() {
+        // R1 P2-1: garanti = "aynı exact repository snapshot içinde id'leri elle
+        // bilmek gerekmez; path, güncel analysis NodeId'sine bind edilir" (burada
+        // src/z.rs aynı snapshot içinde keşfedilmiş → a.rs'nin id'si 1'den 5'e kaymış).
+        // Cross-commit task portability DEĞİL: dosya seti commit'ler arası değişirse
+        // Git HEAD de değişir ve HEAD fence re-bind'ten ÖNCE reddeder.
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        let mut np = HashMap::new();
+        np.insert(5u64, "src/a.rs".to_string());
+        np.insert(6u64, "src/z.rs".to_string());
+        let task = load_v2(&env, &np).expect("path binds to current analysis id");
+        assert_eq!(
+            task.target_predicate_set.predicates[0].predicate.scope,
+            PredicateScope::Node(5)
+        );
+    }
+
+    #[test]
+    fn v2_unknown_binding_path_fails_closed() {
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/gone.rs"}]),
+            serde_json::json!({"Path": "src/gone.rs"}),
+        );
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessTaskError::UnknownScopeBindingPath { ref path } if path == "src/gone.rs"
+        ));
+    }
+
+    #[test]
+    fn v2_unknown_predicate_scope_path_fails_closed() {
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/other.rs"}),
+        );
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessTaskError::UnknownScopeBindingPath { ref path } if path == "src/other.rs"
+        ));
+    }
+
+    #[test]
+    fn v2_node_scope_rejected_v2_is_path_only() {
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Node": 1}),
+        );
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(err, HarnessTaskError::V2ScopeNotPathKeyed { .. }));
+    }
+
+    #[test]
+    fn v2_path_set_mismatch_rejected() {
+        let mut np = HashMap::new();
+        np.insert(1u64, "src/a.rs".to_string());
+        np.insert(2u64, "src/b.rs".to_string());
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/b.rs"}),
+        );
+        let err = load_v2(&env, &np).unwrap_err();
+        assert!(matches!(err, HarnessTaskError::ScopeBindingSetMismatch));
+    }
+
+    #[test]
+    fn v2_head_mismatch_rejected_before_rebind() {
+        let mut env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        env["repository_head"] = serde_json::json!("f".repeat(40));
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        // Guard sırası: schema → HEAD → resolve. HEAD fence re-bind'ten önce patlar;
+        // path'ler doğru olsa bile yanlış baseline'a karşı çözülmez.
+        assert!(matches!(
+            err,
+            HarnessTaskError::RepositoryHeadMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn v2_binding_with_node_id_field_rejected() {
+        // deny_unknown_fields: yanlışlıkla id-keyed yazan kullanıcı sessizce
+        // yutulmak yerine net serde hatası alır.
+        let env = v2_envelope(
+            serde_json::json!([{"node_id": 1, "path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(err, HarnessTaskError::Parse(_)));
+    }
+
+    #[test]
+    fn v2_duplicate_binding_paths_reach_v1_duplicate_fence() {
+        // İki binding aynı path → path set eşitliği BTreeSet dedupe'iyle geçer, ama
+        // re-bind aynı node_id'yi iki kez üretir → finalize'taki mevcut
+        // DuplicateScopeBinding fence'i yakalar (v2 kendi fence'ini icat etmez).
+        let env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}, {"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessTaskError::DuplicateScopeBinding { node_id: 1 }
+        ));
+    }
+
+    #[test]
+    fn missing_schema_version_rejected() {
+        let mut env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        env.as_object_mut().unwrap().remove("schema_version");
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(err, HarnessTaskError::MissingSchemaVersion));
+    }
+
+    #[test]
+    fn unknown_schema_version_rejected() {
+        let mut env = v2_envelope(
+            serde_json::json!([{"path": "src/a.rs"}]),
+            serde_json::json!({"Path": "src/a.rs"}),
+        );
+        env["schema_version"] = serde_json::json!(3);
+        let err = load_v2(&env, &node_paths_with(1, "src/a.rs")).unwrap_err();
+        assert!(matches!(
+            err,
+            HarnessTaskError::UnsupportedSchemaVersion { found: 3, .. }
+        ));
     }
 }
