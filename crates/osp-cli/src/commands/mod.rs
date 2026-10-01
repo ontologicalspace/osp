@@ -5,6 +5,8 @@
 
 pub mod analyze_provenance;
 pub mod harness_task;
+pub mod path_bindings;
+pub mod path_keyed_proposals;
 pub mod repo_snapshot;
 pub mod run_envelope;
 
@@ -636,9 +638,11 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 .proposals
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("--proposals required for --llm mock"))?;
-            let proposals_json = std::fs::read_to_string(proposals_path)?;
+            // #161 (B5): v1 çıplak array (id-keyed) veya v2 object envelope
+            // (path-keyed — attempt anındaki baseline'a karşı re-bind).
             let proposals: Vec<osp_core::agent::DeltaProposal> =
-                serde_json::from_str(&proposals_json)?;
+                path_keyed_proposals::load_proposals_file(proposals_path, &result.node_paths)
+                    .map_err(|e| anyhow::anyhow!(e))?;
             let llm = crate::mock_llm::FileMockLlm::new(proposals);
             run_navigator(
                 &llm,

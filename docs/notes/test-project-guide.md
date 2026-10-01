@@ -47,6 +47,10 @@ Analyzer dosyaları alfabetik sıralar: `a.rs`=0, `b.rs`=1, `main.rs`=2. `osp an
 osp analyze . --format json | grep -E '"node_id"|"path"'
 ```
 
+> **#161 (B5):** Bu adım yalnızca v1 (id-keyed) dosyalar için gerekli. Path-keyed
+> **v2** kullanıyorsanız id avını atlayın — id çözümlemesini OSP, attempt anındaki
+> taze baseline'a karşı yapar (aşağıdaki "Path-keyed v2" bölümü).
+
 ### 3. Task dosyası yaz (CliHarnessTaskFileV1)
 
 `task.v1.json` — **repository DIŞINDA** bir path'e koyun (örn. `/tmp/task.v1.json`):
@@ -116,6 +120,82 @@ osp analyze . --format json | grep -E '"node_id"|"path"'
 
 **Not:** `reasoning` boş olamaz (`OutputContract::strict()` reject eder). `from` = coupling
 taşıyan node, `to` = kaldırılacak dependency.
+
+## Path-keyed v2 (#161/B5) — id avı olmadan
+
+Node id, sıralı dosya listesi üzerindeki **enumerasyon indeksidir** — dosya seti
+değişince kayar (yön tahmin edilemez). v2 formatında task ve proposals **dosya
+yoluyla** bağlanır; path→id çözümlemesi attempt anında, o anki baseline'a karşı
+deterministik yapılır. v1 dosyalar aynen çalışmaya devam eder; iki format
+karışabilir (v1 task + v2 proposals geçerli).
+
+### Task dosyası v2 (`task.v2.json`)
+
+v1'den farkları: `schema_version: 2`, `scope_bindings` path-keyed (`node_id` YOK —
+bilinmeyen alan reddedilir), predicate scope `{"Path": ...}` (v2'de Path-only;
+`{"Node": id}` yazmak reddedilir). Diğer tüm alanlar ve tüm fence'ler (HEAD exact
+match, binding set ≡ predicate set, Node-only homojenlik) birebir aynı:
+
+```json
+{
+  "schema_version": 2,
+  "repository_head": "<full-40-char-SHA>",
+  "scope_bindings": [{"path": "main.rs"}],
+  "task": {
+    "id": 7,
+    "milestone_id": 1,
+    "label": "completed-loop fixture",
+    "target_predicate_set": {
+      "mode": "All",
+      "predicates": [{
+        "predicate": {
+          "metric": "Coupling",
+          "operator": "Le",
+          "threshold": 0.55,
+          "scope": {"Path": "main.rs"},
+          "required_source": "TreeSitter",
+          "tolerance": 0.0
+        },
+        "weight": null
+      }],
+      "preferred_vector": {"x": 0.55, "y": 0.6, "z": 0.5, "w": 0.5, "v": 0.3}
+    },
+    "policy": {
+      "predicate_failure_policy": "StrictReject",
+      "min_improvement_delta": 0.02,
+      "max_axis_regression": 0.15,
+      "maneuver_limit": 3,
+      "allow_progress_checkpoint": false
+    },
+    "allowed_operations": ["RemoveImport"],
+    "constraints": [],
+    "status": "Pending"
+  }
+}
+```
+
+### Proposals v2 (`proposals.v2.json`)
+
+Çıplak array yerine `schema_version: 2` object envelope; NodeId alanları path:
+
+```json
+{
+  "schema_version": 2,
+  "proposals": [{
+    "removed_edges": [{"from": "main.rs", "to": "b.rs", "kind": "Imports"}],
+    "affected_nodes": ["main.rs"],
+    "reasoning": "remove import to reduce coupling below threshold"
+  }]
+}
+```
+
+- Tüm id taşıyan alanlar path kabul eder: `removed_edges[].from/to`,
+  `affected_nodes[]`, `new_edges[].from/to`, `new_nodes[].connected_to[][0]`,
+  `modified_entities[].path`, `position_hints[].path`.
+- **Yeni-node referansı yok:** v2 path'leri yalnız MEVCUT baseline node'larına
+  çözümlenir; yeni node bağlantıları `new_nodes[].connected_to` üzerinden kurulur.
+- Çözülemeyen path → typed fail-closed (hata mesajı alan konumunu taşır, ör.
+  `(removed_edges.to)`).
 
 ## Çalıştırma
 
