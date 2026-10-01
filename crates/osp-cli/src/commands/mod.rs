@@ -199,10 +199,12 @@ pub struct TrajectoryAttemptArgs {
     /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
     #[arg(long, default_value = "human")]
     pub format: String,
-    /// Runtime state directory for pending-authorizations (`.osp/` artifacts). Default = CWD.
-    /// Harness mode invariant (review B-3 P0): must be OUTSIDE the analyzed repo, otherwise
-    /// Held artifacts dirty the repo → subsequent snapshot-bound runs rejected. Production
-    /// callers may set this explicitly; harness mode rejects state-dir inside repo.
+    /// Runtime state directory (`.osp/` artifacts: pending-authorizations +
+    /// persisted space identity). Default = CWD.
+    /// Invariant (#152 R1 P1-2, her iki execution mode): mutlaka analyzed repo
+    /// DIŞINDA — identity + Held artifacts repoya yazılırsa git status kirlenir
+    /// → sonraki snapshot-bound run'lar reddedilir. Relative + henüz var olmayan
+    /// path'ler dahil her durumda çözümlenir ve fence uygulanır.
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
 }
@@ -459,47 +461,108 @@ fn reject_output_inside_repo(repo: &Path, out: &Path) -> anyhow::Result<()> {
 
 /// Resolve runtime state directory for pending-authorizations (review B-3 P0).
 ///
-/// Harness mode REQUIRES state-dir outside the analyzed repo: Held artifacts written
-/// into the repo would dirty git status → subsequent snapshot-bound runs rejected.
-/// Production mode allows CWD default (backward-compat) or explicit `--state-dir`.
+/// **#152 R1 P1-2:** state-dir (default CWD, explicit dahil) analyzed repo
+/// İÇİNDE olamaz — HER İKİ execution mode'da. Identity her attempt başında
+/// `<state-dir>/.osp/space-identity`'ye yazılıyor; production default CWD repo
+/// kökü olduğunda dosya repoya düşer ve `.osp/` gitignore'da YOK → "repo stays
+/// clean" iddiası default production yolunda kırılırdı.
 ///
-/// Returns a canonical state-dir path suitable for `FilesystemPendingAuthorizationStore::new`.
+/// **#152 R2 P1 (canonicalization):** relative + henüz VAR OLMAYAN path'ler
+/// (`--state-dir state/nested`) eskiden parent canonicalize başarısız olduğunda
+/// raw relative kalıp absolute repo ile karşılaştırılıyordu → fence bypass.
+/// Artık: CWD'ye göre mutlaklaştır → var olan en derin atayı canonicalize et,
+/// var olmayan kuyruğu koru → `..`/`.` lexically normalize → karşılaştırma
+/// daima mutlak ↔ mutlak. CWD edinilemezse fail-closed red (doğrulanamayan
+/// state-dir repoya yazabilir).
+///
+/// Returns the caller-facing state-dir path (unchanged form) for
+/// `FilesystemPendingAuthorizationStore::new`.
 fn resolve_state_dir(
     explicit: Option<&std::path::Path>,
-    execution: CliExecutionMode,
+    _execution: CliExecutionMode,
     repo: &std::path::Path,
 ) -> anyhow::Result<PathBuf> {
     let state_dir = match explicit {
         Some(p) => p.to_path_buf(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    // Harness invariant: state-dir must be outside the analyzed repo.
-    if execution == CliExecutionMode::Harness {
-        let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-        let canon_state = if state_dir.exists() {
-            state_dir
-                .canonicalize()
-                .unwrap_or_else(|_| state_dir.clone())
-        } else {
-            // Resolve via parent if the dir doesn't exist yet (caller may pre-create).
-            match state_dir.parent().and_then(|p| p.canonicalize().ok()) {
-                Some(parent) => state_dir
-                    .file_name()
-                    .map(|name| parent.join(name))
-                    .unwrap_or_else(|| state_dir.clone()),
-                None => state_dir.clone(),
-            }
-        };
-        if canon_state.starts_with(&canon_repo) {
-            anyhow::bail!(
-                "--state-dir {} is inside the analyzed repository; harness mode requires \
-                 state-dir outside repo (Held artifacts would dirty git status → subsequent \
-                 snapshot-bound runs rejected). Set --state-dir to an external path.",
+    // R2 P1: mutlaklaştır — fence karşılaştırması daima mutlak↔mutlak.
+    let abs_state = if state_dir.is_absolute() {
+        state_dir.clone()
+    } else {
+        let cwd = std::env::current_dir().map_err(|e| {
+            anyhow::anyhow!(
+                "cannot resolve relative --state-dir {}: current dir unavailable: {e}",
                 state_dir.display()
-            );
-        }
+            )
+        })?;
+        cwd.join(&state_dir)
+    };
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let canon_state = canonicalize_with_missing_tail(&abs_state);
+    if canon_state.starts_with(&canon_repo) {
+        anyhow::bail!(
+            "--state-dir {} is inside the analyzed repository; state-dir must be outside \
+             repo in every execution mode (persisted space identity + Held artifacts would \
+             dirty git status → subsequent snapshot-bound runs rejected). Set --state-dir \
+             to an external path.",
+            state_dir.display()
+        );
     }
     Ok(state_dir)
+}
+
+/// Mutlak path'i, var olmayan kuyruk bileşenlerini KORUYARAK canonicalize et.
+///
+/// En derin VAR OLAN atayı `canonicalize` eder (symlink/UNC çözümü), var olmayan
+/// kuyruğu geri ekler ve `lexical_normalize` ile `..`/`.` temizler. Var olan
+/// atası da çözülemiyorsa lexically normalize edilmiş ham path döner
+/// (fail-closed karşılaştırma yine mutlak↔mutlak olur).
+fn canonicalize_with_missing_tail(abs: &std::path::Path) -> PathBuf {
+    debug_assert!(abs.is_absolute(), "caller must absolutize first");
+    let mut existing = abs.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match existing.canonicalize() {
+            Ok(canon) => {
+                let mut out = canon;
+                for part in tail.iter().rev() {
+                    out.push(part);
+                }
+                return lexical_normalize(&out);
+            }
+            Err(_) => match (existing.parent(), existing.file_name()) {
+                (Some(parent), Some(name)) if parent != existing => {
+                    tail.push(name.to_os_string());
+                    existing = parent.to_path_buf();
+                }
+                _ => {
+                    let mut out = existing.clone();
+                    for part in tail.iter().rev() {
+                        out.push(part);
+                    }
+                    return lexical_normalize(&out);
+                }
+            },
+        }
+    }
+}
+
+/// Lexical path normalization — `.` düşer, `..` bir önceki Normal'ı söker
+/// (kökte `..` no-op). Prefix (ör. `\\?\C:\`) ve RootDir korunur.
+fn lexical_normalize(path: &std::path::Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// INV-T9 Step 4b: trajectory vision authority.
@@ -602,12 +665,27 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         WitnessDepthAxis::from_witness(0.3, 5),
     )?;
     let vision = user_confirmed_trajectory_vision();
+
+    // #152: persisted space identity — load-or-create (state-dir kökü; pending-auths
+    // ile aynı kök → D3 resume sözleşmesi tek kökte, repo kirlenmez). Identity
+    // edinilemezse attempt BAŞLAMAZ: SystemFailure bucket (exit 70 — persistence/
+    // internal, quickstart exit-code contract).
+    let space_view_id =
+        match osp_core::authorization::PersistedSpaceViewId::load_or_create(&state_dir) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("✗ System failure: persisted space identity unavailable: {e}");
+                std::process::exit(exit_codes::SYSTEM_FAILURE);
+            }
+        };
+
     let mut engine = SpaceEngine::with_default_rules(
         result.space,
         cs,
         vision,
         EngineConfig::default_calibrated(),
-    )?;
+    )?
+    .with_persisted_view_id(space_view_id)?;
 
     // 3. Task resolution: harness task file (snapshot-bound) or hardcoded legacy fallback.
     let task_source: &'static str = if args.task.is_some() {
