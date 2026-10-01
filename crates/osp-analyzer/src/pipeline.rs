@@ -488,7 +488,264 @@ fn collect_source_files(repo: &Path, registry: &AdapterRegistry) -> anyhow::Resu
     let mut files = Vec::new();
     walk_dir(repo, &mut files, registry)?;
     files.sort();
+    filter_gitignored(repo, &mut files);
     Ok(files)
+}
+
+/// #157 (PR #158 R1, HEAD-semantics): bir repo kapsamı — kök repo ya da
+/// initialized bir submodule (dosyalar önekli relative).
+struct IgnoreScope {
+    dir: std::path::PathBuf,
+    prefix: String,
+}
+
+/// #157: gitignore-aware discovery — **HEAD-semantics** ile.
+///
+/// Karar kuralı (index state'ten bağımsız — #156'nın "measurement, tanımlı
+/// revision zinciriyle sınırlı" invariantı):
+///
+/// ```text
+/// HEAD-tracked?  evet  → KEEP (ignore deseni önemsiz — HEAD tree'nin parçası)
+///               hayır → ignore deseni eşleşiyor mu? evet → EXCLUDE, hayır → KEEP
+/// ```
+///
+/// Uygulama (reviewer önerisi): "tracked" kararı `git ls-tree -r HEAD`'den
+/// (GERÇEK HEAD set), ignore eşleşmesi `git check-ignore --no-index --stdin`'den
+/// (index'e bakmaz, yalnız pattern'ler). Eski `ls-files --others --ignored`
+/// yaklaşımı INDEX'e bakıyordu: `git rm --cached <HEAD'te-tracked>` dosyası
+/// "ignored/untracked" listelenir, uzaydan sessizce çıkardı ve fence'in kontrol
+/// edeceği node bile kalmazdı (ölçüm, HEAD içeriğinin eksik haliyle).
+///
+/// Aynı kural her **initialized submodule** kapsamında da uygulanır (gitlink
+/// gezinimi — #156 `capture_tracked_paths` deseni; parent `ls-files`/pattern'ler
+/// submodule'a inmez, #157 friction'ı sınırda devam ederdi). Nested-sub-submodule
+/// v1'de kapsam dışıdır (tracked tarafındaki gibi; derin içerik fail-closed'dur).
+///
+/// Git yoksa / komut başarısızsa filtre uygulanmaz (fail-soft; attempt fence'i
+/// `validate_analyzed_paths_tracked` ile HEAD-semantics'i zaten zorunlu kılar).
+fn filter_gitignored(repo: &Path, files: &mut Vec<PathBuf>) {
+    let mut scopes = vec![IgnoreScope {
+        dir: repo.to_path_buf(),
+        prefix: String::new(),
+    }];
+    scopes.extend(initialized_submodule_scopes(repo));
+
+    // rel_path (repo-köküne göre, slash'lı) → keep?
+    //
+    // #158 R2 P1 — scope-authority: her dosya YALNIZ kendi repository scope'unda
+    // değerlendirilir. Root scope'un aday havuzundan submodule alanları ÇIKARILIR;
+    // aksi halde parent `.gitignore` (ör. `*.ts` ya da `clients/fe/**`) submodule'un
+    // HEAD-tracked dosyasını match eder ve union `excluded` seti onu doğru scope'un
+    // KEEP kararı kurtaramadan düşürürdü — "hangi repository'nin ignore kuralları bu
+    // dosya hakkında söz sahibi?" sorusu da revision zinciriyle aynı sınırı izler.
+    //
+    // #158 R3 P1 — repository boundary ≠ revision validity: root exclusion TÜM
+    // gitlink prefix'lerini (parent HEAD'teki her `160000 commit` girdisi) kullanır;
+    // yalnızca GEÇERLİ (initialized + HEAD == gitlink) olanları değil. Aksi halde
+    // revision-mismatch submodule (worktree HEAD = B, gitlink = A) scope'suz
+    // kalır, alanı root aday havuzuna geri düşer ve parent ignore onu sessizce
+    // düşürebilirdi — #156 fence'inin kontrol edeceği node kalmazdı. Mismatch
+    // durumunda doğru akış: parent authority'si de GEÇERLİ sub filtresi de
+    // uygulanmaz → nested dosyalar discovery'de KALIR → fence (tracked-set /
+    // dirty-prefix) fail-closed reddeder.
+    let gitlink_prefixes = all_gitlink_prefixes(repo);
+    let mut excluded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for scope in &scopes {
+        // Bu kapsama düşen aday dosyalar (scope-relative).
+        let candidates: Vec<String> = files
+            .iter()
+            .filter_map(|f| {
+                let repo_rel = f
+                    .strip_prefix(repo)
+                    .ok()?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if scope.prefix.is_empty() {
+                    // Root scope: submodule alanı başka bir repository'nin
+                    // ignore/HEAD authority'sidir — aday DEĞİL (TÜM gitlink'ler,
+                    // revision geçerliliğinden bağımsız — R3 P1).
+                    if gitlink_prefixes
+                        .iter()
+                        .any(|p| repo_rel.starts_with(&format!("{p}/")))
+                    {
+                        return None;
+                    }
+                    Some(repo_rel)
+                } else {
+                    repo_rel
+                        .strip_prefix(&format!("{}/", scope.prefix))
+                        .map(|s| s.to_string())
+                }
+            })
+            .collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let Some((head_tracked, ignore_checked)) = scope_git_state(&scope.dir, &candidates) else {
+            continue;
+        };
+        for rel in &candidates {
+            let keep = head_tracked.contains(rel) || !ignore_checked.contains(rel);
+            if !keep {
+                let repo_rel = if scope.prefix.is_empty() {
+                    rel.clone()
+                } else {
+                    format!("{}/{}", scope.prefix, rel)
+                };
+                excluded.insert(repo_rel);
+            }
+        }
+    }
+    if excluded.is_empty() {
+        return;
+    }
+    files.retain(|f| match f.strip_prefix(repo) {
+        Ok(rel) => {
+            let rel = rel.to_string_lossy().replace('\\', "/");
+            !excluded.contains(&rel)
+        }
+        Err(_) => true,
+    });
+}
+
+/// Bir kapsamın (HEAD-tracked set, ignore-pattern eşleşmeleri) — ikisi de
+/// index'ten bağımsız. Hata → None (fail-soft).
+fn scope_git_state(
+    dir: &Path,
+    candidates: &[String],
+) -> Option<(
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+)> {
+    // 1) Gerçek HEAD-tracked set (`ls-files` DEĞİL — o index'e bakar).
+    let ls_tree = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["ls-tree", "-r", "--name-only", "-z", "HEAD"])
+        .output()
+        .ok()?;
+    if !ls_tree.status.success() {
+        return None;
+    }
+    let head_tracked: std::collections::BTreeSet<String> = String::from_utf8(ls_tree.stdout)
+        .ok()?
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+
+    // 2) Pattern eşleşmesi — check-ignore --no-index (index'e bakmaz; yalnız
+    //    .gitignore zinciri). --stdin ile ADAYLARI (tracked + untracked) tek
+    //    çağrıda sorgularız; exit 0 = bazıları eşleşti, 1 = hiçbiri,
+    //    diğer = hata (None → fail-soft).
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "--no-index", "-z", "--stdin", "--"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    {
+        use std::io::Write as _;
+        if let Some(mut stdin) = child.stdin.take() {
+            for c in candidates {
+                let _ = write!(stdin, "{c}\0");
+            }
+        }
+        // stdin drop → EOF
+    }
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() && out.status.code() != Some(1) {
+        return None;
+    }
+    let ignored: std::collections::BTreeSet<String> = String::from_utf8(out.stdout)
+        .ok()?
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect();
+    Some((head_tracked, ignored))
+}
+
+/// Parent HEAD'teki gitlink girdileri (`160000 commit <sha>\t<path>`).
+///
+/// #158 R4 P1: çıktı `-z` ile alınır — klasik `ls-tree` Unicode/özel karakterli
+/// path'leri C-quote'lar (`clients/türkçe` → `"clients/t\303\274rk\303\247e"`);
+/// quoted prefix, filesystem/analyzer path'iyle eşleşmez, root scope submodule
+/// alanını tanıyamaz ve parent ignore nested HEAD-tracked dosyayı sessizce
+/// düşürebilirdi. `-z` kayıtları NUL-ayrı ve path'ler HAM gelir — escape
+/// çözmeye gerek yok.
+fn gitlink_entries(repo: &Path) -> Vec<(String, String)> {
+    let mut entries = Vec::new();
+    let Ok(raw) = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-tree", "-r", "-z", "HEAD"])
+        .output()
+    else {
+        return entries;
+    };
+    let Ok(raw) = String::from_utf8(raw.stdout) else {
+        return entries;
+    };
+    for record in raw.split('\0').filter(|r| !r.is_empty()) {
+        let Some((meta, path)) = record.split_once('\t') else {
+            continue;
+        };
+        let mut parts = meta.split_whitespace();
+        let (Some(mode), Some(kind), Some(sha)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        if mode != "160000" || kind != "commit" {
+            continue;
+        }
+        entries.push((sha.to_string(), path.to_string()));
+    }
+    entries
+}
+
+/// #158 R3 P1 — repository boundary: parent HEAD'teki TÜM gitlink prefix'leri.
+/// Revision validity'den BAĞIMSIZ — gitlink'in varlığı, alanın parent'ın değil
+/// başka bir repository'nin ignore/HEAD authority'si olduğunu tanımlar.
+/// (Worktree HEAD == gitlink ayrı bir geçerlilik sorusudur; mismatch halinde
+/// nested dosyalar discovery'de KALIR ve #156 fence'i fail-closed reddeder.)
+fn all_gitlink_prefixes(repo: &Path) -> Vec<String> {
+    gitlink_entries(repo)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+/// Geçerli (initialized + worktree HEAD == gitlink SHA) birinci-seviye
+/// submodule'lar — ignore filtresinin uygulanacağı scope'lar.
+fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
+    let mut scopes = Vec::new();
+    for (gitlink_sha, path) in gitlink_entries(repo) {
+        let sub_dir = repo.join(&path);
+        if !sub_dir.join(".git").exists() {
+            continue;
+        }
+        let Ok(sub_head) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&sub_dir)
+            .args(["rev-parse", "HEAD"])
+            .output()
+        else {
+            continue;
+        };
+        let Ok(sub_head) = String::from_utf8(sub_head.stdout) else {
+            continue;
+        };
+        if sub_head.trim() != gitlink_sha {
+            continue;
+        }
+        scopes.push(IgnoreScope {
+            dir: sub_dir,
+            prefix: path,
+        });
+    }
+    scopes
 }
 
 fn walk_dir(
@@ -1231,5 +1488,423 @@ mod tests {
         };
         assert_eq!(admitted_node_cohesion(&v1), Some(0.3));
         assert_eq!(admitted_node_cohesion(&v2), Some(1.0));
+    }
+}
+
+#[cfg(test)]
+mod gitignore_discovery_tests {
+    //! #157: gitignore-aware discovery — ignore'lu içerik uzaya girmez;
+    //! tracked-ama-ignore-desenine-uyan içerik kalır (HEAD tree'nin parçası).
+
+    use super::*;
+
+    fn git_init(repo: &std::path::Path) {
+        let st = std::process::Command::new("git")
+            .arg("init")
+            .arg("-q")
+            .arg(repo)
+            .status()
+            .expect("git init");
+        assert!(st.success());
+        for (k, v) in [("user.email", "t@t.invalid"), ("user.name", "t")] {
+            let st = std::process::Command::new("git")
+                .args(["-C", repo.to_str().unwrap(), "config", k, v])
+                .status()
+                .expect("git config");
+            assert!(st.success());
+        }
+    }
+
+    fn registry_rs() -> AdapterRegistry {
+        // Minimum: .rs destekleyen registry (varsayılan setin alt kümesi yeterli).
+        AdapterRegistry::default_all()
+    }
+
+    fn git_cmd(repo: &std::path::Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .args(["-C", repo.to_str().unwrap()])
+            .args(args)
+            .status()
+            .expect("git");
+        assert!(st.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn gitignored_untracked_files_are_excluded_from_discovery() {
+        // HEAD-semantics: repo commit'li (fence'in de HEAD ister; unborn-HEAD
+        // repo filtre fail-soft'a düşer — non_git testi o sınırı kapsar).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "ignoredir/\nlegacy.rs\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
+        git_cmd(repo, &["add", "-A"]);
+        git_cmd(repo, &["commit", "-qm", "init"]);
+        // ignore'lu içerik SONRADAN düşer (HEAD'te yok).
+        std::fs::create_dir_all(repo.join("ignoredir")).unwrap();
+        std::fs::write(repo.join("ignoredir/x.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(repo.join("legacy.rs"), "fn b() {}\n").unwrap();
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["main.rs".to_string()],
+            "ignored content must be excluded"
+        );
+    }
+
+    /// P1-1a (merge-blocker, PR #158 R1): HEAD'te tracked + ignore desenine
+    /// uyan + `git rm --cached` (index staged-delete) → analizde KALMALI.
+    /// Eski `ls-files --others --ignored` index'e bakardı: bu dosyayı
+    /// "ignored" listeler, uzaydan sessizce çıkarır, fence'in kontrol edeceği
+    /// node kalmazdı (ölçüm HEAD içeriğinin eksik haliyle üretilirdi).
+    #[test]
+    fn head_tracked_file_with_rm_cached_stays_in_discovery() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "*.gen.rs\n").unwrap();
+        std::fs::write(repo.join("kept.gen.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
+        git_cmd(repo, &["add", "-A"]);
+        git_cmd(repo, &["add", "-f", "kept.gen.rs"]); // pattern'e rağmen HEAD'e girmeli
+        git_cmd(repo, &["commit", "-qm", "init"]);
+        git_cmd(repo, &["rm", "--cached", "-q", "kept.gen.rs"]); // staged delete; dosya diskte
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"kept.gen.rs".to_string()) && names.contains(&"main.rs".to_string()),
+            "HEAD-tracked (index staged-deleted) file must STAY; got {names:?}"
+        );
+    }
+
+    /// P1-1b: HEAD'de YOK + ignored + `git add -f` (staged new) → HEAD-bound
+    /// semantics'e göre DIŞARIDA kalır (index'te olması keep ettirmez).
+    #[test]
+    fn staged_new_ignored_file_stays_excluded_under_head_semantics() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "*.gen.rs\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
+        git_cmd(repo, &["add", "-A"]);
+        git_cmd(repo, &["commit", "-qm", "init"]);
+        std::fs::write(repo.join("sneaky.gen.rs"), "fn a() {}\n").unwrap();
+        git_cmd(repo, &["add", "-f", "sneaky.gen.rs"]); // staged new; HEAD'de yok
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["main.rs".to_string()],
+            "staged-new ignored file (not in HEAD) must stay excluded; got {names:?}"
+        );
+    }
+
+    /// HEAD'te commit'lenmiş + ignore desenine uyan dosya kalır (gerçek HEAD
+    /// senaryosu — eski test yalnız index'e ekliyordu; yorum HEAD diyordu).
+    #[test]
+    fn head_committed_file_matching_ignore_pattern_is_kept() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "*.gen.rs\n").unwrap();
+        std::fs::write(repo.join("kept.gen.rs"), "fn a() {}\n").unwrap();
+        git_cmd(repo, &["add", "-f", "kept.gen.rs"]);
+        git_cmd(repo, &["commit", "-qm", "init"]);
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        assert!(
+            files
+                .iter()
+                .any(|f| f.file_name().unwrap() == "kept.gen.rs"),
+            "HEAD-committed pattern-matching file must stay in discovery"
+        );
+    }
+
+    /// P1-2 (PR #158 R1): submodule İÇİ .gitignore kuralları da uygulanır.
+    /// Parent `ls-files`/pattern'ler submodule'a inmez; #156 ile submodule
+    /// içerikleri analysis+snapshot modeline dahil olduğundan aynı friction
+    /// sınırda devam ederdi (sub .gitignore'lu dosya node olur → hierarchical
+    /// tracked-set'te yok → gereksiz fence red'i).
+    #[test]
+    fn submodule_internal_gitignore_rules_are_applied() {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let sub = tempfile::tempdir().expect("sub tempdir");
+        git_init(sub.path());
+        std::fs::write(
+            sub.path().join(".gitignore"),
+            "ignored.rs
+",
+        )
+        .unwrap();
+        std::fs::write(
+            sub.path().join("kept.ts"),
+            "export const a = 1;
+",
+        )
+        .unwrap();
+        git_cmd(sub.path(), &["add", "-A"]);
+        git_cmd(sub.path(), &["commit", "-qm", "sub init"]);
+        git_init(parent.path());
+        std::fs::write(
+            parent.path().join("main.rs"),
+            "fn c() {}
+",
+        )
+        .unwrap();
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "parent init"]);
+        let url = format!(
+            "file:///{}",
+            sub.path().to_str().unwrap().replace('\\', "/")
+        );
+        let st = std::process::Command::new("git")
+            .args(["-C", parent.path().to_str().unwrap()])
+            .args(["submodule", "add", &url, "clients/fe"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .status()
+            .expect("git submodule add");
+        assert!(st.success(), "submodule add failed");
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "add submodule"]);
+        // Submodule içinde: HEAD'te tracked + ignore'lu dosya (kept.ts kalır),
+        // HEAD'te olmayan ignore'lu dosya (ignored.rs düşer).
+        std::fs::write(
+            parent.path().join("clients/fe/ignored.rs"),
+            "fn x() {}
+",
+        )
+        .unwrap();
+        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"kept.ts".to_string()),
+            "submodule tracked file must stay; got {names:?}"
+        );
+        assert!(
+            !names.contains(&"ignored.rs".to_string()),
+            "submodule-internal ignored file must be excluded; got {names:?}"
+        );
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "parent file must stay; got {names:?}"
+        );
+    }
+
+    /// R2 P1 (scope-authority) fixture: parent + içinde initialized submodule.
+    /// Parent .gitignore İÇERİĞİ ve submodule PATH'i parametrik — parent'ın
+    /// ignore politikasının submodule HEAD-tracked dosyasını DÜŞÜREMEMESİ
+    /// pinlenir.
+    fn scope_authority_parent_gitignore_cannot_drop_submodule_files(pattern: &str, sub_path: &str) {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let sub = tempfile::tempdir().expect("sub tempdir");
+        git_init(sub.path());
+        std::fs::write(
+            sub.path().join("kept.ts"),
+            "export const a = 1;
+",
+        )
+        .unwrap();
+        git_cmd(sub.path(), &["add", "-A"]);
+        git_cmd(sub.path(), &["commit", "-qm", "sub init"]);
+        git_init(parent.path());
+        std::fs::write(
+            parent.path().join(".gitignore"),
+            format!(
+                "{pattern}
+"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            parent.path().join("main.rs"),
+            "fn c() {}
+",
+        )
+        .unwrap();
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "parent init"]);
+        let url = format!(
+            "file:///{}",
+            sub.path().to_str().unwrap().replace(chr_bs(), "/")
+        );
+        let st = std::process::Command::new("git")
+            .args(["-C", parent.path().to_str().unwrap()])
+            .args(["submodule", "add", &url, sub_path])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .status()
+            .expect("git submodule add");
+        assert!(st.success(), "submodule add failed");
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "add submodule"]);
+        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"kept.ts".to_string()),
+            "submodule HEAD-tracked file must survive parent ignore pattern {pattern:?} at {sub_path:?}; got {names:?}"
+        );
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "parent file must stay; got {names:?}"
+        );
+    }
+
+    fn chr_bs() -> char {
+        char::from_u32(92).unwrap()
+    }
+
+    /// R2 P1: parent `.gitignore = *.ts` — parent pattern'i submodule'un
+    /// HEAD-tracked kept.ts'ini uzaydan ÇIKARAMAZ (root scope aday havuzundan
+    /// submodule prefix'leri çıkarılır; ignore authority repository-scoped).
+    #[test]
+    fn parent_star_ts_ignore_cannot_drop_submodule_tracked_file() {
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("*.ts", "clients/fe");
+    }
+
+    /// R2 P1 ikinci varyant: parent `.gitignore = clients/fe/**` — submodule
+    /// dizinini hedefleyen pattern bile: içerik gitlink'in, authority parent'ın değil.
+    #[test]
+    fn parent_dir_ignore_cannot_drop_submodule_tracked_file() {
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("clients/fe/**", "clients/fe");
+    }
+
+    /// R4 P1: Unicode submodule path'i (`clients/türkçe`). Non-`-z` `ls-tree`
+    /// bu path'i C-quote'lardı (`"clients/t\303\274rk\303\247e"`) → quoted prefix
+    /// analyzer path'iyle eşleşmez → root scope boundary'yi kaçırır → parent
+    /// `*.ts` nested HEAD-tracked dosyayı sessizce düşürürdü. `-z` + NUL parse
+    /// path'i HAM getirir — boundary tanınır, kept.ts KALIR.
+    #[test]
+    fn unicode_submodule_path_boundary_is_recognized() {
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("*.ts", "clients/türkçe");
+    }
+
+    /// R3 P1 (repository boundary ≠ revision validity): gitlink → sub
+    /// commit A, sub worktree HEAD → commit B (mismatch). Parent .gitignore
+    /// pattern'i `clients/fe` altındaki dosyayı discovery'den DÜŞÜREMEZ —
+    /// alan parent'ın değil, gitlink'in; mismatch bir validity sorunudur ve
+    /// doğru yanıt fail-closed fence (#156), sessiz exclusion değil.
+    fn revision_mismatch_submodule_files_survive_parent_ignore(pattern: &str) {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let sub = tempfile::tempdir().expect("sub tempdir");
+        git_init(sub.path());
+        std::fs::write(
+            sub.path().join("seed.ts"),
+            "export const seed = 0;
+",
+        )
+        .unwrap();
+        git_cmd(sub.path(), &["add", "-A"]);
+        git_cmd(sub.path(), &["commit", "-qm", "sub commit A"]);
+        git_init(parent.path());
+        std::fs::write(
+            parent.path().join(".gitignore"),
+            format!(
+                "{pattern}
+"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            parent.path().join("main.rs"),
+            "fn c() {}
+",
+        )
+        .unwrap();
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "parent init"]);
+        let url = format!(
+            "file:///{}",
+            sub.path().to_str().unwrap().replace(chr_bs(), "/")
+        );
+        let st = std::process::Command::new("git")
+            .args(["-C", parent.path().to_str().unwrap()])
+            .args(["submodule", "add", &url, "clients/fe"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .status()
+            .expect("git submodule add");
+        assert!(st.success(), "submodule add failed");
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(
+            parent.path(),
+            &["commit", "-qm", "add submodule (gitlink -> A)"],
+        );
+        // Submodule'ta yeni commit B — worktree HEAD artık gitlink'ten farklı.
+        // (Submodule klonu parent'ın lokal config'ini TAŞIMAZ — CI'de global
+        // identity yok; commit için inline identity şart.)
+        std::fs::write(
+            parent.path().join("clients/fe/kept.ts"),
+            "export const a = 1;
+",
+        )
+        .unwrap();
+        let sub_dir = parent.path().join("clients/fe");
+        for args in [vec!["add", "-A"], vec!["commit", "-qm", "sub commit B"]] {
+            let st = std::process::Command::new("git")
+                .args(["-C", sub_dir.to_str().unwrap()])
+                .args(&args)
+                .env("GIT_AUTHOR_NAME", "OSP Test")
+                .env("GIT_AUTHOR_EMAIL", "osp-test@example.invalid")
+                .env("GIT_COMMITTER_NAME", "OSP Test")
+                .env("GIT_COMMITTER_EMAIL", "osp-test@example.invalid")
+                .status()
+                .expect("git in submodule");
+            assert!(st.success(), "git {args:?} in submodule failed");
+        }
+        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"kept.ts".to_string()),
+            "revision-mismatch submodule file must NOT be dropped by parent ignore {pattern:?}; got {names:?}"
+        );
+        // Mismatch'ta submodule filtresi de uygulanmaz (validity sorunu) —
+        // seed.ts dahil içerik discovery'de kalır; fail-closed yanıt
+        // #156 fence'inin işi (tracked-set / dirty-prefix), sessiz exclusion değil.
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "parent file must stay; got {names:?}"
+        );
+    }
+
+    #[test]
+    fn mismatched_submodule_survives_parent_star_ts_ignore() {
+        revision_mismatch_submodule_files_survive_parent_ignore("*.ts");
+    }
+
+    #[test]
+    fn mismatched_submodule_survives_parent_dir_ignore() {
+        revision_mismatch_submodule_files_survive_parent_ignore("clients/fe/**");
+    }
+
+    #[test]
+    fn non_git_directory_keeps_old_behavior() {
+        // Git olmayan dizinde filtre fail-soft: dosyalar aynen toplanır.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
+        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        assert_eq!(files.len(), 1);
     }
 }
