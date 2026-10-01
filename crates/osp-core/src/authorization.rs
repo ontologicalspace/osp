@@ -1275,10 +1275,14 @@ impl PersistedSpaceViewId {
     ///   kaybeden kazananın dosyasını okur → **eşzamanlı yaratıcılar tek identity
     ///   üzerinde anlaşır** (concurrent-creator testi pinli).
     /// - Crash pencereleri (dürüst kapsam): temp yazımı ortasında crash → hedef
-    ///   YOKtur → sonraki deneme temiz başlar; link sonrası temp silinemedi →
-    ///   zararsız artık. Hedef ya yoktur ya TAM içeriktir (link atomik) — yarım
-    ///   hedef üretilemez. Parent-dir sync best-effort (Unix'te directory
-    ///   durability; Windows'ta no-op).
+    ///   YOKtur → sonraki deneme hedef için temiz başlar; link sonrası temp
+    ///   silinemedi → zararsız artık. Hedef ya yoktur ya TAM içeriktir (link
+    ///   atomik) — yarım hedef üretilemez. Parent-dir sync best-effort (Unix'te
+    ///   directory durability; Windows'ta no-op).
+    ///   **R3 P2 (temp alanı ayrıdır):** crash sonrası stale temp kalabilir
+    ///   (pid+thread-id adlı). Adın ileride yeniden kullanılması `create_new` →
+    ///   `IoFailed` verir → fail-closed; "temiz başlar" garantisi YALNIZCA hedef
+    ///   dosyası içindir — temp adının benzersizliği garanti edilmez.
     pub fn load_or_create(root: &std::path::Path) -> Result<Self, SpaceIdentityError> {
         let dir = root.join(".osp");
         let path = dir.join("space-identity");

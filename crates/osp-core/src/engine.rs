@@ -1632,6 +1632,9 @@ pub struct SpaceEngine {
     /// işaretlenir; bind guard okur. Identity, revision YAYINLANMIŞ bir motora
     /// bağlanamaz — geçmiş Ephemeral basis'ler + gelecekteki Persisted basis'ler
     /// karışır (provenance bütünlüğü).
+    /// **R3 P2 (muhafazakâr set):** flag, content digest hesaplanmadan ÖNCE
+    /// set edilir — digest hesabı başarısız olsa bile late-bind reddedilir;
+    /// "revision yayınlandı" semantiğinden fail-closed yönünde muhafazakârdır.
     space_view_revision_emitted: std::sync::atomic::AtomicBool,
     snapshot_store: Option<SnapshotStore>,
     /// **#97 MD-3 S3:** in-flight cold-start suspension'ları — `commit_task_claim`
