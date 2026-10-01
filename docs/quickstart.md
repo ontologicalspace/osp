@@ -276,21 +276,24 @@ One commit — exactly what you created — and an empty `git status`. Harness
 run artifacts live under `state/` (outside the repo), and the task file
 pins your HEAD, so the whole decision is reproducible.
 
-## Known boundary — the production legacy demo (for completeness)
+## Production witness suspension (persisted space identity)
 
-Running without a task file (`--execution-mode production`, the legacy
-hardcoded demo task) currently stops at a deeper, *known* layer: with the
-authority mismatch gone, the loop now reaches witness suspension, which
-requires persisted space identity — not yet implemented:
+Since [#152](https://github.com/ontologicalspace/osp/issues/152), every
+attempt load-or-creates a persisted space identity at
+`<state-dir>/.osp/space-identity` (next to `pending-authorizations/`). A
+production run whose proposal satisfies the predicate but lacks witness quorum
+now **suspends for witnesses** instead of failing the durability rule:
 
 ```
-✗ System failure: cross-process suspension requires persisted space identity (ephemeral identity cannot survive process restart)
-  Evidence entries: 0
-exit code: 70
+exit code: 10        # AWAITING_WITNESSES — expected domain outcome, not an error
 ```
 
-Tracked in [#152](https://github.com/ontologicalspace/osp/issues/152); the
-harness loop above is the supported path until then.
+The pending authorization is persisted under
+`<state-dir>/.osp/pending-authorizations/`; the analyzed repo stays clean. A
+corrupted identity file is *not* silently regenerated — the attempt fails with
+exit code 70 (system failure) and the file is preserved for operator
+inspection. Re-running the same suspended task surfaces a persistence conflict
+(exit 40) — the resume flow is the tracked follow-up on #152.
 
 ---
 

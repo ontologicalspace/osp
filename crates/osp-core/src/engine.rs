@@ -1623,6 +1623,10 @@ pub struct SpaceEngine {
     time: TimeFSM,
     config: EngineConfig,
     t_c: u64,
+    /// **#152:** persisted space identity — `None` (default) → `Ephemeral(t_c)`
+    /// (test/geriye uyumluluk). Production CLI load-or-create edip bağlar; D3
+    /// (Ephemeral + CrossProcess store) fail-closed kalır.
+    persisted_view_id: Option<crate::authorization::PersistedSpaceViewId>,
     snapshot_store: Option<SnapshotStore>,
     /// **#97 MD-3 S3:** in-flight cold-start suspension'ları — `commit_task_claim`
     /// `SuspendedColdStart` döndüğünde carrier burada bekler; `approve_cold_start`
@@ -1647,9 +1651,22 @@ impl SpaceEngine {
             time: TimeFSM,
             config,
             t_c: 0,
+            persisted_view_id: None,
             snapshot_store: None,
             suspended_cold_starts: std::collections::HashMap::new(),
         }
+    }
+
+    /// **#152:** persisted space identity bağla — `current_space_view_revision`
+    /// artık `SpaceViewId::Persisted(id)` üretir (sequence `t_c`, content_digest
+    /// aynı). Builder: mevcut kurulum çağrıları ve testler değişmez (default
+    /// `Ephemeral` davranışı korunur).
+    pub fn with_persisted_view_id(
+        mut self,
+        id: crate::authorization::PersistedSpaceViewId,
+    ) -> Self {
+        self.persisted_view_id = Some(id);
+        self
     }
 
     /// **INV-T9 Step 4a:** Q6 Rule Gate için kural ekle — validated registration.
@@ -3148,16 +3165,21 @@ impl SpaceEngine {
     /// **reviewer P0-3 (C6):** Artık gerçek `SpaceDigest::compute` kullanır — node/edge
     /// canonical içeriği. Önceki placeholder yalnız `t_c` üzerinden hash üretiyordu.
     ///
-    /// `view_id` hala `Ephemeral(self.t_c)` — persisted identity dosya lifecycle'ı
-    /// Commit 4'te. Navigator, Ephemeral + CrossProcess store kombinasyonunu fail-closed
-    /// olarak reddeder (D3).
+    /// **#152:** `with_persisted_view_id` bağlıysa `SpaceViewId::Persisted` üretir
+    /// (sequence `t_c`, content_digest aynı) — D3 (Ephemeral + CrossProcess store)
+    /// fail-closed guard'ı böyle geçer. Default (bağlı değil) → `Ephemeral(t_c)`:
+    /// process-local test davranışı değişmez.
     pub fn current_space_view_revision(
         &self,
     ) -> Result<crate::authorization::SpaceViewRevision, String> {
         use crate::authorization::{SpaceDigest, SpaceViewId, SpaceViewRevision};
         let content_digest = SpaceDigest::compute(&self.space).map_err(|e| e.to_string())?;
+        let view_id = match &self.persisted_view_id {
+            Some(persisted) => SpaceViewId::Persisted(persisted.clone()),
+            None => SpaceViewId::Ephemeral(self.t_c),
+        };
         Ok(SpaceViewRevision {
-            view_id: SpaceViewId::Ephemeral(self.t_c),
+            view_id,
             sequence: self.t_c,
             content_digest,
         })

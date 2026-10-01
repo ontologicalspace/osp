@@ -602,12 +602,27 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         WitnessDepthAxis::from_witness(0.3, 5),
     )?;
     let vision = user_confirmed_trajectory_vision();
+
+    // #152: persisted space identity — load-or-create (state-dir kökü; pending-auths
+    // ile aynı kök → D3 resume sözleşmesi tek kökte, repo kirlenmez). Identity
+    // edinilemezse attempt BAŞLAMAZ: SystemFailure bucket (exit 70 — persistence/
+    // internal, quickstart exit-code contract).
+    let space_view_id =
+        match osp_core::authorization::PersistedSpaceViewId::load_or_create(&state_dir) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("✗ System failure: persisted space identity unavailable: {e}");
+                std::process::exit(exit_codes::SYSTEM_FAILURE);
+            }
+        };
+
     let mut engine = SpaceEngine::with_default_rules(
         result.space,
         cs,
         vision,
         EngineConfig::default_calibrated(),
-    )?;
+    )?
+    .with_persisted_view_id(space_view_id);
 
     // 3. Task resolution: harness task file (snapshot-bound) or hardcoded legacy fallback.
     let task_source: &'static str = if args.task.is_some() {

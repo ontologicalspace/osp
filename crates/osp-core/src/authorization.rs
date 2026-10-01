@@ -1217,8 +1217,9 @@ pub struct SpaceViewRevision {
 /// suspension = fail-closed. Production CLI yalnız Persisted + Filesystem kabul eder.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SpaceViewId {
-    /// Cross-process — `<repo>/.osp/space-identity`'den yüklenir (repo path'inden DEĞİL).
-    /// Repo taşınması kimliği değiştirmez; clone/fork bilinçli olarak aynı identity taşıyabilir.
+    /// Cross-process — `<state-dir>/.osp/space-identity`'den yüklenir (#152; state-dir
+    /// kökü — pending-authorizations ile aynı kök, repo kirlenmez, D3 resume sözleşmesi
+    /// tek kökte). Repo taşınması kimliği değiştirmez; farklı state-dir → farklı identity.
     Persisted(PersistedSpaceViewId),
     /// Process-local — in-memory test. Cross-process resumable olarak sunulmaz.
     Ephemeral(u64),
@@ -1253,6 +1254,114 @@ impl PersistedSpaceViewId {
         let mut bytes = [0u8; 16];
         src.fill(&mut bytes)?;
         Ok(Self(bytes))
+    }
+
+    /// **#152:** `<root>/.osp/space-identity` — load-or-create (tek identity ilkesi).
+    ///
+    /// **Kök = state-dir** (pending-authorizations ile AYNI kök → D3 resume sözleşmesi
+    /// tek kökte; analyzed repo KİRLENMEZ — harness state-dir-outside-repo invariant'ı).
+    /// Semantik: identity "bu state-dir'in bu space akışı"nındır — repo taşınıp
+    /// state-dir sabit kalırsa kimlik sabit; farklı state-dir → farklı identity →
+    /// resume bulunamaz (fail-closed, doğru).
+    ///
+    /// - Dosya VARSA oku + doğrula. **Bozuk/geçersiz dosya otomatik yeniden
+    ///   ÜRETİLMEZ** — `InvalidFile` fail-closed (operator müdahalesi gerekir);
+    ///   üzerine yazmak suspend edilmiş authorization'ların kimliğini sessizce
+    ///   çöplere atardı.
+    /// - Dosya YOKSA: CSPRNG üret → same-dir temp (`create_new`) → `write_all` →
+    ///   `sync_all` → `rename` (crash-consistent publish — store persist pattern'i).
+    ///   Race: iki process aynı anda üretirse kazananın identity'si kalır; rename
+    ///   kaybedeni mevcut dosyayı okuyup O id'yi döndürür.
+    pub fn load_or_create(root: &std::path::Path) -> Result<Self, SpaceIdentityError> {
+        let dir = root.join(".osp");
+        let path = dir.join("space-identity");
+
+        if path.exists() {
+            let raw =
+                std::fs::read(&path).map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+            return Self::parse_file(&raw);
+        }
+
+        let id = Self::generate()?;
+        std::fs::create_dir_all(&dir).map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+        let payload = serde_json::to_vec_pretty(&SpaceIdentityFileV1::from(id.clone()))
+            .map_err(|e| SpaceIdentityError::IoFailed(format!("serialization failed: {e}")))?;
+
+        use std::io::Write;
+        let tmp = dir.join(format!("space-identity.tmp.{}", std::process::id()));
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)
+                .map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+            file.write_all(&payload)
+                .and_then(|_| file.sync_all())
+                .map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+        }
+        match std::fs::rename(&tmp, &path) {
+            Ok(()) => Ok(id),
+            Err(_) if path.exists() => {
+                // Race — başka process kazandı: tek identity ilkesi gereği
+                // KAZANANIN id'si geçerli; temp'imizi temizle ve onu oku.
+                let _ = std::fs::remove_file(&tmp);
+                let raw = std::fs::read(&path)
+                    .map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+                Self::parse_file(&raw)
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(SpaceIdentityError::IoFailed(e.to_string()))
+            }
+        }
+    }
+
+    /// Identity dosyasını parse et — schema + 32-hex doğrulaması (fail-closed).
+    fn parse_file(raw: &[u8]) -> Result<Self, SpaceIdentityError> {
+        let file: SpaceIdentityFileV1 = serde_json::from_slice(raw)
+            .map_err(|e| SpaceIdentityError::InvalidFile(e.to_string()))?;
+        if file.schema_version != 1 {
+            return Err(SpaceIdentityError::InvalidFile(format!(
+                "unsupported schema_version {} (expected 1)",
+                file.schema_version
+            )));
+        }
+        if file.space_view_id.len() != 32 {
+            return Err(SpaceIdentityError::InvalidFile(format!(
+                "space_view_id must be 32 hex chars, found {}",
+                file.space_view_id.len()
+            )));
+        }
+        let mut bytes = [0u8; 16];
+        for (i, chunk) in file.space_view_id.as_bytes().chunks(2).enumerate() {
+            let hex_pair = std::str::from_utf8(chunk)
+                .map_err(|e| SpaceIdentityError::InvalidFile(e.to_string()))?;
+            bytes[i] = u8::from_str_radix(hex_pair, 16)
+                .map_err(|e| SpaceIdentityError::InvalidFile(e.to_string()))?;
+        }
+        Ok(Self(bytes))
+    }
+}
+
+/// `<state-dir>/.osp/space-identity` dosya biçimi (v1).
+///
+/// İnsan-okur JSON; `space_view_id` = 16 byte'ın 32 karakter lowercase hex'i.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct SpaceIdentityFileV1 {
+    schema_version: u32,
+    space_view_id: String,
+}
+
+impl From<PersistedSpaceViewId> for SpaceIdentityFileV1 {
+    fn from(id: PersistedSpaceViewId) -> Self {
+        let mut hex = String::with_capacity(32);
+        for byte in id.as_bytes() {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        Self {
+            schema_version: 1,
+            space_view_id: hex,
+        }
     }
 }
 
@@ -12061,6 +12170,86 @@ mod tests {
     fn null_store_durability_is_process_local() {
         let store = NullPendingAuthorizationStore;
         assert_eq!(store.durability(), SuspensionDurability::ProcessLocal);
+    }
+
+    // ── #152: persisted space identity lifecycle ──────────────────────────────
+
+    #[test]
+    fn space_identity_load_or_create_creates_and_reloads_same_id() {
+        let dir = temp_dir();
+        let created = PersistedSpaceViewId::load_or_create(&dir).unwrap();
+        let path = dir.join(".osp").join("space-identity");
+        assert!(
+            path.exists(),
+            "identity file published under <state-dir>/.osp"
+        );
+        // Reload — tek identity ilkesi: ikinci load AYNI id'yi döner (yeni üretim yok).
+        let reloaded = PersistedSpaceViewId::load_or_create(&dir).unwrap();
+        assert_eq!(created, reloaded);
+        // Farklı state-dir → farklı identity (resume fail-closed semantiği).
+        let other = PersistedSpaceViewId::load_or_create(&temp_dir()).unwrap();
+        assert_ne!(created, other);
+    }
+
+    #[test]
+    fn space_identity_corrupted_file_fails_closed_and_is_preserved() {
+        let dir = temp_dir();
+        let identity_path = dir.join(".osp").join("space-identity");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        let corrupted = b"{ this is not valid json";
+        std::fs::write(&identity_path, corrupted).unwrap();
+
+        let err = PersistedSpaceViewId::load_or_create(&dir).unwrap_err();
+        assert!(matches!(err, SpaceIdentityError::InvalidFile(_)));
+        // Fail-closed: bozuk dosya ÜZERİNE YAZILMADI (operator müdahalesi gerekir).
+        assert_eq!(
+            std::fs::read(&identity_path).unwrap(),
+            corrupted,
+            "corrupted identity must NOT be silently regenerated"
+        );
+    }
+
+    #[test]
+    fn space_identity_wrong_schema_version_rejected() {
+        let dir = temp_dir();
+        let identity_path = dir.join(".osp").join("space-identity");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &identity_path,
+            br#"{"schema_version": 2, "space_view_id": "00000000000000000000000000000000"}"#,
+        )
+        .unwrap();
+        let err = PersistedSpaceViewId::load_or_create(&dir).unwrap_err();
+        assert!(matches!(err, SpaceIdentityError::InvalidFile(_)));
+    }
+
+    #[test]
+    fn space_identity_wrong_hex_length_rejected() {
+        let dir = temp_dir();
+        let identity_path = dir.join(".osp").join("space-identity");
+        std::fs::create_dir_all(identity_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &identity_path,
+            br#"{"schema_version": 1, "space_view_id": "abcdef"}"#,
+        )
+        .unwrap();
+        let err = PersistedSpaceViewId::load_or_create(&dir).unwrap_err();
+        assert!(matches!(err, SpaceIdentityError::InvalidFile(_)));
+    }
+
+    #[test]
+    fn space_identity_file_round_trips_hex_encoding() {
+        let dir = temp_dir();
+        let created = PersistedSpaceViewId::load_or_create(&dir).unwrap();
+        let raw = std::fs::read(dir.join(".osp").join("space-identity")).unwrap();
+        // parse_file doğrulaması — yayınlanan dosya bizzat geri okunabilir.
+        let parsed = PersistedSpaceViewId::load_or_create(&dir).unwrap();
+        assert_eq!(created, parsed);
+        assert!(
+            String::from_utf8_lossy(&raw).contains("\"schema_version\": 1"),
+            "human-readable JSON with schema pin: {}",
+            String::from_utf8_lossy(&raw)
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

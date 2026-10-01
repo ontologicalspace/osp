@@ -3680,6 +3680,114 @@ mod tests {
         drop(temp);
     }
 
+    /// **#152:** persisted space identity + GERÇEK CrossProcess store → Held artık
+    /// D3 SystemFailure DEĞİL. `inv_t9_72_held_production_path_exact` ProcessLocal
+    /// test adapter'ı kullanır (ephemeral fixture dürüstlüğü); bu test D3 guard'ın
+    /// PERSISTED ile geçtiğini ve gerçek `FilesystemPendingAuthorizationStore`
+    /// (CrossProcess) persist zincirinin çalıştığını pinler.
+    #[test]
+    fn inv_t9_152_persisted_identity_unlocks_cross_process_suspension() {
+        use crate::agent::EdgeRef;
+        use crate::authorization::{
+            FilesystemPendingAuthorizationStore, PersistedSpaceViewId, SpaceViewId,
+        };
+        use crate::space::EdgeKind;
+
+        // Default engine → Ephemeral (regresyon: identity bağlanmadıysa davranış değişmez).
+        let default_engine = make_balanced_engine();
+        let rev_default = default_engine.current_space_view_revision().unwrap();
+        assert!(
+            matches!(rev_default.view_id, SpaceViewId::Ephemeral(_)),
+            "#152: default engine stays Ephemeral"
+        );
+
+        // Persisted engine → Persisted; sequence (t_c) ve content_digest identity'den etkilenmez.
+        let persisted_id = PersistedSpaceViewId::from_bytes([7u8; 16]);
+        let mut engine = make_balanced_engine().with_persisted_view_id(persisted_id.clone());
+        let rev = engine.current_space_view_revision().unwrap();
+        assert_eq!(rev.view_id, SpaceViewId::Persisted(persisted_id));
+        assert_eq!(
+            rev.sequence, rev_default.sequence,
+            "sequence is t_c, not identity"
+        );
+        assert_eq!(
+            rev.content_digest, rev_default.content_digest,
+            "content digest is identity-independent"
+        );
+
+        // Aynı Held fixture — ama store GERÇEK CrossProcess (adapter DEĞİL).
+        let policy = TaskPolicy {
+            maneuver_limit: 10,
+            predicate_failure_policy: PredicateFailurePolicy::StrictReject,
+            ..Default::default()
+        };
+        let mut task = coupling_task(1, 1.0, policy);
+        task.target_predicate_set.predicates[0].predicate.scope = PredicateScope::Node(0);
+        let target_vector = task
+            .target_predicate_set
+            .preferred_vector
+            .expect("fixture requires preferred vector");
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+
+        let proposal = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![],
+            removed_edges: vec![EdgeRef {
+                from: 0,
+                to: 1,
+                kind: EdgeKind::Imports,
+            }],
+            affected_nodes: vec![0],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "#152 fixture: remove one existing import".into(),
+        };
+        let mock = MockLlmClient::new(vec![proposal]);
+        let mut evidence = vec![];
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let temp_path = temp.path().to_path_buf();
+
+        let mut nav = AgentNavigator {
+            llm: &mock,
+            resolver: &resolver,
+            engine: &mut engine,
+            evidence: &mut evidence,
+            trajectory_id: 1,
+            milestone_id: 1,
+            target_vector,
+            current_measured: measured_pos(0.80),
+            output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::Production,
+            // #152: GERÇEK store — durability() == CrossProcess. D3 guard yalnız
+            // Persisted identity ile geçer; Ephemeral olsaydı SystemFailure dönerdi.
+            pending_authorization_store: Box::new(FilesystemPendingAuthorizationStore::new(
+                &temp_path,
+            )),
+            clock: Box::new(crate::authorization::FixedClock(1_700_000_000)),
+        };
+
+        let result = nav.run_task(1, 7);
+
+        let persistence = match result {
+            NavigatorResult::AwaitingWitnesses { persistence, .. } => persistence,
+            other => panic!(
+                "#152: expected AwaitingWitnesses with real CrossProcess store, got {other:?}"
+            ),
+        };
+        assert_eq!(
+            mock.call_count(),
+            1,
+            "#152: Held terminal — single LLM invocation"
+        );
+        assert!(
+            persistence.artifact_path.exists(),
+            "#152: pending-authorization artifact persisted (persist-before-return)"
+        );
+        drop(temp);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════════
     // INV-T9 Step 4a closure — captured rule context propagation
     //

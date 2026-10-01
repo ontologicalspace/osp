@@ -1291,3 +1291,108 @@ fn v2_proposal_head_mismatch_rejected_at_cli() {
         "stderr explains the proposal provenance fence: {stderr}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #152 — persisted space identity: production witness-hold artık D3'te değil
+// ═══════════════════════════════════════════════════════════════════════════════
+
+fn run_production_attempt(
+    fx: &HarnessFixture,
+    task_path: &std::path::Path,
+    proposals_path: &std::path::Path,
+) -> std::process::Output {
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("production")
+        .arg("--witness")
+        .arg("production")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(proposals_path)
+        .arg("--task")
+        .arg(task_path)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp")
+}
+
+#[test]
+fn production_witness_awaits_with_persisted_identity() {
+    // #152: predicate satisfied (coupling 0.667 → 0.5 ≤ 0.55) + production witness
+    // (quorum 2/1.5, boş witness seti) → Held. Persisted identity load-or-create
+    // edildiği için D3 (Ephemeral + CrossProcess → exit 70) GEÇİLİR:
+    // AwaitingWitnesses (exit 10 — expected domain outcome) + gerçek pending
+    // artifact + space-identity, ikisi de state-dir altında (repo temiz kalır).
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope(&fx.head, 2));
+    let proposals_path = fx.write_proposals(2, 1);
+
+    let output = run_production_attempt(&fx, &task_path, &proposals_path);
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "AwaitingWitnesses exit 10 (not D3 SystemFailure 70). stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let osp_dir = fx.work_path().join(".osp");
+    assert!(
+        osp_dir.join("space-identity").exists(),
+        "persisted space identity created under state-dir"
+    );
+    let pending_dir = osp_dir.join("pending-authorizations");
+    let artifact_count = pending_dir
+        .read_dir()
+        .expect("pending-authorizations dir")
+        .count();
+    assert!(
+        artifact_count >= 1,
+        "pending-authorization artifact persisted"
+    );
+
+    // NOT (kapsam gözlemi): AYNI task'ın tekrar suspend edilmeye çalışması
+    // BasisConflict → exit 40 üretir (envelope zaman damgalı olduğundan
+    // idempotent-success yoluna düşmez). Bu, #152 kapsamındaki resume akışının
+    // girdisidir (issue'ya notlandı) — identity kararlılığı birim testte pinli
+    // (load_or_create reload aynı id).
+
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn corrupted_space_identity_fails_exit_70() {
+    // #152: bozuk identity dosyası otomatik yeniden ÜRETİLMEZ — SystemFailure
+    // bucket (exit 70), dosya olduğu gibi korunur (operator müdahalesi gerekir).
+    let fx = HarnessFixture::new();
+    let osp_dir = fx.work_path().join(".osp");
+    fs::create_dir_all(&osp_dir).expect("osp dir");
+    let corrupted = b"{ this is not valid json";
+    fs::write(osp_dir.join("space-identity"), corrupted).expect("corrupt identity");
+
+    let task_path = fx.write_task(&task_envelope(&fx.head, 2));
+    let proposals_path = fx.write_proposals(2, 1);
+    let output = run_production_attempt(&fx, &task_path, &proposals_path);
+
+    assert_eq!(output.status.code(), Some(70), "SystemFailure exit 70");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("space identity"),
+        "stderr names the identity failure: {stderr}"
+    );
+    assert_eq!(
+        fs::read(osp_dir.join("space-identity")).unwrap(),
+        corrupted,
+        "corrupted identity preserved (no silent regeneration)"
+    );
+    fx.assert_repo_clean();
+}
