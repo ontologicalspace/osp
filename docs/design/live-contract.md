@@ -149,7 +149,7 @@ hükmüydü: **ölçüm doğruluğu ≠ değişiklik geçerliliği.** Köprü bu
 
    Sonuç ledger'da `build_verification` olarak kaydedilir (§4); hangi **exact patched
    state**'in derlendiği bağlanır (`verified_state`: base `repository_head` +
-   `patch_digest`; aday commit mevcutsa SHA'sı da).
+   `patch_digest`).
 
 2. **Karar ile realization ayrımı:** Live Contract'ın bilinçli zinciri
    (`OSP → Decision → İnsan/agent → Patch → Reanalysis`) korunur. Derleme kapısı kırmızı
@@ -235,8 +235,8 @@ analizi, attempt, after analizi) / (`tier2-scip`'te) `scip_index_digest` olmadan
 
 `build_verification` (v1.1, #159): derleme kapısının **state-bound** kaydı — nesne
 üç bilgiyi ayrıştırır: `command`; `verified_state` (hangi exact patched state
-derlendi: base `repository_head` + `patch_digest` — aday commit mevcutsa SHA'sı da
-bağlanabilir); `outcome` (`result: green|red` + `error_count`). Kapı aday state
+derlendi: base `repository_head` + `patch_digest` — candidate state'i bağlamak için
+yeterli ikili); `outcome` (`result: green|red` + `error_count`). Kapı aday state
 üzerinde koşar ve canonical apply, state-identity bağıyla korunur (§3);
 `Build(S0)` önkoşuldur, yama geçerliliği kanıtı DEĞİLDİR. Alanın kendisi nullable'dır:
 v1 run'larında ve `decision: reject` run'larında `null`.
