@@ -1259,19 +1259,26 @@ impl PersistedSpaceViewId {
     /// **#152:** `<root>/.osp/space-identity` — load-or-create (tek identity ilkesi).
     ///
     /// **Kök = state-dir** (pending-authorizations ile AYNI kök → D3 resume sözleşmesi
-    /// tek kökte; analyzed repo KİRLENMEZ — harness state-dir-outside-repo invariant'ı).
-    /// Semantik: identity "bu state-dir'in bu space akışı"nındır — repo taşınıp
-    /// state-dir sabit kalırsa kimlik sabit; farklı state-dir → farklı identity →
-    /// resume bulunamaz (fail-closed, doğru).
+    /// tek kökte; analyzed repo KİRLENMEZ — state-dir-outside-repo invariant'ı her iki
+    /// execution mode'da CLI fence'i ile korunur). Semantik: identity "bu state-dir'in
+    /// bu space akışı"nındır — repo taşınıp state-dir sabit kalırsa kimlik sabit;
+    /// farklı state-dir → farklı identity → resume bulunamaz (fail-closed, doğru).
     ///
     /// - Dosya VARSA oku + doğrula. **Bozuk/geçersiz dosya otomatik yeniden
     ///   ÜRETİLMEZ** — `InvalidFile` fail-closed (operator müdahalesi gerekir);
     ///   üzerine yazmak suspend edilmiş authorization'ların kimliğini sessizce
     ///   çöplere atardı.
-    /// - Dosya YOKSA: CSPRNG üret → same-dir temp (`create_new`) → `write_all` →
-    ///   `sync_all` → `rename` (crash-consistent publish — store persist pattern'i).
-    ///   Race: iki process aynı anda üretirse kazananın identity'si kalır; rename
-    ///   kaybedeni mevcut dosyayı okuyup O id'yi döndürür.
+    /// - Dosya YOKSA: CSPRNG üret → same-dir unique temp (`create_new`) →
+    ///   `write_all` + `sync_all` → **`hard_link`** publish (R1 P1-1: `fs::rename`
+    ///   hedef varken REPLACE eder — no-clobber DEĞİL; `hard_link` hedef mevcutsa
+    ///   `AlreadyExists` ile atomik olarak başarısız olur). Kazanan link'ler,
+    ///   kaybeden kazananın dosyasını okur → **eşzamanlı yaratıcılar tek identity
+    ///   üzerinde anlaşır** (concurrent-creator testi pinli).
+    /// - Crash pencereleri (dürüst kapsam): temp yazımı ortasında crash → hedef
+    ///   YOKtur → sonraki deneme temiz başlar; link sonrası temp silinemedi →
+    ///   zararsız artık. Hedef ya yoktur ya TAM içeriktir (link atomik) — yarım
+    ///   hedef üretilemez. Parent-dir sync best-effort (Unix'te directory
+    ///   durability; Windows'ta no-op).
     pub fn load_or_create(root: &std::path::Path) -> Result<Self, SpaceIdentityError> {
         let dir = root.join(".osp");
         let path = dir.join("space-identity");
@@ -1288,7 +1295,11 @@ impl PersistedSpaceViewId {
             .map_err(|e| SpaceIdentityError::IoFailed(format!("serialization failed: {e}")))?;
 
         use std::io::Write;
-        let tmp = dir.join(format!("space-identity.tmp.{}", std::process::id()));
+        let tid = format!("{:?}", std::thread::current().id());
+        let tmp = dir.join(format!(
+            "space-identity.tmp.{pid}.{tid}",
+            pid = std::process::id()
+        ));
         {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
@@ -1299,10 +1310,16 @@ impl PersistedSpaceViewId {
                 .and_then(|_| file.sync_all())
                 .map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
         }
-        match std::fs::rename(&tmp, &path) {
-            Ok(()) => Ok(id),
+        // No-clobber atomic publish: hard_link hedef mevcutsa başarısız olur.
+        match std::fs::hard_link(&tmp, &path) {
+            Ok(()) => {
+                // Directory durability — best-effort (Windows: no-op).
+                let _ = std::fs::File::open(&dir).and_then(|d| d.sync_all());
+                let _ = std::fs::remove_file(&tmp);
+                Ok(id)
+            }
             Err(_) if path.exists() => {
-                // Race — başka process kazandı: tek identity ilkesi gereği
+                // Race — kazanan zaten link'ledi: tek identity ilkesi gereği
                 // KAZANANIN id'si geçerli; temp'imizi temizle ve onu oku.
                 let _ = std::fs::remove_file(&tmp);
                 let raw = std::fs::read(&path)
@@ -1393,6 +1410,10 @@ pub enum SpaceIdentityError {
     /// Identity dosyası I/O hatası.
     #[error("space identity file I/O failed: {0}")]
     IoFailed(String),
+    /// Engine'e identity ZATEN bağlı — yeniden bağlama reddi (R1 P2-1: sessiz
+    /// kimlik değişimi suspension provenance'ını bozar; fail-closed).
+    #[error("space view identity already bound — rebinding is rejected")]
+    IdentityAlreadyBound,
 }
 
 /// Space content digest (BLAKE3, 32 byte) — canonical binary encoding over nodes + edges.
@@ -12250,6 +12271,36 @@ mod tests {
             "human-readable JSON with schema pin: {}",
             String::from_utf8_lossy(&raw)
         );
+    }
+
+    #[test]
+    fn space_identity_concurrent_creators_agree_on_single_identity() {
+        // R1 P1-1: fs::rename hedef varken REPLACE eder (no-clobber DEĞİL) —
+        // eski yayında iki eşzamanlı yaratıcı FARKLI id'lerle başarıyla devam
+        // edebilirdi. hard_link publish ile kazanan tek olur; kaybedenler
+        // kazananın dosyasını okur → herkes AYNI id'yi görür.
+        let dir = std::sync::Arc::new(temp_dir());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let dir = std::sync::Arc::clone(&dir);
+            let barrier = std::sync::Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                PersistedSpaceViewId::load_or_create(&dir)
+            }));
+        }
+        let ids: Vec<PersistedSpaceViewId> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread").expect("load_or_create"))
+            .collect();
+        let on_disk = PersistedSpaceViewId::load_or_create(&dir).expect("post-race read agrees");
+        for id in &ids {
+            assert_eq!(
+                id, &on_disk,
+                "every concurrent creator must observe the SAME identity"
+            );
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════════════

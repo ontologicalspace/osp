@@ -3703,7 +3703,22 @@ mod tests {
 
         // Persisted engine → Persisted; sequence (t_c) ve content_digest identity'den etkilenmez.
         let persisted_id = PersistedSpaceViewId::from_bytes([7u8; 16]);
-        let mut engine = make_balanced_engine().with_persisted_view_id(persisted_id.clone());
+        let mut engine = make_balanced_engine()
+            .with_persisted_view_id(persisted_id.clone())
+            .expect("#152: first bind succeeds");
+        // R1 P2-1: aynı engine'e ikinci bağlama reddedilir — sessiz kimlik
+        // değişimi suspension provenance'ını geçersiz kılardı; fail-closed.
+        let rebound = make_balanced_engine()
+            .with_persisted_view_id(PersistedSpaceViewId::from_bytes([7u8; 16]))
+            .expect("bound once")
+            .with_persisted_view_id(PersistedSpaceViewId::from_bytes([8u8; 16]));
+        assert!(
+            matches!(
+                rebound,
+                Err(crate::authorization::SpaceIdentityError::IdentityAlreadyBound)
+            ),
+            "#152 R1 P2-1: rebinding must fail closed"
+        );
         let rev = engine.current_space_view_revision().unwrap();
         assert_eq!(rev.view_id, SpaceViewId::Persisted(persisted_id));
         assert_eq!(

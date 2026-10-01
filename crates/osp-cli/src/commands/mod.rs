@@ -459,45 +459,49 @@ fn reject_output_inside_repo(repo: &Path, out: &Path) -> anyhow::Result<()> {
 
 /// Resolve runtime state directory for pending-authorizations (review B-3 P0).
 ///
-/// Harness mode REQUIRES state-dir outside the analyzed repo: Held artifacts written
-/// into the repo would dirty git status → subsequent snapshot-bound runs rejected.
-/// Production mode allows CWD default (backward-compat) or explicit `--state-dir`.
+/// **#152 R1 P1-2:** state-dir (default CWD, explicit dahil) analyzed repo
+/// İÇİNDE olamaz — HER İKİ execution mode'da. Identity artık her attempt
+/// başında `<state-dir>/.osp/space-identity`'ye yazılıyor; production default
+/// CWD repo kökü olduğunda dosya repoya düşer ve `.osp/` gitignore'da YOK →
+/// "repo stays clean" iddiası default production yolunda kırılırdı. Fence
+/// harness invariant'ı ile simetrik: repo içinde → red + açık `--state-dir`
+/// iste (repo dışı CWD default'u backward-compat korunur).
 ///
 /// Returns a canonical state-dir path suitable for `FilesystemPendingAuthorizationStore::new`.
 fn resolve_state_dir(
     explicit: Option<&std::path::Path>,
-    execution: CliExecutionMode,
+    _execution: CliExecutionMode,
     repo: &std::path::Path,
 ) -> anyhow::Result<PathBuf> {
     let state_dir = match explicit {
         Some(p) => p.to_path_buf(),
         None => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
-    // Harness invariant: state-dir must be outside the analyzed repo.
-    if execution == CliExecutionMode::Harness {
-        let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
-        let canon_state = if state_dir.exists() {
-            state_dir
-                .canonicalize()
-                .unwrap_or_else(|_| state_dir.clone())
-        } else {
-            // Resolve via parent if the dir doesn't exist yet (caller may pre-create).
-            match state_dir.parent().and_then(|p| p.canonicalize().ok()) {
-                Some(parent) => state_dir
-                    .file_name()
-                    .map(|name| parent.join(name))
-                    .unwrap_or_else(|| state_dir.clone()),
-                None => state_dir.clone(),
-            }
-        };
-        if canon_state.starts_with(&canon_repo) {
-            anyhow::bail!(
-                "--state-dir {} is inside the analyzed repository; harness mode requires \
-                 state-dir outside repo (Held artifacts would dirty git status → subsequent \
-                 snapshot-bound runs rejected). Set --state-dir to an external path.",
-                state_dir.display()
-            );
+    // State-dir invariant (harness'dan genelleştirildi — #152 R1 P1-2):
+    // must be outside the analyzed repo, every mode.
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let canon_state = if state_dir.exists() {
+        state_dir
+            .canonicalize()
+            .unwrap_or_else(|_| state_dir.clone())
+    } else {
+        // Resolve via parent if the dir doesn't exist yet (caller may pre-create).
+        match state_dir.parent().and_then(|p| p.canonicalize().ok()) {
+            Some(parent) => state_dir
+                .file_name()
+                .map(|name| parent.join(name))
+                .unwrap_or_else(|| state_dir.clone()),
+            None => state_dir.clone(),
         }
+    };
+    if canon_state.starts_with(&canon_repo) {
+        anyhow::bail!(
+            "--state-dir {} is inside the analyzed repository; state-dir must be outside \
+             repo in every execution mode (persisted space identity + Held artifacts would \
+             dirty git status → subsequent snapshot-bound runs rejected). Set --state-dir \
+             to an external path.",
+            state_dir.display()
+        );
     }
     Ok(state_dir)
 }
@@ -622,7 +626,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         vision,
         EngineConfig::default_calibrated(),
     )?
-    .with_persisted_view_id(space_view_id);
+    .with_persisted_view_id(space_view_id)?;
 
     // 3. Task resolution: harness task file (snapshot-bound) or hardcoded legacy fallback.
     let task_source: &'static str = if args.task.is_some() {

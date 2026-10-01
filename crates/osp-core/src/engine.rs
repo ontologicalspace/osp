@@ -1661,12 +1661,20 @@ impl SpaceEngine {
     /// artık `SpaceViewId::Persisted(id)` üretir (sequence `t_c`, content_digest
     /// aynı). Builder: mevcut kurulum çağrıları ve testler değişmez (default
     /// `Ephemeral` davranışı korunur).
+    ///
+    /// **R1 P2-1:** ikinci bağlama denemesi `IdentityAlreadyBound` ile reddedilir —
+    /// aynı engine'in identity'sini sonradan değiştirmek, üretilmiş suspension
+    /// provenance'ının (authorization basis digest'leri) sessizce geçersiz
+    /// kılınması demektir; fail-closed.
     pub fn with_persisted_view_id(
         mut self,
         id: crate::authorization::PersistedSpaceViewId,
-    ) -> Self {
+    ) -> Result<Self, crate::authorization::SpaceIdentityError> {
+        if self.persisted_view_id.is_some() {
+            return Err(crate::authorization::SpaceIdentityError::IdentityAlreadyBound);
+        }
         self.persisted_view_id = Some(id);
-        self
+        Ok(self)
     }
 
     /// **INV-T9 Step 4a:** Q6 Rule Gate için kural ekle — validated registration.

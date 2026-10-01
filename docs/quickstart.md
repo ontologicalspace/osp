@@ -295,6 +295,11 @@ exit code 70 (system failure) and the file is preserved for operator
 inspection. Re-running the same suspended task surfaces a persistence conflict
 (exit 40) — the resume flow is the tracked follow-up on #152.
 
+The state directory must be **outside the analyzed repository in every
+execution mode** (production default is the current working directory — if
+that is the repo root, the attempt asks for an explicit external
+`--state-dir`).
+
 ---
 
 ## The 30-second version

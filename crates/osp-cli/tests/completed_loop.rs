@@ -1396,3 +1396,50 @@ fn corrupted_space_identity_fails_exit_70() {
     );
     fx.assert_repo_clean();
 }
+
+#[test]
+fn production_state_dir_inside_repo_rejected() {
+    // #152 R1 P1-2: identity artık her attempt'te <state-dir>/.osp/space-identity
+    // yazıyor; production default CWD repo kökü olduğunda dosya repoya düşerdi
+    // (.osp gitignore'da YOK). Fence her iki mode'da: state-dir (default CWD
+    // dahil) analyzed repo içinde → red + açık --state-dir iste. Hiçbir yazma
+    // gerçekleşmeden reddedilir → repo temiz kalır.
+    let fx = HarnessFixture::new();
+    let task_path = fx.write_task(&task_envelope(&fx.head, 2));
+    let proposals_path = fx.write_proposals(2, 1);
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.repo_path()) // CWD = analyzed repo kökü → default state-dir repo içinde
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("production")
+        .arg("--witness")
+        .arg("production")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .output()
+        .expect("run osp");
+    assert!(
+        !output.status.success(),
+        "state-dir inside repo must fail in every execution mode"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr explains the fence: {stderr}"
+    );
+    assert!(
+        !fx.repo_path().join(".osp").exists(),
+        "no identity or artifacts written into the repo"
+    );
+    fx.assert_repo_clean();
+}
