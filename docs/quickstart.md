@@ -293,12 +293,42 @@ The pending authorization is persisted under
 corrupted identity file is *not* silently regenerated — the attempt fails with
 exit code 70 (system failure) and the file is preserved for operator
 inspection. Re-running the same suspended task surfaces a persistence conflict
-(exit 40) — the resume flow is the tracked follow-up on #152.
+(exit 40) — continue from the artifact with `osp trajectory resume` instead.
 
 The state directory must be **outside the analyzed repository in every
 execution mode** (production default is the current working directory — if
 that is the repo root, the attempt asks for an explicit external
 `--state-dir`).
+
+### Resuming a suspension with witness evidence
+
+Since [#164](https://github.com/ontologicalspace/osp/issues/164), a suspension
+can be continued from its artifact. Resume is an **operator flow without an
+LLM** — the decision chain already ran at attempt time and is digest-bound in
+the artifact; resume only re-checks the fences, evaluates the witness
+evidence, and (on quorum) applies the recorded delta:
+
+```bash
+osp trajectory resume <state-dir>/.osp/pending-authorizations/task-...json \
+  --repo <repo> \
+  --witness-evidence witnesses.json \
+  --state-dir <state-dir>
+```
+
+`witnesses.json` is a strict-wire array of evidence events
+(`{ "id", "source", "witness_kind", "actor", "claim" }`). The event weight is
+derived from `witness_kind` (operators cannot pick weights); every event's
+`claim` must match the artifact's claim id; the author's own evidence is
+excluded (inv #1). Quorum parameters come **from the artifact** — they cannot
+be lowered at resume time.
+
+Outcomes: quorum met → recorded delta applied → exit `0` and a durable
+`<artifact>.receipt.json` is written next to the artifact; quorum still
+insufficient → exit `10` (artifact unchanged); explicit rejection → exit `11`.
+Fail-closed refusals: the space changed since suspension (or the artifact was
+already applied) → exit `15` — remeasure with a fresh attempt; evidence bound
+to a foreign claim → exit `20`; artifact/identity integrity failures → exit
+`70`.
 
 ---
 
@@ -317,7 +347,8 @@ that is the repo root, the attempt asks for an explicit external
   applying accepted deltas as source-code patches is a future layer.
 - **Exit codes are a contract:** `0` completed, `10` awaiting witnesses,
   `11` requires revision, `12` maneuver limit exceeded, `13` operator
-  approval required, `14` cold-start approval required, `70` system failure
+  approval required, `14` cold-start approval required, `15` resume refused
+  (stale/already-applied suspension), `70` system failure
   (full list: `crates/osp-cli/src/commands/mod.rs`, `exit_codes` module).
 
 ## Next steps

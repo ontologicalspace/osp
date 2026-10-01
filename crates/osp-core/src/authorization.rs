@@ -1337,6 +1337,22 @@ impl PersistedSpaceViewId {
         }
     }
 
+    /// **#164 (resume):** Identity'yi LOAD-ONLY oku — yoksa üretme.
+    ///
+    /// `load_or_create` attempt akışının işlemidir (yoksa yarat). Resume için
+    /// yaratma YANLIŞ olurdu: yeni üretilmiş bir identity, artifact'in base
+    /// view_id'siyle ASLA eşleşmezdi ama yan etki olarak diskte sahte bir identity
+    /// dosyası bırakırdı. Resume mevcut identity'yi ister; yoksa typed fail-closed
+    /// (`FileNotFound`) — "yanlış state-dir ya da bu kökte attempt yapılmamış".
+    pub fn load_existing(root: &std::path::Path) -> Result<Self, SpaceIdentityError> {
+        let path = root.join(".osp").join("space-identity");
+        if !path.exists() {
+            return Err(SpaceIdentityError::FileNotFound(path));
+        }
+        let raw = std::fs::read(&path).map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+        Self::parse_file(&raw)
+    }
+
     /// Identity dosyasını parse et — schema + 32-hex doğrulaması (fail-closed).
     fn parse_file(raw: &[u8]) -> Result<Self, SpaceIdentityError> {
         let file: SpaceIdentityFileV1 = serde_json::from_slice(raw)
@@ -1411,6 +1427,11 @@ pub enum SpaceIdentityError {
     /// Identity dosyası bozuk/geçersiz. Otomatik yeniden üretim YOK (fail-closed).
     #[error("space identity file is invalid: {0}")]
     InvalidFile(String),
+    /// **#164 (resume):** Identity dosyası YOK — load-only istendi (yeniden üretim
+    /// yok). Resume, attempt'in yazdığı mevcut identity'yi bulamadı: yanlış
+    /// state-dir ya da bu state-dir'de hiç attempt yapılmamış.
+    #[error("space identity file not found: {0}")]
+    FileNotFound(std::path::PathBuf),
     /// Identity dosyası I/O hatası.
     #[error("space identity file I/O failed: {0}")]
     IoFailed(String),
@@ -1430,6 +1451,16 @@ pub struct SpaceDigest([u8; 32]);
 
 impl SpaceDigest {
     const DOMAIN_SEPARATOR: &'static [u8] = b"osp.space-content.v1\0";
+
+    /// **#164:** Hex encoding (resume hata mesajları/JSON yüzeyleri için —
+    /// AuthorizationBasisDigest pattern).
+    pub fn to_hex(&self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in &self.0 {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
 
     /// **reviewer P0-3:** Space içeriğinin gerçek canonical digest'ı.
     ///
@@ -2155,6 +2186,81 @@ pub struct AuthorizationBasis {
 /// değişmez. V2 (`AuthorizationBasisV2`) canonical redesign — additive DEĞİL, duplicate
 /// field yok. Backward compat = V1'i okuyabilmek (V1 field'larını V2'ye kopyalamak DEĞİL).
 pub type AuthorizationBasisV1 = AuthorizationBasis;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #164 — Resume: askılı claim'in basis'ten rekonstrüksiyonu
+//
+// Resume, commit pipeline'ını YENiden koşamaz: `NativeSubjectMeasurement` opak
+// token process-local'dır, çapraz süreçte sunulamaz (engine.rs "aynı context'te
+// meşru yeniden sunum" notu aynı-SÜREÇ replay'i kapsar). Karar zinciri zaten
+// attempt anında koşuldu ve artifact'a digest'lerle bağlı — resume yalnız
+// (a) fence teyidi, (b) witness değerlendirme, (c) KAYITLI delta'nın uygulanması
+// yapar. Bu fonksiyon (c)'nin girdisi olan Claim'i basis'ten çıkarır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#164:** `AuthorizationBasis` → resume `Claim` rekonstrüksiyonu.
+///
+/// Yalnız `evaluate` + `apply_delta`'nın tükettiği alanlar geride gelir:
+/// `id`/`author` (author-witness ayrımı + audit), `delta_nodes`/`delta_edges`/
+/// `removed_edges` (`prospective_delta_from_claim` bunlardan Delta üretir),
+/// `task_id` (INV-T5 binding).
+///
+/// **Bilinçli varsayılanlar (kullanılmayan alanlar):** `computed_raw`/`intent`
+/// target'ı `RawPosition::default()` — Q1-Q3 witness değerlendirmesi ve structural
+/// apply bunları okumaz; ölçüm gerçeği artifact'ta `measured_result` olarak zaten
+/// bağlı, resume'da yeniden üretilmez. `position` engine-derived'dır (inclusion
+/// table) — node'larda `Default` kalır, `apply_delta` sonrası yeniden hesaplanır.
+pub fn restore_claim_for_resume(basis: &AuthorizationBasis) -> crate::witness::Claim {
+    let delta_nodes = basis
+        .structural_delta
+        .new_nodes()
+        .iter()
+        .map(|n| crate::space::Node {
+            id: n.id,
+            kind: n.kind.into(),
+            mass: n.mass,
+            cohesion: n.cohesion,
+            classification: n.classification.into(),
+            role: n.role.into(),
+            // Engine-derived (inclusion table) — apply sonrası hesaplanır.
+            ..Default::default()
+        })
+        .collect();
+    let delta_edges = basis
+        .structural_delta
+        .new_edges()
+        .iter()
+        .map(|e| crate::space::Edge {
+            from: e.from,
+            to: e.to,
+            kind: e.kind.into(),
+            is_type_only: e.is_type_only,
+        })
+        .collect();
+    let removed_edges = basis
+        .structural_delta
+        .removed_edges()
+        .iter()
+        .map(|r| crate::agent::EdgeRef {
+            from: r.from(),
+            to: r.to(),
+            kind: r.kind().into(),
+        })
+        .collect();
+    crate::witness::Claim {
+        id: basis.claim_identity.claim_id,
+        intent: crate::witness::Intent::new(
+            basis.claim_author,
+            crate::coords::RawPosition::default(),
+        ),
+        author: basis.claim_author,
+        computed_raw: crate::coords::RawPosition::default(),
+        delta_nodes,
+        delta_edges,
+        task_id: Some(basis.claim_identity.task_id),
+        removed_edges,
+    }
+}
 
 /// **reviewer P0-1 (bloklayıcı):** Tek eksen ölçümü — value + source.
 ///
@@ -9055,7 +9161,99 @@ impl FilesystemPendingAuthorizationStore {
             evidence_digest: record.evidence_digest().clone(),
         })
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #164 — Resume receipt (applied-idempotency kanıtı)
+    //
+    // Engine-space apply process-inner'dır; repo değişmediği sürece staleness
+    // fence ikinci resume'ı YAKALAMAZ (fresh analiz yine base revision'ı üretir).
+    // Receipt, "bu artifact bu uzayda uygulandı" gerçeğini state-dir'e kalıcı
+    // yazar; ikinci resume fail-closed reddedilir (çift-yetkilendirme yanılgısı
+    // kapanır). Artifact dosyası silinmez/değiştirilmez — audit trail korunur.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Resume receipt path'i — artifact'in kardeşi (`<name>.json` → `<name>.receipt.json`).
+    fn resume_receipt_path(&self, artifact_path: &std::path::Path) -> std::path::PathBuf {
+        let mut name = artifact_path
+            .file_name()
+            .map(|n| n.to_os_string())
+            .unwrap_or_default();
+        name.push(".receipt.json");
+        artifact_path.with_file_name(name)
+    }
+
+    /// Varolan resume receipt'i oku (`None` = henüz uygulanmamış).
+    pub fn read_resume_receipt(
+        &self,
+        artifact_path: &std::path::Path,
+    ) -> Result<Option<ResumeReceipt>, ResumeReceiptError> {
+        let path = self.resume_receipt_path(artifact_path);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read(&path).map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        let receipt: ResumeReceipt =
+            serde_json::from_slice(&raw).map_err(|e| ResumeReceiptError::Invalid(e.to_string()))?;
+        Ok(Some(receipt))
+    }
+
+    /// Resume receipt yaz — no-clobber (`create_new`): zaten varsa `AlreadyExists`
+    /// (çift-apply fail-closed). Crash penceresi: create_new başarılı + yazma
+    /// yarıda → bozuk receipt → sonraki resume `Invalid` ile reddedilir (yine
+    /// fail-closed; operator temizler).
+    pub fn write_resume_receipt(
+        &self,
+        artifact_path: &std::path::Path,
+        receipt: ResumeReceipt,
+    ) -> Result<std::path::PathBuf, ResumeReceiptError> {
+        use std::io::Write;
+        let path = self.resume_receipt_path(artifact_path);
+        let payload = serde_json::to_vec_pretty(&receipt)
+            .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        file.write_all(&payload)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        Ok(path)
+    }
 }
+
+/// **#164:** Resume receipt hataları.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ResumeReceiptError {
+    /// I/O (okuma/yazma/serialization).
+    #[error("resume receipt I/O failed: {0}")]
+    Io(String),
+    /// Receipt dosyası bozuk (parse/schema) — fail-closed, operator müdahalesi.
+    #[error("resume receipt is invalid: {0}")]
+    Invalid(String),
+}
+
+/// **#164:** Applied resume receipt — `<artifact>.receipt.json` içeriği.
+///
+/// Kimlik alanları artifact'la dosya-adı komşuluğuyla bağlanır (receipt,
+/// digest-adlı artifact'in kardeşidir); `evidence_digest` hex'i ek kanıt olarak
+/// taşınır. `resulting_sequence` = apply sonrası `t_c` (base.sequence + 1).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ResumeReceipt {
+    pub schema: String,
+    pub task_id: crate::trajectory::TaskId,
+    pub claim_id: ClaimId,
+    pub attempt_num: u64,
+    /// Artifact'ın evidence digest'i (hex) — hangi askının çözüldüğünün kanıtı.
+    pub evidence_digest_hex: String,
+    /// Unix saniye — apply anı.
+    pub applied_at: u64,
+    /// Apply sonrası space revision sequence (base + 1).
+    pub resulting_sequence: u64,
+}
+
+/// Resume receipt schema sabiti.
+pub const RESUME_RECEIPT_SCHEMA: &str = "osp.resume-receipt.v1";
 
 /// Artifact'ı dosyadan yükle + verify (P1 resume için, ama P0'da da test edilebilir).
 pub fn load_pending_authorization(
@@ -11459,6 +11657,285 @@ mod tests {
                 required: 2
             }
         ));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // #164 — Resume flow tests (engine resume API + restore + receipt)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// sample_basis/record türevi — base revision motorun GERÇEK current revision'ı.
+    /// (Evidence basis-digest'i de yeni basis'ten türetilir — Envelope::new cross-check.)
+    fn sample_envelope_with_base(base: SpaceViewRevision) -> PendingAuthorizationEnvelope {
+        let mut basis = sample_basis();
+        basis.base_space_view_revision = base.clone();
+        let basis_digest = AuthorizationBasisDigest::compute(&basis).unwrap();
+        let hold_reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest.clone(),
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: hold_reason.clone(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .unwrap();
+        let evidence_digest = SuspendedAttemptEvidenceDigest::compute(&evidence).unwrap();
+        let record = PendingAuthorization {
+            task_id: TaskId::from(1u64),
+            claim_id: ClaimId::from(42u64),
+            predicate_completion: PredicateCompletion::Completed,
+            mutation_decision: MutationDecision::AcceptAsCompleted,
+            intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+            authorization_basis_digest: basis_digest,
+            base_space_view_revision: base,
+            evaluation_context_digest: EvaluationContextDigest::from_bytes([0xaa; 32]),
+            witness_requirement: WitnessRequirement {
+                min_approvers: 2,
+                quorum_threshold: 1.5,
+            },
+            witness_hold_reason: hold_reason,
+            witness_snapshot: snapshot,
+            attempt_num: AttemptNumber::try_from(1u64).unwrap(),
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
+            created_at: 1_700_000_000,
+        };
+        PendingAuthorizationEnvelope::new(record, basis).unwrap()
+    }
+
+    fn resume_test_engine(identity: [u8; 16]) -> crate::engine::SpaceEngine {
+        let engine = crate::engine::SpaceEngine::new(
+            crate::space::Space::default(),
+            crate::coords::CoordinateSystem::default_raw_five(
+                crate::coords::MetricSource::Placeholder,
+                crate::axes::CohesionAxis::new(),
+                crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+            )
+            .unwrap(),
+            crate::vision::VisionVector::with_source(
+                crate::coords::RawPosition::default(),
+                crate::vision::VisionSource::UserLoaded,
+            ),
+            crate::engine::EngineConfig::default_calibrated(),
+        );
+        engine
+            .with_persisted_view_id(PersistedSpaceViewId::from_bytes(identity))
+            .unwrap()
+    }
+
+    fn resume_event(id: u64, actor: u64, claim: u64) -> crate::witness::EvidenceEvent {
+        crate::witness::EvidenceEvent::new(
+            id,
+            format!("s{id}"),
+            crate::witness::WitnessKind::MergeCommit,
+            actor,
+            claim,
+        )
+    }
+
+    #[test]
+    fn resume_applies_with_quorum_and_advances_revision() {
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("quorum met → apply");
+        match &outcome {
+            crate::engine::ResumeHeldOutcome::Applied {
+                resulting_sequence, ..
+            } => assert_eq!(*resulting_sequence, 1, "t_c 0 → 1"),
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        // Aynı motor üzerinde ikinci resume → revision ilerledi → stale (fence).
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect_err("double-resume on same engine must hit staleness fence");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::StaleBaseRevision { .. }
+            ),
+            "expected StaleBaseRevision, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resume_insufficient_evidence_still_held_leaves_space_untouched() {
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        // Tek witness (author 100 dışlandı — kendisi) → 1 approver < 2 → StillHeld.
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![
+                    resume_event(1, 100, 42), // author-self — dışlanır (inv #1)
+                    resume_event(2, 200, 42),
+                ],
+            )
+            .expect("still-held is a domain outcome, not an error");
+        assert!(matches!(
+            outcome,
+            crate::engine::ResumeHeldOutcome::StillHeld { .. }
+        ));
+
+        // Uzay dokunulmadı → aynı motorla tam kanıt gelince apply ÇALIŞMALI.
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("space untouched after StillHeld → fresh resume applies");
+        assert!(matches!(
+            outcome,
+            crate::engine::ResumeHeldOutcome::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn resume_foreign_claim_evidence_fail_closed() {
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![
+                    resume_event(1, 200, 999), // yabancı claim
+                    resume_event(2, 300, 42),
+                ],
+            )
+            .expect_err("foreign-claim evidence must be rejected before evaluation");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::ClaimBindingMismatch {
+                    evidence_claim: 999,
+                    artifact_claim: 42,
+                    ..
+                }
+            ),
+            "expected ClaimBindingMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resume_identity_mismatch_fail_closed() {
+        // Artifact [0xdd]* motorunda üretildi; resume [0xee]* motorunda → mismatch.
+        let mut engine = resume_test_engine([0xee; 16]);
+        let mut base = engine.current_space_view_revision().unwrap();
+        // Base'in view_id'sini artifact'ın identity'siyle değiştir (içerik aynı motorun).
+        base.view_id = SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xdd; 16]));
+        let envelope = sample_envelope_with_base(base);
+
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect_err("different state-dir/space must fail closed");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::IdentityMismatch { .. }),
+            "expected IdentityMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_claim_for_resume_projects_structural_delta() {
+        let basis = sample_basis();
+        let claim = restore_claim_for_resume(&basis);
+        assert_eq!(claim.id, 42, "claim id from claim_identity");
+        assert_eq!(claim.author, 100, "author from claim_author");
+        assert_eq!(claim.task_id, Some(TaskId::from(1u64)), "INV-T5 binding");
+
+        assert_eq!(claim.delta_nodes.len(), 1);
+        let node = &claim.delta_nodes[0];
+        assert_eq!(node.id, 10);
+        assert_eq!(
+            node.kind,
+            crate::space::NodeKind::Module,
+            "kind tag reverse"
+        );
+        assert_eq!(node.mass, 100.0);
+        assert_eq!(node.cohesion, Some(0.5));
+        assert_eq!(
+            node.classification,
+            crate::space::NodeClassification::Production
+        );
+        assert_eq!(node.role, crate::space::NodeRole::Runtime);
+
+        assert_eq!(
+            claim.removed_edges,
+            vec![crate::agent::EdgeRef {
+                from: 0,
+                to: 1,
+                kind: crate::space::EdgeKind::Imports,
+            }],
+            "removed edge identity reverse"
+        );
+    }
+
+    #[test]
+    fn resume_receipt_write_read_and_no_clobber() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FilesystemPendingAuthorizationStore::new(tmp.path());
+        let artifact = tmp
+            .path()
+            .join("task-1--claim-42--attempt-1--deadbeef.json");
+        assert_eq!(
+            store.read_resume_receipt(&artifact).unwrap(),
+            None,
+            "no receipt yet"
+        );
+
+        let receipt = ResumeReceipt {
+            schema: RESUME_RECEIPT_SCHEMA.to_string(),
+            task_id: 1,
+            claim_id: 42,
+            attempt_num: 1,
+            evidence_digest_hex: "ab".repeat(32),
+            applied_at: 1_700_000_000,
+            resulting_sequence: 1,
+        };
+        let path = store
+            .write_resume_receipt(&artifact, receipt.clone())
+            .expect("write receipt");
+        assert!(path
+            .to_string_lossy()
+            .contains("deadbeef.json.receipt.json"));
+        assert_eq!(
+            store.read_resume_receipt(&artifact).unwrap().as_ref(),
+            Some(&receipt),
+            "round-trip"
+        );
+
+        // No-clobber — ikinci yazma fail-closed (çift-apply yanılgısı).
+        store
+            .write_resume_receipt(&artifact, receipt)
+            .expect_err("second write must fail (create_new no-clobber)");
     }
 
     #[test]

@@ -1305,6 +1305,153 @@ pub enum EngineCommitResult {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// #164 — Resume flow: askılı (Held) authorization'ın sürdürülmesi
+//
+// Resume, commit pipeline'ını yeniden KOŞMAZ — ölçüm token'ı process-local'dır
+// ve karar zinciri attempt anında koşulup artifact'a digest'lerle bağlanmıştır.
+// Resume = fence teyidi (identity + staleness) + witness değerlendirme +
+// KAYITLI delta'nın `time.advance` ile uygulanması. Quorum parametreleri
+// artifact'ın `witness_policy`'sinden gelir — operator quorum DÜŞÜREMEZ.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#164:** Resume sonucu — witness değerlendirmesinin domain çıktısı.
+#[derive(Debug, Clone)]
+pub enum ResumeHeldOutcome {
+    /// Quorum karşılandı → kayıtlı delta `apply_delta` ile uygulandı, `t_c` ilerledi.
+    Applied {
+        /// Apply sonrası space revision sequence (base.sequence + 1).
+        resulting_sequence: u64,
+        /// Quorum anlık görüntüsü (audit — kaç onay, hangi destek).
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+    },
+    /// Quorum hâlâ yetersiz → uzay DOKUNULMADI; artifact geçerli kalır (exit 10).
+    StillHeld {
+        reason: crate::witness::WitnessHoldReason,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+    },
+    /// Explicit witness ret (Q3 sinyalleri bugün üretilmiyor — defensive kol).
+    Rejected {
+        reasons: crate::witness::NonEmptyWitnessRejections,
+        snapshot: crate::witness::WitnessQuorumSnapshot,
+    },
+}
+
+/// **#164:** Resume red hataları — fence ihlalleri + kanıt geçersizliği.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ResumeHeldError {
+    /// Artifact'ın base view_id'si bu motorun identity'siyle uyuşmuyor —
+    /// artifact başka bir state-dir'in/space'in. Fail-closed (SystemFailure).
+    #[error("space identity mismatch: artifact base view {artifact:?} ≠ current view {current:?} — artifact belongs to a different state-dir/space")]
+    IdentityMismatch { artifact: String, current: String },
+    /// Uzay askıdan beri değişti (`current != base`) → authorization bağlamı ölü;
+    /// devam edilemez, yeni baseline'la YENİ attempt gerekir (remeasure).
+    #[error("stale base revision: artifact base sequence {base_seq} does not match current sequence {current_seq} (content digest {base_digest} vs {current_digest}) — remeasure required (new attempt on fresh baseline)")]
+    StaleBaseRevision {
+        base_seq: u64,
+        current_seq: u64,
+        base_digest: String,
+        current_digest: String,
+    },
+    /// Kanıt olayı başka bir claim'e bağlı — bu claim'i yabancı kanıtla
+    /// yetkilendirme denemesi (operational fault, kanıt reddi).
+    #[error("witness evidence claim binding mismatch: event id {event_id} witnesses claim {evidence_claim}, expected {artifact_claim}")]
+    ClaimBindingMismatch {
+        event_id: u64,
+        evidence_claim: u64,
+        artifact_claim: u64,
+    },
+}
+
+impl SpaceEngine {
+    /// **#164:** Askılı (Held) pending authorization'ı yeni witness kanıtıyla sürdür.
+    ///
+    /// Sıra (fail-closed — her adım bir önceki geçilmeden çalışmaz):
+    /// 1. **Claim binding:** her kanıt olayı artifact'ın `claim_id`'sine bağlı
+    ///    olmalı (`canonicalize_for` claim'e göre FİLTRELEMEZ — resume yüzeyinde
+    ///    yabancı kanıtla yetkilendirme burada kapanır).
+    /// 2. **Identity fence:** artifact base `view_id` == motorun bağlı identity'si.
+    /// 3. **Staleness fence:** `current_space_view_revision() == base` ("current
+    ///    == base → devam; != → remeasure" — SpaceViewRevision sözleşmesi).
+    /// 4. Claim rekonstrüksiyonu (`restore_claim_for_resume`) + quorum'u
+    ///    artifact'ın `witness_policy`'sinden alan `WitnessSet` kurulumu.
+    /// 5. `time.advance` — Satisfied ise kayıtlı delta uygulanır + `t_c += 1`;
+    ///    Held/Rejected uzayı dokunmaz.
+    ///
+    /// **Quorum düşürülemez:** quorum parametreleri basis'ten (digest-korumalı)
+    /// gelir; caller yalnız ham kanıt olayları verir.
+    ///
+    /// **Çift-apply:** bu metodun kendisi process-inner'dır; kalıcı idempotency
+    /// çağıran tarafın receipt yazmasıyla kurulur (CLI: `<artifact>.receipt.json`).
+    pub fn resume_held_authorization(
+        &mut self,
+        envelope: &crate::authorization::PendingAuthorizationEnvelope,
+        evidence: Vec<crate::witness::EvidenceEvent>,
+    ) -> Result<ResumeHeldOutcome, ResumeHeldError> {
+        let record = envelope.record();
+        let basis = envelope.authorization_basis();
+        let base = &record.base_space_view_revision;
+
+        // 1. Claim binding — yabancı kanıt reddi (fail-closed).
+        for event in &evidence {
+            if event.claim != record.claim_id {
+                return Err(ResumeHeldError::ClaimBindingMismatch {
+                    event_id: event.id,
+                    evidence_claim: event.claim,
+                    artifact_claim: record.claim_id,
+                });
+            }
+        }
+
+        // 2+3. Fences — önce identity, sonra içerik tazelik. Quorum parametreleri
+        //     basis'ten (digest-korumalı — operator düşüremez).
+        let requirement = basis.witness_policy.effective_requirement();
+        let current =
+            self.current_space_view_revision()
+                .map_err(|e| ResumeHeldError::IdentityMismatch {
+                    artifact: format!("{:?}", base.view_id),
+                    current: format!("revision computation failed: {e}"),
+                })?;
+        if current.view_id != base.view_id {
+            return Err(ResumeHeldError::IdentityMismatch {
+                artifact: format!("{:?}", base.view_id),
+                current: format!("{:?}", current.view_id),
+            });
+        }
+        if current.sequence != base.sequence || current.content_digest != base.content_digest {
+            return Err(ResumeHeldError::StaleBaseRevision {
+                base_seq: base.sequence,
+                current_seq: current.sequence,
+                base_digest: base.content_digest.to_hex(),
+                current_digest: current.content_digest.to_hex(),
+            });
+        }
+
+        // 4. Claim rekonstrüksiyonu + quorum'u artifact'tan alan witness set.
+        let claim = crate::authorization::restore_claim_for_resume(basis);
+        let omega = crate::witness::WitnessSet::new(evidence)
+            .with_quorum(requirement.min_approvers, requirement.quorum_threshold);
+
+        // 5. Değerlendir + (Satisfied ise) uygula.
+        let disposition = self.time.advance(&mut self.space, &claim, &omega);
+        match disposition {
+            crate::witness::WitnessDisposition::Satisfied { snapshot, .. } => {
+                self.t_c += 1;
+                Ok(ResumeHeldOutcome::Applied {
+                    resulting_sequence: self.t_c,
+                    snapshot,
+                })
+            }
+            crate::witness::WitnessDisposition::Held { reason, snapshot } => {
+                Ok(ResumeHeldOutcome::StillHeld { reason, snapshot })
+            }
+            crate::witness::WitnessDisposition::Rejected { reasons, snapshot } => {
+                Ok(ResumeHeldOutcome::Rejected { reasons, snapshot })
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // #97 MD-3 S3 — cold-start operator onay akışı (tip modeli)
 // ═══════════════════════════════════════════════════════════════════════════════
 
