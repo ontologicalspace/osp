@@ -531,6 +531,14 @@ fn filter_gitignored(repo: &Path, files: &mut Vec<PathBuf>) {
     scopes.extend(initialized_submodule_scopes(repo));
 
     // rel_path (repo-köküne göre, slash'lı) → keep?
+    //
+    // #158 R2 P1 — scope-authority: her dosya YALNIZ kendi repository scope'unda
+    // değerlendirilir. Root scope'un aday havuzundan submodule prefix'leri ÇIKARILIR;
+    // aksi halde parent `.gitignore` (ör. `*.ts` ya da `clients/fe/**`) submodule'un
+    // HEAD-tracked dosyasını match eder ve union `excluded` seti onu doğru scope'un
+    // KEEP kararı kurtaramadan düşürürdü — "hangi repository'nin ignore kuralları bu
+    // dosya hakkında söz sahibi?" sorusu da revision zinciriyle aynı sınırı izler.
+    let submodule_prefixes: Vec<String> = scopes.iter().skip(1).map(|s| s.prefix.clone()).collect();
     let mut excluded: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for scope in &scopes {
         // Bu kapsama düşen aday dosyalar (scope-relative).
@@ -543,6 +551,14 @@ fn filter_gitignored(repo: &Path, files: &mut Vec<PathBuf>) {
                     .to_string_lossy()
                     .replace('\\', "/");
                 if scope.prefix.is_empty() {
+                    // Root scope: submodule alanı başka bir repository'nin
+                    // ignore/HEAD authority'sidir — aday DEĞİL.
+                    if submodule_prefixes
+                        .iter()
+                        .any(|p| repo_rel.starts_with(&format!("{p}/")))
+                    {
+                        return None;
+                    }
                     Some(repo_rel)
                 } else {
                     repo_rel
@@ -1648,6 +1664,87 @@ mod gitignore_discovery_tests {
             names.contains(&"main.rs".to_string()),
             "parent file must stay; got {names:?}"
         );
+    }
+
+    /// R2 P1 (scope-authority) fixture: parent + içinde initialized submodule.
+    /// Parent .gitignore İÇERİĞİ parametrik — parent'ın ignore politikasının
+    /// submodule HEAD-tracked dosyasını DÜŞÜREMEMESİ pinlenir.
+    fn scope_authority_parent_gitignore_cannot_drop_submodule_files(pattern: &str) {
+        let parent = tempfile::tempdir().expect("parent tempdir");
+        let sub = tempfile::tempdir().expect("sub tempdir");
+        git_init(sub.path());
+        std::fs::write(
+            sub.path().join("kept.ts"),
+            "export const a = 1;
+",
+        )
+        .unwrap();
+        git_cmd(sub.path(), &["add", "-A"]);
+        git_cmd(sub.path(), &["commit", "-qm", "sub init"]);
+        git_init(parent.path());
+        std::fs::write(
+            parent.path().join(".gitignore"),
+            format!(
+                "{pattern}
+"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            parent.path().join("main.rs"),
+            "fn c() {}
+",
+        )
+        .unwrap();
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "parent init"]);
+        let url = format!(
+            "file:///{}",
+            sub.path().to_str().unwrap().replace(chr_bs(), "/")
+        );
+        let st = std::process::Command::new("git")
+            .args(["-C", parent.path().to_str().unwrap()])
+            .args(["submodule", "add", &url, "clients/fe"])
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always")
+            .status()
+            .expect("git submodule add");
+        assert!(st.success(), "submodule add failed");
+        git_cmd(parent.path(), &["add", "-A"]);
+        git_cmd(parent.path(), &["commit", "-qm", "add submodule"]);
+        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let names: Vec<String> = files
+            .iter()
+            .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            names.contains(&"kept.ts".to_string()),
+            "submodule HEAD-tracked file must survive parent ignore pattern {pattern:?}; got {names:?}"
+        );
+        assert!(
+            names.contains(&"main.rs".to_string()),
+            "parent file must stay; got {names:?}"
+        );
+    }
+
+    fn chr_bs() -> char {
+        char::from_u32(92).unwrap()
+    }
+
+    /// R2 P1: parent `.gitignore = *.ts` — parent pattern'i submodule'un
+    /// HEAD-tracked kept.ts'ini uzaydan ÇIKARAMAZ (root scope aday havuzundan
+    /// submodule prefix'leri çıkarılır; ignore authority repository-scoped).
+    #[test]
+    fn parent_star_ts_ignore_cannot_drop_submodule_tracked_file() {
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("*.ts");
+    }
+
+    /// R2 P1 ikinci varyant: parent `.gitignore = clients/fe/**` — submodule
+    /// dizinini hedefleyen pattern bile: içerik gitlink'in, authority parent'ın değil.
+    #[test]
+    fn parent_dir_ignore_cannot_drop_submodule_tracked_file() {
+        scope_authority_parent_gitignore_cannot_drop_submodule_files("clients/fe/**");
     }
 
     #[test]
