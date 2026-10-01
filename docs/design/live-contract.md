@@ -1,4 +1,4 @@
-# OSP Live Contract — Canlı Kullanım Davranış Kontratı (v1)
+# OSP Live Contract — Canlı Kullanım Davranış Kontratı (v1.1)
 
 > **Durum:** #151 canlı kullanım programı Faz 0 artefaktı (2026-09-30).
 > Bu belge kod değil **davranış kontratı** dondurur: canlı koşularda hangi zincir
@@ -8,6 +8,12 @@
 >
 > Değişiklik disiplini: bu kontrat canlı koşular toplandıkça **versiyonlanır**
 > (`v1 → v2`); her run hangi kontrat sürümünde üretildiğini ledger'da kaydeder.
+>
+> **v1.1 (2026-10-01, #159):** accept→apply arası **zorunlu derleme kapısı** ve
+> tümleyici ad-çözümleme denetim kuralı (§3); ledger'da `build_verification`
+> alanı (§4). Tetikleyen: run 1'in kabul edilen yaması derlemeyi kırdı —
+> post-mortem #159'da. Ekleme niteliğindedir; v1'de üretilmiş run satırları
+> geçerliliğini korur (`build_verification: null`).
 
 ## 1. Karar zinciri ve artifact'ler
 
@@ -104,6 +110,29 @@ OSP → Decision → İnsan / coding agent → Patch → Reanalysis
 - Reddedilen proposal'da `applied.patch` YOKTUR (`decision.json` "rejected" +
    boş bırakılır) — uzay ve dosyalar before durumunda kalır; bu da deneydir.
 
+### v1.1 — yama köprüsü kapıları (run 1 post-mortem, #159)
+
+Run 1'de kabul edilen RemoveImport yaması derlemeyi KIRDI: `AiGenerateTextRequest`
+gövdede üç kez kullanılıyordu (iç içe nitelikli erişim `AiGenerateTextRequest.AiMessage`
+dahil), elle grep+okuma denetimi bunu kaçırdı ve yama sonrası hiç derleme koşulmadı;
+kırıklık ancak sonraki apply partisinin derleme doğrulamasında görüldü (onarım:
+kaynak repoda using restore; ledger'da `accept-reverted` + amendment). Ölçüm doğru
+kalmaya devam etti — coupling tam öngörüldüğü gibi düştü. Yanlış olan "using ölü"
+hükmüydü: **ölçüm doğruluğu ≠ değişiklik geçerliliği.** Köprü bu yüzden iki kapı kazanır:
+
+1. **Derleme kapısı (zorunlu):** `applied.patch` uygulanmadan ÖNCE hedef çözüm/proje
+   derlenir; yama yalnızca **0 hata** üzerinde uygulanır ve sonuç ledger'da
+   `build_verification` olarak kaydedilir (§4). Kırmızı derleme = yama uygulanmaz;
+   öneri ve denetim gözden geçirilir, karar kaydı düzeltilir.
+2. **Tümleyici ad-çözümleme denetimi:** "using ölü" tarzı ad-çözümleme hükümleri
+   grep/okuma izlenimiyle DEĞİL, namespace'in bildirdiği tip listesinin **tümleyici
+   dökümü**nün gövde tanımlayıcılarıyla kesişimi boş olmasıyla gerekçelendirilir;
+   extension-method riski (jenerik imzalar dahil) ayrıca elenir. Run 1'in kaçırdığı
+   `DışTip.İçTip` nitelikli erişimi bu yöntemle görünür olur.
+
+Araçlaştırma bilinçli olarak ikinci aşamadır: süreç kuralı oturmadan wrapper
+sertleştirilmez (soğuk başlatma dersi, PR #153 R2). Takibi #159'da.
+
 ## 4. Ledger (canonical: `dogfood/ledger.jsonl`)
 
 **Raw dogfood artifact'ları lokal ve versiyonsuzdur** (`/dogfood/` → `.gitignore`):
@@ -142,6 +171,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "patch_ref": "…/applied.patch | null",
   "patch_digest": "sha256:… | null",
   "after_ref": "…/after.json | null",
+  "build_verification": "dotnet build <sln> → 0 errors @<patch-commit> | null (v1 run'ları ve reddedilen run'lar)",
   "decision_utility": "decision-changed | decision-confirmed | none",
   "counterfactual": "verified-bad | inspected-ok | unverified | null",
   "human_override": false,
@@ -156,6 +186,11 @@ farklı OSP revizyonlarında farklı measurement/decision üretebilir; `osp_revi
 analizi, attempt, after analizi) / (`tier2-scip`'te) `scip_index_digest` olmadan
 "aynı girdi → aynı karar" denetlenemez. `*_digest` alanları v1'de opsiyoneldir
 (null), Paper 4 dataset'ine export edilmeden önce doldurulurlar.
+
+`build_verification` (v1.1, #159): kabul edilen yamanın uygulandığı partide
+koşulan derleme doğrulamasının komut-sonuç özeti (§3 derleme kapısı). v1'de
+üretilmiş run'larda ve `decision: reject` run'larda `null`'dur; `schema_version`
+`live-ledger-v1` olarak kalır (alan ekleme niteliğinde, geriye dönük uyumlu).
 
 `decision_utility` / `counterfactual` programın iki **kritik-eşik olayının**
 alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"
