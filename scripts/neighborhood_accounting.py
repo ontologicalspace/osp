@@ -19,15 +19,40 @@ dependency multiplicity in the import-graph representation. It is NOT a claim
 about architectural complexity: until type-level edges (#167) land, edge
 identity is namespace-representative, not a semantic dependency.
 
+PARTITION SEMANTICS (frozen at v1.1):
+For each dependency d with before-owner set B_d and after-owner set A_d:
+
+    cardinality(B, A) in {new, removed, same, increased, decreased}
+        new        B = {} and A != {}
+        removed    B != {} and A = {}
+        same       B != {} and A != {} and |A| = |B|
+        increased  |A| > |B|
+        decreased  0 < |A| < |B|
+    ownership(B, A) in {unchanged, changed}      (set equality)
+
+    label = f(cardinality, ownership):
+        new -> new;  removed -> removed
+        (same, unchanged) -> unchanged
+        (same, changed)   -> moved
+        increased -> multiplied
+        decreased -> reduced
+
+The six labels are mutually exclusive and exhaustive (trichotomy on |A| vs
+|B| once the empty-set cases are settled). The orthogonal cardinality x
+ownership pair is recorded per dependency because a single label can conflate
+facts: owner change can co-occur with growth ((increased, changed) reports
+both; the label alone says only "multiplied").
+
 FROZEN ALGORITHM: this script is the measurement instrument for the paired
 adversarial probe (dogfood/adversarial-probe-tasarim.md). Its accounting
 semantics must not change after pre-registration; changes require a new
 schema_version. `--check` runs embedded fixtures and asserts every
-classification so the freeze is verifiable at any commit SHA.
+classification AND the label = f(cardinality, ownership) derivation, so the
+freeze is verifiable at any commit SHA.
 
-Output: JSON record (schema neighborhood-accounting-v1) and a markdown table
-on stdout. Companion to dogfood/ledger.jsonl — a separate measurement stratum;
-it does NOT edit finalized ledger lines.
+Output: JSON record (schema neighborhood-accounting-v1.1) and a markdown
+table on stdout. Companion to dogfood/ledger.jsonl — a separate measurement
+stratum; it does NOT edit finalized ledger lines.
 
 Usage:
   py scripts/neighborhood_accounting.py \
@@ -45,7 +70,7 @@ import json
 import sys
 from pathlib import Path
 
-SCHEMA = "neighborhood-accounting-v1"
+SCHEMA = "neighborhood-accounting-v1.1"
 
 
 def load_snapshot(path: str) -> tuple[dict[int, str], dict[int, list[int]], dict[int, dict]]:
@@ -79,18 +104,35 @@ def holder_map(
     return deps
 
 
-def classify(before_h: set[str], after_h: set[str]) -> str:
+def cardinality(before_h: set[str], after_h: set[str]) -> str:
     if not before_h and after_h:
         return "new"
     if before_h and not after_h:
         return "removed"
-    if before_h == after_h:
-        return "unchanged"
-    if len(after_h) > len(before_h):
-        return "multiplied"
     if len(after_h) == len(before_h):
-        return "moved"
-    return "reduced"
+        return "same"
+    return "increased" if len(after_h) > len(before_h) else "decreased"
+
+
+def ownership(before_h: set[str], after_h: set[str]) -> str:
+    return "unchanged" if before_h == after_h else "changed"
+
+
+def label_from(card: str, own: str) -> str:
+    direct = {
+        "new": "new",
+        "removed": "removed",
+        "increased": "multiplied",
+        "decreased": "reduced",
+    }
+    if card in direct:
+        return direct[card]
+    assert card == "same", f"unknown cardinality: {card}"
+    return "unchanged" if own == "unchanged" else "moved"
+
+
+def classify(before_h: set[str], after_h: set[str]) -> str:
+    return label_from(cardinality(before_h, after_h), ownership(before_h, after_h))
 
 
 def account(
@@ -116,6 +158,8 @@ def account(
         per_dep[key] = {
             "before": sorted(bh),
             "after": sorted(ah),
+            "cardinality": cardinality(bh, ah),
+            "ownership": ownership(bh, ah),
             "class": classify(bh, ah),
         }
 
@@ -185,19 +229,21 @@ def run(args: argparse.Namespace) -> int:
           f"   (new entering: {len(s['new_dependencies_entering'])})")
     print(f"  out-edge sum:     {s['neighborhood_out_sum_before']} -> {s['neighborhood_out_sum_after']}")
     print(f"  classes: {json.dumps(s['classes'])}")
-    print("\n| dependency (representative) | class | before holders | after holders |")
-    print("|---|---|---|---|")
+    print("\n| dependency (representative) | cardinality | ownership | class | before | after |")
+    print("|---|---|---|---|---|---|")
     for key, v in record["per_dependency"].items():
         short = key.split("src/")[-1] if "src/" in key else key
-        print(f"| {short} | {v['class']} | {len(v['before'])} | {len(v['after'])} |")
+        print(f"| {short} | {v['cardinality']} | {v['ownership']} | {v['class']} |"
+              f" {len(v['before'])} | {len(v['after'])} |")
     for npath, c in record["node_coupling"].items():
         print(f"  c {npath.split('/')[-1]}: {c.get('before')} -> {c.get('after')}")
     return 0
 
 
 def self_check() -> int:
-    """Embedded fixtures covering every classification. Freeze guard: if any
-    assertion fails after pre-registration, the instrument drifted."""
+    """Embedded fixtures covering every classification and the frozen
+    partition derivation. Freeze guard: if any assertion fails after
+    pre-registration, the instrument drifted."""
     T, G2, F = "pkg/T.cs", "pkg/G2.cs", "pkg/F.cs"
     A, B, C, D, E, G = "dep/A.cs", "dep/B.cs", "dep/C.cs", "dep/D.cs", "dep/E.cs", "dep/G.cs"
     b_ids = {1: T, 2: G2, 10: A, 11: B, 12: C, 13: D, 14: G}
@@ -206,14 +252,23 @@ def self_check() -> int:
     b_edges = {1: [10, 11, 12, 13, 14], 2: [14]}
     a_edges = {1: [11, 13], 2: [14], 4: [12, 13, 15]}
     rec = account([T, G2, F], b_ids, b_edges, a_ids, a_edges)
-    per = {k.split("/")[-1]: v["class"] for k, v in rec["per_dependency"].items()}
-    expected = {"A.cs": "removed", "B.cs": "unchanged", "C.cs": "moved",
-                "D.cs": "multiplied", "E.cs": "new", "G.cs": "reduced"}
-    assert per == expected, f"classification drift: {per} != {expected}"
+    per = {k.split("/")[-1]: v for k, v in rec["per_dependency"].items()}
+    expected = {
+        "A.cs": ("removed", "changed", "removed"),
+        "B.cs": ("same", "unchanged", "unchanged"),
+        "C.cs": ("same", "changed", "moved"),
+        "D.cs": ("increased", "changed", "multiplied"),
+        "E.cs": ("new", "changed", "new"),
+        "G.cs": ("decreased", "changed", "reduced"),
+    }
+    for name, (card, own, label) in expected.items():
+        got = (per[name]["cardinality"], per[name]["ownership"], per[name]["class"])
+        assert got == (card, own, label), f"partition drift at {name}: {got} != {(card, own, label)}"
+        assert per[name]["class"] == label_from(per[name]["cardinality"], per[name]["ownership"])
     s = rec["summary"]
     assert s["neighborhood_out_sum_before"] == 6 and s["neighborhood_out_sum_after"] == 6, s
     assert s["dependency_union_before"] == 5 and s["dependency_union_after"] == 5, s
-    print("self-check PASS (fixtures: removed/unchanged/moved/multiplied/new/reduced;"
+    print("self-check PASS (six-class fixtures + cardinality/ownership cross-derivation;"
           " out-sum 6->6; union 5->5)")
     return 0
 
