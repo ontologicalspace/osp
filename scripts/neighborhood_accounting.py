@@ -303,7 +303,9 @@ def main() -> int:
     ap.add_argument("--after", help="after.json space snapshot")
     ap.add_argument("--nodes", help="comma-separated neighborhood node paths")
     ap.add_argument("--out", help="optional path for the JSON record")
-    ap.add_argument("--check", action="store_true", help="run embedded freeze-guard fixtures")
+    ap.add_argument("--check", action="store_true",
+                    help="run embedded instrument self-check fixtures (behavioral sanity;"
+                         " the freeze itself is the commit SHA — see instrument contract)")
     args = ap.parse_args()
     if args.check:
         return self_check()
