@@ -937,8 +937,8 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         };
 
     // 4. Witness kanıtı — strict wire parse; → 20 (operational fault).
-    //    Katılan actor'leri ŞİMDİ topla (evidence motora move edilir — R2 P1
-    //    receipt provenance).
+    //    (Kanıt provenance'ı — digest + actors — motordan TEK değer olarak
+    //    döner; CLI ayrı liste TÜRETMEZ — R3 P1.)
     let evidence = match load_witness_evidence(&args.witness_evidence) {
         Ok(events) => events,
         Err(e) => {
@@ -946,9 +946,6 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
         }
     };
-    let mut witness_actors: Vec<u64> = evidence.iter().map(|e| e.actor).collect();
-    witness_actors.sort_unstable();
-    witness_actors.dedup();
 
     // 5. Snapshot + analyze + analyzed-scope fence'ler (attempt ile aynı).
     let snapshot_before =
@@ -1042,12 +1039,13 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     };
 
     // 9. Applied ise kalıcı receipt (idempotency + kanıt provenance) — yazılamazsa
-    //    dürüst 70. Askı kimliği record'dan, kanıt bağlaması motorun digest'inden
-    //    (R2 P1), güven beyanı operator'ın --evidence-trust flag'inden (R2 P0);
-    //    adres identity-keyed (R1 P0-1).
+    //    dürüst 70. Askı kimliği record'dan, kanıt bağlaması motorun TEK
+    //    provenance değerinden (R3 P1: digest + actors yapışık — CLI ayrı actor
+    //    listesi VERMEZ), güven beyanı operator'ın --evidence-trust flag'inden
+    //    (R2 P0); adres identity-keyed (R1 P0-1).
     if let osp_core::engine::ResumeHeldOutcome::Applied {
         resulting_sequence,
-        witness_evidence_digest,
+        evidence_provenance,
         ..
     } = &outcome
     {
@@ -1060,8 +1058,7 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             applied_at,
             resulting_sequence: *resulting_sequence,
             evidence_trust: args.evidence_trust.to_core(),
-            witness_evidence_digest: witness_evidence_digest.clone(),
-            witness_actors: witness_actors.clone(),
+            evidence_provenance: evidence_provenance.clone(),
         };
         if let Err(e) = store.write_resume_receipt(receipt_input) {
             eprintln!(

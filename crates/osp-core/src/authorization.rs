@@ -9221,12 +9221,11 @@ impl FilesystemPendingAuthorizationStore {
     }
 
     /// Resume receipt yaz — no-clobber (`create_new`): zaten varsa io hatası
-    /// (çift-apply fail-closed). Receipt'in askı kimliği alanları record'dan
-    /// türetilir — caller kimlik alanı veremez (drift yüzeyi kapalı). R2 P1:
-    /// quorum'u sağlayan kanıt da bağlanır (trust modu + kanıt digest'i + actor
-    /// listesi). Crash penceresi: create_new başarılı + yazma yarıda → bozuk
-    /// receipt → sonraki resume strict parse ile reddedilir (yine fail-closed;
-    /// operator temizler).
+    /// (çift-apply fail-closed). Receipt'in askı kimliği alanları record'dan,
+    /// kanıt provenance'ı motorun TEK değerinden (R3 P1) türetilir — caller
+    /// ikisi için de ayrı alan veremez. Crash penceresi: create_new başarılı +
+    /// yazma yarıda → bozuk receipt → sonraki resume strict parse ile reddedilir
+    /// (yine fail-closed; operator temizler).
     pub fn write_resume_receipt(
         &self,
         input: ResumeReceiptInput<'_>,
@@ -9241,8 +9240,8 @@ impl FilesystemPendingAuthorizationStore {
             applied_at: input.applied_at,
             resulting_sequence: input.resulting_sequence,
             evidence_trust: input.evidence_trust.as_str().to_string(),
-            witness_evidence_digest_hex: input.witness_evidence_digest.to_hex(),
-            witness_actors: input.witness_actors,
+            witness_evidence_digest_hex: input.evidence_provenance.digest().to_hex(),
+            witness_actors: input.evidence_provenance.actors().to_vec(),
         };
         let path = self.resume_receipt_path_for(input.record);
         // Parent dizini garanti et (store kökü ilk kez kullanılıyor olabilir —
@@ -9261,24 +9260,51 @@ impl FilesystemPendingAuthorizationStore {
         file.write_all(&payload)
             .and_then(|_| file.sync_all())
             .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        // **R3 P1: parent-directory fsync — persist ile crash-consistency eşitliği.**
+        // Receipt sıradan log değil; cross-process double-resume'u engelleyen TEK
+        // durable applied kaydı. Unix'te dosya içeriğinin sync_all'ı directory
+        // entry'nin güç kaybından sonra kalacağını garanti ETMEZ — entry kaybolursa
+        // sonraki process read → None görür ve aynı askıyı yeniden authorize
+        // edebilir. `persist()` bu fsync'i yapıyor; receipt aynı seviyede olmalı.
+        fsync_parent_dir_unix(&path);
         Ok(path)
     }
 }
 
-/// **#164 R2 P1:** Receipt yazım girdisi — alan adlarıyla kurulur (iki u64'nün
-/// transpoze riskine karşı).
+/// **R3 P1:** Unix parent-directory fsync (best-effort) — `persist()`'in
+/// crash-consistency deseninin paylaşılan hâli. Windows'ta no-op.
+fn fsync_parent_dir_unix(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    libc::fsync(dir.as_raw_fd());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// **#164 R2 P1 / R3 P1:** Receipt yazım girdisi — alan adlarıyla kurulur (iki
+/// u64'nün transpoze riskine karşı). Kanıt provenance'ı TEK motor değeri olarak
+/// gelir (digest + actors ayrı ayrı caller'dan ALINMAZ — R3 P1).
 pub struct ResumeReceiptInput<'a> {
     pub record: &'a PendingAuthorization,
     /// Unix saniye — apply anı.
     pub applied_at: u64,
     /// Apply sonrası space revision sequence.
     pub resulting_sequence: u64,
-    /// Kanıt güven sınırı (R2 P0) — receipt'e kalıcı kaydedilir.
+    /// Kanıt güven sınırı beyanı (R2 P0) — receipt'e kalıcı kaydedilir.
     pub evidence_trust: EvidenceTrustMode,
-    /// Değerlendirilen kanıt dizisinin digest'i (motorun hesapladığı).
-    pub witness_evidence_digest: ResumeWitnessEvidenceDigest,
-    /// Katılan witness actor'leri (sorted, distinct — validator invariant'ı).
-    pub witness_actors: Vec<u64>,
+    /// Değerlendirilen kanıtın provenance'ı (digest + katılan actor'ler) —
+    /// motorun validated evidence'den ürettiği TEK değer.
+    pub evidence_provenance: ResumeWitnessEvidenceProvenance,
 }
 
 /// **#164:** Resume receipt hataları.
@@ -9302,11 +9328,15 @@ pub enum ResumeReceiptError {
 /// sahte/forged receipt "already applied" durumuna dönüşemez.
 /// `resulting_sequence` = apply sonrası `t_c` (base.sequence + 1).
 ///
-/// **R2 P1 — kanıt provenance'ı:** receipt ayrıca quorum'u sağlayan KANITI bağlar:
-/// `evidence_trust` (güven sınırı beyanı — R2 P0), `witness_evidence_digest_hex`
-/// (değerlendirilen kanıt dizisinin digest'i) ve `witness_actors` (katılan
-/// şahitler). Kanıt dosyası sonradan değişse/silinse bile "hangi kanıt bu askıyı
-/// çözdü" durable kayıttan cevaplanır.
+/// **R2/R3 P1 — kanıt provenance'ı (commitment):** receipt, quorum'u sağlayan
+/// kanıtın değerlendirmeye girmiş hâline bağlanır: `evidence_trust` (güven
+/// sınırı beyanı — R2 P0), `witness_evidence_digest_hex` (değerlendirilen kanıt
+/// dizisinin domain-separated digest'i) ve `witness_actors` (katılan şahitler).
+/// **Bu bir commitment'tır, içerik geri çıkarmaz (R3 P2):** sonradan sunulan
+/// bir kanıt seti bu digest'le doğrulanabilir (aynı kanıt mıydı?) ve kimler
+/// katıldı kalıcıdır; fakat kanıt dosyası silinirse event `source`/`kind`/`id`
+/// receipt'ten YENİDEN KURULAMAZ — değerlendirilen kanıtın tamamının kalıcı
+/// audit kopyası ayrı bir karardır (bu PR'da yok).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ResumeReceipt {
     pub schema: String,
@@ -9525,6 +9555,53 @@ impl ResumeWitnessEvidenceDigest {
             hex.push_str(&format!("{byte:02x}"));
         }
         hex
+    }
+}
+
+/// **#164 R3 P1:** Değerlendirilen kanıtın TEK provenance değeri — motor
+/// validated evidence'den üretir; receipt writer OLDUĞU GİBİ tüketir.
+///
+/// **Neden tek tip:** R2'de digest motor'dan, actor listesi CLI'den ayrı
+/// geliyordu — public `ResumeReceiptInput` alanları sayesinde başka caller
+/// `{digest = kanıt A, actors = kanıt B}` şeklinde şeklen geçerli ama
+/// semantik olarak çelişkili receipt yazabilirdi. Bu tip digest + actors'ı
+/// yapışık kılar: ikisi de aynı validated evidence'dan, aynı anda türetilir;
+/// caller ayrı ayrı veremez. Private fields + smart constructor (dosya
+/// deserializasyonu YOK — yalnız motor üretir; diskten gelen receipt ayrı
+/// tiptedir ve `verify_against` yapısal kontrolünden geçer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeWitnessEvidenceProvenance {
+    digest: ResumeWitnessEvidenceDigest,
+    /// Sorted + distinct (constructor invariant'ı). Non-empty motor bağlamında
+    /// garanti (Applied implies quorum → ≥1 approver); tip düzeyinde
+    /// ZORLANMAZ — receipt reader kendi yapısal kontrolünü korur.
+    actors: Vec<u64>,
+}
+
+impl ResumeWitnessEvidenceProvenance {
+    /// Validated evidence'den provenance üret — digest + sorted-distinct actors,
+    /// tek kaynak. Sözleşme: yalnız doğrulanmış (engine `validate_external_
+    /// evidence` geçmiş) kanıt üzerinden anlamlıdır — motor resume'da böyle
+    /// çağırır. Tip invariant'ı (digest + actors AYNI diziden türetilir) her
+    /// caller için construction ile garanti; çelişkili değer üretilemez.
+    pub fn from_validated_evidence(events: &[crate::witness::EvidenceEvent]) -> Self {
+        let mut actors: Vec<u64> = events.iter().map(|e| e.actor).collect();
+        actors.sort_unstable();
+        actors.dedup();
+        Self {
+            digest: ResumeWitnessEvidenceDigest::compute(events),
+            actors,
+        }
+    }
+
+    /// Değerlendirilen kanıt dizisinin digest'i.
+    pub fn digest(&self) -> &ResumeWitnessEvidenceDigest {
+        &self.digest
+    }
+
+    /// Katılan witness actor'leri (sorted, distinct).
+    pub fn actors(&self) -> &[u64] {
+        &self.actors
     }
 }
 
@@ -12239,9 +12316,30 @@ mod tests {
             applied_at,
             resulting_sequence,
             evidence_trust: EvidenceTrustMode::OperatorAsserted,
-            witness_evidence_digest: ResumeWitnessEvidenceDigest::compute(&events),
-            witness_actors: vec![200, 300],
+            // R3 P1: kanıt provenance'ı TEK değer — digest/actors ayrı verilmez.
+            evidence_provenance: ResumeWitnessEvidenceProvenance::from_validated_evidence(&events),
         }
+    }
+
+    #[test]
+    fn resume_witness_provenance_binds_digest_and_actors_to_same_source() {
+        // R3 P1: provenance TEK değer — digest + actors aynı validated evidence'den
+        // türetilir; sorted+distinct garanti. Çelişkili değer ÜRETİLEMEZ (private
+        // fields; construction ikisini birlikte hesaplar).
+        let events = vec![
+            resume_event(2, 300, 42),
+            resume_event(1, 200, 42),
+            // Aynı actor'ün ikinci olayı wire'da zaten reddedilir; constructor
+            // yine de sorted+distinct üretir (defensive).
+            resume_event(3, 200, 42),
+        ];
+        let provenance = ResumeWitnessEvidenceProvenance::from_validated_evidence(&events);
+        assert_eq!(provenance.actors(), &[200, 300], "sorted + distinct actors");
+        assert_eq!(
+            *provenance.digest(),
+            ResumeWitnessEvidenceDigest::compute(&events),
+            "digest aynı diziden bağımsız hesapla"
+        );
     }
 
     #[test]

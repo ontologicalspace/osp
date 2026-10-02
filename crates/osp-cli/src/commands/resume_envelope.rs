@@ -33,9 +33,10 @@ pub struct CliResumeQuorumSnapshot {
 pub struct CliResumeResult {
     pub kind: CliResumeResultKind,
     pub witness: CliResumeQuorumSnapshot,
-    /// **R2 P1:** Değerlendirilen kanıt dizisinin digest'i (yalnız `applied` —
-    /// receipt ile aynı kaynak; kanıt dosyası değişse bile neyin quorum
-    /// sağladığı bu digest'ten kanıtlanır).
+    /// **R2/R3 P1:** Değerlendirilen kanıt dizisinin digest'i (yalnız `applied` —
+    /// motorun provenance değerinden; receipt ile aynı kaynak). **Commitment'tır**
+    /// (R3 P2): sonradan sunulan kanıt bu digest'le doğrulanır; içerik geri
+    /// çıkarılmaz.
     pub witness_evidence_digest: Option<String>,
 }
 
@@ -65,12 +66,12 @@ pub fn build_resume_envelope_v1(
     let (kind, witness, evidence_digest) = match outcome {
         ResumeHeldOutcome::Applied {
             snapshot,
-            witness_evidence_digest,
+            evidence_provenance,
             ..
         } => (
             CliResumeResultKind::Applied,
             clone_snapshot(snapshot),
-            Some(witness_evidence_digest.to_hex()),
+            Some(evidence_provenance.digest().to_hex()),
         ),
         ResumeHeldOutcome::StillHeld { snapshot, .. } => (
             CliResumeResultKind::StillHeld,
@@ -142,9 +143,10 @@ mod tests {
         let outcome = ResumeHeldOutcome::Applied {
             resulting_sequence: 1,
             snapshot: snapshot(),
-            witness_evidence_digest: osp_core::authorization::ResumeWitnessEvidenceDigest::compute(
-                &events,
-            ),
+            evidence_provenance:
+                osp_core::authorization::ResumeWitnessEvidenceProvenance::from_validated_evidence(
+                    &events,
+                ),
         };
         let envelope = build_resume_envelope_v1(
             &outcome,

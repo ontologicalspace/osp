@@ -1323,9 +1323,11 @@ pub enum ResumeHeldOutcome {
         resulting_sequence: u64,
         /// Quorum anlık görüntüsü (audit — kaç onay, hangi destek).
         snapshot: crate::witness::WitnessQuorumSnapshot,
-        /// **R2 P1:** Değerlendirilen kanıt dizisinin digest'i — quorum'u
-        /// sağlayan kanıtın receipt'e bağlanması için (authorization provenance).
-        witness_evidence_digest: crate::authorization::ResumeWitnessEvidenceDigest,
+        /// **R2/R3 P1:** Değerlendirilen kanıtın TEK provenance değeri (digest +
+        /// katılan actor'ler, aynı validated evidence'den) — quorum'u sağlayan
+        /// kanıtın receipt'e bağlanması için (authorization provenance; caller
+        /// digest/actors'ı ayrı ayrı veremez).
+        evidence_provenance: crate::authorization::ResumeWitnessEvidenceProvenance,
     },
     /// Quorum hâlâ yetersiz → uzay DOKUNULMADI; artifact geçerli kalır (exit 10).
     StillHeld {
@@ -1445,10 +1447,13 @@ impl SpaceEngine {
         }
 
         // 5. Claim rekonstrüksiyonu + quorum'u artifact'tan alan witness set +
-        //    değerlendirilen kanıtın digest'i (R2 P1 — receipt provenance).
+        //    değerlendirilen kanıtın TEK provenance değeri (R2/R3 P1 — digest
+        //    + actors aynı validated evidence'den, receipt'e oldukları gibi gider).
         let claim = crate::authorization::restore_claim_for_resume(basis);
-        let witness_evidence_digest =
-            crate::authorization::ResumeWitnessEvidenceDigest::compute(&evidence);
+        let evidence_provenance =
+            crate::authorization::ResumeWitnessEvidenceProvenance::from_validated_evidence(
+                &evidence,
+            );
         let omega = crate::witness::WitnessSet::new(evidence)
             .with_quorum(requirement.min_approvers, requirement.quorum_threshold);
 
@@ -1460,7 +1465,7 @@ impl SpaceEngine {
                 Ok(ResumeHeldOutcome::Applied {
                     resulting_sequence: self.t_c,
                     snapshot,
-                    witness_evidence_digest,
+                    evidence_provenance,
                 })
             }
             crate::witness::WitnessDisposition::Held { reason, snapshot } => {

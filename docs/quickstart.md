@@ -344,8 +344,10 @@ Outcomes: quorum met → recorded delta applied → exit `0` and a durable
 identity-keyed receipt (`<artifact-stem>.receipt.json`, addressed by
 task/claim/attempt/evidence-digest — resuming a *copy* of the artifact still
 finds it; binds the evidence-trust declaration, the evaluated-evidence digest
-and the witness actors) is written next to the canonical artifact; quorum
-still insufficient → exit `10` (artifact unchanged); explicit rejection →
+and the witness actors) is written next to the canonical artifact. That digest
+is a **commitment**: a later-presented evidence file can be checked against it
+("is this the same evidence?"), but the events themselves are not reconstructed
+from the receipt. Quorum still insufficient → exit `10` (artifact unchanged); explicit rejection →
 exit `11`. Fail-closed refusals: the space changed since suspension (or the
 artifact was already applied) → exit `15` — remeasure with a fresh attempt;
 evidence bound to a foreign claim or otherwise defective (author-self,
