@@ -1565,6 +1565,144 @@ fn production_resume_foreign_claim_evidence_exit_20() {
 }
 
 #[test]
+fn production_resume_defective_evidence_exit_20() {
+    // #164 R1 P1-2 — INV-T9 sözleşmesi: author-self / duplicate kanıt operational
+    // fault (exit 20); sessiz dışlama/dedup YOK. Author = navigator agent id 1.
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+
+    // (a) author-self: actor 1 (navigator agent) + geçerli witness.
+    let evidence = write_witness_evidence(&fx, claim_id, &[1, 200]);
+    let output = run_resume(&fx, &artifact, &evidence, "human");
+    assert_eq!(
+        output.status.code(),
+        Some(20),
+        "author-self evidence → exit 20. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("claim author"),
+        "stderr explains author-self rejection"
+    );
+
+    // (b) duplicate actor (aynı actor, farklı kaynak) — triple-dedup tek başına
+    // yakalamaz; yüzey doğrulaması reddeder.
+    let dup_path = fx.work_path().join("witnesses-dup.json");
+    let dup_events = serde_json::json!([
+        { "id": 1, "source": "PR#1", "witness_kind": "MergeCommit", "actor": 200, "claim": claim_id },
+        { "id": 2, "source": "commit-abc", "witness_kind": "MergeCommit", "actor": 200, "claim": claim_id },
+    ]);
+    fs::write(
+        &dup_path,
+        serde_json::to_string_pretty(&dup_events).unwrap(),
+    )
+    .expect("write dup evidence");
+    let output = run_resume(&fx, &artifact, &dup_path, "human");
+    assert_eq!(
+        output.status.code(),
+        Some(20),
+        "duplicate-actor evidence → exit 20. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("duplicate actor"),
+        "stderr explains duplicate-actor rejection"
+    );
+
+    assert!(
+        !artifact.with_extension("json.receipt.json").exists(),
+        "no receipt on defective evidence"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn production_resume_via_copied_artifact_still_blocked_after_apply() {
+    // #164 R1 P0-1 — receipt EVIDENCE IDENTITY'den adreslenir (caller path'inden
+    // DEĞİL): geçerli artifact'ı copy.json'a kopyala → oradan resume ET (uygular,
+    // receipt canonical adrese yazılır) → ORİJİNAL path'ten ikinci resume yine
+    // "already applied" ile reddedilir (çift-yetkilendirme kapalı).
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+    let copied = fx.work_path().join("copy.json");
+    fs::copy(&artifact, &copied).expect("copy artifact");
+
+    let evidence = write_witness_evidence(&fx, claim_id, &[200, 300]);
+
+    // Kopyadan ilk resume — uygular (exit 0); receipt kopyanın yanına DEĞİL
+    // canonical identity adresine yazılır.
+    let first = run_resume(&fx, &copied, &evidence, "human");
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "resume from copied artifact path applies. stderr={}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        !copied.with_extension("json.receipt.json").exists(),
+        "receipt must NOT be written next to the copied path"
+    );
+    assert!(
+        artifact.with_extension("json.receipt.json").exists(),
+        "receipt written at the canonical identity-keyed address"
+    );
+
+    // Orijinal path'ten ikinci resume → receipt bulunur → exit 15.
+    let second = run_resume(&fx, &artifact, &evidence, "human");
+    assert_eq!(
+        second.status.code(),
+        Some(15),
+        "resume via original path after copy-apply must be refused. stderr={}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("already applied"),
+        "stderr explains the refusal"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn production_resume_forged_receipt_fails_closed_exit_70() {
+    // #164 R1 P1-1 — parse-edilebilir-ama-sahte receipt "already applied"
+    // durumuna DÖNÜŞEMEZ: strict wire + identity doğrulaması → exit 70.
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+
+    // Sahte receipt: tip şekli doğru, schema + claim yabancı.
+    let receipt_path = artifact.with_extension("json.receipt.json");
+    let forged = serde_json::json!({
+        "schema": "osp.resume-receipt.v9",
+        "task_id": 1,
+        "claim_id": claim_id + 1000,
+        "attempt_num": 1,
+        "evidence_digest_hex": format!("{:064x}", 0),
+        "applied_at": 1,
+        "resulting_sequence": 1,
+    });
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&forged).unwrap(),
+    )
+    .expect("write forged receipt");
+
+    let evidence = write_witness_evidence(&fx, claim_id, &[200, 300]);
+    let output = run_resume(&fx, &artifact, &evidence, "human");
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "forged receipt must fail closed (not already-applied, not applied). stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("invalid"),
+        "stderr names the receipt integrity failure"
+    );
+    assert!(
+        !output.status.success(),
+        "forged receipt never yields a successful apply"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
 fn production_resume_stale_after_repo_change_exit_15() {
     // #164 staleness fence: askıdan sonra analyzed kapsam İÇERİĞİ değişirse
     // content digest değişir → remeasure gerekir → exit 15. Drift COMMIT'lenir

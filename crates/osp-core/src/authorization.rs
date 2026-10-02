@@ -9170,44 +9170,84 @@ impl FilesystemPendingAuthorizationStore {
     // Receipt, "bu artifact bu uzayda uygulandı" gerçeğini state-dir'e kalıcı
     // yazar; ikinci resume fail-closed reddedilir (çift-yetkilendirme yanılgısı
     // kapanır). Artifact dosyası silinmez/değiştirilmez — audit trail korunur.
+    //
+    // **R1 P0-1 — adres caller path'inden DEĞİL evidence identity'den türetilir:**
+    // receipt, `artifact_path()` ile AYNI türetimle (task+claim+attempt+digest)
+    // canonical olarak adreslenir. Geçerli artifact'ı `copy.json`'a kopyalayıp
+    // oradan resume etmek receipt'i kopyanın yanına yazamaz — identity aynı
+    // olduğundan canonical receipt bulunur → ikinci resume (hangi path'ten
+    // gelirse gelsin) "already applied" ile reddedilir.
     // ─────────────────────────────────────────────────────────────────────────
 
-    /// Resume receipt path'i — artifact'in kardeşi (`<name>.json` → `<name>.receipt.json`).
-    fn resume_receipt_path(&self, artifact_path: &std::path::Path) -> std::path::PathBuf {
-        let mut name = artifact_path
-            .file_name()
-            .map(|n| n.to_os_string())
-            .unwrap_or_default();
-        name.push(".receipt.json");
-        artifact_path.with_file_name(name)
+    /// Receipt path'i — artifact'ın **canonical** dosya adına `.receipt.json`
+    /// eklenerek türetilir (`task-{t}--claim-{c}--attempt-{n}--{digest}.json
+    /// .receipt.json`, canonical artifact'ın kardeşi). Caller'ın verdiği path'e
+    /// BAĞLI DEĞİL (R1 P0-1).
+    fn resume_receipt_path_for(&self, record: &PendingAuthorization) -> std::path::PathBuf {
+        let hex = record.evidence_digest.to_hex();
+        let filename = format!(
+            "task-{}--claim-{}--attempt-{}--{hex}.json.receipt.json",
+            record.task_id,
+            record.claim_id,
+            record.suspended_attempt_evidence.attempt_num().get()
+        );
+        self.root
+            .join(".osp")
+            .join("pending-authorizations")
+            .join(filename)
     }
 
-    /// Varolan resume receipt'i oku (`None` = henüz uygulanmamış).
+    /// Varolan resume receipt'i oku + record'a karşı DOĞRULA (`None` = uygulanmamış).
+    ///
+    /// **R1 P1-1:** yalnız parse edilmez — strict wire (`deny_unknown_fields`) +
+    /// `ResumeReceipt::verify_against(record)` (schema + kimlik alanları +
+    /// evidence digest) tek yüzeyde çalışır. Parse-edilebilir-ama-sahte receipt
+    /// ("already applied" mühürlenmesi) fail-closed `Invalid` olur.
     pub fn read_resume_receipt(
         &self,
-        artifact_path: &std::path::Path,
+        record: &PendingAuthorization,
     ) -> Result<Option<ResumeReceipt>, ResumeReceiptError> {
-        let path = self.resume_receipt_path(artifact_path);
+        let path = self.resume_receipt_path_for(record);
         if !path.exists() {
             return Ok(None);
         }
         let raw = std::fs::read(&path).map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
-        let receipt: ResumeReceipt =
-            serde_json::from_slice(&raw).map_err(|e| ResumeReceiptError::Invalid(e.to_string()))?;
+        let receipt = ResumeReceipt::from_strict_bytes(&raw)
+            .map_err(|e| ResumeReceiptError::Invalid(format!("{}: {e}", path.display())))?;
+        receipt
+            .verify_against(record)
+            .map_err(|e| ResumeReceiptError::Invalid(format!("{}: {e}", path.display())))?;
         Ok(Some(receipt))
     }
 
-    /// Resume receipt yaz — no-clobber (`create_new`): zaten varsa `AlreadyExists`
-    /// (çift-apply fail-closed). Crash penceresi: create_new başarılı + yazma
-    /// yarıda → bozuk receipt → sonraki resume `Invalid` ile reddedilir (yine
-    /// fail-closed; operator temizler).
+    /// Resume receipt yaz — no-clobber (`create_new`): zaten varsa io hatası
+    /// (çift-apply fail-closed). Receipt içeriği record'dan türetilir — caller
+    /// kimlik alanı veremez (drift yüzeyi kapalı). Crash penceresi: create_new
+    /// başarılı + yazma yarıda → bozuk receipt → sonraki resume strict parse ile
+    /// reddedilir (yine fail-closed; operator temizler).
     pub fn write_resume_receipt(
         &self,
-        artifact_path: &std::path::Path,
-        receipt: ResumeReceipt,
+        record: &PendingAuthorization,
+        applied_at: u64,
+        resulting_sequence: u64,
     ) -> Result<std::path::PathBuf, ResumeReceiptError> {
         use std::io::Write;
-        let path = self.resume_receipt_path(artifact_path);
+        let receipt = ResumeReceipt {
+            schema: RESUME_RECEIPT_SCHEMA.to_string(),
+            task_id: record.task_id,
+            claim_id: record.claim_id,
+            attempt_num: record.suspended_attempt_evidence.attempt_num().get(),
+            evidence_digest_hex: record.evidence_digest.to_hex(),
+            applied_at,
+            resulting_sequence,
+        };
+        let path = self.resume_receipt_path_for(record);
+        // Parent dizini garanti et (store kökü ilk kez kullanılıyor olabilir —
+        // artifact persist akışı dizini yaratmış olur ama receipt yazıcı
+        // kendine yeterli olmalı).
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        }
         let payload = serde_json::to_vec_pretty(&receipt)
             .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
         let mut file = std::fs::OpenOptions::new()
@@ -9228,17 +9268,21 @@ pub enum ResumeReceiptError {
     /// I/O (okuma/yazma/serialization).
     #[error("resume receipt I/O failed: {0}")]
     Io(String),
-    /// Receipt dosyası bozuk (parse/schema) — fail-closed, operator müdahalesi.
+    /// Receipt dosyası bozuk/sahte (parse/strict-wire/schema/identity) —
+    /// fail-closed, operator müdahalesi gerekir.
     #[error("resume receipt is invalid: {0}")]
     Invalid(String),
 }
 
-/// **#164:** Applied resume receipt — `<artifact>.receipt.json` içeriği.
+/// **#164 (R1 P0-1/P1-1):** Applied resume receipt — evidence identity'ye
+/// adresli kalıcı kayıt.
 ///
-/// Kimlik alanları artifact'la dosya-adı komşuluğuyla bağlanır (receipt,
-/// digest-adlı artifact'in kardeşidir); `evidence_digest` hex'i ek kanıt olarak
-/// taşınır. `resulting_sequence` = apply sonrası `t_c` (base.sequence + 1).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// Adres store'da identity'den türetilir (`task-{t}--claim-{c}--attempt-{n}
+/// --{digest}.receipt.json`); içerik `write_resume_receipt` tarafından record'dan
+/// kurulur, `read_resume_receipt` strict parse + `verify_against` ile doğrular —
+/// sahte/forged receipt "already applied" durumuna dönüşemez.
+/// `resulting_sequence` = apply sonrası `t_c` (base.sequence + 1).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ResumeReceipt {
     pub schema: String,
     pub task_id: crate::trajectory::TaskId,
@@ -9250,6 +9294,81 @@ pub struct ResumeReceipt {
     pub applied_at: u64,
     /// Apply sonrası space revision sequence (base + 1).
     pub resulting_sequence: u64,
+}
+
+/// **R1 P1-1:** Strict wire — `deny_unknown_fields` (forged-alan/rename reddi).
+impl<'de> serde::Deserialize<'de> for ResumeReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: String,
+            task_id: crate::trajectory::TaskId,
+            claim_id: ClaimId,
+            attempt_num: u64,
+            evidence_digest_hex: String,
+            applied_at: u64,
+            resulting_sequence: u64,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(ResumeReceipt {
+            schema: wire.schema,
+            task_id: wire.task_id,
+            claim_id: wire.claim_id,
+            attempt_num: wire.attempt_num,
+            evidence_digest_hex: wire.evidence_digest_hex,
+            applied_at: wire.applied_at,
+            resulting_sequence: wire.resulting_sequence,
+        })
+    }
+}
+
+impl ResumeReceipt {
+    /// Strict wire'dan kur (disk baytları → tip).
+    fn from_strict_bytes(raw: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(raw).map_err(|e| e.to_string())
+    }
+
+    /// **R1 P1-1:** Receipt'i askılı kayda karşı doğrula — tek doğrulama yüzeyi.
+    ///
+    /// Schema sabiti + kimlik üçlüsü (task/claim/attempt) + evidence digest hex'i
+    /// record ile eşit olmalı. Sapma = receipt başka bir askıya ait ya da forge
+    /// → `Err` (fail-closed; "already applied" olarak sayılmaz).
+    pub fn verify_against(&self, record: &PendingAuthorization) -> Result<(), String> {
+        if self.schema != RESUME_RECEIPT_SCHEMA {
+            return Err(format!(
+                "schema {:?} ≠ expected {:?}",
+                self.schema, RESUME_RECEIPT_SCHEMA
+            ));
+        }
+        if self.task_id != record.task_id {
+            return Err(format!(
+                "task_id {} ≠ artifact {}",
+                self.task_id, record.task_id
+            ));
+        }
+        if self.claim_id != record.claim_id {
+            return Err(format!(
+                "claim_id {} ≠ artifact {}",
+                self.claim_id, record.claim_id
+            ));
+        }
+        let artifact_attempt = record.suspended_attempt_evidence.attempt_num().get();
+        if self.attempt_num != artifact_attempt {
+            return Err(format!(
+                "attempt_num {} ≠ artifact {}",
+                self.attempt_num, artifact_attempt
+            ));
+        }
+        let expected_hex = record.evidence_digest.to_hex();
+        if self.evidence_digest_hex != expected_hex {
+            return Err("evidence_digest_hex does not match the artifact".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Resume receipt schema sabiti.
@@ -11786,15 +11905,9 @@ mod tests {
         let base = engine.current_space_view_revision().unwrap();
         let envelope = sample_envelope_with_base(base);
 
-        // Tek witness (author 100 dışlandı — kendisi) → 1 approver < 2 → StillHeld.
+        // Tek witness (1 approver < 2) → StillHeld — domain outcome, hata değil.
         let outcome = engine
-            .resume_held_authorization(
-                &envelope,
-                vec![
-                    resume_event(1, 100, 42), // author-self — dışlanır (inv #1)
-                    resume_event(2, 200, 42),
-                ],
-            )
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 42)])
             .expect("still-held is a domain outcome, not an error");
         assert!(matches!(
             outcome,
@@ -11808,6 +11921,68 @@ mod tests {
                 vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
             )
             .expect("space untouched after StillHeld → fresh resume applies");
+        assert!(matches!(
+            outcome,
+            crate::engine::ResumeHeldOutcome::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn resume_defective_evidence_is_operational_fault() {
+        // R1 P1-2: INV-T9 sözleşmesi — author-self / duplicate kanıt operational
+        // fault; sessiz dışlama/dedup YOK. Motor, değerlendirme ÖNCESİ reddeder.
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        // (a) author-self (author = 100).
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 100, 42), resume_event(2, 200, 42)],
+            )
+            .expect_err("author-self evidence must be rejected, not silently excluded");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::InvalidEvidence { .. }),
+            "got {err:?}"
+        );
+
+        // (b) Duplicate actor (200, iki kaynak) — triple-dedup tek başına
+        // yakalamaz; yüzey doğrulaması reddeder.
+        let mut dup_source = resume_event(2, 200, 42);
+        dup_source.source = "another-source".to_string();
+        let err = engine
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 42), dup_source])
+            .expect_err("duplicate-actor evidence must be rejected");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::InvalidEvidence { .. }),
+            "got {err:?}"
+        );
+
+        // (c) Aynı dedup anahtarı (source, actor, claim) iki kez — farklı id,
+        //     aynı içerik (inv #2 triple'i).
+        let same_key = crate::witness::EvidenceEvent::new(
+            2,
+            "s1",
+            crate::witness::WitnessKind::MergeCommit,
+            200,
+            42,
+        );
+        let err = engine
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 42), same_key])
+            .expect_err("duplicate-key evidence must be rejected");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::InvalidEvidence { .. }),
+            "got {err:?}"
+        );
+
+        // Uzay dokunulmadı → temiz kanıtla apply hâlâ çalışır.
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("clean evidence after rejections still applies");
         assert!(matches!(
             outcome,
             crate::engine::ResumeHeldOutcome::Applied { .. }
@@ -11899,43 +12074,112 @@ mod tests {
     }
 
     #[test]
-    fn resume_receipt_write_read_and_no_clobber() {
+    fn resume_receipt_identity_keyed_write_read_and_no_clobber() {
+        // R1 P0-1: receipt adresi CALLER PATH'inden değil record identity'den
+        // türetilir — artifact'ı başka path'e kopyalamak receipt'i kaçıramaz.
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = FilesystemPendingAuthorizationStore::new(tmp.path());
-        let artifact = tmp
-            .path()
-            .join("task-1--claim-42--attempt-1--deadbeef.json");
+        let record = sample_pending_record();
         assert_eq!(
-            store.read_resume_receipt(&artifact).unwrap(),
+            store.read_resume_receipt(&record).unwrap(),
             None,
             "no receipt yet"
         );
 
-        let receipt = ResumeReceipt {
-            schema: RESUME_RECEIPT_SCHEMA.to_string(),
-            task_id: 1,
-            claim_id: 42,
-            attempt_num: 1,
-            evidence_digest_hex: "ab".repeat(32),
-            applied_at: 1_700_000_000,
-            resulting_sequence: 1,
-        };
         let path = store
-            .write_resume_receipt(&artifact, receipt.clone())
+            .write_resume_receipt(&record, 1_700_000_000, 1)
             .expect("write receipt");
-        assert!(path
-            .to_string_lossy()
-            .contains("deadbeef.json.receipt.json"));
-        assert_eq!(
-            store.read_resume_receipt(&artifact).unwrap().as_ref(),
-            Some(&receipt),
-            "round-trip"
-        );
+        // Adres canonical artifact kimliğiyle aynı kökte, digest-adlı:
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(filename.starts_with("task-1--claim-42--attempt-1--"));
+        assert!(filename.ends_with(".receipt.json"));
+
+        let read = store
+            .read_resume_receipt(&record)
+            .unwrap()
+            .expect("round-trip");
+        assert_eq!(read.task_id, record.task_id);
+        assert_eq!(read.claim_id, record.claim_id);
+        assert_eq!(read.resulting_sequence, 1);
 
         // No-clobber — ikinci yazma fail-closed (çift-apply yanılgısı).
         store
-            .write_resume_receipt(&artifact, receipt)
+            .write_resume_receipt(&record, 1_700_000_001, 2)
             .expect_err("second write must fail (create_new no-clobber)");
+    }
+
+    #[test]
+    fn resume_receipt_forged_variants_fail_closed() {
+        // R1 P1-1: parse-edilebilir-ama-sahte receipt "already applied" durumuna
+        // DÖNÜŞEMEZ — strict wire + verify_against(record) her varyantta reddeder.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FilesystemPendingAuthorizationStore::new(tmp.path());
+        let record = sample_pending_record();
+        let receipt_path = store.resume_receipt_path_for(&record);
+        std::fs::create_dir_all(receipt_path.parent().unwrap()).expect("receipt parent dir");
+        let write_raw = |json: String| std::fs::write(&receipt_path, json).expect("write forged");
+        let digest_hex = record.evidence_digest.to_hex();
+
+        // (a) Yanlış schema — tip şekli doğru, schema değil.
+        write_raw(
+            serde_json::json!({
+                "schema": "osp.resume-receipt.v9",
+                "task_id": 1, "claim_id": 42, "attempt_num": 1,
+                "evidence_digest_hex": digest_hex,
+                "applied_at": 1, "resulting_sequence": 1,
+            })
+            .to_string(),
+        );
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("wrong schema rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (b) Yabancı identity — başka askının receipt'i (claim uyuşmaz).
+        write_raw(
+            serde_json::json!({
+                "schema": RESUME_RECEIPT_SCHEMA,
+                "task_id": 1, "claim_id": 999, "attempt_num": 1,
+                "evidence_digest_hex": digest_hex,
+                "applied_at": 1, "resulting_sequence": 1,
+            })
+            .to_string(),
+        );
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("foreign identity rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (c) Evidence digest uyuşmazlığı.
+        write_raw(
+            serde_json::json!({
+                "schema": RESUME_RECEIPT_SCHEMA,
+                "task_id": 1, "claim_id": 42, "attempt_num": 1,
+                "evidence_digest_hex": "ff".repeat(32),
+                "applied_at": 1, "resulting_sequence": 1,
+            })
+            .to_string(),
+        );
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("digest mismatch rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (d) Strict wire — unknown alan reject (forged-alan enjeksiyonu).
+        write_raw(
+            serde_json::json!({
+                "schema": RESUME_RECEIPT_SCHEMA,
+                "task_id": 1, "claim_id": 42, "attempt_num": 1,
+                "evidence_digest_hex": digest_hex,
+                "applied_at": 1, "resulting_sequence": 1,
+                "extra_field": true,
+            })
+            .to_string(),
+        );
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("unknown field rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
     }
 
     #[test]

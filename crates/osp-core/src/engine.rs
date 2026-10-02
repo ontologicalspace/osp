@@ -1360,6 +1360,11 @@ pub enum ResumeHeldError {
         evidence_claim: u64,
         artifact_claim: u64,
     },
+    /// **R1 P1-2:** Kanıt dosyası kusurlu (author-self / duplicate key / duplicate
+    /// actor / duplicate id) — INV-T9 operational fault (`InvalidWitnessEvidence`
+    /// sınıfının ilk production üreticisi). Terminal; exit 20.
+    #[error("invalid witness evidence: {detail}")]
+    InvalidEvidence { detail: String },
 }
 
 impl SpaceEngine {
@@ -1369,19 +1374,22 @@ impl SpaceEngine {
     /// 1. **Claim binding:** her kanıt olayı artifact'ın `claim_id`'sine bağlı
     ///    olmalı (`canonicalize_for` claim'e göre FİLTRELEMEZ — resume yüzeyinde
     ///    yabancı kanıtla yetkilendirme burada kapanır).
-    /// 2. **Identity fence:** artifact base `view_id` == motorun bağlı identity'si.
-    /// 3. **Staleness fence:** `current_space_view_revision() == base` ("current
+    /// 2. **Kanıt yüzey doğrulaması (R1 P1-2):** author-self / duplicate kanıt
+    ///    operational fault — sessiz dışlama/dedup YOK (INV-T9 sözleşmesi).
+    /// 3. **Identity fence:** artifact base `view_id` == motorun bağlı identity'si.
+    /// 4. **Staleness fence:** `current_space_view_revision() == base` ("current
     ///    == base → devam; != → remeasure" — SpaceViewRevision sözleşmesi).
-    /// 4. Claim rekonstrüksiyonu (`restore_claim_for_resume`) + quorum'u
+    /// 5. Claim rekonstrüksiyonu (`restore_claim_for_resume`) + quorum'u
     ///    artifact'ın `witness_policy`'sinden alan `WitnessSet` kurulumu.
-    /// 5. `time.advance` — Satisfied ise kayıtlı delta uygulanır + `t_c += 1`;
+    /// 6. `time.advance` — Satisfied ise kayıtlı delta uygulanır + `t_c += 1`;
     ///    Held/Rejected uzayı dokunmaz.
     ///
     /// **Quorum düşürülemez:** quorum parametreleri basis'ten (digest-korumalı)
     /// gelir; caller yalnız ham kanıt olayları verir.
     ///
     /// **Çift-apply:** bu metodun kendisi process-inner'dır; kalıcı idempotency
-    /// çağıran tarafın receipt yazmasıyla kurulur (CLI: `<artifact>.receipt.json`).
+    /// çağıran tarafın receipt yazmasıyla kurulur (CLI: identity-keyed receipt,
+    /// `<state-dir>/.osp/pending-authorizations/` altında canonical adres).
     pub fn resume_held_authorization(
         &mut self,
         envelope: &crate::authorization::PendingAuthorizationEnvelope,
@@ -1402,8 +1410,15 @@ impl SpaceEngine {
             }
         }
 
-        // 2+3. Fences — önce identity, sonra içerik tazelik. Quorum parametreleri
-        //     basis'ten (digest-korumalı — operator düşüremez).
+        // 2. Kanıt yüzey doğrulaması — INV-T9 operational fault sözleşmesi.
+        crate::witness::validate_external_evidence(&evidence, basis.claim_author).map_err(|e| {
+            ResumeHeldError::InvalidEvidence {
+                detail: e.to_string(),
+            }
+        })?;
+
+        // 3+4. Fences — önce identity, sonra içerik tazelik. Quorum parametreleri
+        //      basis'ten (digest-korumalı — operator düşüremez).
         let requirement = basis.witness_policy.effective_requirement();
         let current =
             self.current_space_view_revision()
@@ -1426,12 +1441,12 @@ impl SpaceEngine {
             });
         }
 
-        // 4. Claim rekonstrüksiyonu + quorum'u artifact'tan alan witness set.
+        // 5. Claim rekonstrüksiyonu + quorum'u artifact'tan alan witness set.
         let claim = crate::authorization::restore_claim_for_resume(basis);
         let omega = crate::witness::WitnessSet::new(evidence)
             .with_quorum(requirement.min_approvers, requirement.quorum_threshold);
 
-        // 5. Değerlendir + (Satisfied ise) uygula.
+        // 6. Değerlendir + (Satisfied ise) uygula.
         let disposition = self.time.advance(&mut self.space, &claim, &omega);
         match disposition {
             crate::witness::WitnessDisposition::Satisfied { snapshot, .. } => {

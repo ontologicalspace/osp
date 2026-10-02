@@ -318,17 +318,21 @@ osp trajectory resume <state-dir>/.osp/pending-authorizations/task-...json \
 `witnesses.json` is a strict-wire array of evidence events
 (`{ "id", "source", "witness_kind", "actor", "claim" }`). The event weight is
 derived from `witness_kind` (operators cannot pick weights); every event's
-`claim` must match the artifact's claim id; the author's own evidence is
-excluded (inv #1). Quorum parameters come **from the artifact** — they cannot
-be lowered at resume time.
+`claim` must match the artifact's claim id. A defective evidence file is an
+operational fault (exit 20): the author witnessing their own claim, duplicate
+events, or one actor contributing multiple events are all rejected up front —
+nothing is silently excluded or deduplicated on this wire. Quorum parameters
+come **from the artifact** — they cannot be lowered at resume time.
 
 Outcomes: quorum met → recorded delta applied → exit `0` and a durable
-`<artifact>.receipt.json` is written next to the artifact; quorum still
-insufficient → exit `10` (artifact unchanged); explicit rejection → exit `11`.
-Fail-closed refusals: the space changed since suspension (or the artifact was
-already applied) → exit `15` — remeasure with a fresh attempt; evidence bound
-to a foreign claim → exit `20`; artifact/identity integrity failures → exit
-`70`.
+identity-keyed receipt (`<artifact-stem>.receipt.json`, addressed by
+task/claim/attempt/evidence-digest — resuming a *copy* of the artifact still
+finds it) is written next to the canonical artifact; quorum still insufficient
+→ exit `10` (artifact unchanged); explicit rejection → exit `11`. Fail-closed
+refusals: the space changed since suspension (or the artifact was already
+applied) → exit `15` — remeasure with a fresh attempt; evidence bound to a
+foreign claim or otherwise defective (author-self, duplicates) → exit `20`;
+receipt/artifact/identity integrity failures → exit `70`.
 
 ---
 

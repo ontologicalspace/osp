@@ -230,8 +230,9 @@ pub struct TrajectoryResumeArgs {
     /// Witness kanıt dosyası — `EvidenceEvent` JSON dizisi (strict wire):
     /// `[{ "id", "source", "witness_kind", "actor", "claim" }, …]`.
     /// Ağırlık `witness_kind`'dan türetilir (operator ağırlık SEÇEMEZ); her olayın
-    /// `claim`'i artifact'ın claim'idine bağlı olmalı; author'un kendi kanıtı
-    /// değerlendirmede dışlanır (inv #1).
+    /// `claim`'i artifact'ın claim'idine bağlı olmalı. Kusurlu kanıt dosyası
+    /// operational fault ile reddedilir (INV-T9 sözleşmesi): author'un kendi
+    /// kanıtı, duplicate olay/actor/id → exit 20.
     #[arg(long)]
     pub witness_evidence: PathBuf,
     /// Runtime state directory — attempt ile AYNI kök olmalı (identity + artifact
@@ -825,6 +826,14 @@ fn load_witness_evidence(
 
 /// `osp trajectory resume <artifact>` — #164 resume akışı (run_trajectory_attempt
 /// mirror'ı: aynı state-dir fence ailesi + analyzed-scope clean fence'ler).
+///
+/// **Sıra sözleşmesi (R1 P0-2):** TÜM fallible doğruluk fence'leri (artifact
+/// integrity, receipt idempotency, identity, kanıt doğrulaması, snapshot/analyze,
+/// analyzed-scope tracked+clean, post-capture drift) kalıcı etkidEN ÖNCE
+/// tamamlanır. Kalıcı etki = engine apply + receipt yazımı (commit/finalization);
+/// sonrasında yalnız çıktı + exit kalır. receipt diske yazıldıktan sonra hiçbir
+/// doğruluk kontrolü hata veremez — başarısız bir run "Applied" olarak
+/// mühürlenmesi bu sırayla imkânsız.
 pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
     use osp_core::coords::{CoordinateSystem, MetricSource};
@@ -838,26 +847,50 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     )?;
     let store = osp_core::authorization::FilesystemPendingAuthorizationStore::new(&state_dir);
 
-    // 0. Applied-idempotency fence: receipt varsa bu artifact zaten uygulanmış —
-    //    çift-yetkilendirme fail-closed (exit 15, artifact'a dokunulmaz).
-    if let Some(receipt) = store
-        .read_resume_receipt(&args.artifact)
-        .map_err(|e| anyhow::anyhow!("resume receipt read failed: {e}"))?
-    {
-        eprintln!(
-            "✗ Resume refused: artifact already applied at unix {} \
-             (task {} / claim {} / attempt {} → sequence {}). \
-             A second authorization of the same suspension is not a new event.",
-            receipt.applied_at,
-            receipt.task_id,
-            receipt.claim_id,
-            receipt.attempt_num,
-            receipt.resulting_sequence
-        );
-        std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+    // 1. Artifact yükle + verify (11-adım zincir) — integrity hatası → 70.
+    //    Receipt identity-keyed olduğundan (R1 P0-1) önce record gerekir.
+    let envelope = match osp_core::authorization::load_pending_authorization(&args.artifact) {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            eprintln!(
+                "✗ System failure: pending authorization artifact {}: {e}",
+                args.artifact.display()
+            );
+            std::process::exit(exit_codes::SYSTEM_FAILURE);
+        }
+    };
+    let record = envelope.record();
+
+    // 2. Applied-idempotency fence (R1 P0-1/P1-1): receipt EVIDENCE IDENTITY'den
+    //    adreslenir (record'dan türetilir — caller path'i değil) ve strict parse +
+    //    verify_against ile doğrulanır. Artifact'ı başka path'ten sunmak (copy/
+    //    rename) receipt'i kaçıramaz; sahte/bozuk receipt → 70.
+    match store.read_resume_receipt(record) {
+        Ok(Some(receipt)) => {
+            eprintln!(
+                "✗ Resume refused: artifact already applied at unix {} \
+                 (task {} / claim {} / attempt {} → sequence {}). \
+                 A second authorization of the same suspension is not a new event.",
+                receipt.applied_at,
+                receipt.task_id,
+                receipt.claim_id,
+                receipt.attempt_num,
+                receipt.resulting_sequence
+            );
+            std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "✗ System failure: resume receipt is unreadable/invalid — resolve \
+                 manually before resuming (do not delete blindly; the receipt is the \
+                 durable record of an apply): {e}"
+            );
+            std::process::exit(exit_codes::SYSTEM_FAILURE);
+        }
     }
 
-    // 1. Identity — LOAD-ONLY (resume yaratmaz; attempt'in yazdığı identity gerek).
+    // 3. Identity — LOAD-ONLY (resume yaratmaz; attempt'in yazdığı identity gerek).
     let space_view_id =
         match osp_core::authorization::PersistedSpaceViewId::load_existing(&state_dir) {
             Ok(id) => id,
@@ -871,7 +904,16 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             }
         };
 
-    // 2. Snapshot + analyze + analyzed-scope fence'ler (attempt ile aynı).
+    // 4. Witness kanıtı — strict wire parse; → 20 (operational fault).
+    let evidence = match load_witness_evidence(&args.witness_evidence) {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("✗ Witness evaluation error: {e}");
+            std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
+        }
+    };
+
+    // 5. Snapshot + analyze + analyzed-scope fence'ler (attempt ile aynı).
     let snapshot_before =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
     let registry = AdapterRegistry::default_all();
@@ -886,7 +928,7 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
-    // 3. Engine — attempt ile BİREBİR aynı kurulum (farklı kurulum farklı digest
+    // 6. Engine — attempt ile BİREBİR aynı kurulum (farklı kurulum farklı digest
     //    üretirdi → staleness fence yanlış tetiklenirdi).
     let cs = CoordinateSystem::default_raw_five(
         MetricSource::TreeSitter,
@@ -903,29 +945,20 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     )?
     .with_persisted_view_id(space_view_id)?;
 
-    // 4. Artifact yükle + verify (11-adım zincir) — integrity hatası → 70.
-    let envelope = match osp_core::authorization::load_pending_authorization(&args.artifact) {
-        Ok(envelope) => envelope,
-        Err(e) => {
-            eprintln!(
-                "✗ System failure: pending authorization artifact {}: {e}",
-                args.artifact.display()
-            );
-            std::process::exit(exit_codes::SYSTEM_FAILURE);
-        }
-    };
-    let record = envelope.record();
+    // 7. Post-capture drift fence — SON doğruluk fence'i (R1 P0-2). Resume repo
+    //    dokunmaz; pre/post eşitliği analiz penceresinde dış drift olmadığını
+    //    kanıtlar. Bu noktadan sonra fallible doğruluk kontrolü YOKTUR — yalnız
+    //    commit (apply + receipt) + raporlama kalır.
+    let snapshot_after =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+    repo_snapshot::validate_post_attempt_snapshot(
+        &snapshot_before,
+        &snapshot_after,
+        &result.node_paths,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
-    // 5. Witness kanıtı — strict wire; parse/red → 20 (operational fault).
-    let evidence = match load_witness_evidence(&args.witness_evidence) {
-        Ok(events) => events,
-        Err(e) => {
-            eprintln!("✗ Witness evaluation error: {e}");
-            std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
-        }
-    };
-
-    // 6. Resume — fence'ler (identity/staleness) + witness değerlendirme + apply.
+    // 8. Commit — fence'ler + witness değerlendirme + apply (tek atomik motor adımı).
     let outcome = match engine.resume_held_authorization(&envelope, evidence) {
         Ok(outcome) => outcome,
         Err(osp_core::engine::ResumeHeldError::ClaimBindingMismatch {
@@ -937,6 +970,13 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
                 "✗ Witness evaluation error: evidence event {event_id} witnesses claim \
                  {evidence_claim} but the artifact suspends claim {artifact_claim} — \
                  foreign-claim evidence cannot authorize this suspension"
+            );
+            std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
+        }
+        Err(osp_core::engine::ResumeHeldError::InvalidEvidence { detail }) => {
+            eprintln!(
+                "✗ Witness evaluation error: {detail} — fix the evidence file \
+                 (one event per witness; the author cannot witness their own claim)"
             );
             std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
         }
@@ -964,24 +1004,17 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         }
     };
 
-    // 7. Applied ise kalıcı receipt (idempotency) — yazılamazsa dürüst 70.
+    // 9. Applied ise kalıcı receipt (idempotency) — yazılamazsa dürüst 70.
+    //    İçerik record'dan türetilir; adres identity-keyed (R1 P0-1).
     if let osp_core::engine::ResumeHeldOutcome::Applied {
         resulting_sequence, ..
     } = &outcome
     {
-        let receipt = osp_core::authorization::ResumeReceipt {
-            schema: osp_core::authorization::RESUME_RECEIPT_SCHEMA.to_string(),
-            task_id: record.task_id,
-            claim_id: record.claim_id,
-            attempt_num: record.attempt_num.get(),
-            evidence_digest_hex: record.evidence_digest.to_hex(),
-            applied_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-            resulting_sequence: *resulting_sequence,
-        };
-        if let Err(e) = store.write_resume_receipt(&args.artifact, receipt) {
+        let applied_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if let Err(e) = store.write_resume_receipt(record, applied_at, *resulting_sequence) {
             eprintln!(
                 "✗ System failure: mutation applied in-engine (sequence \
                  {resulting_sequence}) but resume receipt persistence failed: {e} — \
@@ -992,7 +1025,7 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         }
     }
 
-    // 8. Çıktı — human (default) veya json (stdout yalnız JSON).
+    // 10. Rapor + exit (doğruluk fence'i YOK — yalnız çıktı).
     let is_json = args.format.eq_ignore_ascii_case("json");
     if is_json {
         let envelope_json = resume_envelope::build_resume_envelope_v1(
@@ -1006,16 +1039,6 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     } else {
         print_human_resume_result(&outcome, record.task_id, record.claim_id);
     }
-
-    // 9. Post-capture drift fence — resume repo'yu dokunmaz; kanıtla.
-    let snapshot_after =
-        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    repo_snapshot::validate_post_attempt_snapshot(
-        &snapshot_before,
-        &snapshot_after,
-        &result.node_paths,
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
 
     let exit_code = match &outcome {
         osp_core::engine::ResumeHeldOutcome::Applied { .. } => exit_codes::COMPLETED,

@@ -578,6 +578,92 @@ mod tests {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // #164 (R1 P2) — structural ailesi exhaustive round-trip matrix testleri.
+    //
+    // Reverse From'lar `match tag.as_u8()` + `unreachable!` deseni taşıdığından
+    // yeni varyantta compiler exhaustiveness YARDIM ETMEZ — bu matrix testleri
+    // restore boundary'yi sabitler: domain → canonical → domain == original,
+    // TAM varyant seti üzerinden. Domain'e varyant eklenirse forward TryFrom
+    // exhaustiveness'i yakalar; bu testler de eksik/yanlış reverse eşlemeyi.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn canonical_node_kind_round_trips_through_domain() {
+        let cases = [
+            NodeKind::Module,
+            NodeKind::Concept,
+            NodeKind::Feature,
+            NodeKind::Bug,
+            NodeKind::Rule,
+            NodeKind::Agent,
+            NodeKind::Intent,
+            NodeKind::Claim,
+            NodeKind::Witness,
+        ];
+        for kind in cases {
+            let tag = CanonicalNodeKind::try_from(&kind).unwrap();
+            let restored: NodeKind = tag.into();
+            assert_eq!(restored, kind, "round-trip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_edge_kind_round_trips_through_domain() {
+        let cases = [
+            EdgeKind::Imports,
+            EdgeKind::Calls,
+            EdgeKind::DependsOn,
+            EdgeKind::PartOf,
+            EdgeKind::DerivesFrom,
+            EdgeKind::Witnesses,
+            EdgeKind::Approves,
+            EdgeKind::Violates,
+        ];
+        for kind in cases {
+            let tag = CanonicalEdgeKind::try_from(&kind).unwrap();
+            let restored: EdgeKind = tag.into();
+            assert_eq!(restored, kind, "round-trip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_node_classification_round_trips_through_domain() {
+        let cases = [
+            NodeClassification::Production,
+            NodeClassification::Test,
+            NodeClassification::Fixture,
+            NodeClassification::Migration,
+            NodeClassification::Config,
+            NodeClassification::Script,
+            NodeClassification::Generated,
+            NodeClassification::Documentation,
+            NodeClassification::Unknown,
+        ];
+        for cls in cases {
+            let tag = CanonicalNodeClassification::try_from(&cls).unwrap();
+            let restored: NodeClassification = tag.into();
+            assert_eq!(restored, cls, "round-trip failed for {cls:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_node_role_round_trips_through_domain() {
+        let cases = [
+            NodeRole::TypeSurface,
+            NodeRole::Core,
+            NodeRole::Adapter,
+            NodeRole::Utility,
+            NodeRole::Runtime,
+            NodeRole::Support,
+        ];
+        for role in cases {
+            let tag = CanonicalNodeRole::try_from(&role).unwrap();
+            let restored: NodeRole = tag.into();
+            assert_eq!(restored, role, "round-trip failed for {role:?}");
+        }
+    }
+
     #[test]
     fn predicate_axis_tag_maps_all_domain_variants() {
         let cases = [
