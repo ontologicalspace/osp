@@ -1439,10 +1439,20 @@ fn run_resume(
     evidence: &std::path::Path,
     format: &str,
 ) -> std::process::Output {
+    run_resume_opt(fx, artifact, evidence, format, true)
+}
+
+/// `with_trust = false` → `--evidence-trust` beyanı verilmez (R2 P0 testi).
+fn run_resume_opt(
+    fx: &HarnessFixture,
+    artifact: &std::path::Path,
+    evidence: &std::path::Path,
+    format: &str,
+    with_trust: bool,
+) -> std::process::Output {
     let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    Command::cargo_bin("osp")
-        .expect("osp binary")
-        .current_dir(fx.work_path())
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    cmd.current_dir(fx.work_path())
         .arg("trajectory")
         .arg("resume")
         .arg(artifact)
@@ -1452,9 +1462,11 @@ fn run_resume(
         .arg(evidence)
         .arg("--state-dir")
         .arg(fx.work_path())
-        .args(["--format", format])
-        .output()
-        .expect("run osp resume")
+        .args(["--format", format]);
+    if with_trust {
+        cmd.args(["--evidence-trust", "operator-asserted"]);
+    }
+    cmd.output().expect("run osp resume")
 }
 
 #[test]
@@ -1477,8 +1489,10 @@ fn production_resume_applies_with_two_witnesses() {
     assert_eq!(v["schema_version"], 1);
     assert_eq!(v["result"]["kind"], "applied");
     assert_eq!(v["result"]["witness"]["approvers"], 2);
+    assert_eq!(v["evidence_trust"], "operator_asserted");
 
-    // Kalıcı receipt — artifact kardeşi.
+    // Kalıcı receipt — artifact kardeşi. R2 P1: kanıt bağlama alanları
+    // (trust beyanı + kanıt digest'i + actor listesi) envelope ile aynı kaynak.
     let receipt_path = artifact.with_extension("json.receipt.json");
     let receipt_raw =
         fs::read_to_string(&receipt_path).expect("resume receipt persisted next to artifact");
@@ -1486,7 +1500,46 @@ fn production_resume_applies_with_two_witnesses() {
     assert_eq!(receipt["schema"], "osp.resume-receipt.v1");
     assert_eq!(receipt["claim_id"].as_u64(), Some(claim_id));
     assert_eq!(receipt["resulting_sequence"].as_u64(), Some(1));
+    assert_eq!(receipt["evidence_trust"], "operator_asserted");
+    assert_eq!(receipt["witness_actors"], serde_json::json!([200, 300]));
+    assert_eq!(
+        receipt["witness_evidence_digest_hex"], v["result"]["witness_evidence_digest"],
+        "receipt binds the same evaluated-evidence digest the envelope reported"
+    );
+    assert_eq!(
+        receipt["witness_evidence_digest_hex"]
+            .as_str()
+            .unwrap()
+            .len(),
+        64
+    );
 
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn production_resume_requires_explicit_evidence_trust_declaration() {
+    // R2 P0: raw JSON doğrudan production authorization sağlayamaz — güven
+    // sınırı beyanı (--evidence-trust) ZORUNLU; beyansız çağrı clap red
+    // (exit 2), hiçbir iş yapılmadan.
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+    let evidence = write_witness_evidence(&fx, claim_id, &[200, 300]);
+
+    let output = run_resume_opt(&fx, &artifact, &evidence, "human", false);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "missing --evidence-trust → clap usage error. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--evidence-trust"),
+        "stderr names the required trust declaration"
+    );
+    assert!(
+        !artifact.with_extension("json.receipt.json").exists(),
+        "no receipt without the trust declaration"
+    );
     fx.assert_repo_clean();
 }
 
@@ -1507,6 +1560,10 @@ fn production_resume_insufficient_witnesses_still_held() {
     assert!(
         stdout.contains("Still awaiting witnesses"),
         "human output explains hold: {stdout}"
+    );
+    assert!(
+        stdout.contains("does NOT accumulate"),
+        "R2 P2: message states non-accumulation semantics: {stdout}"
     );
     assert!(
         !artifact.with_extension("json.receipt.json").exists(),
@@ -1666,7 +1723,8 @@ fn production_resume_forged_receipt_fails_closed_exit_70() {
     // durumuna DÖNÜŞEMEZ: strict wire + identity doğrulaması → exit 70.
     let (fx, artifact, claim_id) = suspend_and_locate_artifact();
 
-    // Sahte receipt: tip şekli doğru, schema + claim yabancı.
+    // Sahte receipt: tip şekli doğru (yeni kanıt alanları dahil), schema +
+    // claim yabancı — red verify katmanından gelmeli (wire'dan değil).
     let receipt_path = artifact.with_extension("json.receipt.json");
     let forged = serde_json::json!({
         "schema": "osp.resume-receipt.v9",
@@ -1676,6 +1734,9 @@ fn production_resume_forged_receipt_fails_closed_exit_70() {
         "evidence_digest_hex": format!("{:064x}", 0),
         "applied_at": 1,
         "resulting_sequence": 1,
+        "evidence_trust": "operator_asserted",
+        "witness_evidence_digest_hex": "ab".repeat(32),
+        "witness_actors": [200, 300],
     });
     fs::write(
         &receipt_path,

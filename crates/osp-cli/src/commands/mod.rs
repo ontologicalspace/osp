@@ -214,6 +214,29 @@ pub struct TrajectoryAttemptArgs {
     pub state_dir: Option<PathBuf>,
 }
 
+/// **#164 R2 P0:** Kanıt güven sınırı modu — resume'un kanıt kaynağına dair AÇIK
+/// beyan. Zorunlu (default YOK): raw JSON'un sessizce production authorization
+/// sağlaması engellenir; operator kefaleti kalıcı receipt'e yazılır.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum CliEvidenceTrustMode {
+    /// Operator, kanıt dosyasındaki olayların gerçekliğine (actor kimliğinin
+    /// doğru olduğu, olay tipinin/kaynağın gerçeği yansıttığı) kefildir —
+    /// OSP dış doğrulama YAPMAZ (Paper 1 A1 provider-doğrulaması gelecek
+    /// yüzey). Wire yalnız yapısal kusurları reddeder; `witness_kind`'ın
+    /// ağırlığı belirlediği DİKKATE ALINIR — kefalet dolaylı ağırlık
+    /// seçimini de kapsar. Beyan receipt'e `operator_asserted` olarak yazılır.
+    OperatorAsserted,
+}
+
+impl CliEvidenceTrustMode {
+    /// Core wire değerine projekte.
+    pub fn to_core(self) -> osp_core::authorization::EvidenceTrustMode {
+        match self {
+            Self::OperatorAsserted => osp_core::authorization::EvidenceTrustMode::OperatorAsserted,
+        }
+    }
+}
+
 /// `osp trajectory resume <artifact>` — #164: askılı (exit 10 / AwaitingWitnesses)
 /// görevin kalıcı pending-authorization artifact'ından sürdürülmesi.
 ///
@@ -229,12 +252,21 @@ pub struct TrajectoryResumeArgs {
     pub repo: PathBuf,
     /// Witness kanıt dosyası — `EvidenceEvent` JSON dizisi (strict wire):
     /// `[{ "id", "source", "witness_kind", "actor", "claim" }, …]`.
-    /// Ağırlık `witness_kind`'dan türetilir (operator ağırlık SEÇEMEZ); her olayın
-    /// `claim`'i artifact'ın claim'idine bağlı olmalı. Kusurlu kanıt dosyası
-    /// operational fault ile reddedilir (INV-T9 sözleşmesi): author'un kendi
-    /// kanıtı, duplicate olay/actor/id → exit 20.
+    /// Ağırlık `witness_kind`'ın kalibre değerinden türetilir — ancak `witness_kind`
+    /// caller tarafından SEÇİLDİĞİ için ağırlık dolaylı olarak seçilebilir; bu
+    /// yüzden dosyanın gerçekliği `--evidence-trust` beyanına tabidir (OSP olayın
+    /// gerçekle uyumunu DOĞRULAMAZ). Her olayın `claim`'i artifact'ın claim'idine
+    /// bağlı olmalı. Kusurlu kanıt operational fault ile reddedilir (INV-T9):
+    /// author'un kendi kanıtı, duplicate olay/actor/id → exit 20.
+    /// KANIT BİRİKMESİ YOKTUR — her resume YALNIZ dosyadaki olayları değerlendirir;
+    /// önceki resume'un kanıtı eklenmez (tam set yeniden verilir).
     #[arg(long)]
     pub witness_evidence: PathBuf,
+    /// Kanıt güven sınırı beyanı (ZORUNLU — varsayılan yok). `operator-asserted`:
+    /// dosyadaki olayların gerçekliğine operator kefildir; beyan receipt'e kalıcı
+    /// yazılır. OSP-verified kanıt yüzeyi henüz yok (Paper 1 A1 follow-up).
+    #[arg(long, value_enum)]
+    pub evidence_trust: CliEvidenceTrustMode,
     /// Runtime state directory — attempt ile AYNI kök olmalı (identity + artifact
     /// orada yaşar). Farklı state-dir → farklı identity → fail-closed red.
     /// Attempt ile aynı fence ailesi: analyzed repo DIŞINDA.
@@ -905,6 +937,8 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         };
 
     // 4. Witness kanıtı — strict wire parse; → 20 (operational fault).
+    //    Katılan actor'leri ŞİMDİ topla (evidence motora move edilir — R2 P1
+    //    receipt provenance).
     let evidence = match load_witness_evidence(&args.witness_evidence) {
         Ok(events) => events,
         Err(e) => {
@@ -912,6 +946,9 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
         }
     };
+    let mut witness_actors: Vec<u64> = evidence.iter().map(|e| e.actor).collect();
+    witness_actors.sort_unstable();
+    witness_actors.dedup();
 
     // 5. Snapshot + analyze + analyzed-scope fence'ler (attempt ile aynı).
     let snapshot_before =
@@ -1004,17 +1041,29 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         }
     };
 
-    // 9. Applied ise kalıcı receipt (idempotency) — yazılamazsa dürüst 70.
-    //    İçerik record'dan türetilir; adres identity-keyed (R1 P0-1).
+    // 9. Applied ise kalıcı receipt (idempotency + kanıt provenance) — yazılamazsa
+    //    dürüst 70. Askı kimliği record'dan, kanıt bağlaması motorun digest'inden
+    //    (R2 P1), güven beyanı operator'ın --evidence-trust flag'inden (R2 P0);
+    //    adres identity-keyed (R1 P0-1).
     if let osp_core::engine::ResumeHeldOutcome::Applied {
-        resulting_sequence, ..
+        resulting_sequence,
+        witness_evidence_digest,
+        ..
     } = &outcome
     {
         let applied_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        if let Err(e) = store.write_resume_receipt(record, applied_at, *resulting_sequence) {
+        let receipt_input = osp_core::authorization::ResumeReceiptInput {
+            record,
+            applied_at,
+            resulting_sequence: *resulting_sequence,
+            evidence_trust: args.evidence_trust.to_core(),
+            witness_evidence_digest: witness_evidence_digest.clone(),
+            witness_actors: witness_actors.clone(),
+        };
+        if let Err(e) = store.write_resume_receipt(receipt_input) {
             eprintln!(
                 "✗ System failure: mutation applied in-engine (sequence \
                  {resulting_sequence}) but resume receipt persistence failed: {e} — \
@@ -1026,6 +1075,7 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     }
 
     // 10. Rapor + exit (doğruluk fence'i YOK — yalnız çıktı).
+    let evidence_trust_str = args.evidence_trust.to_core().as_str();
     let is_json = args.format.eq_ignore_ascii_case("json");
     if is_json {
         let envelope_json = resume_envelope::build_resume_envelope_v1(
@@ -1034,10 +1084,16 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             record.task_id,
             record.claim_id,
             record.attempt_num.get(),
+            evidence_trust_str,
         );
         println!("{}", serde_json::to_string_pretty(&envelope_json)?);
     } else {
-        print_human_resume_result(&outcome, record.task_id, record.claim_id);
+        print_human_resume_result(
+            &outcome,
+            record.task_id,
+            record.claim_id,
+            evidence_trust_str,
+        );
     }
 
     let exit_code = match &outcome {
@@ -1056,11 +1112,13 @@ fn print_human_resume_result(
     outcome: &osp_core::engine::ResumeHeldOutcome,
     task_id: u64,
     claim_id: u64,
+    evidence_trust: &str,
 ) {
     match outcome {
         osp_core::engine::ResumeHeldOutcome::Applied {
             resulting_sequence,
             snapshot,
+            ..
         } => {
             println!(
                 "✓ Suspended authorization applied — task {task_id} / claim {claim_id} \
@@ -1073,6 +1131,7 @@ fn print_human_resume_result(
                 snapshot.support,
                 snapshot.required_support
             );
+            println!("  Evidence trust: {evidence_trust} (recorded in the resume receipt)");
         }
         osp_core::engine::ResumeHeldOutcome::StillHeld { reason, snapshot } => {
             println!(
@@ -1088,7 +1147,11 @@ fn print_human_resume_result(
                 snapshot.support,
                 snapshot.required_support
             );
-            println!("  Artifact unchanged — resume again with additional evidence.");
+            println!(
+                "  Artifact unchanged — evidence does NOT accumulate across resume \
+                 attempts: resume again with the COMPLETE evidence set (this file's \
+                 events are the only ones evaluated)."
+            );
         }
         osp_core::engine::ResumeHeldOutcome::Rejected { reasons, snapshot } => {
             println!(

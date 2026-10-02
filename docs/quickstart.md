@@ -312,27 +312,45 @@ evidence, and (on quorum) applies the recorded delta:
 osp trajectory resume <state-dir>/.osp/pending-authorizations/task-...json \
   --repo <repo> \
   --witness-evidence witnesses.json \
+  --evidence-trust operator-asserted \
   --state-dir <state-dir>
 ```
 
 `witnesses.json` is a strict-wire array of evidence events
 (`{ "id", "source", "witness_kind", "actor", "claim" }`). The event weight is
-derived from `witness_kind` (operators cannot pick weights); every event's
+derived from `witness_kind` — but note that `witness_kind` itself is
+caller-chosen, so the weight is only as trustworthy as the file; every event's
 `claim` must match the artifact's claim id. A defective evidence file is an
 operational fault (exit 20): the author witnessing their own claim, duplicate
 events, or one actor contributing multiple events are all rejected up front —
 nothing is silently excluded or deduplicated on this wire. Quorum parameters
 come **from the artifact** — they cannot be lowered at resume time.
 
+**Trust boundary (`--evidence-trust`, required):** OSP does **not** verify that
+an event corresponds to reality — the actor id, the event kind, and the source
+are all operator-supplied fields. Producing provider-verified evidence (Paper 1
+assumption A1) is a separate, not-yet-built surface. Until then, resuming with
+file evidence requires an explicit declaration (`--evidence-trust
+operator-asserted`): *you* vouch that the file contains pre-verified events.
+The declaration — together with a digest of the evaluated evidence and the
+participating witness actors — is recorded durably in the resume receipt, so an
+authorization granted this way never masquerades as OSP-verified.
+
+**Evidence does not accumulate:** each resume evaluates *only* the events in
+its own file — nothing from prior resume attempts is added. If a first attempt
+with witness A still holds, the next call must carry the complete set (A and B).
+
 Outcomes: quorum met → recorded delta applied → exit `0` and a durable
 identity-keyed receipt (`<artifact-stem>.receipt.json`, addressed by
 task/claim/attempt/evidence-digest — resuming a *copy* of the artifact still
-finds it) is written next to the canonical artifact; quorum still insufficient
-→ exit `10` (artifact unchanged); explicit rejection → exit `11`. Fail-closed
-refusals: the space changed since suspension (or the artifact was already
-applied) → exit `15` — remeasure with a fresh attempt; evidence bound to a
-foreign claim or otherwise defective (author-self, duplicates) → exit `20`;
-receipt/artifact/identity integrity failures → exit `70`.
+finds it; binds the evidence-trust declaration, the evaluated-evidence digest
+and the witness actors) is written next to the canonical artifact; quorum
+still insufficient → exit `10` (artifact unchanged); explicit rejection →
+exit `11`. Fail-closed refusals: the space changed since suspension (or the
+artifact was already applied) → exit `15` — remeasure with a fresh attempt;
+evidence bound to a foreign claim or otherwise defective (author-self,
+duplicates) → exit `20`; receipt/artifact/identity integrity failures →
+exit `70`.
 
 ---
 
