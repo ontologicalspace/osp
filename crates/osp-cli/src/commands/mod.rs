@@ -39,6 +39,10 @@ pub mod exit_codes {
     /// **#97 MD-3:** cold-start operatör onayı (INV-T9 extension — witness'den
     /// ayrı otorite; expected domain outcome, hata DEĞİL).
     pub const AWAITING_COLD_START_APPROVAL: i32 = 14;
+    /// **#164:** Resume reddedildi — artifact bu uzayda artık uygulanabilir değil
+    /// (stale base revision: uzay askıdan beri değişti → remeasure / yeni attempt;
+    /// veya artifact zaten uygulanmış — receipt var). Expected domain outcome.
+    pub const RESUME_REFUSED_BASE: i32 = 15;
     /// Invalid witness evidence — operational fault (malformed/author-self/duplicate).
     pub const WITNESS_EVALUATION_ERROR: i32 = 20;
     /// Pending authorization persistence failure — terminal (non-retryable).
@@ -53,6 +57,7 @@ pub mod exit_codes {
 
 pub mod graph;
 pub(crate) mod resolve_code_entity_preview_render;
+pub mod resume_envelope;
 pub mod review;
 pub(crate) mod supersede_preview_render;
 
@@ -207,6 +212,69 @@ pub struct TrajectoryAttemptArgs {
     /// path'ler dahil her durumda çözümlenir ve fence uygulanır.
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
+}
+
+/// **#164 R2 P0:** Kanıt güven sınırı modu — resume'un kanıt kaynağına dair AÇIK
+/// beyan. Zorunlu (default YOK): raw JSON'un sessizce production authorization
+/// sağlaması engellenir; operator kefaleti kalıcı receipt'e yazılır.
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum CliEvidenceTrustMode {
+    /// Operator, kanıt dosyasındaki olayların gerçekliğine (actor kimliğinin
+    /// doğru olduğu, olay tipinin/kaynağın gerçeği yansıttığı) kefildir —
+    /// OSP dış doğrulama YAPMAZ (Paper 1 A1 provider-doğrulaması gelecek
+    /// yüzey). Wire yalnız yapısal kusurları reddeder; `witness_kind`'ın
+    /// ağırlığı belirlediği DİKKATE ALINIR — kefalet dolaylı ağırlık
+    /// seçimini de kapsar. Beyan receipt'e `operator_asserted` olarak yazılır.
+    OperatorAsserted,
+}
+
+impl CliEvidenceTrustMode {
+    /// Core wire değerine projekte.
+    pub fn to_core(self) -> osp_core::authorization::EvidenceTrustMode {
+        match self {
+            Self::OperatorAsserted => osp_core::authorization::EvidenceTrustMode::OperatorAsserted,
+        }
+    }
+}
+
+/// `osp trajectory resume <artifact>` — #164: askılı (exit 10 / AwaitingWitnesses)
+/// görevin kalıcı pending-authorization artifact'ından sürdürülmesi.
+///
+/// LLM'siz operatör akışı — karar zinciri attempt anında koşuldu ve artifact'a
+/// bağlandı; resume yalnız fence teyidi (identity + staleness) + witness kanıtı
+/// değerlendirmesi + kayıtlı delta'nın uygulanmasını yapar. Quorum parametreleri
+/// artifact'tan gelir (operator düşüremez).
+#[derive(Args, Debug)]
+pub struct TrajectoryResumeArgs {
+    /// Pending authorization artifact path'i (`<state-dir>/.osp/pending-authorizations/…`).
+    pub artifact: PathBuf,
+    #[arg(long)]
+    pub repo: PathBuf,
+    /// Witness kanıt dosyası — `EvidenceEvent` JSON dizisi (strict wire):
+    /// `[{ "id", "source", "witness_kind", "actor", "claim" }, …]`.
+    /// Ağırlık `witness_kind`'ın kalibre değerinden türetilir — ancak `witness_kind`
+    /// caller tarafından SEÇİLDİĞİ için ağırlık dolaylı olarak seçilebilir; bu
+    /// yüzden dosyanın gerçekliği `--evidence-trust` beyanına tabidir (OSP olayın
+    /// gerçekle uyumunu DOĞRULAMAZ). Her olayın `claim`'i artifact'ın claim'idine
+    /// bağlı olmalı. Kusurlu kanıt operational fault ile reddedilir (INV-T9):
+    /// author'un kendi kanıtı, duplicate olay/actor/id → exit 20.
+    /// KANIT BİRİKMESİ YOKTUR — her resume YALNIZ dosyadaki olayları değerlendirir;
+    /// önceki resume'un kanıtı eklenmez (tam set yeniden verilir).
+    #[arg(long)]
+    pub witness_evidence: PathBuf,
+    /// Kanıt güven sınırı beyanı (ZORUNLU — varsayılan yok). `operator-asserted`:
+    /// dosyadaki olayların gerçekliğine operator kefildir; beyan receipt'e kalıcı
+    /// yazılır. OSP-verified kanıt yüzeyi henüz yok (Paper 1 A1 follow-up).
+    #[arg(long, value_enum)]
+    pub evidence_trust: CliEvidenceTrustMode,
+    /// Runtime state directory — attempt ile AYNI kök olmalı (identity + artifact
+    /// orada yaşar). Farklı state-dir → farklı identity → fail-closed red.
+    /// Attempt ile aynı fence ailesi: analyzed repo DIŞINDA.
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
+    /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
+    #[arg(long, default_value = "human")]
+    pub format: String,
 }
 
 /// `osp task view <task-id>` — AgentTaskView göster.
@@ -749,6 +817,366 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     )
     .map_err(|e| anyhow::anyhow!(e))?;
     Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #164 — `osp trajectory resume`: askılı görevin artifact'tan sürdürülmesi
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Witness kanıt wire'ı (strict) — operator ağırlık SEÇEMEZ: `weight`
+/// `witness_kind`'ın kalibre ağırlığından türetilir (`EvidenceEvent::new`).
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WitnessEvidenceWireV1 {
+    id: u64,
+    source: String,
+    witness_kind: osp_core::witness::WitnessKind,
+    actor: u64,
+    claim: u64,
+}
+
+/// Kanıt dosyası yükle — strict wire + `EvidenceEvent::new` (weight = kind default).
+fn load_witness_evidence(
+    path: &std::path::Path,
+) -> anyhow::Result<Vec<osp_core::witness::EvidenceEvent>> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("witness evidence file {}: {e}", path.display()))?;
+    let wire: Vec<WitnessEvidenceWireV1> = serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!(
+            "witness evidence file {} is not a valid EvidenceEvent array (strict wire — \
+             fields: id, source, witness_kind, actor, claim): {e}",
+            path.display()
+        )
+    })?;
+    Ok(wire
+        .into_iter()
+        .map(|w| {
+            osp_core::witness::EvidenceEvent::new(w.id, w.source, w.witness_kind, w.actor, w.claim)
+        })
+        .collect())
+}
+
+/// `osp trajectory resume <artifact>` — #164 resume akışı (run_trajectory_attempt
+/// mirror'ı: aynı state-dir fence ailesi + analyzed-scope clean fence'ler).
+///
+/// **Sıra sözleşmesi (R1 P0-2):** TÜM fallible doğruluk fence'leri (artifact
+/// integrity, receipt idempotency, identity, kanıt doğrulaması, snapshot/analyze,
+/// analyzed-scope tracked+clean, post-capture drift) kalıcı etkidEN ÖNCE
+/// tamamlanır. Kalıcı etki = engine apply + receipt yazımı (commit/finalization);
+/// sonrasında yalnız çıktı + exit kalır. receipt diske yazıldıktan sonra hiçbir
+/// doğruluk kontrolü hata veremez — başarısız bir run "Applied" olarak
+/// mühürlenmesi bu sırayla imkânsız.
+pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
+    use osp_core::axes::{CohesionAxis, EntropyAxis, WitnessDepthAxis};
+    use osp_core::coords::{CoordinateSystem, MetricSource};
+    use osp_core::engine::{EngineConfig, SpaceEngine};
+
+    // State-dir — attempt ile aynı fence ailesi (repo dışı, her mode'da).
+    let state_dir = resolve_state_dir(
+        args.state_dir.as_deref(),
+        CliExecutionMode::Production,
+        &args.repo,
+    )?;
+    let store = osp_core::authorization::FilesystemPendingAuthorizationStore::new(&state_dir);
+
+    // 1. Artifact yükle + verify (11-adım zincir) — integrity hatası → 70.
+    //    Receipt identity-keyed olduğundan (R1 P0-1) önce record gerekir.
+    let envelope = match osp_core::authorization::load_pending_authorization(&args.artifact) {
+        Ok(envelope) => envelope,
+        Err(e) => {
+            eprintln!(
+                "✗ System failure: pending authorization artifact {}: {e}",
+                args.artifact.display()
+            );
+            std::process::exit(exit_codes::SYSTEM_FAILURE);
+        }
+    };
+    let record = envelope.record();
+
+    // 2. Applied-idempotency fence (R1 P0-1/P1-1): receipt EVIDENCE IDENTITY'den
+    //    adreslenir (record'dan türetilir — caller path'i değil) ve strict parse +
+    //    verify_against ile doğrulanır. Artifact'ı başka path'ten sunmak (copy/
+    //    rename) receipt'i kaçıramaz; sahte/bozuk receipt → 70.
+    match store.read_resume_receipt(record) {
+        Ok(Some(receipt)) => {
+            eprintln!(
+                "✗ Resume refused: artifact already applied at unix {} \
+                 (task {} / claim {} / attempt {} → sequence {}). \
+                 A second authorization of the same suspension is not a new event.",
+                receipt.applied_at,
+                receipt.task_id,
+                receipt.claim_id,
+                receipt.attempt_num,
+                receipt.resulting_sequence
+            );
+            std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!(
+                "✗ System failure: resume receipt is unreadable/invalid — resolve \
+                 manually before resuming (do not delete blindly; the receipt is the \
+                 durable record of an apply): {e}"
+            );
+            std::process::exit(exit_codes::SYSTEM_FAILURE);
+        }
+    }
+
+    // 3. Identity — LOAD-ONLY (resume yaratmaz; attempt'in yazdığı identity gerek).
+    let space_view_id =
+        match osp_core::authorization::PersistedSpaceViewId::load_existing(&state_dir) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!(
+                    "✗ System failure: persisted space identity unavailable for resume: {e} \
+                     (resume requires an identity created by a prior attempt in this \
+                     state-dir — wrong --state-dir?)"
+                );
+                std::process::exit(exit_codes::SYSTEM_FAILURE);
+            }
+        };
+
+    // 4. Witness kanıtı — strict wire parse; → 20 (operational fault).
+    //    (Kanıt provenance'ı — digest + actors — motordan TEK değer olarak
+    //    döner; CLI ayrı liste TÜRETMEZ — R3 P1.)
+    let evidence = match load_witness_evidence(&args.witness_evidence) {
+        Ok(events) => events,
+        Err(e) => {
+            eprintln!("✗ Witness evaluation error: {e}");
+            std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
+        }
+    };
+
+    // 5. Snapshot + analyze + analyzed-scope fence'ler (attempt ile aynı).
+    let snapshot_before =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+    let registry = AdapterRegistry::default_all();
+    let config = AnalysisConfig::default();
+    let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
+    repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    repo_snapshot::validate_analyzed_paths_clean(
+        &result.node_paths,
+        &snapshot_before,
+        "before resume",
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 6. Engine — attempt ile BİREBİR aynı kurulum (farklı kurulum farklı digest
+    //    üretirdi → staleness fence yanlış tetiklenirdi).
+    let cs = CoordinateSystem::default_raw_five(
+        MetricSource::TreeSitter,
+        CohesionAxis::try_with_observed_source(MetricSource::Scip)?,
+        EntropyAxis::from_commit_entropy(6.0),
+        WitnessDepthAxis::from_witness(0.3, 5),
+    )?;
+    let vision = user_confirmed_trajectory_vision();
+    let mut engine = SpaceEngine::with_default_rules(
+        result.space,
+        cs,
+        vision,
+        EngineConfig::default_calibrated(),
+    )?
+    .with_persisted_view_id(space_view_id)?;
+
+    // 7. Post-capture drift fence — SON doğruluk fence'i (R1 P0-2). Resume repo
+    //    dokunmaz; pre/post eşitliği analiz penceresinde dış drift olmadığını
+    //    kanıtlar. Bu noktadan sonra fallible doğruluk kontrolü YOKTUR — yalnız
+    //    commit (apply + receipt) + raporlama kalır.
+    let snapshot_after =
+        repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+    repo_snapshot::validate_post_attempt_snapshot(
+        &snapshot_before,
+        &snapshot_after,
+        &result.node_paths,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 8. Commit — fence'ler + witness değerlendirme + apply (tek atomik motor adımı).
+    let outcome = match engine.resume_held_authorization(&envelope, evidence) {
+        Ok(outcome) => outcome,
+        Err(osp_core::engine::ResumeHeldError::ClaimBindingMismatch {
+            event_id,
+            evidence_claim,
+            artifact_claim,
+        }) => {
+            eprintln!(
+                "✗ Witness evaluation error: evidence event {event_id} witnesses claim \
+                 {evidence_claim} but the artifact suspends claim {artifact_claim} — \
+                 foreign-claim evidence cannot authorize this suspension"
+            );
+            std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
+        }
+        Err(osp_core::engine::ResumeHeldError::InvalidEvidence { detail }) => {
+            eprintln!(
+                "✗ Witness evaluation error: {detail} — fix the evidence file \
+                 (one event per witness; the author cannot witness their own claim)"
+            );
+            std::process::exit(exit_codes::WITNESS_EVALUATION_ERROR);
+        }
+        Err(osp_core::engine::ResumeHeldError::StaleBaseRevision {
+            base_seq,
+            current_seq,
+            base_digest,
+            current_digest,
+        }) => {
+            eprintln!(
+                "✗ Resume refused: stale base revision (artifact base sequence {base_seq} / \
+                 digest {base_digest} vs current {current_seq} / {current_digest}) — the \
+                 space changed since suspension; remeasure required (new attempt on fresh \
+                 baseline)"
+            );
+            std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+        }
+        Err(osp_core::engine::ResumeHeldError::IdentityMismatch { artifact, current }) => {
+            eprintln!(
+                "✗ System failure: space identity mismatch (artifact base view {artifact} ≠ \
+                 current view {current}) — the artifact belongs to a different \
+                 state-dir/space (wrong --state-dir?)"
+            );
+            std::process::exit(exit_codes::SYSTEM_FAILURE);
+        }
+    };
+
+    // 9. Applied ise kalıcı receipt (idempotency + kanıt provenance) — yazılamazsa
+    //    dürüst 70. Askı kimliği record'dan, kanıt bağlaması motorun TEK
+    //    provenance değerinden (R3 P1: digest + actors yapışık — CLI ayrı actor
+    //    listesi VERMEZ), güven beyanı operator'ın --evidence-trust flag'inden
+    //    (R2 P0); adres identity-keyed (R1 P0-1).
+    if let osp_core::engine::ResumeHeldOutcome::Applied {
+        resulting_sequence,
+        evidence_provenance,
+        ..
+    } = &outcome
+    {
+        let applied_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let receipt_input = osp_core::authorization::ResumeReceiptInput {
+            record,
+            applied_at,
+            resulting_sequence: *resulting_sequence,
+            evidence_trust: args.evidence_trust.to_core(),
+            evidence_provenance: evidence_provenance.clone(),
+        };
+        if let Err(e) = store.write_resume_receipt(receipt_input) {
+            eprintln!(
+                "✗ System failure: mutation applied in-engine (sequence \
+                 {resulting_sequence}) but resume receipt persistence failed: {e} — \
+                 the apply is NOT durably recorded; do not re-run this artifact before \
+                 resolving the receipt failure"
+            );
+            std::process::exit(exit_codes::SYSTEM_FAILURE);
+        }
+    }
+
+    // 10. Rapor + exit (doğruluk fence'i YOK — yalnız çıktı).
+    let evidence_trust_str = args.evidence_trust.to_core().as_str();
+    let is_json = args.format.eq_ignore_ascii_case("json");
+    if is_json {
+        let envelope_json = resume_envelope::build_resume_envelope_v1(
+            &outcome,
+            &args.artifact,
+            record.task_id,
+            record.claim_id,
+            record.attempt_num.get(),
+            evidence_trust_str,
+        );
+        println!("{}", serde_json::to_string_pretty(&envelope_json)?);
+    } else {
+        print_human_resume_result(
+            &outcome,
+            record.task_id,
+            record.claim_id,
+            evidence_trust_str,
+        );
+    }
+
+    let exit_code = match &outcome {
+        osp_core::engine::ResumeHeldOutcome::Applied { .. } => exit_codes::COMPLETED,
+        osp_core::engine::ResumeHeldOutcome::StillHeld { .. } => exit_codes::AWAITING_WITNESSES,
+        osp_core::engine::ResumeHeldOutcome::Rejected { .. } => exit_codes::REQUIRES_REVISION,
+    };
+    if exit_code != exit_codes::COMPLETED {
+        std::process::exit(exit_code);
+    }
+    Ok(())
+}
+
+/// Human-readable resume sonucu.
+fn print_human_resume_result(
+    outcome: &osp_core::engine::ResumeHeldOutcome,
+    task_id: u64,
+    claim_id: u64,
+    evidence_trust: &str,
+) {
+    match outcome {
+        osp_core::engine::ResumeHeldOutcome::Applied {
+            resulting_sequence,
+            snapshot,
+            ..
+        } => {
+            println!(
+                "✓ Suspended authorization applied — task {task_id} / claim {claim_id} \
+                 (space revision sequence → {resulting_sequence})"
+            );
+            println!(
+                "  Witness quorum: {}/{} approvers, support {:.3}/{:.3}",
+                snapshot.approvers,
+                snapshot.required_approvers,
+                snapshot.support,
+                snapshot.required_support
+            );
+            println!("  Evidence trust: {evidence_trust} (recorded in the resume receipt)");
+        }
+        osp_core::engine::ResumeHeldOutcome::StillHeld { reason, snapshot } => {
+            println!(
+                "… Still awaiting witnesses — task {task_id} / claim {claim_id} \
+                 ({}: {})",
+                reason.as_reason_str(),
+                hold_reason_detail(reason)
+            );
+            println!(
+                "  Witness quorum: {}/{} approvers, support {:.3}/{:.3}",
+                snapshot.approvers,
+                snapshot.required_approvers,
+                snapshot.support,
+                snapshot.required_support
+            );
+            println!(
+                "  Artifact unchanged — evidence does NOT accumulate across resume \
+                 attempts: resume again with the COMPLETE evidence set (this file's \
+                 events are the only ones evaluated)."
+            );
+        }
+        osp_core::engine::ResumeHeldOutcome::Rejected { reasons, snapshot } => {
+            println!(
+                "✗ Witness rejection — task {task_id} / claim {claim_id} ({} reason(s))",
+                reasons.as_slice().len()
+            );
+            println!(
+                "  Witness quorum: {}/{} approvers, support {:.3}/{:.3}",
+                snapshot.approvers,
+                snapshot.required_approvers,
+                snapshot.support,
+                snapshot.required_support
+            );
+        }
+    }
+}
+
+/// Hold reason kısa detay metni (human çıktı için).
+fn hold_reason_detail(reason: &osp_core::witness::WitnessHoldReason) -> String {
+    match reason {
+        osp_core::witness::WitnessHoldReason::MinApproversNotMet { distinct, required } => {
+            format!("{distinct}/{required} distinct non-author approvers")
+        }
+        osp_core::witness::WitnessHoldReason::QuorumInsufficient { support, threshold } => {
+            format!("support {support:.3} < threshold {threshold:.3}")
+        }
+        osp_core::witness::WitnessHoldReason::EvidenceNotLocallyObservable { hint } => hint.clone(),
+    }
 }
 
 /// Resolve task: harness file (`--task`) or hardcoded legacy fallback (backward-compat).

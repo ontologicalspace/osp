@@ -74,6 +74,8 @@ enum TrajectoryAction {
     Init(commands::TrajectoryInitArgs),
     /// Bir task için navigator attempt (D2 navigator, MockLlmClient).
     Attempt(commands::TrajectoryAttemptArgs),
+    /// Askılı (exit 10 / AwaitingWitnesses) görevi artifact'tan sürdür (#164).
+    Resume(commands::TrajectoryResumeArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -122,6 +124,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Trajectory { action } => match action {
             TrajectoryAction::Init(args) => commands::run_trajectory_init(args),
             TrajectoryAction::Attempt(args) => commands::run_trajectory_attempt(args),
+            TrajectoryAction::Resume(args) => commands::run_trajectory_resume(args),
         },
         Commands::Task { action } => match action {
             TaskAction::View(args) => commands::run_task_view(args),

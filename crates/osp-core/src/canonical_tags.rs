@@ -418,6 +418,81 @@ impl From<PredicateModeTag> for crate::trajectory::PredicateMode {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// #164 — Resume restore reverse projections: Tag → Domain (structural ailesi)
+//
+// Faz 5 Adım 1 yalnızca predicate ailesine yetki verdi; "NodeKind, EdgeKind, vb.
+// restore semantiği ortaya çıktığında ayrı değerlendirilir" notu bu andır: #164
+// resume flow, askılı claim'i `CanonicalStructuralDelta`'dan `Claim`'e rekonstrükte
+// ederken structural tag ailesinin reverse dönüşümüne ihtiyaç duyar. Aynı ilkeyle
+// (blanket reverse YOK — yalnız bu dört tag'e yetki; infallible çünkü tag set'i
+// construction sınırında valide edilir ve domain varyant setiyle birebir örtüşür).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+impl From<CanonicalNodeKind> for crate::space::NodeKind {
+    fn from(tag: CanonicalNodeKind) -> Self {
+        match tag.as_u8() {
+            0 => crate::space::NodeKind::Module,
+            1 => crate::space::NodeKind::Concept,
+            2 => crate::space::NodeKind::Feature,
+            3 => crate::space::NodeKind::Bug,
+            4 => crate::space::NodeKind::Rule,
+            5 => crate::space::NodeKind::Agent,
+            6 => crate::space::NodeKind::Intent,
+            7 => crate::space::NodeKind::Claim,
+            8 => crate::space::NodeKind::Witness,
+            _ => unreachable!("CanonicalNodeKind VALID_TAGS invariant"),
+        }
+    }
+}
+
+impl From<CanonicalEdgeKind> for crate::space::EdgeKind {
+    fn from(tag: CanonicalEdgeKind) -> Self {
+        match tag.as_u8() {
+            0 => crate::space::EdgeKind::Imports,
+            1 => crate::space::EdgeKind::Calls,
+            2 => crate::space::EdgeKind::DependsOn,
+            3 => crate::space::EdgeKind::PartOf,
+            4 => crate::space::EdgeKind::DerivesFrom,
+            5 => crate::space::EdgeKind::Witnesses,
+            6 => crate::space::EdgeKind::Approves,
+            7 => crate::space::EdgeKind::Violates,
+            _ => unreachable!("CanonicalEdgeKind VALID_TAGS invariant"),
+        }
+    }
+}
+
+impl From<CanonicalNodeClassification> for NodeClassification {
+    fn from(tag: CanonicalNodeClassification) -> Self {
+        match tag.as_u8() {
+            0 => NodeClassification::Production,
+            1 => NodeClassification::Test,
+            2 => NodeClassification::Fixture,
+            3 => NodeClassification::Migration,
+            4 => NodeClassification::Config,
+            5 => NodeClassification::Script,
+            6 => NodeClassification::Generated,
+            7 => NodeClassification::Documentation,
+            8 => NodeClassification::Unknown,
+            _ => unreachable!("CanonicalNodeClassification VALID_TAGS invariant"),
+        }
+    }
+}
+
+impl From<CanonicalNodeRole> for NodeRole {
+    fn from(tag: CanonicalNodeRole) -> Self {
+        match tag.as_u8() {
+            0 => NodeRole::TypeSurface,
+            1 => NodeRole::Core,
+            2 => NodeRole::Adapter,
+            3 => NodeRole::Utility,
+            4 => NodeRole::Runtime,
+            5 => NodeRole::Support,
+            _ => unreachable!("CanonicalNodeRole VALID_TAGS invariant"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,6 +575,92 @@ mod tests {
         for (role, expected) in cases {
             let tag = CanonicalNodeRole::try_from(&role).unwrap();
             assert_eq!(tag.as_u8(), expected);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #164 (R1 P2) — structural ailesi exhaustive round-trip matrix testleri.
+    //
+    // Reverse From'lar `match tag.as_u8()` + `unreachable!` deseni taşıdığından
+    // yeni varyantta compiler exhaustiveness YARDIM ETMEZ — bu matrix testleri
+    // restore boundary'yi sabitler: domain → canonical → domain == original,
+    // TAM varyant seti üzerinden. Domain'e varyant eklenirse forward TryFrom
+    // exhaustiveness'i yakalar; bu testler de eksik/yanlış reverse eşlemeyi.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn canonical_node_kind_round_trips_through_domain() {
+        let cases = [
+            NodeKind::Module,
+            NodeKind::Concept,
+            NodeKind::Feature,
+            NodeKind::Bug,
+            NodeKind::Rule,
+            NodeKind::Agent,
+            NodeKind::Intent,
+            NodeKind::Claim,
+            NodeKind::Witness,
+        ];
+        for kind in cases {
+            let tag = CanonicalNodeKind::try_from(&kind).unwrap();
+            let restored: NodeKind = tag.into();
+            assert_eq!(restored, kind, "round-trip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_edge_kind_round_trips_through_domain() {
+        let cases = [
+            EdgeKind::Imports,
+            EdgeKind::Calls,
+            EdgeKind::DependsOn,
+            EdgeKind::PartOf,
+            EdgeKind::DerivesFrom,
+            EdgeKind::Witnesses,
+            EdgeKind::Approves,
+            EdgeKind::Violates,
+        ];
+        for kind in cases {
+            let tag = CanonicalEdgeKind::try_from(&kind).unwrap();
+            let restored: EdgeKind = tag.into();
+            assert_eq!(restored, kind, "round-trip failed for {kind:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_node_classification_round_trips_through_domain() {
+        let cases = [
+            NodeClassification::Production,
+            NodeClassification::Test,
+            NodeClassification::Fixture,
+            NodeClassification::Migration,
+            NodeClassification::Config,
+            NodeClassification::Script,
+            NodeClassification::Generated,
+            NodeClassification::Documentation,
+            NodeClassification::Unknown,
+        ];
+        for cls in cases {
+            let tag = CanonicalNodeClassification::try_from(&cls).unwrap();
+            let restored: NodeClassification = tag.into();
+            assert_eq!(restored, cls, "round-trip failed for {cls:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_node_role_round_trips_through_domain() {
+        let cases = [
+            NodeRole::TypeSurface,
+            NodeRole::Core,
+            NodeRole::Adapter,
+            NodeRole::Utility,
+            NodeRole::Runtime,
+            NodeRole::Support,
+        ];
+        for role in cases {
+            let tag = CanonicalNodeRole::try_from(&role).unwrap();
+            let restored: NodeRole = tag.into();
+            assert_eq!(restored, role, "round-trip failed for {role:?}");
         }
     }
 

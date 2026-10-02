@@ -1337,6 +1337,22 @@ impl PersistedSpaceViewId {
         }
     }
 
+    /// **#164 (resume):** Identity'yi LOAD-ONLY oku — yoksa üretme.
+    ///
+    /// `load_or_create` attempt akışının işlemidir (yoksa yarat). Resume için
+    /// yaratma YANLIŞ olurdu: yeni üretilmiş bir identity, artifact'in base
+    /// view_id'siyle ASLA eşleşmezdi ama yan etki olarak diskte sahte bir identity
+    /// dosyası bırakırdı. Resume mevcut identity'yi ister; yoksa typed fail-closed
+    /// (`FileNotFound`) — "yanlış state-dir ya da bu kökte attempt yapılmamış".
+    pub fn load_existing(root: &std::path::Path) -> Result<Self, SpaceIdentityError> {
+        let path = root.join(".osp").join("space-identity");
+        if !path.exists() {
+            return Err(SpaceIdentityError::FileNotFound(path));
+        }
+        let raw = std::fs::read(&path).map_err(|e| SpaceIdentityError::IoFailed(e.to_string()))?;
+        Self::parse_file(&raw)
+    }
+
     /// Identity dosyasını parse et — schema + 32-hex doğrulaması (fail-closed).
     fn parse_file(raw: &[u8]) -> Result<Self, SpaceIdentityError> {
         let file: SpaceIdentityFileV1 = serde_json::from_slice(raw)
@@ -1411,6 +1427,11 @@ pub enum SpaceIdentityError {
     /// Identity dosyası bozuk/geçersiz. Otomatik yeniden üretim YOK (fail-closed).
     #[error("space identity file is invalid: {0}")]
     InvalidFile(String),
+    /// **#164 (resume):** Identity dosyası YOK — load-only istendi (yeniden üretim
+    /// yok). Resume, attempt'in yazdığı mevcut identity'yi bulamadı: yanlış
+    /// state-dir ya da bu state-dir'de hiç attempt yapılmamış.
+    #[error("space identity file not found: {0}")]
+    FileNotFound(std::path::PathBuf),
     /// Identity dosyası I/O hatası.
     #[error("space identity file I/O failed: {0}")]
     IoFailed(String),
@@ -1430,6 +1451,16 @@ pub struct SpaceDigest([u8; 32]);
 
 impl SpaceDigest {
     const DOMAIN_SEPARATOR: &'static [u8] = b"osp.space-content.v1\0";
+
+    /// **#164:** Hex encoding (resume hata mesajları/JSON yüzeyleri için —
+    /// AuthorizationBasisDigest pattern).
+    pub fn to_hex(&self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in &self.0 {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
 
     /// **reviewer P0-3:** Space içeriğinin gerçek canonical digest'ı.
     ///
@@ -2155,6 +2186,81 @@ pub struct AuthorizationBasis {
 /// değişmez. V2 (`AuthorizationBasisV2`) canonical redesign — additive DEĞİL, duplicate
 /// field yok. Backward compat = V1'i okuyabilmek (V1 field'larını V2'ye kopyalamak DEĞİL).
 pub type AuthorizationBasisV1 = AuthorizationBasis;
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #164 — Resume: askılı claim'in basis'ten rekonstrüksiyonu
+//
+// Resume, commit pipeline'ını YENiden koşamaz: `NativeSubjectMeasurement` opak
+// token process-local'dır, çapraz süreçte sunulamaz (engine.rs "aynı context'te
+// meşru yeniden sunum" notu aynı-SÜREÇ replay'i kapsar). Karar zinciri zaten
+// attempt anında koşuldu ve artifact'a digest'lerle bağlı — resume yalnız
+// (a) fence teyidi, (b) witness değerlendirme, (c) KAYITLI delta'nın uygulanması
+// yapar. Bu fonksiyon (c)'nin girdisi olan Claim'i basis'ten çıkarır.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#164:** `AuthorizationBasis` → resume `Claim` rekonstrüksiyonu.
+///
+/// Yalnız `evaluate` + `apply_delta`'nın tükettiği alanlar geride gelir:
+/// `id`/`author` (author-witness ayrımı + audit), `delta_nodes`/`delta_edges`/
+/// `removed_edges` (`prospective_delta_from_claim` bunlardan Delta üretir),
+/// `task_id` (INV-T5 binding).
+///
+/// **Bilinçli varsayılanlar (kullanılmayan alanlar):** `computed_raw`/`intent`
+/// target'ı `RawPosition::default()` — Q1-Q3 witness değerlendirmesi ve structural
+/// apply bunları okumaz; ölçüm gerçeği artifact'ta `measured_result` olarak zaten
+/// bağlı, resume'da yeniden üretilmez. `position` engine-derived'dır (inclusion
+/// table) — node'larda `Default` kalır, `apply_delta` sonrası yeniden hesaplanır.
+pub fn restore_claim_for_resume(basis: &AuthorizationBasis) -> crate::witness::Claim {
+    let delta_nodes = basis
+        .structural_delta
+        .new_nodes()
+        .iter()
+        .map(|n| crate::space::Node {
+            id: n.id,
+            kind: n.kind.into(),
+            mass: n.mass,
+            cohesion: n.cohesion,
+            classification: n.classification.into(),
+            role: n.role.into(),
+            // Engine-derived (inclusion table) — apply sonrası hesaplanır.
+            ..Default::default()
+        })
+        .collect();
+    let delta_edges = basis
+        .structural_delta
+        .new_edges()
+        .iter()
+        .map(|e| crate::space::Edge {
+            from: e.from,
+            to: e.to,
+            kind: e.kind.into(),
+            is_type_only: e.is_type_only,
+        })
+        .collect();
+    let removed_edges = basis
+        .structural_delta
+        .removed_edges()
+        .iter()
+        .map(|r| crate::agent::EdgeRef {
+            from: r.from(),
+            to: r.to(),
+            kind: r.kind().into(),
+        })
+        .collect();
+    crate::witness::Claim {
+        id: basis.claim_identity.claim_id,
+        intent: crate::witness::Intent::new(
+            basis.claim_author,
+            crate::coords::RawPosition::default(),
+        ),
+        author: basis.claim_author,
+        computed_raw: crate::coords::RawPosition::default(),
+        delta_nodes,
+        delta_edges,
+        task_id: Some(basis.claim_identity.task_id),
+        removed_edges,
+    }
+}
 
 /// **reviewer P0-1 (bloklayıcı):** Tek eksen ölçümü — value + source.
 ///
@@ -9055,6 +9161,448 @@ impl FilesystemPendingAuthorizationStore {
             evidence_digest: record.evidence_digest().clone(),
         })
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #164 — Resume receipt (applied-idempotency kanıtı)
+    //
+    // Engine-space apply process-inner'dır; repo değişmediği sürece staleness
+    // fence ikinci resume'ı YAKALAMAZ (fresh analiz yine base revision'ı üretir).
+    // Receipt, "bu artifact bu uzayda uygulandı" gerçeğini state-dir'e kalıcı
+    // yazar; ikinci resume fail-closed reddedilir (çift-yetkilendirme yanılgısı
+    // kapanır). Artifact dosyası silinmez/değiştirilmez — audit trail korunur.
+    //
+    // **R1 P0-1 — adres caller path'inden DEĞİL evidence identity'den türetilir:**
+    // receipt, `artifact_path()` ile AYNI türetimle (task+claim+attempt+digest)
+    // canonical olarak adreslenir. Geçerli artifact'ı `copy.json`'a kopyalayıp
+    // oradan resume etmek receipt'i kopyanın yanına yazamaz — identity aynı
+    // olduğundan canonical receipt bulunur → ikinci resume (hangi path'ten
+    // gelirse gelsin) "already applied" ile reddedilir.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// Receipt path'i — artifact'ın **canonical** dosya adına `.receipt.json`
+    /// eklenerek türetilir (`task-{t}--claim-{c}--attempt-{n}--{digest}.json
+    /// .receipt.json`, canonical artifact'ın kardeşi). Caller'ın verdiği path'e
+    /// BAĞLI DEĞİL (R1 P0-1).
+    fn resume_receipt_path_for(&self, record: &PendingAuthorization) -> std::path::PathBuf {
+        let hex = record.evidence_digest.to_hex();
+        let filename = format!(
+            "task-{}--claim-{}--attempt-{}--{hex}.json.receipt.json",
+            record.task_id,
+            record.claim_id,
+            record.suspended_attempt_evidence.attempt_num().get()
+        );
+        self.root
+            .join(".osp")
+            .join("pending-authorizations")
+            .join(filename)
+    }
+
+    /// Varolan resume receipt'i oku + record'a karşı DOĞRULA (`None` = uygulanmamış).
+    ///
+    /// **R1 P1-1:** yalnız parse edilmez — strict wire (`deny_unknown_fields`) +
+    /// `ResumeReceipt::verify_against(record)` (schema + kimlik alanları +
+    /// evidence digest) tek yüzeyde çalışır. Parse-edilebilir-ama-sahte receipt
+    /// ("already applied" mühürlenmesi) fail-closed `Invalid` olur.
+    pub fn read_resume_receipt(
+        &self,
+        record: &PendingAuthorization,
+    ) -> Result<Option<ResumeReceipt>, ResumeReceiptError> {
+        let path = self.resume_receipt_path_for(record);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read(&path).map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        let receipt = ResumeReceipt::from_strict_bytes(&raw)
+            .map_err(|e| ResumeReceiptError::Invalid(format!("{}: {e}", path.display())))?;
+        receipt
+            .verify_against(record)
+            .map_err(|e| ResumeReceiptError::Invalid(format!("{}: {e}", path.display())))?;
+        Ok(Some(receipt))
+    }
+
+    /// Resume receipt yaz — no-clobber (`create_new`): zaten varsa io hatası
+    /// (çift-apply fail-closed). Receipt'in askı kimliği alanları record'dan,
+    /// kanıt provenance'ı motorun TEK değerinden (R3 P1) türetilir — caller
+    /// ikisi için de ayrı alan veremez. Crash penceresi: create_new başarılı +
+    /// yazma yarıda → bozuk receipt → sonraki resume strict parse ile reddedilir
+    /// (yine fail-closed; operator temizler).
+    pub fn write_resume_receipt(
+        &self,
+        input: ResumeReceiptInput<'_>,
+    ) -> Result<std::path::PathBuf, ResumeReceiptError> {
+        use std::io::Write;
+        let receipt = ResumeReceipt {
+            schema: RESUME_RECEIPT_SCHEMA.to_string(),
+            task_id: input.record.task_id,
+            claim_id: input.record.claim_id,
+            attempt_num: input.record.suspended_attempt_evidence.attempt_num().get(),
+            evidence_digest_hex: input.record.evidence_digest.to_hex(),
+            applied_at: input.applied_at,
+            resulting_sequence: input.resulting_sequence,
+            evidence_trust: input.evidence_trust.as_str().to_string(),
+            witness_evidence_digest_hex: input.evidence_provenance.digest().to_hex(),
+            witness_actors: input.evidence_provenance.actors().to_vec(),
+        };
+        let path = self.resume_receipt_path_for(input.record);
+        // Parent dizini garanti et (store kökü ilk kez kullanılıyor olabilir —
+        // artifact persist akışı dizini yaratmış olur ama receipt yazıcı
+        // kendine yeterli olmalı).
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        }
+        let payload = serde_json::to_vec_pretty(&receipt)
+            .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        file.write_all(&payload)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| ResumeReceiptError::Io(e.to_string()))?;
+        // **R3 P1: parent-directory fsync — persist ile crash-consistency eşitliği.**
+        // Receipt sıradan log değil; cross-process double-resume'u engelleyen TEK
+        // durable applied kaydı. Unix'te dosya içeriğinin sync_all'ı directory
+        // entry'nin güç kaybından sonra kalacağını garanti ETMEZ — entry kaybolursa
+        // sonraki process read → None görür ve aynı askıyı yeniden authorize
+        // edebilir. `persist()` bu fsync'i yapıyor; receipt aynı seviyede olmalı.
+        fsync_parent_dir_unix(&path);
+        Ok(path)
+    }
+}
+
+/// **R3 P1:** Unix parent-directory fsync (best-effort) — `persist()`'in
+/// crash-consistency deseninin paylaşılan hâli. Windows'ta no-op.
+fn fsync_parent_dir_unix(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        if let Some(parent) = path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                use std::os::unix::io::AsRawFd;
+                unsafe {
+                    libc::fsync(dir.as_raw_fd());
+                }
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+}
+
+/// **#164 R2 P1 / R3 P1:** Receipt yazım girdisi — alan adlarıyla kurulur (iki
+/// u64'nün transpoze riskine karşı). Kanıt provenance'ı TEK motor değeri olarak
+/// gelir (digest + actors ayrı ayrı caller'dan ALINMAZ — R3 P1).
+pub struct ResumeReceiptInput<'a> {
+    pub record: &'a PendingAuthorization,
+    /// Unix saniye — apply anı.
+    pub applied_at: u64,
+    /// Apply sonrası space revision sequence.
+    pub resulting_sequence: u64,
+    /// Kanıt güven sınırı beyanı (R2 P0) — receipt'e kalıcı kaydedilir.
+    pub evidence_trust: EvidenceTrustMode,
+    /// Değerlendirilen kanıtın provenance'ı (digest + katılan actor'ler) —
+    /// motorun validated evidence'den ürettiği TEK değer.
+    pub evidence_provenance: ResumeWitnessEvidenceProvenance,
+}
+
+/// **#164:** Resume receipt hataları.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum ResumeReceiptError {
+    /// I/O (okuma/yazma/serialization).
+    #[error("resume receipt I/O failed: {0}")]
+    Io(String),
+    /// Receipt dosyası bozuk/sahte (parse/strict-wire/schema/identity) —
+    /// fail-closed, operator müdahalesi gerekir.
+    #[error("resume receipt is invalid: {0}")]
+    Invalid(String),
+}
+
+/// **#164 (R1 P0-1/P1-1):** Applied resume receipt — evidence identity'ye
+/// adresli kalıcı kayıt.
+///
+/// Adres store'da identity'den türetilir (`task-{t}--claim-{c}--attempt-{n}
+/// --{digest}.receipt.json`); içerik `write_resume_receipt` tarafından record'dan
+/// kurulur, `read_resume_receipt` strict parse + `verify_against` ile doğrular —
+/// sahte/forged receipt "already applied" durumuna dönüşemez.
+/// `resulting_sequence` = apply sonrası `t_c` (base.sequence + 1).
+///
+/// **R2/R3 P1 — kanıt provenance'ı (commitment):** receipt, quorum'u sağlayan
+/// kanıtın değerlendirmeye girmiş hâline bağlanır: `evidence_trust` (güven
+/// sınırı beyanı — R2 P0), `witness_evidence_digest_hex` (değerlendirilen kanıt
+/// dizisinin domain-separated digest'i) ve `witness_actors` (katılan şahitler).
+/// **Bu bir commitment'tır, içerik geri çıkarmaz (R3 P2):** sonradan sunulan
+/// bir kanıt seti bu digest'le doğrulanabilir (aynı kanıt mıydı?) ve kimler
+/// katıldı kalıcıdır; fakat kanıt dosyası silinirse event `source`/`kind`/`id`
+/// receipt'ten YENİDEN KURULAMAZ — değerlendirilen kanıtın tamamının kalıcı
+/// audit kopyası ayrı bir karardır (bu PR'da yok).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ResumeReceipt {
+    pub schema: String,
+    pub task_id: crate::trajectory::TaskId,
+    pub claim_id: ClaimId,
+    pub attempt_num: u64,
+    /// Artifact'ın evidence digest'i (hex) — hangi askının çözüldüğünün kanıtı.
+    pub evidence_digest_hex: String,
+    /// Unix saniye — apply anı.
+    pub applied_at: u64,
+    /// Apply sonrası space revision sequence (base + 1).
+    pub resulting_sequence: u64,
+    /// Kanıt güven sınırı beyanı (R2 P0) — `EvidenceTrustMode::as_str`.
+    pub evidence_trust: String,
+    /// Değerlendirilen witness kanıt dizisinin digest'i (hex) — R2 P1.
+    pub witness_evidence_digest_hex: String,
+    /// Quorum'u sağlayan witness actor'leri (sorted, distinct) — R2 P1.
+    pub witness_actors: Vec<u64>,
+}
+
+/// **R1 P1-1:** Strict wire — `deny_unknown_fields` (forged-alan/rename reddi).
+impl<'de> serde::Deserialize<'de> for ResumeReceipt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            schema: String,
+            task_id: crate::trajectory::TaskId,
+            claim_id: ClaimId,
+            attempt_num: u64,
+            evidence_digest_hex: String,
+            applied_at: u64,
+            resulting_sequence: u64,
+            evidence_trust: String,
+            witness_evidence_digest_hex: String,
+            witness_actors: Vec<u64>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(ResumeReceipt {
+            schema: wire.schema,
+            task_id: wire.task_id,
+            claim_id: wire.claim_id,
+            attempt_num: wire.attempt_num,
+            evidence_digest_hex: wire.evidence_digest_hex,
+            applied_at: wire.applied_at,
+            resulting_sequence: wire.resulting_sequence,
+            evidence_trust: wire.evidence_trust,
+            witness_evidence_digest_hex: wire.witness_evidence_digest_hex,
+            witness_actors: wire.witness_actors,
+        })
+    }
+}
+
+impl ResumeReceipt {
+    /// Strict wire'dan kur (disk baytları → tip).
+    fn from_strict_bytes(raw: &[u8]) -> Result<Self, String> {
+        serde_json::from_slice(raw).map_err(|e| e.to_string())
+    }
+
+    /// **R1 P1-1:** Receipt'i askılı kayda karşı doğrula — tek doğrulama yüzeyi.
+    ///
+    /// Schema sabiti + kimlik üçlüsü (task/claim/attempt) + evidence digest hex'i
+    /// record ile eşit olmalı. Sapma = receipt başka bir askıya ait ya da forge
+    /// → `Err` (fail-closed; "already applied" olarak sayılmaz).
+    ///
+    /// **R2 P1 yapısal kontroller:** kanıt bağlama alanları shape-düzeyinde
+    /// doğulanır (trust modu bilinen değer, digest 64-hex, actor listesi
+    /// sorted+distinct+non-empty) — bunların record'la çapraz kontrolü yoktur
+    /// (run'a özgü veri); görevleri kalıcı kaydın dürüst biçimde dolu olması.
+    pub fn verify_against(&self, record: &PendingAuthorization) -> Result<(), String> {
+        if self.schema != RESUME_RECEIPT_SCHEMA {
+            return Err(format!(
+                "schema {:?} ≠ expected {:?}",
+                self.schema, RESUME_RECEIPT_SCHEMA
+            ));
+        }
+        if self.task_id != record.task_id {
+            return Err(format!(
+                "task_id {} ≠ artifact {}",
+                self.task_id, record.task_id
+            ));
+        }
+        if self.claim_id != record.claim_id {
+            return Err(format!(
+                "claim_id {} ≠ artifact {}",
+                self.claim_id, record.claim_id
+            ));
+        }
+        let artifact_attempt = record.suspended_attempt_evidence.attempt_num().get();
+        if self.attempt_num != artifact_attempt {
+            return Err(format!(
+                "attempt_num {} ≠ artifact {}",
+                self.attempt_num, artifact_attempt
+            ));
+        }
+        let expected_hex = record.evidence_digest.to_hex();
+        if self.evidence_digest_hex != expected_hex {
+            return Err("evidence_digest_hex does not match the artifact".to_string());
+        }
+        if EvidenceTrustMode::from_str_wire(&self.evidence_trust).is_none() {
+            return Err(format!(
+                "unknown evidence_trust {:?} (known: {:?})",
+                self.evidence_trust,
+                EvidenceTrustMode::OperatorAsserted.as_str()
+            ));
+        }
+        if self.witness_evidence_digest_hex.len() != 64
+            || !self
+                .witness_evidence_digest_hex
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit())
+        {
+            return Err("witness_evidence_digest_hex must be 64 hex chars".to_string());
+        }
+        if self.witness_actors.is_empty() {
+            return Err("witness_actors must be non-empty (applied implies quorum)".to_string());
+        }
+        if self.witness_actors.windows(2).any(|w| w[0] >= w[1]) {
+            return Err("witness_actors must be sorted and distinct".to_string());
+        }
+        Ok(())
+    }
+}
+
+/// Resume receipt schema sabiti.
+pub const RESUME_RECEIPT_SCHEMA: &str = "osp.resume-receipt.v1";
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #164 R2 — Evidence trust boundary + witness kanıt digest'i
+//
+// R2 P0: mevcut wire actor/kind/source'u caller'dan olduğu gibi alır — OSP bir
+// olayın GERÇEKLE uyumunu doğrulayamaz ("{actor:200, kind:MergeCommit}" uydurma
+// olabilir). Paper 1 A1'in provider-doğrulaması (verified-evidence artifact'ı)
+// ayrı bir gelecek yüzeydir; bu PR'da sınır DÜRÜSTÇE modellenir: production
+// resume, kanıtı ancak açık bir güven beyanıyla tüketir ve bu beyan kalıcı
+// receipt'e yazılır. "Raw JSON doğrudan authorization sağlar" iddiası kalkar —
+// "operator kefaletiyle authorization sağlar" olur.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#164 R2 P0:** Kanıt güven sınırı modu — resume'un kanıt kaynağına dair
+/// açık beyan; receipt'e kalıcı yazılır.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvidenceTrustMode {
+    /// Operator, dosyadaki olayların gerçekliğine (actor kimliğinin doğru
+    /// olduğu, olay tipinin/kaynağın gerçeği yansıttığı) KEFİLDİR. OSP bu
+    /// modda hiçbir dış doğrulama yapmaz — wire yalnız yapısal kusurları
+    /// (author-self, duplicate) reddeder. Ağırlık `witness_kind`'dan türediği
+    /// için operator kefaleti DOLAYLI ağırlık seçimini de kapsar.
+    OperatorAsserted,
+}
+
+impl EvidenceTrustMode {
+    /// Kalıcı wire string'i (receipt + JSON envelope).
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::OperatorAsserted => "operator_asserted",
+        }
+    }
+
+    /// Wire'dan oku (receipt doğrulaması) — bilinmeyen değer `None`.
+    pub fn from_str_wire(value: &str) -> Option<Self> {
+        match value {
+            "operator_asserted" => Some(Self::OperatorAsserted),
+            _ => None,
+        }
+    }
+}
+
+/// **#164 R2 P1:** Resume'da değerlendirilen witness kanıt dizisinin digest'i.
+///
+/// Kanonik kodlama (BLAKE3, domain-separated): olay sayısı (u64 LE) + her olay
+/// (id'ye göre sorted): id (u64 LE) + source (u64 LE uzunluk + baytlar) +
+/// witness_kind tag (u8: MergeCommit=0, PRMerged=1, TrailerReviewed=2,
+/// CoAuthored=3) + actor (u64 LE) + claim (u64 LE). Weight DAHİL DEĞİL —
+/// `default_weight(kind)`'ın deterministik fonksiyonu (bijection), bağımsız
+/// bilgi taşımaz; kind tag'ı zaten bağlı. Sıralama id'ye göre olduğundan
+/// dosyadaki satır sırası digest'i değiştirmez.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeWitnessEvidenceDigest([u8; 32]);
+
+impl ResumeWitnessEvidenceDigest {
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.resume-witness-evidence.v1\0";
+
+    /// Digest hesapla — infallible (BLAKE3 over düz veri).
+    pub fn compute(events: &[crate::witness::EvidenceEvent]) -> Self {
+        use crate::canonical_encoding::{encode_u64, encode_u8};
+        let mut sorted: Vec<&crate::witness::EvidenceEvent> = events.iter().collect();
+        sorted.sort_by_key(|e| e.id);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(Self::DOMAIN_SEPARATOR);
+        encode_u64(&mut hasher, sorted.len() as u64, "event_count");
+        for event in sorted {
+            encode_u64(&mut hasher, event.id, "event_id");
+            encode_u64(&mut hasher, event.source.len() as u64, "event_source_len");
+            hasher.update(event.source.as_bytes());
+            let kind_tag = match event.witness_kind {
+                crate::witness::WitnessKind::MergeCommit => 0u8,
+                crate::witness::WitnessKind::PRMerged => 1,
+                crate::witness::WitnessKind::TrailerReviewed => 2,
+                crate::witness::WitnessKind::CoAuthored => 3,
+            };
+            encode_u8(&mut hasher, kind_tag, "event_kind");
+            encode_u64(&mut hasher, event.actor, "event_actor");
+            encode_u64(&mut hasher, event.claim, "event_claim");
+        }
+        Self(*hasher.finalize().as_bytes())
+    }
+
+    /// Hex (64 karakter — receipt/JSON yüzeyleri).
+    pub fn to_hex(&self) -> String {
+        let mut hex = String::with_capacity(64);
+        for byte in &self.0 {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+}
+
+/// **#164 R3 P1:** Değerlendirilen kanıtın TEK provenance değeri — motor
+/// validated evidence'den üretir; receipt writer OLDUĞU GİBİ tüketir.
+///
+/// **Neden tek tip:** R2'de digest motor'dan, actor listesi CLI'den ayrı
+/// geliyordu — public `ResumeReceiptInput` alanları sayesinde başka caller
+/// `{digest = kanıt A, actors = kanıt B}` şeklinde şeklen geçerli ama
+/// semantik olarak çelişkili receipt yazabilirdi. Bu tip digest + actors'ı
+/// yapışık kılar: ikisi de aynı validated evidence'dan, aynı anda türetilir;
+/// caller ayrı ayrı veremez. Private fields + smart constructor (dosya
+/// deserializasyonu YOK — yalnız motor üretir; diskten gelen receipt ayrı
+/// tiptedir ve `verify_against` yapısal kontrolünden geçer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeWitnessEvidenceProvenance {
+    digest: ResumeWitnessEvidenceDigest,
+    /// Sorted + distinct (constructor invariant'ı). Non-empty motor bağlamında
+    /// garanti (Applied implies quorum → ≥1 approver); tip düzeyinde
+    /// ZORLANMAZ — receipt reader kendi yapısal kontrolünü korur.
+    actors: Vec<u64>,
+}
+
+impl ResumeWitnessEvidenceProvenance {
+    /// Validated evidence'den provenance üret — digest + sorted-distinct actors,
+    /// tek kaynak. Sözleşme: yalnız doğrulanmış (engine `validate_external_
+    /// evidence` geçmiş) kanıt üzerinden anlamlıdır — motor resume'da böyle
+    /// çağırır. Tip invariant'ı (digest + actors AYNI diziden türetilir) her
+    /// caller için construction ile garanti; çelişkili değer üretilemez.
+    pub fn from_validated_evidence(events: &[crate::witness::EvidenceEvent]) -> Self {
+        let mut actors: Vec<u64> = events.iter().map(|e| e.actor).collect();
+        actors.sort_unstable();
+        actors.dedup();
+        Self {
+            digest: ResumeWitnessEvidenceDigest::compute(events),
+            actors,
+        }
+    }
+
+    /// Değerlendirilen kanıt dizisinin digest'i.
+    pub fn digest(&self) -> &ResumeWitnessEvidenceDigest {
+        &self.digest
+    }
+
+    /// Katılan witness actor'leri (sorted, distinct).
+    pub fn actors(&self) -> &[u64] {
+        &self.actors
+    }
 }
 
 /// Artifact'ı dosyadan yükle + verify (P1 resume için, ama P0'da da test edilebilir).
@@ -11459,6 +12007,514 @@ mod tests {
                 required: 2
             }
         ));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // #164 — Resume flow tests (engine resume API + restore + receipt)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// sample_basis/record türevi — base revision motorun GERÇEK current revision'ı.
+    /// (Evidence basis-digest'i de yeni basis'ten türetilir — Envelope::new cross-check.)
+    fn sample_envelope_with_base(base: SpaceViewRevision) -> PendingAuthorizationEnvelope {
+        let mut basis = sample_basis();
+        basis.base_space_view_revision = base.clone();
+        let basis_digest = AuthorizationBasisDigest::compute(&basis).unwrap();
+        let hold_reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest.clone(),
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: hold_reason.clone(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .unwrap();
+        let evidence_digest = SuspendedAttemptEvidenceDigest::compute(&evidence).unwrap();
+        let record = PendingAuthorization {
+            task_id: TaskId::from(1u64),
+            claim_id: ClaimId::from(42u64),
+            predicate_completion: PredicateCompletion::Completed,
+            mutation_decision: MutationDecision::AcceptAsCompleted,
+            intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+            authorization_basis_digest: basis_digest,
+            base_space_view_revision: base,
+            evaluation_context_digest: EvaluationContextDigest::from_bytes([0xaa; 32]),
+            witness_requirement: WitnessRequirement {
+                min_approvers: 2,
+                quorum_threshold: 1.5,
+            },
+            witness_hold_reason: hold_reason,
+            witness_snapshot: snapshot,
+            attempt_num: AttemptNumber::try_from(1u64).unwrap(),
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
+            created_at: 1_700_000_000,
+        };
+        PendingAuthorizationEnvelope::new(record, basis).unwrap()
+    }
+
+    fn resume_test_engine(identity: [u8; 16]) -> crate::engine::SpaceEngine {
+        let engine = crate::engine::SpaceEngine::new(
+            crate::space::Space::default(),
+            crate::coords::CoordinateSystem::default_raw_five(
+                crate::coords::MetricSource::Placeholder,
+                crate::axes::CohesionAxis::new(),
+                crate::axes::EntropyAxis::from_commit_entropy(0.0),
+                crate::axes::WitnessDepthAxis::from_witness(0.0, 0),
+            )
+            .unwrap(),
+            crate::vision::VisionVector::with_source(
+                crate::coords::RawPosition::default(),
+                crate::vision::VisionSource::UserLoaded,
+            ),
+            crate::engine::EngineConfig::default_calibrated(),
+        );
+        engine
+            .with_persisted_view_id(PersistedSpaceViewId::from_bytes(identity))
+            .unwrap()
+    }
+
+    fn resume_event(id: u64, actor: u64, claim: u64) -> crate::witness::EvidenceEvent {
+        crate::witness::EvidenceEvent::new(
+            id,
+            format!("s{id}"),
+            crate::witness::WitnessKind::MergeCommit,
+            actor,
+            claim,
+        )
+    }
+
+    #[test]
+    fn resume_applies_with_quorum_and_advances_revision() {
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("quorum met → apply");
+        match &outcome {
+            crate::engine::ResumeHeldOutcome::Applied {
+                resulting_sequence, ..
+            } => assert_eq!(*resulting_sequence, 1, "t_c 0 → 1"),
+            other => panic!("expected Applied, got {other:?}"),
+        }
+
+        // Aynı motor üzerinde ikinci resume → revision ilerledi → stale (fence).
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect_err("double-resume on same engine must hit staleness fence");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::StaleBaseRevision { .. }
+            ),
+            "expected StaleBaseRevision, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resume_insufficient_evidence_still_held_leaves_space_untouched() {
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        // Tek witness (1 approver < 2) → StillHeld — domain outcome, hata değil.
+        let outcome = engine
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 42)])
+            .expect("still-held is a domain outcome, not an error");
+        assert!(matches!(
+            outcome,
+            crate::engine::ResumeHeldOutcome::StillHeld { .. }
+        ));
+
+        // Uzay dokunulmadı → aynı motorla tam kanıt gelince apply ÇALIŞMALI.
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("space untouched after StillHeld → fresh resume applies");
+        assert!(matches!(
+            outcome,
+            crate::engine::ResumeHeldOutcome::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn resume_defective_evidence_is_operational_fault() {
+        // R1 P1-2: INV-T9 sözleşmesi — author-self / duplicate kanıt operational
+        // fault; sessiz dışlama/dedup YOK. Motor, değerlendirme ÖNCESİ reddeder.
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        // (a) author-self (author = 100).
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 100, 42), resume_event(2, 200, 42)],
+            )
+            .expect_err("author-self evidence must be rejected, not silently excluded");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::InvalidEvidence { .. }),
+            "got {err:?}"
+        );
+
+        // (b) Duplicate actor (200, iki kaynak) — triple-dedup tek başına
+        // yakalamaz; yüzey doğrulaması reddeder.
+        let mut dup_source = resume_event(2, 200, 42);
+        dup_source.source = "another-source".to_string();
+        let err = engine
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 42), dup_source])
+            .expect_err("duplicate-actor evidence must be rejected");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::InvalidEvidence { .. }),
+            "got {err:?}"
+        );
+
+        // (c) Aynı dedup anahtarı (source, actor, claim) iki kez — farklı id,
+        //     aynı içerik (inv #2 triple'i).
+        let same_key = crate::witness::EvidenceEvent::new(
+            2,
+            "s1",
+            crate::witness::WitnessKind::MergeCommit,
+            200,
+            42,
+        );
+        let err = engine
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 42), same_key])
+            .expect_err("duplicate-key evidence must be rejected");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::InvalidEvidence { .. }),
+            "got {err:?}"
+        );
+
+        // Uzay dokunulmadı → temiz kanıtla apply hâlâ çalışır.
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("clean evidence after rejections still applies");
+        assert!(matches!(
+            outcome,
+            crate::engine::ResumeHeldOutcome::Applied { .. }
+        ));
+    }
+
+    #[test]
+    fn resume_foreign_claim_evidence_fail_closed() {
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![
+                    resume_event(1, 200, 999), // yabancı claim
+                    resume_event(2, 300, 42),
+                ],
+            )
+            .expect_err("foreign-claim evidence must be rejected before evaluation");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::ClaimBindingMismatch {
+                    evidence_claim: 999,
+                    artifact_claim: 42,
+                    ..
+                }
+            ),
+            "expected ClaimBindingMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn resume_identity_mismatch_fail_closed() {
+        // Artifact [0xdd]* motorunda üretildi; resume [0xee]* motorunda → mismatch.
+        let mut engine = resume_test_engine([0xee; 16]);
+        let mut base = engine.current_space_view_revision().unwrap();
+        // Base'in view_id'sini artifact'ın identity'siyle değiştir (içerik aynı motorun).
+        base.view_id = SpaceViewId::Persisted(PersistedSpaceViewId::from_bytes([0xdd; 16]));
+        let envelope = sample_envelope_with_base(base);
+
+        let err = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect_err("different state-dir/space must fail closed");
+        assert!(
+            matches!(err, crate::engine::ResumeHeldError::IdentityMismatch { .. }),
+            "expected IdentityMismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_claim_for_resume_projects_structural_delta() {
+        let basis = sample_basis();
+        let claim = restore_claim_for_resume(&basis);
+        assert_eq!(claim.id, 42, "claim id from claim_identity");
+        assert_eq!(claim.author, 100, "author from claim_author");
+        assert_eq!(claim.task_id, Some(TaskId::from(1u64)), "INV-T5 binding");
+
+        assert_eq!(claim.delta_nodes.len(), 1);
+        let node = &claim.delta_nodes[0];
+        assert_eq!(node.id, 10);
+        assert_eq!(
+            node.kind,
+            crate::space::NodeKind::Module,
+            "kind tag reverse"
+        );
+        assert_eq!(node.mass, 100.0);
+        assert_eq!(node.cohesion, Some(0.5));
+        assert_eq!(
+            node.classification,
+            crate::space::NodeClassification::Production
+        );
+        assert_eq!(node.role, crate::space::NodeRole::Runtime);
+
+        assert_eq!(
+            claim.removed_edges,
+            vec![crate::agent::EdgeRef {
+                from: 0,
+                to: 1,
+                kind: crate::space::EdgeKind::Imports,
+            }],
+            "removed edge identity reverse"
+        );
+    }
+
+    /// İki witness'lık temiz kanıt — receipt input'u kurmak için.
+    fn resume_receipt_test_input<'a>(
+        record: &'a PendingAuthorization,
+        applied_at: u64,
+        resulting_sequence: u64,
+    ) -> ResumeReceiptInput<'a> {
+        let events = vec![resume_event(1, 200, 42), resume_event(2, 300, 42)];
+        ResumeReceiptInput {
+            record,
+            applied_at,
+            resulting_sequence,
+            evidence_trust: EvidenceTrustMode::OperatorAsserted,
+            // R3 P1: kanıt provenance'ı TEK değer — digest/actors ayrı verilmez.
+            evidence_provenance: ResumeWitnessEvidenceProvenance::from_validated_evidence(&events),
+        }
+    }
+
+    #[test]
+    fn resume_witness_provenance_binds_digest_and_actors_to_same_source() {
+        // R3 P1: provenance TEK değer — digest + actors aynı validated evidence'den
+        // türetilir; sorted+distinct garanti. Çelişkili değer ÜRETİLEMEZ (private
+        // fields; construction ikisini birlikte hesaplar).
+        let events = vec![
+            resume_event(2, 300, 42),
+            resume_event(1, 200, 42),
+            // Aynı actor'ün ikinci olayı wire'da zaten reddedilir; constructor
+            // yine de sorted+distinct üretir (defensive).
+            resume_event(3, 200, 42),
+        ];
+        let provenance = ResumeWitnessEvidenceProvenance::from_validated_evidence(&events);
+        assert_eq!(provenance.actors(), &[200, 300], "sorted + distinct actors");
+        assert_eq!(
+            *provenance.digest(),
+            ResumeWitnessEvidenceDigest::compute(&events),
+            "digest aynı diziden bağımsız hesapla"
+        );
+    }
+
+    #[test]
+    fn resume_receipt_identity_keyed_write_read_and_no_clobber() {
+        // R1 P0-1: receipt adresi CALLER PATH'inden değil record identity'den
+        // türetilir — artifact'ı başka path'e kopyalamak receipt'i kaçıramaz.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FilesystemPendingAuthorizationStore::new(tmp.path());
+        let record = sample_pending_record();
+        assert_eq!(
+            store.read_resume_receipt(&record).unwrap(),
+            None,
+            "no receipt yet"
+        );
+
+        let path = store
+            .write_resume_receipt(resume_receipt_test_input(&record, 1_700_000_000, 1))
+            .expect("write receipt");
+        // Adres canonical artifact kimliğiyle aynı kökte, digest-adlı:
+        let filename = path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(filename.starts_with("task-1--claim-42--attempt-1--"));
+        assert!(filename.ends_with(".receipt.json"));
+
+        let read = store
+            .read_resume_receipt(&record)
+            .unwrap()
+            .expect("round-trip");
+        assert_eq!(read.task_id, record.task_id);
+        assert_eq!(read.claim_id, record.claim_id);
+        assert_eq!(read.resulting_sequence, 1);
+        // R2 P1 — kanıt bağlama alanları round-trip.
+        assert_eq!(read.evidence_trust, "operator_asserted");
+        assert_eq!(read.witness_evidence_digest_hex.len(), 64);
+        assert_eq!(read.witness_actors, vec![200, 300]);
+
+        // No-clobber — ikinci yazma fail-closed (çift-apply yanılgısı).
+        store
+            .write_resume_receipt(resume_receipt_test_input(&record, 1_700_000_001, 2))
+            .expect_err("second write must fail (create_new no-clobber)");
+    }
+
+    #[test]
+    fn resume_witness_evidence_digest_order_insensitive_and_content_bound() {
+        // R2 P1: digest id-sorted kodlamayla hesaplanır — dosya satır sırası
+        // fark etmez; içerik değişirse değişir.
+        let a = vec![resume_event(1, 200, 42), resume_event(2, 300, 42)];
+        let mut b = a.clone();
+        b.reverse();
+        assert_eq!(
+            ResumeWitnessEvidenceDigest::compute(&a),
+            ResumeWitnessEvidenceDigest::compute(&b),
+            "same events, different order → same digest"
+        );
+
+        let c = vec![resume_event(1, 201, 42), resume_event(2, 300, 42)];
+        assert_ne!(
+            ResumeWitnessEvidenceDigest::compute(&a),
+            ResumeWitnessEvidenceDigest::compute(&c),
+            "different actor → different digest"
+        );
+
+        // source/kind değişimi de bağlanır.
+        let mut d = a.clone();
+        d[0].source = "different-source".to_string();
+        assert_ne!(
+            ResumeWitnessEvidenceDigest::compute(&a),
+            ResumeWitnessEvidenceDigest::compute(&d)
+        );
+        let mut e = a.clone();
+        e[0].witness_kind = crate::witness::WitnessKind::PRMerged;
+        assert_ne!(
+            ResumeWitnessEvidenceDigest::compute(&a),
+            ResumeWitnessEvidenceDigest::compute(&e)
+        );
+    }
+
+    #[test]
+    fn resume_receipt_forged_variants_fail_closed() {
+        // R1 P1-1 + R2: parse-edilebilir-ama-sahte receipt "already applied"
+        // durumuna DÖNÜŞEMEZ — strict wire + verify_against(record) her varyantta
+        // reddeder. Geçerli taban (valid new fields) üstünde varyasyon.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FilesystemPendingAuthorizationStore::new(tmp.path());
+        let record = sample_pending_record();
+        let receipt_path = store.resume_receipt_path_for(&record);
+        std::fs::create_dir_all(receipt_path.parent().unwrap()).expect("receipt parent dir");
+        let write_raw = |json: String| std::fs::write(&receipt_path, json).expect("write forged");
+        let digest_hex = record.evidence_digest.to_hex();
+        // Geçerli taban — tüm alanlar doğru (bu yazım verify'den GEÇMELİDİR;
+        // aşağıdaki varyasyonlar tek alan bozar).
+        let valid = serde_json::json!({
+            "schema": RESUME_RECEIPT_SCHEMA,
+            "task_id": 1, "claim_id": 42, "attempt_num": 1,
+            "evidence_digest_hex": digest_hex,
+            "applied_at": 1, "resulting_sequence": 1,
+            "evidence_trust": "operator_asserted",
+            "witness_evidence_digest_hex": "ab".repeat(32),
+            "witness_actors": [200, 300],
+        });
+        write_raw(valid.to_string());
+        store
+            .read_resume_receipt(&record)
+            .expect("valid base receipt must pass (sanity)");
+
+        // (a) Yanlış schema — tip şekli doğru, schema değil.
+        let mut forged = valid.clone();
+        forged["schema"] = serde_json::json!("osp.resume-receipt.v9");
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("wrong schema rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (b) Yabancı identity — başka askının receipt'i (claim uyuşmaz).
+        let mut forged = valid.clone();
+        forged["claim_id"] = serde_json::json!(999);
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("foreign identity rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (c) Suspension evidence digest uyuşmazlığı.
+        let mut forged = valid.clone();
+        forged["evidence_digest_hex"] = serde_json::json!("ff".repeat(32));
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("digest mismatch rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (d) Strict wire — unknown alan reject (forged-alan enjeksiyonu).
+        let mut forged = valid.clone();
+        forged["extra_field"] = serde_json::json!(true);
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("unknown field rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (e) R2 — bilinmeyen trust modu.
+        let mut forged = valid.clone();
+        forged["evidence_trust"] = serde_json::json!("osp-verified");
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("unknown trust mode rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (f) R2 — kanıt digest'i 64-hex değil.
+        let mut forged = valid.clone();
+        forged["witness_evidence_digest_hex"] = serde_json::json!("ab".repeat(16));
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("malformed witness digest rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (g) R2 — boş actor listesi (applied implies quorum).
+        let mut forged = valid.clone();
+        forged["witness_actors"] = serde_json::json!([]);
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("empty witness list rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
+
+        // (h) R2 — sırasız/tekrarlı actor listesi.
+        let mut forged = valid.clone();
+        forged["witness_actors"] = serde_json::json!([300, 200]);
+        write_raw(forged.to_string());
+        let err = store
+            .read_resume_receipt(&record)
+            .expect_err("unsorted witness list rejected");
+        assert!(matches!(err, ResumeReceiptError::Invalid(_)), "got {err:?}");
     }
 
     #[test]

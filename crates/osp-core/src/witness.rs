@@ -567,6 +567,108 @@ pub fn classify_status(
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// #164 (review R1 P1-2) — Dış (operatör) kanıt yüzeyi doğrulayıcısı
+//
+// INV-T9 sözleşmesi (`EngineCommitError::InvalidWitnessEvidence` + exit 20 =
+// "malformed/author-self/duplicate" + NativeFailureSurface dokümantasyonu) kusurlu
+// kanıtı operational fault sayar; bu sınıf bugüne dek hiçbir production kodu
+// tarafından üretilmiyordu. Resume wire'ı bu sözleşmenin İLK production
+// tüketicisidir: operatör kanıt dosyası temiz değilse BAŞTAN reddedilir.
+//
+// İki katmanın ayrımı (bilinçli): motorun iç kanonikleştirme invariant'ları
+// (inv #1 author-dışlama, inv #2 triple-dedup) TOPLANMIŞ kanıt kümelerinin
+// hesapsal doğruluğunu korur — örn. `gh pr list` çıktısında author'un kendi
+// commit'i legitimately görünebilir ve sayılmaz. Operatör wire'ı ise bir askıyı
+// çözmek için bilinçli listelenmiş kanıttır: author-self veya duplicate giriş
+// dosya kusurudur; sessiz dışlama/dedup, quorum eksikliğini beklenmedik bir
+// StillHeld olarak maskeler. Yüzey sıkı, çekirdek tolerant.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **#164 (R1 P1-2):** Dış kanıt yüzeyi doğrulama hatası — operational fault.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ExternalEvidenceError {
+    /// inv #1 — author kendi claim'ine şahitlik edemez; wire'da kusur olarak reddedilir.
+    #[error("author-self evidence: event {event_id} actor {actor} is the claim author — the author cannot witness their own claim")]
+    AuthorSelf {
+        event_id: EvidenceId,
+        actor: AgentId,
+    },
+    /// inv #2 dedup anahtarı `(source, actor, claim)` dosyada iki kez göründü.
+    #[error(
+        "duplicate evidence: events {first_id} and {second_id} share dedup key \
+         (source={evidence_source:?}, actor={actor}, claim={claim})"
+    )]
+    DuplicateKey {
+        first_id: EvidenceId,
+        second_id: EvidenceId,
+        evidence_source: String,
+        actor: AgentId,
+        claim: ClaimId,
+    },
+    /// Aynı actor iki ayrı olayla geldi — Q1 "distinct non-author approvers"
+    /// semantiği wire yüzeyinde zorlanır (tek actor iki kaynakla çift-onaycı
+    /// olamaz; `canonicalize_for` triple-dedup'u bunu tek başına yakalamaz).
+    #[error(
+        "duplicate actor: actor {actor} appears in events {first_id} and {second_id} — \
+         each witness contributes exactly one event"
+    )]
+    DuplicateActor {
+        actor: AgentId,
+        first_id: EvidenceId,
+        second_id: EvidenceId,
+    },
+    /// Olay kimliği çakışması (wire kusuru).
+    #[error("duplicate event id: {event_id}")]
+    DuplicateEventId { event_id: EvidenceId },
+}
+
+/// **#164 (R1 P1-2):** Operatör kanıt dosyası yüzey doğrulaması.
+///
+/// Sıra: duplicate-id → author-self → duplicate-key → duplicate-actor.
+/// Claim-binding (event.claim == artifact claim) bu fonksiyonun DEĞİL resume
+/// fence'inin işidir (`ResumeHeldError::ClaimBindingMismatch`).
+pub fn validate_external_evidence(
+    events: &[EvidenceEvent],
+    author: AgentId,
+) -> Result<(), ExternalEvidenceError> {
+    use std::collections::{HashMap, HashSet};
+    let mut seen_ids: HashSet<EvidenceId> = HashSet::new();
+    let mut seen_keys: HashMap<(String, AgentId, ClaimId), EvidenceId> = HashMap::new();
+    let mut seen_actors: HashMap<AgentId, EvidenceId> = HashMap::new();
+    for e in events {
+        if !seen_ids.insert(e.id) {
+            return Err(ExternalEvidenceError::DuplicateEventId { event_id: e.id });
+        }
+        if e.actor == author {
+            return Err(ExternalEvidenceError::AuthorSelf {
+                event_id: e.id,
+                actor: e.actor,
+            });
+        }
+        let key = (e.source.clone(), e.actor, e.claim);
+        if let Some(&first_id) = seen_keys.get(&key) {
+            return Err(ExternalEvidenceError::DuplicateKey {
+                first_id,
+                second_id: e.id,
+                evidence_source: e.source.clone(),
+                actor: e.actor,
+                claim: e.claim,
+            });
+        }
+        seen_keys.insert(key, e.id);
+        if let Some(&first_id) = seen_actors.get(&e.actor) {
+            return Err(ExternalEvidenceError::DuplicateActor {
+                actor: e.actor,
+                first_id,
+                second_id: e.id,
+            });
+        }
+        seen_actors.insert(e.actor, e.id);
+    }
+    Ok(())
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // Testler
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -859,5 +961,92 @@ mod tests {
             TimeLayer::Gelecek,
             "serde #[skip] input'taki time_layer'ı yok sayar → invariant korundu"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #164 (R1 P1-2) — dış kanıt yüzeyi doğrulayıcısı
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_external_evidence_accepts_clean_set() {
+        let events = vec![
+            ev(1, "PR#1", WitnessKind::MergeCommit, 200),
+            ev(2, "PR#2", WitnessKind::PRMerged, 300),
+        ];
+        assert!(validate_external_evidence(&events, 100).is_ok());
+    }
+
+    #[test]
+    fn validate_external_evidence_rejects_author_self() {
+        let events = vec![
+            ev(1, "PR#1", WitnessKind::MergeCommit, 200),
+            ev(2, "PR#2", WitnessKind::MergeCommit, 100), // author!
+        ];
+        let err = validate_external_evidence(&events, 100).unwrap_err();
+        assert!(
+            matches!(err, ExternalEvidenceError::AuthorSelf { actor: 100, .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_external_evidence_rejects_duplicate_key() {
+        // Aynı (source, actor, claim) — farklı id.
+        let events = vec![
+            ev(1, "PR#42", WitnessKind::MergeCommit, 200),
+            ev(2, "PR#42", WitnessKind::CoAuthored, 200),
+        ];
+        let err = validate_external_evidence(&events, 999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExternalEvidenceError::DuplicateKey {
+                    first_id: 1,
+                    second_id: 2,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_external_evidence_rejects_duplicate_actor() {
+        // Aynı actor, FARKLI source — triple-dedup bunu yakalamaz; yüzey reddeder.
+        let events = vec![
+            ev(1, "PR#1", WitnessKind::MergeCommit, 200),
+            ev(2, "commit-abc", WitnessKind::MergeCommit, 200),
+        ];
+        let err = validate_external_evidence(&events, 999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExternalEvidenceError::DuplicateActor {
+                    actor: 200,
+                    first_id: 1,
+                    second_id: 2
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_external_evidence_rejects_duplicate_event_id() {
+        let events = vec![
+            ev(1, "PR#1", WitnessKind::MergeCommit, 200),
+            ev(1, "PR#2", WitnessKind::MergeCommit, 300),
+        ];
+        let err = validate_external_evidence(&events, 999).unwrap_err();
+        assert!(
+            matches!(err, ExternalEvidenceError::DuplicateEventId { event_id: 1 }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_external_evidence_empty_set_is_clean() {
+        // Boş kanıt dosyası kusur DEĞİL — StillHeld domain outcome'ıdır.
+        assert!(validate_external_evidence(&[], 100).is_ok());
     }
 }
