@@ -3,15 +3,21 @@
 
 Answers the question a node-local coupling metric cannot: for a run's
 neighborhood (target node + nodes created by the accepted proposal), was each
-dependency REMOVED from the system, MOVED to exactly one other holder,
-UNCHANGED, or MULTIPLIED across several holders?
+dependency REMOVED from the OBSERVED NEIGHBORHOOD, MOVED to exactly one other
+holder, UNCHANGED, or MULTIPLIED across several holders? Scope: holders are
+counted only inside the neighborhood — "removed" means removed from the
+observed neighborhood and "new" means newly entering it; the dependency may
+still exist elsewhere in the graph. This is not a system-removal claim.
 
 Inputs are two `osp analyze` space snapshots of the SAME repository (before
 and after the promoted patch) plus the neighborhood node paths. Dependencies
 are keyed by the representative target-file path of each import edge (OSP's
-import graph maps one using-line to one representative file; the mapping is
-deterministic per analysis, and in practice stable across snapshots for the
-same namespace import).
+import graph maps one using-line to one representative file via a
+sorted-first namespace resolver). The mapping is deterministic per analysis
+and empirically stable for runs 9-11, but it is NOT an analyzer invariant:
+adding a lexicographically earlier file to a namespace can shift the
+representative path, which would surface here as `removed + new` for the same
+semantic dependency. #167 (type-level edges) is the structural fix.
 
 TERMINOLOGY (frozen; see dogfood/neighborhood-ledger.jsonl amendment): the
 counted quantity is *neighborhood edge multiplication* — represented
@@ -43,12 +49,19 @@ ownership pair is recorded per dependency because a single label can conflate
 facts: owner change can co-occur with growth ((increased, changed) reports
 both; the label alone says only "multiplied").
 
-FROZEN ALGORITHM: this script is the measurement instrument for the paired
-adversarial probe (dogfood/adversarial-probe-tasarim.md). Its accounting
-semantics must not change after pre-registration; changes require a new
-schema_version. `--check` runs embedded fixtures and asserts every
-classification AND the label = f(cardinality, ownership) derivation, so the
-freeze is verifiable at any commit SHA.
+INSTRUMENT CONTRACT (freeze semantics — two distinct things):
+  instrument identity = the merge/instrument commit SHA. The commit is what
+      freezes the algorithm; a later edit requires a new schema_version.
+  behavioral sanity   = `--check`. Embedded fixtures assert every
+      classification and the label = f(cardinality, ownership) derivation.
+      This is a regression self-test, NOT a freeze: if algorithm and fixtures
+      change together, or behavior outside fixture coverage changes,
+      `--check` still passes.
+Probe contract: the paired adversarial probe (dogfood/adversarial-probe-
+tasarim.md) must run THIS script AS RECORDED in its instrument_commit
+(e.g. `git show <sha>:scripts/neighborhood_accounting.py`), not whatever
+later lives on main. Writing the SHA into the artifact while running a newer
+script is not a freeze.
 
 Output: JSON record (schema neighborhood-accounting-v1.1) and a markdown
 table on stdout. Companion to dogfood/ledger.jsonl — a separate measurement
@@ -67,7 +80,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 SCHEMA = "neighborhood-accounting-v1.1"
@@ -127,7 +139,8 @@ def label_from(card: str, own: str) -> str:
     }
     if card in direct:
         return direct[card]
-    assert card == "same", f"unknown cardinality: {card}"
+    if card != "same":
+        raise ValueError(f"unknown cardinality: {card}")
     return "unchanged" if own == "unchanged" else "moved"
 
 
@@ -163,9 +176,12 @@ def account(
             "class": classify(bh, ah),
         }
 
-    classes: dict[str, int] = {}
+    # Deterministic shape for frozen artifacts: all six labels always present
+    # (missing != zero must never be ambiguous downstream).
+    classes: dict[str, int] = {k: 0 for k in
+                               ("removed", "moved", "multiplied", "unchanged", "new", "reduced")}
     for v in per_dep.values():
-        classes[v["class"]] = classes.get(v["class"], 0) + 1
+        classes[v["class"]] += 1
 
     def out_sum(deps: dict[str, set[str]], holders: set[str]) -> int:
         return sum(len(h & holders) for h in deps.values())
@@ -241,9 +257,11 @@ def run(args: argparse.Namespace) -> int:
 
 
 def self_check() -> int:
-    """Embedded fixtures covering every classification and the frozen
-    partition derivation. Freeze guard: if any assertion fails after
-    pre-registration, the instrument drifted."""
+    """Embedded fixtures covering every classification and the partition
+    derivation. Behavioral sanity test (NOT the freeze itself — instrument
+    identity is the commit SHA; see the instrument contract in the module
+    docstring). Explicit checks, not `assert`: python -O strips asserts and
+    this must still fail loudly."""
     T, G2, F = "pkg/T.cs", "pkg/G2.cs", "pkg/F.cs"
     A, B, C, D, E, G = "dep/A.cs", "dep/B.cs", "dep/C.cs", "dep/D.cs", "dep/E.cs", "dep/G.cs"
     b_ids = {1: T, 2: G2, 10: A, 11: B, 12: C, 13: D, 14: G}
@@ -263,13 +281,19 @@ def self_check() -> int:
     }
     for name, (card, own, label) in expected.items():
         got = (per[name]["cardinality"], per[name]["ownership"], per[name]["class"])
-        assert got == (card, own, label), f"partition drift at {name}: {got} != {(card, own, label)}"
-        assert per[name]["class"] == label_from(per[name]["cardinality"], per[name]["ownership"])
+        if got != (card, own, label):
+            raise RuntimeError(f"partition drift at {name}: {got} != {(card, own, label)}")
+        if per[name]["class"] != label_from(per[name]["cardinality"], per[name]["ownership"]):
+            raise RuntimeError(f"label derivation drift at {name}")
     s = rec["summary"]
-    assert s["neighborhood_out_sum_before"] == 6 and s["neighborhood_out_sum_after"] == 6, s
-    assert s["dependency_union_before"] == 5 and s["dependency_union_after"] == 5, s
+    if s["neighborhood_out_sum_before"] != 6 or s["neighborhood_out_sum_after"] != 6:
+        raise RuntimeError(f"out-sum drift: {s}")
+    if s["dependency_union_before"] != 5 or s["dependency_union_after"] != 5:
+        raise RuntimeError(f"union drift: {s}")
+    if set(s["classes"].keys()) != {"removed", "moved", "multiplied", "unchanged", "new", "reduced"}:
+        raise RuntimeError(f"classes shape drift: {s['classes']}")
     print("self-check PASS (six-class fixtures + cardinality/ownership cross-derivation;"
-          " out-sum 6->6; union 5->5)")
+          " all-six-key classes; out-sum 6->6; union 5->5)")
     return 0
 
 
