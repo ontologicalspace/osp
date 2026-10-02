@@ -98,5 +98,13 @@ jobs:
       - name: Verify invariant evidence matrix
         run: python3 scripts/verify_invariant_evidence.py
 
+      # PR #168: mahalle muhasebesi enstrümanı (paired adversarial probe'un
+      # ölçüm aracı) kendi self-test'ini merge gate'ine girer. NOT: --check
+      # davranışsal sağduyu testidir; enstrüman KİMLİĞİ commit SHA'dır (freeze
+      # sözleşmesi script docstring'inde — probe kayıtlı instrument_commit
+      # içeriğinden çalışır, main'deki script'ten değil).
+      - name: Verify neighborhood accounting instrument
+        run: python3 scripts/neighborhood_accounting.py --check
+
       - name: Build examples
         run: cargo build --locked --workspace --examples --exclude osp-desktop
