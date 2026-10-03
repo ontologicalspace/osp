@@ -147,6 +147,21 @@ pub struct NewEdgeSpec {
     pub kind: EdgeKind,
 }
 
+/// **#167 review tur-2 P0-2:** `TypeImports`/`SameNsType` analyzer-owned
+/// OBSERVATIONAL stratum'dur — yalnız analyzer'ın tip-çözümleme çıktısı olarak
+/// üretilirler; proposal/new-node mutation yolu fail-closed reddeder.
+///
+/// Gerekçe: bu kenarların kimliği `Edge.type_ref` (tip sembolü) taşır; proposal
+/// şeması (`NewEdgeSpec`) ve canonical structural-delta (`CanonicalEdge`) ref
+/// TAŞIMAZ — mutasyonla üretilen bir tip-gren kenar `type_ref: None` doğururdu:
+/// grafta var ama `x_type`'a 0 katkı (distinct-ref sayımı) ve digest'te ayrışmaz
+/// (None uzantısı boş). Domain kimliği genişledi, mutasyon kimliği genişlemedi —
+/// ara durum YASAK. #169/#171 gerçekten bu stratum'ı mutate etmeye ihtiyaç
+/// duyarsa proposal şeması + canonical identity BİRLİKTE genişletilir.
+pub fn is_analyzer_owned_edge_kind(kind: EdgeKind) -> bool {
+    matches!(kind, EdgeKind::TypeImports | EdgeKind::SameNsType)
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EntityChangeSpec {
     pub node_id: NodeId,
@@ -257,6 +272,18 @@ impl OutputContract {
             // "yeni node kendini import eder" senaryosu burada oluşamaz.
             let mut seen_edges: HashSet<(NodeId, EdgeKind)> = HashSet::new();
             for (target_id, edge_kind) in &node.connected_to {
+                // #167 review tur-2 P0-2: observational stratum mutasyon yoluyla
+                // ÜRETİLEMEZ (is_analyzer_owned_edge_kind doc — ref'siz tip-gren
+                // kenarı x_type'a 0 katkı + digest'te görünmez yarım kimlik).
+                if is_analyzer_owned_edge_kind(*edge_kind) {
+                    return Err(SyntaxViolation {
+                        claim_id: 0,
+                        detail: format!(
+                            "new_nodes[{}]: connected_to edge kind {:?} is analyzer-owned observational (#167) — not producible via proposals",
+                            i, edge_kind
+                        ),
+                    });
+                }
                 if !seen_edges.insert((*target_id, *edge_kind)) {
                     return Err(SyntaxViolation {
                         claim_id: 0,
@@ -272,6 +299,18 @@ impl OutputContract {
         // 2. NewEdgeSpec validation
         let mut seen_explicit_edges: HashSet<(NodeId, NodeId, EdgeKind)> = HashSet::new();
         for (i, edge) in proposal.new_edges.iter().enumerate() {
+            // #167 review tur-2 P0-2: observational stratum fail-closed —
+            // production-reachable `{"kind": "TypeImports"}` proposal'ı reddedilir.
+            if is_analyzer_owned_edge_kind(edge.kind) {
+                return Err(SyntaxViolation {
+                    claim_id: 0,
+                    detail: format!(
+                        "new_edges[{}]: edge kind {:?} is analyzer-owned observational (#167) — not producible via proposals",
+                        i, edge.kind
+                    ),
+                });
+            }
+
             // Imports self-loop
             if edge.kind == EdgeKind::Imports && edge.from == edge.to {
                 return Err(SyntaxViolation {
@@ -666,6 +705,43 @@ mod tests {
             ..Default::default() // G2c-2: removed_edges, affected_nodes default
         };
         assert!(contract.validate(&proposal).is_ok());
+    }
+
+    #[test]
+    fn output_contract_rejects_analyzer_owned_edge_kinds() {
+        // #167 review tur-2 P0-2: observational stratum mutasyon yoluyla uretilemez.
+        // (a) new_edges kind=TypeImports → red; (b) connected_to SameNsType → red.
+        let contract = OutputContract::default();
+
+        let mut proposal = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![NewEdgeSpec {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::TypeImports,
+            }],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "type-granular edge via proposal".to_string(),
+            ..Default::default()
+        };
+        let err = contract.validate(&proposal).expect_err("TypeImports red");
+        assert!(
+            err.detail.contains("analyzer-owned"),
+            "mesaj stratum gerekcesini tasisin: {}",
+            err.detail
+        );
+
+        proposal.new_edges = vec![];
+        proposal.new_nodes = vec![NewNodeSpec {
+            kind: NodeKind::Module,
+            initial_mass: 10.0,
+            connected_to: vec![(5, EdgeKind::SameNsType)],
+        }];
+        assert!(
+            contract.validate(&proposal).is_err(),
+            "connected_to SameNsType red"
+        );
     }
 
     #[test]

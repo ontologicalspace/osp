@@ -154,11 +154,16 @@ impl Axis for TypeGranularCouplingAxis {
     fn name(&self) -> &'static str {
         "coupling_type"
     }
-    /// CouplingAxis ile aynı formula marker (0 — value-level out-degree `deg/(1+deg)`);
-    /// ayrım eksen adı + okuduğu kenar sınıfıyladır (`Imports` vs `TypeImports`).
+    /// **Review tur-2 P1-1:** formula marker 1 — CouplingAxis'in 0'ından AYRIK:
+    /// ölçüLEN quantity `deg/(1+deg)` şeklinde aynı olsa da `deg` tanımı farklı
+    /// (`out_degree_value(Imports)` vs `out_distinct_type_refs(TypeImports)` =
+    /// distinct TİP SEMBOLÜ sayısı; partial tip 1 sayılır, type_ref'siz kenar 0).
+    /// INV-T9 #70 ilkesi: descriptor implementation'ın efektif algoritmasını
+    /// bağlamalı — marker 0'da kalsaydı "value-level out-degree" yazıp distinct-
+    /// symbol sayardık (semantics ≠ implementation).
     fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
         let mut params = AxisParameterEncoder::new();
-        params.push_u8(0); // formula marker: parametresiz, value-level out-degree
+        params.push_u8(1); // formula marker: distinct TypeImports type_ref sembol sayısı, deg/(1+deg)
         params.push_bytes(self.source.descriptor_id())?; // P1-1 source encoding
         AxisDescriptor::try_new(self.name(), 2, params)
     }

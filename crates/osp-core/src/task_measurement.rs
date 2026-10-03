@@ -162,6 +162,21 @@ pub fn validate_claim_structure(claim: &Claim) -> Result<(), EngineCommitError> 
 
     // 3. Edge validation
     for edge in &claim.delta_edges {
+        // #167 review tur-2 P0-2: analyzer-owned observational stratum — claim
+        // delta'sında TypeImports/SameNsType ÜRETİLEMEZ (agent `validate` birinci
+        // kapı; bu ikinci kapı doğrudan engine caller'larını kapatır). Ref'siz
+        // tip-gren kenarı x_type'a 0 katkı yapan yarım kimliktir.
+        if crate::agent::is_analyzer_owned_edge_kind(edge.kind) {
+            return Err(EngineCommitError::SyntaxViolation {
+                violation: SyntaxViolation {
+                    claim_id: claim.id,
+                    detail: format!(
+                        "edge kind {:?} is analyzer-owned observational (#167) — not producible via claims",
+                        edge.kind
+                    ),
+                },
+            });
+        }
         // Imports self-loop: module cannot import itself (semantic rule)
         if edge.kind == EdgeKind::Imports && edge.from == edge.to {
             return Err(EngineCommitError::SyntaxViolation {
@@ -622,6 +637,42 @@ mod tests {
 
     // Not: kapsamlı test envanteri (yarış, construction contract, cross-pin) W8'de;
     // burada yalnız taşınan fonksiyonların bit-identical pin'leri.
+
+    /// **#167 review tur-2 P0-2:** ikinci kapı — claim delta'sında observational
+    /// kind reddi (agent `validate` birinci kapı; doğrudan engine caller'ları için).
+    #[test]
+    fn claim_structure_rejects_analyzer_owned_edge_kinds() {
+        // build_claim_from_proposal ref'siz Edge üretir (bilinçli — proposal
+        // şeması ref taşımaz); ikinci kapı bu claim'i reddetmeli. Bu tam tur-2
+        // P0-2'nin anlattığı yarım-kimlik senaryosu: ref'siz tip-gren kenarı.
+        let proposal = crate::agent::DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![crate::agent::NewEdgeSpec {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::SameNsType,
+            }],
+            ..Default::default()
+        };
+        let claim =
+            build_claim_from_proposal(&proposal, crate::coords::RawPosition::default(), 7, 42, 1)
+                .expect("build (validation degil)");
+        assert!(
+            claim.delta_edges[0].type_ref.is_none(),
+            "fixture: ref'siz kenar"
+        );
+        let err = validate_claim_structure(&claim).expect_err("observational kind red");
+        match err {
+            EngineCommitError::SyntaxViolation { violation } => {
+                assert!(
+                    violation.detail.contains("analyzer-owned"),
+                    "{}",
+                    violation.detail
+                );
+            }
+            other => panic!("beklenen SyntaxViolation: {other:?}"),
+        }
+    }
 
     /// **P1-1 (review tur 5):** disposition → agent yüzeyi tablosu — navigator
     /// arm'ı ile birebir. Yeni disposition eklendiğinde bu test derleme hatası
