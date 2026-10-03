@@ -204,6 +204,15 @@ pub struct TrajectoryAttemptArgs {
     /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
     #[arg(long, default_value = "human")]
     pub format: String,
+    /// #166: Kanonik attempt artifact'ın çağırıcıya ait kopyası (şemalı run
+    /// envelope v1; atomic temp+rename yazım). Canonical KALICI kayıt her modda
+    /// state-dir'e yazılır: `attempts/task-<task_id>-<unix_millis>-<pid>[-N].json`
+    /// (no-clobber; final snapshot fence GEÇTİKTEN SONRA publish edilir — sıra:
+    /// navigator → fence → canonical publish → emit → exit). `--out` analyzed
+    /// repo'yu ve state-dir'in `.osp/` + `attempts/` canonical alanlarını
+    /// hedefleyemez (preflight'te reddedilir).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
     /// Runtime state directory (`.osp/` artifacts: pending-authorizations +
     /// persisted space identity). Default = CWD.
     /// Invariant (#152 R1 P1-2, her iki execution mode): mutlaka analyzed repo
@@ -580,6 +589,77 @@ fn resolve_state_dir(
     Ok(state_dir)
 }
 
+/// #166 review tur-2 (P0 + P1-1): `--out` hedefi preflight'te doğrulanır —
+/// navigator ÇALIŞMADAN önce. İki bütünlük koruması:
+///
+/// 1. **Analyzed repo dışı:** `--out` repo içine yazarsa final snapshot fence'i
+///    GEÇTİKTEN SONRA analyzed source'u değiştirebilir (fence'ten kaçış). State-dir
+///    invariant'ı ve `reject_output_inside_repo` precedent'iyle aynı ilke.
+/// 2. **Canonical state mağazaları dokunulmaz:** `<state-dir>/.osp/**` (space
+///    identity + pending-authorizations) ve `<state-dir>/attempts/**` (no-clobber
+///    canonical evidence store) hedeflenemez — `--out` kopyası `rename` ile REPLACE
+///    eder; canonical store'un immutability'si `--out` arka kapısıyla kırılamaz.
+///    State-dir KÖKÜNDEK caller-owned dosyalara (ör. attempt-out.json) izin verilir.
+///
+/// Karşılaştırma `canonicalize_with_missing_tail` ile (symlink/relative/`..`
+/// kaçışlarına karşı component-wise; string-match değil).
+fn validate_attempt_output_path(
+    repo: &std::path::Path,
+    state_dir: &std::path::Path,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    // #166 review tur-3 (P2): CWD çözülemiyorsa fail-closed — relative path fence
+    // doğrulaması bilinmeyen bir tabana düşmemeli (resolve_state_dir ile tutarlı).
+    let cwd = |what: &str| -> anyhow::Result<PathBuf> {
+        std::env::current_dir().map_err(|e| {
+            anyhow::anyhow!(
+                "cannot resolve relative {what} {}: current dir unavailable: {e}",
+                out.display()
+            )
+        })
+    };
+    let abs_out = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        cwd("--out")?.join(out)
+    };
+    let canon_out = canonicalize_with_missing_tail(&abs_out);
+
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    if canon_out.starts_with(&canon_repo) {
+        anyhow::bail!(
+            "--out {} resolves inside the analyzed repository; --out must be outside the \
+             repo (writing it after the final snapshot fence would modify analyzed source \
+             post-validation). Set --out to an external path.",
+            out.display()
+        );
+    }
+
+    let abs_state = if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        cwd("--state-dir")?.join(state_dir)
+    };
+    let canon_state = canonicalize_with_missing_tail(&abs_state);
+    for reserved in [".osp", "attempts"] {
+        // #166 review tur-3 (P0): reserved root'un KENDİSİ de canonicalize edilir.
+        // `<state-dir>/attempts` bir symlink/junction ile `/external/attempts`'a
+        // giderse `--out <state-dir>/attempts/x.json` tam yolu çözülür ama sabit
+        // root eşleşmezdi → bypass. Gerçek (çözülmüş) store root'u ile karşılaştır.
+        let reserved_root = canonicalize_with_missing_tail(&canon_state.join(reserved));
+        if canon_out.starts_with(&reserved_root) {
+            anyhow::bail!(
+                "--out {} resolves inside the canonical state store ({}/); the no-clobber \
+                 evidence store and space identity are immutable — --out cannot target them. \
+                 Choose a caller-owned path (state-dir root is allowed).",
+                out.display(),
+                reserved
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Mutlak path'i, var olmayan kuyruk bileşenlerini KORUYARAK canonicalize et.
 ///
 /// En derin VAR OLAN atayı `canonicalize` eder (symlink/UNC çözümü), var olmayan
@@ -698,6 +778,12 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // repo → subsequent snapshot-bound runs rejected). Production allows CWD default.
     let state_dir = resolve_state_dir(args.state_dir.as_deref(), args.execution_mode, &args.repo)?;
 
+    // #166 review tur-2 (P0 + P1-1): --out hedefi navigator ÇALIŞMADAN doğrulanır —
+    // analyzed repo ve canonical state mağazaları (.osp/, attempts/) dışını zorlar.
+    if let Some(out) = &args.out {
+        validate_attempt_output_path(&args.repo, &state_dir, out)?;
+    }
+
     // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
     // Pre-capture repository snapshot (HEAD + tracked paths + dirty-path set).
     // #155 (analyzed-scope clean semantics): global clean-worktree pre-fence KALDIRILDI —
@@ -764,7 +850,9 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     let task = resolve_task(&args, &snapshot_before, &result.node_paths)?;
 
     // 4. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
-    match args.llm.as_str() {
+    // #166 P1-1: navigator YAYIM YAPMAZ — AttemptExecution döndürür; fence +
+    // canonical persist + emit + exit aşağıda, TÜM navigator sonuçları için.
+    let execution = match args.llm.as_str() {
         "real" => {
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
@@ -776,7 +864,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 &state_dir,
                 &snapshot_before,
                 task_source,
-            )?;
+            )?
         }
         _ => {
             // mock (default)
@@ -802,12 +890,16 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 &state_dir,
                 &snapshot_before,
                 task_source,
-            )?;
+            )?
         }
-    }
+    };
 
     // 5. Post-capture drift fence (review P0-3). #155: HEAD + tracked-set eşitliği
     //    global, içerik drift'i analyzed-scope'ta (saf fonksiyon — exact matrix testli).
+    //    #166 P1-1: fence ARTIK HER navigator sonucu için koşar (Completed dışı
+    //    sonuçlarda eskiden process::exit atlıyordu). Canonical artifact bu
+    //    fence'İ GEÇTİKTEN SONRA yazılır — fence başarısızsa kanıt "canonical"
+    //    değildir ve diskte canonical artifact YOKTUR.
     let snapshot_after =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
     repo_snapshot::validate_post_attempt_snapshot(
@@ -816,6 +908,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         &result.node_paths,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 6. #166: canonical publish (no-clobber atomic) → emit (json envelope /
+    //    human: progress stderr + stdout evidence[]) → exit.
+    persist_canonical_attempt_artifact(&execution.envelope, &args, &state_dir)?;
+    emit_attempt_output(&execution, &args)?;
+    if execution.exit_code != exit_codes::COMPLETED {
+        std::process::exit(execution.exit_code);
+    }
     Ok(())
 }
 
@@ -1366,7 +1466,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     state_dir: &PathBuf,
     snapshot: &repo_snapshot::RepositorySnapshot,
     task_source: &'static str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AttemptExecution> {
     use osp_core::navigator::AgentNavigator;
     use osp_core::trajectory::{
         InMemoryTaskRegistry, MilestoneId, OperatorCapability, TrajectoryId,
@@ -1430,18 +1530,199 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         clock: Box::new(osp_core::authorization::SystemClock),
     };
     let result = nav.run_task(args.task_id, 1);
-    // 6. Output — versioned JSON envelope (json) veya human (default).
-    let is_json = args.format.eq_ignore_ascii_case("json");
-    if is_json {
-        let envelope = run_envelope::build_run_envelope_v1(
-            &result,
-            &evidence,
-            args.execution_mode,
-            args.witness,
-            task_source,
-            snapshot.head.as_str(),
-        );
-        let json = serde_json::to_string_pretty(&envelope)?;
+    drop(nav); // evidence'ın mutable ödünç alanı (nav field'ı) biter — taşınabilir.
+               // #166 P1-1 (review): navigator YAYIM YAPMAZ — persist/emit/exit dış katmanda,
+               // final snapshot fence'inden SONRA koşar. Envelope burada yalnız HAZIRLANIR:
+               // measured + subject-validity + persistence-validity birlikte "canonical"dir.
+    let envelope = run_envelope::build_run_envelope_v1(
+        &result,
+        &evidence,
+        args.execution_mode,
+        args.witness,
+        task_source,
+        snapshot.head.as_str(),
+        args.task_id,
+    );
+    let exit_code = navigator_exit_code(&result, args.task_id);
+    Ok(AttemptExecution {
+        result,
+        evidence,
+        envelope,
+        exit_code,
+    })
+}
+
+/// #166 P1-1: navigator yürütmesinin taşınabilir sonucu — yayım (canonical
+/// persist + emit + exit) dış katmanda, final snapshot fence'inden sonra.
+struct AttemptExecution {
+    result: osp_core::navigator::NavigatorResult,
+    evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
+    envelope: run_envelope::CliRunEnvelopeV1,
+    exit_code: i32,
+}
+
+/// #166 P1-1/P1-2: kanonik attempt artifact'ı YAYINLA — final snapshot fence
+/// BAŞARILI olduktan sonra çağrılmalı (fence başarısızsa çağrılmaz: canonical
+/// artifact YOKTUR; diagnostic-artifact bilinçli olarak eklenmedi — "canonical"
+/// unvanı fence-geçmiş kanıta özeldir).
+///
+/// P1-2 persistence modeli — pending-authorization/space-identity precedent'i:
+/// same-dir temp (`create_new`) → `write_all` + `sync_all` → **`hard_link`
+/// no-clobber publish** (`fs::rename` hedefi REPLACE eder — no-clobber DEĞİL) →
+/// parent-dir sync → temp temizliği. Crash penceresi: hedef ya YOKtur ya TAM
+/// içeriktir; yarım canonical dosya üretilemez. Kimlik `task_id + unix_millis +
+/// pid` (+ çakışmada `-N` soneki, 64 deneme bütçesi — zaman tek başına kimlik
+/// değildir; `hard_link` AlreadyExists ayrımı zorlar, fail-closed).
+fn persist_canonical_attempt_artifact(
+    envelope: &run_envelope::CliRunEnvelopeV1,
+    args: &TrajectoryAttemptArgs,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let payload = serde_json::to_vec_pretty(envelope)?;
+    let attempts_dir = state_dir.join("attempts");
+    std::fs::create_dir_all(&attempts_dir)?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let canonical =
+        publish_no_clobber_attempt_artifact(&attempts_dir, args.task_id, millis, pid, &payload)?;
+    eprintln!("Canonical attempt artifact: {}", canonical.display());
+
+    // --out kopyası: çağırıcıya ait hedef (validate_attempt_output_path ile
+    // repo/canonical-store dışı guarantee'li) — unique temp + create_new ile
+    // yazılır (tur-3 P1: temp adı caller verisine DEĞMEZ), rename final hedefi
+    // replace eder (çağırıcının açık isteği).
+    if let Some(out) = &args.out {
+        write_attempt_out_copy(out, &payload)?;
+        eprintln!("Attempt artifact (--out): {}", out.display());
+    }
+    Ok(())
+}
+
+/// #166 review tur-3 (P1): `--out` kopyası — unique same-dir temp + `create_new`
+/// + write/sync + rename + hata durumunda temp temizliği.
+///
+/// Eski sabit `<target>.json.tmp-osp` adı, o adda duran ilgisiz bir caller
+/// dosyasını `truncate` edebilir ve iki eşzamanlı çağrı aynı temp'i
+/// paylaşabilirdi; canonical store'daki pattern ile aynı disiplin. `rename`
+/// final hedefi replace eder — overwrite çağırıcının açık isteğidir (kasıtlı).
+fn write_attempt_out_copy(out: &std::path::Path, payload: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let dir = out
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("--out {} has no parent directory", out.display()))?;
+    let stem = out
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attempt".to_string());
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+
+    let mut tmp: Option<PathBuf> = None;
+    for suffix in 0..=64u32 {
+        let name = match suffix {
+            0 => format!(".{stem}.osp-tmp-{pid}-{millis}"),
+            n => format!(".{stem}.osp-tmp-{pid}-{millis}-{n}"),
+        };
+        let candidate = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(payload).and_then(|_| file.sync_all()) {
+                    let _ = std::fs::remove_file(&candidate);
+                    anyhow::bail!("--out temp write failed: {e}");
+                }
+                tmp = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => anyhow::bail!("--out temp open failed: {e}"),
+        }
+    }
+    let tmp = match tmp {
+        Some(p) => p,
+        None => anyhow::bail!("--out temp collision budget exhausted"),
+    };
+    if let Err(e) = std::fs::rename(&tmp, out) {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("--out rename failed: {e}");
+    }
+    Ok(())
+}
+
+/// #166 review tur-2 (P2-2): no-clobber publish çekirdeği — millis/pid PARAMETRE
+/// (test edilebilirlik; gerçek değerler wrapper'dan). Deterministic kimlik +
+/// collision yolu (`-N` soneği) unit testlerde pinli.
+fn publish_no_clobber_attempt_artifact(
+    attempts_dir: &std::path::Path,
+    task_id: u64,
+    millis: u128,
+    pid: u32,
+    payload: &[u8],
+) -> anyhow::Result<PathBuf> {
+    use std::io::Write as _;
+    // Same-dir temp — ad per-attempt benzersiz (pid+millis): aynı process aynı
+    // thread'in bir sonraki attempt'i stale temp'e takılmaz.
+    let tmp = attempts_dir.join(format!("attempt.tmp.{pid}.{millis}"));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(payload).and_then(|_| file.sync_all())?;
+    }
+
+    // No-clobber publish — candidate çakışırsa -N sonekiyle devam (fail-closed).
+    let mut canonical: Option<PathBuf> = None;
+    for suffix in 0..=64u32 {
+        let name = match suffix {
+            0 => format!("task-{task_id}-{millis}-{pid}.json"),
+            n => format!("task-{task_id}-{millis}-{pid}-{n}.json"),
+        };
+        let candidate = attempts_dir.join(name);
+        match std::fs::hard_link(&tmp, &candidate) {
+            Ok(()) => {
+                canonical = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                anyhow::bail!("canonical attempt artifact publish failed: {e}");
+            }
+        }
+    }
+    let canonical = match canonical {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("canonical attempt artifact collision budget exhausted");
+        }
+    };
+    // Directory durability — best-effort (Windows'ta no-op).
+    let _ = std::fs::File::open(attempts_dir).and_then(|d| d.sync_all());
+    let _ = std::fs::remove_file(&tmp);
+    Ok(canonical)
+}
+
+/// #166: attempt çıktısını yayınla — json modunda stdout'a tam envelope;
+/// human modunda progress stderr'de, stdout'ta HER ZAMAN geçerli evidence JSON
+/// dizisi (P1-3: boş evidence → `[]`; zero-evidence outcome'lar parser
+/// istisnası üretmez).
+fn emit_attempt_output(
+    execution: &AttemptExecution,
+    args: &TrajectoryAttemptArgs,
+) -> anyhow::Result<()> {
+    if args.format.eq_ignore_ascii_case("json") {
+        let json = serde_json::to_string_pretty(&execution.envelope)?;
         // Diagnostics stderr'e — stdout JSON-only.
         // **#96 MD-2 + #95-A MD-1 cutover:** navigator ölçümü engine-native
         // per-axis (opaque NativeSubjectMeasurement token) + canonical
@@ -1452,16 +1733,15 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         );
         println!("{json}");
     } else {
-        print_human_result(&result, args.task_id, &evidence)?;
-    }
-    let exit_code = navigator_exit_code(&result, args.task_id);
-    if exit_code != exit_codes::COMPLETED {
-        std::process::exit(exit_code);
+        print_human_result(&execution.result, args.task_id, &execution.evidence)?;
     }
     Ok(())
 }
 
 /// Print human-readable navigator result (non-json mode).
+///
+/// #166 akış ayrımı: progress satırları stderr'e yazılır; stdout yalnız
+/// makine-okunur evidence JSON dizisi taşır (elle ayıklama gerektirmez).
 fn print_human_result(
     result: &osp_core::navigator::NavigatorResult,
     task_id: u64,
@@ -1473,34 +1753,34 @@ fn print_human_result(
             attempts,
             total_tokens,
         } => {
-            println!("✓ Task completed in {attempts} attempts");
-            println!("  Total tokens: {}", total_tokens.total_tokens);
+            eprintln!("✓ Task completed in {attempts} attempts");
+            eprintln!("  Total tokens: {}", total_tokens.total_tokens);
         }
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
-            println!("✗ Maneuver limit exceeded after {attempts} attempts");
+            eprintln!("✗ Maneuver limit exceeded after {attempts} attempts");
         }
         NavigatorResult::AwaitingWitnesses {
             pending,
             persistence,
         } => {
-            println!(
+            eprintln!(
                 "⏸ Awaiting witnesses (INV-T9) — task {}, claim {}",
                 pending.task_id, pending.claim_id
             );
-            println!(
+            eprintln!(
                 "  Witness hold reason: {}",
                 pending.witness_hold_reason.as_reason_str()
             );
-            println!("  Commit state: awaiting_witnesses");
-            println!("  Mainline mutation: not_applied");
-            println!("  Next action: await external evidence");
-            println!(
+            eprintln!("  Commit state: awaiting_witnesses");
+            eprintln!("  Mainline mutation: not_applied");
+            eprintln!("  Next action: await external evidence");
+            eprintln!(
                 "  Pending artifact: {}",
                 persistence.artifact_path.display()
             );
         }
         NavigatorResult::RequiresRevision(rev) => {
-            println!(
+            eprintln!(
                 "↻ Requires revision (explicit witness rejection) — task {}, claim {}",
                 rev.task_id(),
                 rev.claim_id()
@@ -1512,38 +1792,39 @@ fn print_human_result(
             claim_id,
             ..
         } => {
-            println!(
+            eprintln!(
                 "❄ Awaiting cold-start operator approval (INV-T9 ext) — task {}, claim {}, attempt {}",
                 task_id, claim_id, attempts
             );
         }
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
-            println!(
+            eprintln!(
                 "✗ Pending authorization persistence failed — task {}, claim {}: {error}",
                 pending.task_id, pending.claim_id
             );
         }
         NavigatorResult::WitnessEvaluationError(msg) => {
-            println!("✗ Witness evaluation error: {msg}");
+            eprintln!("✗ Witness evaluation error: {msg}");
         }
         NavigatorResult::SystemFailure(msg) => {
-            println!("✗ System failure: {msg}");
+            eprintln!("✗ System failure: {msg}");
         }
         NavigatorResult::TaskNotFound => {
-            println!("✗ Task {task_id} not found");
+            eprintln!("✗ Task {task_id} not found");
         }
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
-            println!("⚠ Operator approval required after {attempts} attempts");
+            eprintln!("⚠ Operator approval required after {attempts} attempts");
         }
         NavigatorResult::LlmError(e) => {
-            println!("✗ LLM error: {e}");
+            eprintln!("✗ LLM error: {e}");
         }
     }
-    println!("  Evidence entries: {}", evidence.len());
-    if !evidence.is_empty() {
-        let json = serde_json::to_string_pretty(evidence)?;
-        println!("{json}");
-    }
+    eprintln!("  Evidence entries: {}", evidence.len());
+    // #166 P1-3: stdout HER ZAMAN geçerli JSON dizisi — boş evidence'da `[]`.
+    // Zero-evidence outcome'lar (task_not_found, erken llm_error) parser istisnası
+    // üretmez; `serde_json::from_reader(stdout)` her durumda çalışır.
+    let json = serde_json::to_string_pretty(evidence)?;
+    println!("{json}");
     Ok(())
 }
 
@@ -1627,6 +1908,7 @@ mod mode_matrix_tests {
             execution_mode: mode,
             witness: CliWitnessMode::default(),
             format: "human".into(),
+            out: None,
             state_dir: None,
         }
     }
@@ -1884,5 +2166,190 @@ mod trajectory_vision_authority_tests {
             "trajectory vision must use UserLoaded authority — GlobalDefault is rejected \
              at the authorization-gated mutation surface (INV-T9 Step 4b, issue #105)"
         );
+    }
+}
+
+#[cfg(test)]
+mod attempt_artifact_persistence_tests {
+    //! #166 review tur-2: no-clobber publish çekirdeği + --out hedef doğrulaması.
+    use super::*;
+
+    #[test]
+    fn publish_no_clobber_collision_takes_suffix_path() {
+        // P2-2: aynı deterministic kimlik (task/millis/pid) ikinci publish'de
+        // `-1` soneğine düşer; içerikler korunur; temp artığı kalmaz.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attempts = dir.path().join("attempts");
+        std::fs::create_dir_all(&attempts).expect("mkdir");
+
+        let first = publish_no_clobber_attempt_artifact(&attempts, 7, 123, 42, b"first")
+            .expect("first publish");
+        assert_eq!(
+            first.file_name().unwrap().to_string_lossy(),
+            "task-7-123-42.json"
+        );
+
+        let second = publish_no_clobber_attempt_artifact(&attempts, 7, 123, 42, b"second")
+            .expect("second publish (collision -> -1)");
+        assert_eq!(
+            second.file_name().unwrap().to_string_lossy(),
+            "task-7-123-42-1.json",
+            "collision must take the -1 suffix, not clobber"
+        );
+
+        let third = publish_no_clobber_attempt_artifact(&attempts, 7, 123, 42, b"third")
+            .expect("third publish (collision -> -2)");
+        assert_eq!(
+            third.file_name().unwrap().to_string_lossy(),
+            "task-7-123-42-2.json"
+        );
+
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            b"first",
+            "first artifact content must be untouched"
+        );
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+
+        // Temp artığı kalmaz (başarılı publish temp'i temizler).
+        let leftovers: Vec<_> = std::fs::read_dir(&attempts)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("attempt.tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn validate_attempt_output_path_rejects_repo_and_canonical_stores() {
+        // P0 + P1-1: --out analyzed repo içine, state-dir/.osp/** ve
+        // state-dir/attempts/** altına yazılamaz; state-dir kökü serbest.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let state = tempfile::tempdir().expect("state tempdir");
+        std::fs::create_dir_all(state.path().join(".osp")).expect("mkdir .osp");
+        std::fs::create_dir_all(state.path().join("attempts")).expect("mkdir attempts");
+
+        // Repo içi → red.
+        let err = validate_attempt_output_path(
+            repo.path(),
+            state.path(),
+            &repo.path().join("src/foo.rs"),
+        )
+        .expect_err("out inside repo must be rejected");
+        assert!(
+            err.to_string().contains("inside the analyzed repository"),
+            "message: {err}"
+        );
+
+        // Canonical store'lar → red.
+        for reserved in ["space-identity", "attempts/task-7-1.json"] {
+            let target = if reserved.starts_with("attempts") {
+                state.path().join(reserved)
+            } else {
+                state.path().join(".osp").join(reserved)
+            };
+            let err = validate_attempt_output_path(repo.path(), state.path(), &target)
+                .expect_err(&format!("must reject {reserved}"));
+            assert!(
+                err.to_string().contains("canonical state store"),
+                "message for {reserved}: {err}"
+            );
+        }
+
+        // State-dir kökü (caller-owned) → serbest; tamamen dış path → serbest.
+        validate_attempt_output_path(
+            repo.path(),
+            state.path(),
+            &state.path().join("attempt-out.json"),
+        )
+        .expect("state-dir root file is caller-owned");
+        let external = tempfile::tempdir().expect("external tempdir");
+        validate_attempt_output_path(repo.path(), state.path(), &external.path().join("out.json"))
+            .expect("external path is fine");
+    }
+}
+
+#[cfg(test)]
+mod attempt_output_path_hardening_tests {
+    //! #166 review tur-3: symlink'li reserved store bypass'ı + --out temp clobber.
+    use super::*;
+
+    /// Platform symlink oluşturucu — Windows'ta ayrıcalık gerektirebilir;
+    /// bu durumda test skip (CI ubuntu-latest'te tam koşar).
+    fn try_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(src, dst)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(src, dst)
+        }
+    }
+
+    #[test]
+    fn validate_attempt_output_path_resolves_symlinked_reserved_stores() {
+        // P0 (tur-3): <state>/attempts veya <state>/.osp bir symlink ile başka
+        // yere yönlendirilirse --out o GERÇEK hedefe düşse bile reddedilmelidir —
+        // reserved root'un kendisi canonicalize edilerek karşılaştırılır.
+        let base = tempfile::tempdir().expect("base tempdir");
+        let state = base.path().join("state");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&state).expect("mkdir state");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+
+        for reserved in ["attempts", ".osp"] {
+            let real = base.path().join(format!("real-{reserved}"));
+            std::fs::create_dir_all(&real).expect("mkdir real store");
+            let link = state.join(reserved);
+            if let Err(e) = try_symlink(&real, &link) {
+                eprintln!(
+                    "skipped (symlink unsupported here: {e}) — CI ubuntu-latest covers this path"
+                );
+                return;
+            }
+            let target = link.join("task-7-1.json");
+            let err = validate_attempt_output_path(&repo, &state, &target)
+                .expect_err("symlinked reserved store must be rejected");
+            assert!(
+                err.to_string().contains("canonical state store"),
+                "message for {reserved}: {err}"
+            );
+        }
+
+        // Negatif kontrol: symlink'li store DIŞINDAKI bir path serbest kalmalı.
+        let external = base.path().join("caller-out.json");
+        validate_attempt_output_path(&repo, &state, &external)
+            .expect("external caller-owned path stays allowed");
+    }
+
+    #[test]
+    fn out_copy_temp_never_touches_caller_files() {
+        // P1 (tur-3): unique temp — eski sabit ad şemasına (`report.json.tmp-osp`)
+        // uyan caller dosyası DOKUNULMAMALI; hedef doğru yazılmalı; temp artığı
+        // kalmamalı; ikinci yazım overwrite etmek kasıtlı.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("report.json");
+        let decoy = dir.path().join("report.json.tmp-osp");
+        std::fs::write(&decoy, b"caller data").expect("decoy");
+
+        write_attempt_out_copy(&out, b"payload-one").expect("first copy");
+        assert_eq!(std::fs::read(&out).unwrap(), b"payload-one");
+        assert_eq!(
+            std::fs::read(&decoy).unwrap(),
+            b"caller data",
+            "same-named caller file must NOT be truncated"
+        );
+
+        write_attempt_out_copy(&out, b"payload-two").expect("second copy (overwrite intended)");
+        assert_eq!(std::fs::read(&out).unwrap(), b"payload-two");
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"caller data");
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".osp-tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp leftovers: {leftovers:?}");
     }
 }

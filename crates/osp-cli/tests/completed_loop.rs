@@ -71,6 +71,9 @@ impl HarnessFixture {
                 .expect("git")
         };
         // main.rs imports a + b → 2 outgoing value imports → coupling 2/3 = 0.667.
+        // NOT (#173): `mod` bildirimleri güncel Rust adaptöründe kenar ÜRETMEZ
+        // (yalnız `use_declaration` sayılır) — bu fixture'ta gerçek coupling 0'dır.
+        // Kenar-gerektiren testler `new_with_use_edges()` kullanır.
         fs::write(
             r.join("main.rs"),
             "mod a;\nmod b;\npub fn main() { a::a(); b::b(); }\n",
@@ -92,6 +95,53 @@ impl HarnessFixture {
         .to_string();
         let work = tempfile::tempdir().expect("work tempdir (CWD)");
         Self { repo, work, head }
+    }
+
+    /// #166 fixture'ı: `use`-declaration tabanlı GERÇEK import kenarları.
+    /// main.rs → a.rs + b.rs (2 çıkan kenar, coupling 2/3 = 0.6667). Mevcut
+    /// `new()`'in `mod` bildirimleri güncel Rust adaptöründe kenar üretmez
+    /// (yalnız `use_declaration` sayılır — #173); kenar-gerektiren testler
+    /// bu kurucuyu kullanır. `mod` satırları KENAR ÜRETMEZ ama fixture'ı
+    /// geçerli bir Rust programı yapar (P2-3) — graf önermesi ayrıca
+    /// `use_edge_fixture_graph_premise_holds` ile analizden assert edilir.
+    fn new_with_use_edges() -> Self {
+        let fx = Self::new();
+        let r = fx.repo_path();
+        fs::write(r.join("a.rs"), "pub struct A;\n").expect("write a.rs");
+        fs::write(r.join("b.rs"), "pub struct B;\n").expect("write b.rs");
+        fs::write(
+            r.join("main.rs"),
+            "mod a;\nmod b;\nuse crate::a::A;\nuse crate::b::B;\npub fn main() { let _ = (A, B); }\n",
+        )
+        .expect("write main.rs");
+        // Test tempdir'i (kullanıcı reporu değil): fixture plumbing'inde add -A güvenli.
+        let add = Command::new("git")
+            .args(["-C", r.to_str().unwrap(), "add", "-A"])
+            .status()
+            .expect("git add");
+        assert!(add.success(), "use-edges add must succeed");
+        let commit = Command::new("git")
+            .args(["-C", r.to_str().unwrap(), "commit", "-qm", "use-edges"])
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
+            .status()
+            .expect("git commit (use-edges)");
+        assert!(commit.success(), "use-edges commit must succeed");
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["-C", r.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        Self {
+            repo: fx.repo,
+            work: fx.work,
+            head,
+        }
     }
 
     fn repo_path(&self) -> &std::path::Path {
@@ -561,11 +611,14 @@ fn harness_valid_completed_loop_runs() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     // The attempt must reach the navigator (evidence/maneuver output), not fail pre-flight.
+    // #166 akış ayrımı: progress artık stderr'de; "navigator'a ulaştı" sinyali
+    // stderr progress'inden veya başarılı exit'ten gelir.
     assert!(
-        stdout.contains("Evidence entries")
-            || stdout.contains("Task completed")
-            || stdout.contains("Maneuver limit")
-            || stdout.contains("Awaiting witnesses")
+        stderr.contains("Evidence entries")
+            || stderr.contains("Task completed")
+            || stderr.contains("Maneuver limit")
+            || stderr.contains("Awaiting witnesses")
+            || stderr.contains("Canonical attempt artifact")
             || output.status.success(),
         "harness wiring reached navigator. stdout={stdout}\nstderr={stderr}"
     );
@@ -630,12 +683,13 @@ fn harness_state_dir_outside_repo_accepted() {
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "human"); // state-dir = work (outside)
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    // Must reach navigator (not fail on state-dir invariant).
+    // Must reach navigator (not fail on state-dir invariant). #166: progress stderr'de.
     assert!(
-        stdout.contains("Evidence entries")
-            || stdout.contains("Task completed")
-            || stdout.contains("Maneuver limit")
-            || stdout.contains("Awaiting witnesses")
+        stderr.contains("Evidence entries")
+            || stderr.contains("Task completed")
+            || stderr.contains("Maneuver limit")
+            || stderr.contains("Awaiting witnesses")
+            || stderr.contains("Canonical attempt artifact")
             || output.status.success(),
         "harness + external state-dir must reach navigator. stdout={stdout}\nstderr={stderr}"
     );
@@ -682,11 +736,13 @@ fn harness_state_dir_sibling_external_accepted() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Must reach navigator (canonical resolved outside repo → no invariant reject).
+    // #166 akış ayrımı: progress stderr'de.
     assert!(
-        stdout.contains("Evidence entries")
-            || stdout.contains("Task completed")
-            || stdout.contains("Maneuver limit")
-            || stdout.contains("Awaiting witnesses")
+        stderr.contains("Evidence entries")
+            || stderr.contains("Task completed")
+            || stderr.contains("Maneuver limit")
+            || stderr.contains("Awaiting witnesses")
+            || stderr.contains("Canonical attempt artifact")
             || output.status.success(),
         "harness + external sibling state-dir must reach navigator (P1-1 canonical). stdout={stdout}\nstderr={stderr}"
     );
@@ -782,11 +838,13 @@ fn production_production_no_task_uses_legacy_path() {
         !stderr.contains("requires --task"),
         "production+no-task must NOT require --task (legacy backward-compat): {stderr}"
     );
+    // #166 akış ayrımı: progress stderr'de.
     assert!(
-        stdout.contains("Evidence entries")
-            || stdout.contains("Awaiting witnesses")
-            || stdout.contains("Maneuver limit")
-            || stdout.contains("Task completed"),
+        stderr.contains("Evidence entries")
+            || stderr.contains("Awaiting witnesses")
+            || stderr.contains("Maneuver limit")
+            || stderr.contains("Task completed")
+            || stderr.contains("Canonical attempt artifact"),
         "production legacy path reaches navigator. stdout={stdout}\nstderr={stderr}"
     );
 }
@@ -826,11 +884,13 @@ fn harness_production_witness_reaches_navigator() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Must reach navigator (no mode-guard reject). Production witness → likely
     // AwaitingWitnesses (no real approvers), but the point is it runs.
+    // #166 akış ayrımı: progress stderr'de.
     assert!(
-        stdout.contains("Evidence entries")
-            || stdout.contains("Awaiting witnesses")
-            || stdout.contains("Maneuver limit")
-            || stdout.contains("Task completed"),
+        stderr.contains("Evidence entries")
+            || stderr.contains("Awaiting witnesses")
+            || stderr.contains("Maneuver limit")
+            || stderr.contains("Task completed")
+            || stderr.contains("Canonical attempt artifact"),
         "harness+production-witness+task must reach navigator. stdout={stdout}\nstderr={stderr}"
     );
 }
@@ -964,8 +1024,9 @@ fn analyzed_scope_fence_allows_untracked_outside_analysis() {
         "out-of-scope untracked file must not block the attempt. stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Task completed"), "got: {stdout}");
+    // #166 akış ayrımı: progress stderr'de.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Task completed"), "got: {stderr}");
 }
 
 #[test]
@@ -1092,7 +1153,6 @@ fn real_submodule_clean_nested_analyzed_paths_pass() {
         .parent
         .run_attempt(&task_path, &proposals_path, 7, "human");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
     // Exact kontrat (#156 R2 P1-2): clean initialized submodule → attempt
     // BAŞARILI olmalı ve Task completed üretmeli. Zayıf `success || !contains`
     // assertion'ı yanlış-pozitife açıktı — scope-binding/node-id/ başka bir
@@ -1101,7 +1161,8 @@ fn real_submodule_clean_nested_analyzed_paths_pass() {
         output.status.success(),
         "clean initialized submodule must complete the attempt. stderr={stderr}"
     );
-    assert!(stdout.contains("Task completed"), "got: {stdout}");
+    // #166 akış ayrımı: progress stderr'de.
+    assert!(stderr.contains("Task completed"), "got: {stderr}");
 }
 
 #[test]
@@ -1976,4 +2037,369 @@ fn state_dir_dotdot_path_resolved_before_fence() {
         "stderr: {stderr}"
     );
     fx.assert_repo_clean();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #166 — canonical attempt artifact + stream separation
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Run harness attempt with an additional `--out` flag (canonical artifact copy).
+fn run_attempt_with_out(
+    fx: &HarnessFixture,
+    task_path: &std::path::Path,
+    proposals_path: &std::path::Path,
+    out_path: &std::path::Path,
+) -> std::process::Output {
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("harness")
+        .arg("--witness")
+        .arg("harness-auto-approve")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(proposals_path)
+        .arg("--task")
+        .arg(task_path)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--out")
+        .arg(out_path)
+        .output()
+        .expect("run osp")
+}
+
+#[test]
+fn attempt_human_mode_streams_separate_and_artifacts_persist() {
+    // #166: human modunda stdout YALNIZ makine-okunur evidence dizisi; progress
+    // (Task completed / Evidence entries / artifact path) stderr'de. Kanonik
+    // artifact state-dir altına + --out kopyası olarak şemalı yazılır.
+    // use-edges fixture: main.rs (node 2, GERÇEK coupling 2/3=0.667) +
+    // RemoveImport(2→1) → 1/2=0.5 ≤ 0.55 → Completed, evidence dolu.
+    let fx = HarnessFixture::new_with_use_edges();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let out_path = fx.work_path().join("attempt-out.json");
+    let output = run_attempt_with_out(&fx, &task_path, &proposals_path, &out_path);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // Akış ayrımı: stdout'ta progress YOK, yalnız JSON dizisi.
+    assert!(
+        !stdout.contains("Task completed") && !stdout.contains("Evidence entries"),
+        "human stdout must be evidence-only (stream separation). stdout={stdout}"
+    );
+    let stdout_json: serde_json::Value =
+        serde_json::from_str(stdout.trim_start_matches('\u{feff}').trim())
+            .unwrap_or_else(|e| panic!("stdout must parse as JSON. err={e} stdout={stdout}"));
+    let stdout_arr = stdout_json
+        .as_array()
+        .unwrap_or_else(|| panic!("stdout must be a JSON array. stdout={stdout}"));
+    assert!(!stdout_arr.is_empty(), "completed run must emit evidence");
+    // Progress stderr'de + artifact path bildirimi.
+    assert!(
+        stderr.contains("Task completed"),
+        "progress moved to stderr. stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Canonical attempt artifact"),
+        "canonical artifact path announced on stderr. stderr={stderr}"
+    );
+
+    // --out kopyası: şemalı envelope (run 10 sözleşmesi — schema_version + metadata).
+    let out_text = fs::read_to_string(&out_path).expect("--out artifact written");
+    let out_json: serde_json::Value = serde_json::from_str(&out_text).expect("--out parses");
+    assert_eq!(out_json["schema_version"], 1, "envelope schema_version=1");
+    assert_eq!(out_json["result"]["kind"], "completed");
+    assert_eq!(out_json["run"]["repository_head"], fx.head);
+    assert_eq!(
+        out_json["run"]["execution_mode"], "harness",
+        "run metadata pins execution mode"
+    );
+    let out_evidence = out_json["evidence"].as_array().expect("evidence array");
+    assert_eq!(
+        out_evidence.len(),
+        stdout_arr.len(),
+        "--out envelope evidence matches stdout evidence"
+    );
+
+    // State-dir kalıcı kaydı: attempts/task-7-*.json (aynı şema).
+    let attempts_dir = fx.work_path().join("attempts");
+    let mut persisted = Vec::new();
+    for entry in fs::read_dir(&attempts_dir).expect("attempts dir exists") {
+        let entry = entry.expect("dir entry");
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("task-7-") && name.ends_with(".json") {
+            persisted.push(entry.path());
+        }
+    }
+    assert_eq!(persisted.len(), 1, "exactly one persisted attempt artifact");
+    let persisted_text = fs::read_to_string(&persisted[0]).expect("persisted artifact read");
+    let persisted_json: serde_json::Value =
+        serde_json::from_str(&persisted_text).expect("persisted parses");
+    assert_eq!(persisted_json["schema_version"], 1);
+    assert_eq!(persisted_json["result"]["kind"], "completed");
+
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn attempt_artifact_persists_on_unsatisfied_predicate() {
+    // #166: kanıt kalıcılığı exit-code'a bağlı DEĞİL — predicate tatmin
+    // olamazsa bile kanonik artifact yazılır. Kanıt hattı her attempt için
+    // eksiksiz. Fixture: main.rs (node 2) GERÇEK coupling 2/3=0.667 (use-edges);
+    // RemoveImport(2→1) sonrası 1/2=0.5 — bar 0.1'e indirildiği için DAİMA red
+    // (tatmin imkânsız).
+    let fx = HarnessFixture::new_with_use_edges();
+    let mut env = task_envelope(&fx.head, 2);
+    env["task"]["target_predicate_set"]["predicates"][0]["predicate"]["threshold"] =
+        serde_json::json!(0.1);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let out_path = fx.work_path().join("attempt-out.json");
+    let output = run_attempt_with_out(&fx, &task_path, &proposals_path, &out_path);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Tatmin imkânsız → sıfır-dışı çıkış yollarından biri (maneuver-limit /
+    // mock-exhausted); hangisi olduğundan bağımsız artifact yazılmış olmalı.
+    assert!(
+        !output.status.success(),
+        "unsatisfiable predicate must yield non-zero exit. stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Canonical attempt artifact"),
+        "artifact persisted regardless of decision. stderr={stderr}"
+    );
+    let out_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&out_path).expect("--out written"))
+            .expect("parses");
+    assert_eq!(out_json["schema_version"], 1);
+    assert_ne!(
+        out_json["result"]["kind"], "completed",
+        "predicate must remain unsatisfied in this fixture"
+    );
+    fx.assert_repo_clean();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #166 review — P2-3 fixture-graph sanity + P1-3 zero-evidence stdout contract
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn use_edge_fixture_graph_premise_holds() {
+    // #173 dersi (review P2-3): fixture'ın graf önermesi analiz çıktısından
+    // assert edilir — adapter ileride değişirse (ör. `mod` kenar üretmeye
+    // başlarsa) vacuous-test sınıfı kırmızıya döner, sessizce geri gelmez.
+    let fx = HarnessFixture::new_with_use_edges();
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run osp analyze");
+    assert!(
+        output.status.success(),
+        "analyze must succeed. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let space: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("analyze json parses: {e}. stdout={stdout}"));
+    let nodes = space["nodes"].as_array().expect("nodes");
+    let edges = space["edges"].as_array().expect("edges");
+    let import_edges: Vec<&serde_json::Value> = edges
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("imports"))
+        .collect();
+    assert_eq!(
+        import_edges.len(),
+        2,
+        "use-edges fixture must have exactly 2 import edges (got {import_edges:?})"
+    );
+    let main_node = nodes
+        .iter()
+        .find(|n| n["path"].as_str().map(|p| p.ends_with("main.rs")) == Some(true))
+        .expect("main.rs node");
+    let c_main = main_node["coupling"]["value"]
+        .as_f64()
+        .expect("coupling value");
+    assert!(
+        (c_main - 2.0 / 3.0).abs() < 1e-9,
+        "main.rs coupling must be 2/3 (got {c_main})"
+    );
+}
+
+#[test]
+fn attempt_zero_evidence_human_stdout_is_empty_json_array() {
+    // #166 P1-3: zero-evidence navigator sonucunda (legacy path + production
+    // witness → AwaitingWitnesses, evidence 0) human stdout HER ZAMAN geçerli
+    // JSON dizisidir: `[]`. Parser istisnası sınıfı yoktur. Aynı akış P1-1'i
+    // pinler: non-Completed sonuçta da fence koşar + canonical artifact yazılır.
+    let fx = HarnessFixture::new();
+    let proposals_path = fx.write_proposals(0, 1);
+    let output = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("99") // legacy hardcoded task id'si ile eşleşmez → TaskNotFound
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&proposals_path)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+    });
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON. err={e} stdout={stdout}"));
+    assert!(
+        parsed.as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "zero-evidence stdout must be []. got: {stdout}"
+    );
+    // Legacy yol istenen task id'yi benimser; production witness'te
+    // AwaitingWitnesses (exit 10, min_approvers_not_met) — evidence 0.
+    // Zero-evidence outcome'u budur; P1-1 sayesinde fence + canonical artifact
+    // BU sonuç için de çalışır (non-Completed yolu).
+    assert!(
+        stderr.contains("Awaiting witnesses") && stderr.contains("Evidence entries: 0"),
+        "zero-evidence outcome progress on stderr. stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Canonical attempt artifact"),
+        "canonical artifact persisted for non-Completed navigator result. stderr={stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "non-Completed result must exit non-zero"
+    );
+    fx.assert_repo_clean();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #166 review tur-2 — P0/P1-1 --out hedef fence'i + P2-1 drift negatifi
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn attempt_out_inside_repo_rejected_preflight() {
+    // P1-1: --out analyzed repo içinde → navigator ÇALIŞMADAN reddedilir
+    // (final fence'i geçtikten sonra analyzed source'u değiştiremezdi).
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let out_inside = fx.repo_path().join("attempt-out.json");
+    let output = run_attempt_with_out(&fx, &task_path, &proposals_path, &out_inside);
+    assert!(
+        !output.status.success(),
+        "--out inside analyzed repo must be rejected preflight"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr explains the --out repo fence: {stderr}"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn attempt_out_targeting_canonical_store_rejected_preflight() {
+    // P0: --out state-dir'in .osp/ (space identity) veya attempts/ (no-clobber
+    // canonical evidence) alanına yazamaz — canonical store'un immutability'si
+    // caller-controlled rename ile kırılamaz. Preflight red; state-dir kökü serbest.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    for reserved in ["attempts/task-7-999.json", ".osp/space-identity"] {
+        let output = run_attempt_with_out(
+            &fx,
+            &task_path,
+            &proposals_path,
+            &fx.work_path().join(reserved),
+        );
+        assert!(
+            !output.status.success(),
+            "--out under {reserved} must be rejected preflight"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("canonical state store"),
+            "stderr explains the canonical-store fence ({reserved}): {stderr}"
+        );
+    }
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn attempt_drift_after_navigator_leaves_no_canonical_artifact() {
+    // P2-1 (regression, review tur-1 P1-1'in negatifi): navigator SONUÇ ÜRETTİKTE
+    // SONRA analyzed repo drift ederse final snapshot fence başarısız olur ve
+    // diskte canonical artifact YOKTUR (--out da yazılmaz). "Persistent evidence
+    // ≠ canonical validated evidence" kontratının doğrudan testi.
+    //
+    // Controlled drift: state-dir'e space-identity ilk kez ERKEN yazılır (engine
+    // kurulumundan önce) — bu deterministik tetik; izleyici thread onu görünce
+    // tracked+analyzed a.rs'yi kirletir. Fence attempt'in EN SONUNDA koşar.
+    let fx = HarnessFixture::new_with_use_edges();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let out_path = fx.work_path().join("attempt-out.json");
+    let identity_marker = fx.work_path().join(".osp").join("space-identity");
+    let repo_a = fx.repo_path().join("a.rs");
+    let watcher = std::thread::spawn(move || {
+        for _ in 0..25_000 {
+            if identity_marker.exists() {
+                // Drift: analyzed-scope kirliliği — post-fence bunu yakalar.
+                let _ = std::fs::write(&repo_a, "pub struct A;\n// drift\n");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let output = run_attempt_with_out(&fx, &task_path, &proposals_path, &out_path);
+    watcher.join().expect("watcher thread");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "post-attempt drift must fail the attempt. stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("modified or untracked (after attempt)"),
+        "post-fence fence message. stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("Canonical attempt artifact"),
+        "NO canonical artifact announcement on fence failure. stderr={stderr}"
+    );
+
+    // Disk gerçeği: attempts/ altında artifact yok; --out yok.
+    let attempts_dir = fx.work_path().join("attempts");
+    let artifacts: Vec<_> = match std::fs::read_dir(&attempts_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("task-"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    assert!(
+        artifacts.is_empty(),
+        "fence-failed attempt must leave NO canonical artifacts: {artifacts:?}"
+    );
+    assert!(
+        !out_path.exists(),
+        "--out copy must not be written on fence failure"
+    );
 }

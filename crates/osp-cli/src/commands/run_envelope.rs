@@ -127,8 +127,11 @@ pub struct CliRunEnvelopeV1 {
 }
 
 /// Run metadata — execution mode, witness, task source, repository head.
+/// #166 P2-2: `task_id` doğrudan taşınır — evidence boş olsa bile artifact
+/// self-describing olur (#172 finalize-run bunu tüketecek).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CliRunMeta {
+    pub task_id: u64,
     pub execution_mode: CliRunExecutionMode,
     pub witness_mode: CliRunWitnessMode,
     /// "harness_task_file" veya "legacy_hardcoded" (task dosyası verilmedi).
@@ -180,10 +183,12 @@ pub fn build_run_envelope_v1(
     witness_mode: crate::commands::CliWitnessMode,
     task_source: &'static str,
     repository_head: &str,
+    task_id: u64,
 ) -> CliRunEnvelopeV1 {
     CliRunEnvelopeV1 {
         schema_version: 1,
         run: CliRunMeta {
+            task_id,
             execution_mode: CliRunExecutionMode::from_cli(execution_mode),
             witness_mode: CliRunWitnessMode::from_cli(witness_mode),
             task_source,
@@ -298,10 +303,12 @@ mod tests {
             crate::commands::CliWitnessMode::HarnessAutoApprove,
             "harness_task_file",
             "0123456789abcdef0123456789abcdef01234567",
+            7,
         );
         let json = serde_json::to_string(&envelope).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["run"]["task_id"], 7);
         assert_eq!(v["run"]["execution_mode"], "harness");
         assert_eq!(v["run"]["witness_mode"], "harness_auto_approve");
         assert_eq!(v["run"]["task_source"], "harness_task_file");
