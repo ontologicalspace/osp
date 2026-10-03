@@ -407,36 +407,63 @@ pub struct Edge {
     pub type_ref: Option<EdgeTypeRef>,
 }
 
-/// #167 (P0-1): tip-gren kenarın tip kimliği — namespace + tip sembolü.
+/// #167 (P0-1 + tur-5 P0): tip-gren kenarın tip kimliği — TAM TİP SEMBOLÜ.
 ///
 /// `namespace` = tipin DECLARE edildiği namespace (global ns = `""`).
-/// `name` = tip sembolü (nested tiplerde düz ad — Tier-1 düz ad eşleşmesinin
-/// uzantısı; `A.B` ayrımı yapılmaz, belgeli sınırlama).
+/// `containing` = containing-type zinciri, dıştan içe (`[]` = top-level).
+/// `name` = tipin basit adı.
+/// `arity` = type parameter sayısı (`Box<T>` = 1; metadata `` İsim`1 ``
+/// kavramının ayrıştırılmış hali).
 ///
-/// `Ord` sırası `(namespace, name)` — deterministik kenar sıralaması için.
+/// **Tur-5 identity amendment** (issue #167 karar kaydı): kimlik artık
+/// `TypeSymbolRef₁ = TypeSymbolRef₂ ⟺ C# sembolü aynı` (Tier-1'in gördüğü
+/// ölçüde). `(namespace, name)` çifti iki yasal sembolü çökertiyordu:
+/// `Box<T>` vs `Box<T1,T2>` (aynı ns, aynı ad, farklı arity) ve
+/// `Ns.Inner` vs `Ns.Outer.Inner` (nested containing path). Tier-1 bir
+/// kullanımın sembolünü bilemeyebilir (belgeli miss'ler — karar kaydı);
+/// ama bildiğini iddia ettiği kimlik çökertmez.
+///
+/// `Ord` sırası `(namespace, containing, name, arity)` — deterministik
+/// kenar sıralaması için (digest preimage + CLI wire sıralaması aynı
+/// sözlükbilimsel sırayı kullanır).
+///
+/// Serde: `containing`/`arity` `#[serde(default)]` — JSON wire'da eski
+/// (branch-içi) artifact'lar `[]`/`0` ile okunur. Core `Edge` bincode'a
+/// serileştiğinden GERÇEK geri-uyumluluk persistence version kırılmasıyla
+/// sağlanır (`SNAPSHOT_FORMAT_VERSION` 3 — v1/v2 peek'de reddedilir);
+/// serde default burada yalnız deserialize hatasına karşı kaba koruma.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct EdgeTypeRef {
     pub namespace: String,
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    #[serde(default)]
+    pub containing: Vec<String>,
     pub name: String,
+    /// Type parameter sayısı (u16 — metadata arity sınırının altında).
+    #[serde(default)]
+    pub arity: u16,
 }
 
-/// **#167 tur-3 P1-3:** `EdgeKind ↔ type_ref` cross-field invariant'ı — tek
-/// merkezî doğrulayıcı:
+/// **#167 tur-3 P1-3 + tur-5:** `EdgeKind ↔ type_ref` cross-field invariant'ı —
+/// tek merkezî doğrulayıcı:
 ///
 /// ```text
 /// TypeImports | SameNsType  ⇒  type_ref = Some(..) VE name boş değil
+///                              VE containing segmentleri boş değil (tur-5)
 /// diğer tüm kind'lar        ⇒  type_ref = None
 /// ```
 ///
 /// `namespace` boş olabilir (global ns geçerli); `name` boş OLAMAZ (sembol
-/// kimliği adın kendisidir). `Space::insert_edge` her kombinasyonu kabul
-/// ettiğinden (API yeniden tasarımı bu PR'ın kapsamı dışı — bilinçli),
-/// invariant publication boundary'lerinde fail-closed uygulanır:
-/// `SpaceDigest::compute` (identity yüzeyi — digest'in type_ref uzantısının
-/// güvenli yorumu bu invariant'a dayanır) ve analyzer pipeline üretimi
-/// (yapısal olarak doğru çiftler üretir).
+/// kimliği adın kendisidir); `containing` segmenti boş OLAMAZ (tur-5 — boş
+/// segment yarım kimliktir: `["", "Inner"]` ne `[]` ne `["Outer"]` ile
+/// özdeşleştirilebilir). Arity kısıtsızdır (0 geçerli — generic olmayan sembol).
+/// `Space::insert_edge` her kombinasyonu kabul ettiğinden (API yeniden tasarımı
+/// bu PR'ın kapsamı dışı — bilinçli), invariant publication boundary'lerinde
+/// fail-closed uygulanır: `SpaceDigest::compute` (identity yüzeyi — digest'in
+/// type_ref uzantısının güvenli yorumu bu invariant'a dayanır) ve analyzer
+/// pipeline üretimi (yapısal olarak doğru çiftler üretir).
 pub fn validate_edge_type_ref_invariant(edge: &Edge) -> Result<(), &'static str> {
     match edge.kind {
         EdgeKind::TypeImports | EdgeKind::SameNsType => match &edge.type_ref {
@@ -444,6 +471,9 @@ pub fn validate_edge_type_ref_invariant(edge: &Edge) -> Result<(), &'static str>
             Some(r) if r.name.is_empty() => {
                 Err("type-granular edge type_ref.name must be non-empty")
             }
+            Some(r) if r.containing.iter().any(|s| s.is_empty()) => Err(
+                "type-granular edge type_ref.containing segments must be non-empty (partial identity)",
+            ),
             Some(_) => Ok(()),
         },
         _ => match &edge.type_ref {
@@ -668,7 +698,9 @@ mod tests {
         let tref = |ns: &str, name: &str| {
             Some(EdgeTypeRef {
                 namespace: ns.to_string(),
+                containing: Vec::new(),
                 name: name.to_string(),
+                arity: 0,
             })
         };
         // Tip-gren kind + Some(geçerli) → OK (global ns dahil).
@@ -697,6 +729,31 @@ mod tests {
             ..Default::default()
         };
         assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Tur-5: boş containing segmenti → HATA (yarım kimlik — ne []
+        // ne ["Outer"] ile özdeşleştirilebilir).
+        let e = Edge {
+            kind: EdgeKind::TypeImports,
+            type_ref: Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: vec!["".to_string()],
+                name: "Inner".to_string(),
+                arity: 0,
+            }),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Tur-5: geçerli containing + arity > 0 → OK.
+        let e = Edge {
+            kind: EdgeKind::TypeImports,
+            type_ref: Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: vec!["Outer".to_string()],
+                name: "Inner".to_string(),
+                arity: 2,
+            }),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_ok());
         // Diğer kind + None → OK.
         let e = Edge {
             kind: EdgeKind::Imports,

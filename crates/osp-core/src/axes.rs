@@ -605,6 +605,8 @@ mod tests {
             type_ref: Some(crate::space::EdgeTypeRef {
                 namespace: "Ns".to_string(),
                 name: format!("T{from}_{to}"),
+                containing: Vec::new(),
+                arity: 0,
             }),
             ..Default::default()
         }
@@ -634,6 +636,8 @@ mod tests {
             type_ref: Some(crate::space::EdgeTypeRef {
                 namespace: "Ns".to_string(),
                 name: "Same".to_string(),
+                containing: Vec::new(),
+                arity: 0,
             }),
             ..Default::default()
         });
@@ -662,6 +666,8 @@ mod tests {
             Some(crate::space::EdgeTypeRef {
                 namespace: ns.to_string(),
                 name: name.to_string(),
+                containing: Vec::new(),
+                arity: 0,
             })
         };
         // (i) Request + Response, ikisi de Contracts.cs (node 2)'de
@@ -713,6 +719,63 @@ mod tests {
     }
 
     #[test]
+    fn type_coupling_counts_distinct_arity_and_containing_as_distinct_symbols() {
+        // Tur-5 P0 pin'i: `Box<T>` vs `Box<T1,T2>` (aynı ns+ad, farklı arity)
+        // ve `Ns.Inner` vs `Ns.Outer.Inner` (farklı containing) AYRI tip
+        // sembolleridir — x_type 4 distinct bağımlılık sayar. Eski
+        // (namespace, name) kimliğinde bu dört kenar 2 sembole çökerdi.
+        let mut space = Space::new();
+        space.insert_node(node(1));
+        space.insert_node(node(2));
+        let r = |containing: &[&str], name: &str, arity: u16| {
+            Some(crate::space::EdgeTypeRef {
+                namespace: "App.Svc".to_string(),
+                containing: containing.iter().map(|s| s.to_string()).collect(),
+                name: name.to_string(),
+                arity,
+            })
+        };
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r(&[], "Box", 1),
+            ..Default::default()
+        });
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r(&[], "Box", 2),
+            ..Default::default()
+        });
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r(&[], "Inner", 0),
+            ..Default::default()
+        });
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r(&["Outer"], "Inner", 0),
+            ..Default::default()
+        });
+
+        assert_eq!(space.out_degree(1, EdgeKind::TypeImports), 4);
+        assert_eq!(
+            space.out_distinct_type_refs(1, EdgeKind::TypeImports),
+            4,
+            "tur-5: arity + containing ayrışan sembol eksenleri"
+        );
+        let axis = TypeGranularCouplingAxis::new();
+        let x_type = axis.compute(&node(1), &space);
+        assert!((x_type - 4.0 / 5.0).abs() < 1e-9, "x_type = {}", x_type);
+    }
+
+    #[test]
     fn type_coupling_excludes_type_only_type_imports() {
         // value-only derece tutarlılığı: is_type_only=true TypeImports kenarı
         // x_type'a girmez (CouplingAxis ile aynı kural).
@@ -729,6 +792,8 @@ mod tests {
             type_ref: Some(crate::space::EdgeTypeRef {
                 namespace: "Ns".to_string(),
                 name: "Only".to_string(),
+                containing: Vec::new(),
+                arity: 0,
             }),
         });
 

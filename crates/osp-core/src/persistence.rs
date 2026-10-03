@@ -23,11 +23,18 @@ use crate::witness::ClaimId;
 /// bincode format sürümü (reviewer #4). Uyumsuzluk → graceful error.
 /// **v2 (#167 review tur-2 P0-3):** `Edge.type_ref` alanı bincode gövdesine
 /// girdi — v1 `Edge` baytları (4 alan) yeni struct'ta `UnexpectedEof` üretir.
-/// Bilinçli format kırılması: v1 kayıtları MİGRE EDİLMEZ; version-peek
+/// **v3 (#167 review tur-5 identity amendment):** `EdgeTypeRef` kimliği
+/// `{namespace, name}` → `{namespace, containing, name, arity}` — tam tip
+/// sembol kimliği. v2 baytları serde-default ile okunabilir ANCAK bu yarım
+/// kimliği `[]`/`0`'a çökertirdiğinden (belirsiz kimliğin sessiz
+/// launder'i — "yarım kimlik YASAK" ilkesi) v2 de v1 gibi BİLİNÇLİ REDDEDİLİR:
+/// version-peek fail-visible `VersionMismatch`. v2 yalnız bu branch'in iç
+/// artifact'larında vardı (main'de hiç yayımlanmadı) → kırılma bedelsiz.
+/// Bilinçli format kırılması: eski kayıtlar MİGRE EDİLMEZ; version-peek
 /// (deserialize'tan ÖNCE ilk 4 bayt) sayesinde fail-visible `VersionMismatch`
 /// ile reddedilirler (opak Bincode EOF'u yerine). Eski store kökleri yeniden
-/// üretilmelidir. Gerçek migration gerektiğinde: LegacyV1 mirror + dönüşüm.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
+/// üretilmelidir. Gerçek migration gerektiğinde: LegacyV1/V2 mirror + dönüşüm.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {

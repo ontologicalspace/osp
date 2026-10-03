@@ -253,12 +253,24 @@ pub struct CliEdge {
     pub type_ref: Option<CliEdgeTypeRef>,
 }
 
-/// #167 (P0-1): tip-gren kenarın tip kimliği — wire karşılığı (snake_case).
-/// `Ord` sırası `(namespace, name)` — canonical wire sort için.
+/// #167 (P0-1 + tur-5): tip-gren kenarın TAM TİP SEMBOLÜ kimliği — wire
+/// karşılığı (snake_case). `Ord` sırası `(namespace, containing, name,
+/// arity)` — canonical wire sort için (core `EdgeTypeRef` ile aynı sözlük
+/// sırası). Tur-5 identity amendment: `Box<T>` vs `Box<T1,T2>` (arity) ve
+/// `Ns.Inner` vs `Ns.Outer.Inner` (containing) ayrı kimliklerdir.
+/// `containing`/`arity` serde-default — eski (branch-içi) JSON artifact'lar
+/// `[]`/`0` ile okunur (kalıcı veri değil; bincode persistence ayrıca v3
+/// kırmaktadır).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
 pub struct CliEdgeTypeRef {
     pub namespace: String,
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    #[serde(default)]
+    pub containing: Vec<String>,
     pub name: String,
+    /// Type parameter sayısı (metadata `` İsim`1 `` kavramının ayrıştırılmışı).
+    #[serde(default)]
+    pub arity: u16,
 }
 
 /// Edge kind — CLI wire formatı (snake_case). Core `EdgeKind` ile birebir varyant
@@ -331,7 +343,9 @@ impl CliEdge {
             is_type_only: edge.is_type_only,
             type_ref: edge.type_ref.as_ref().map(|r| CliEdgeTypeRef {
                 namespace: r.namespace.clone(),
+                containing: r.containing.clone(),
                 name: r.name.clone(),
+                arity: r.arity,
             }),
         }
     }

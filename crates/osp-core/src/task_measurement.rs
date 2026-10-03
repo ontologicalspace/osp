@@ -685,6 +685,8 @@ mod tests {
                 type_ref: Some(crate::space::EdgeTypeRef {
                     namespace: "App.Contracts".to_string(),
                     name: name.to_string(),
+                    containing: Vec::new(),
+                    arity: 0,
                 }),
                 ..Default::default()
             });

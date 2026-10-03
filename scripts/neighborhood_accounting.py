@@ -13,20 +13,26 @@ Inputs are two `osp analyze` space snapshots of the SAME repository (before
 and after the promoted patch) plus the neighborhood node paths. Dependencies
 are keyed by the target-file path of each import edge.
 
-GRANULARITY (v1.2, #167): the script reads one edge class at a time.
+GRANULARITY (v1.3, #167 tur-5): the script reads one edge class at a time.
   --granularity namespace (default; v1.1 semantics unchanged): edges of kind
       `imports` — one using-line maps to ONE namespace-representative file via
       a sorted-first resolver. The representative caveat below applies HERE.
   --granularity type: edges of kind `type_imports` — one using-line maps to one
-      edge PER referenced type. The dependency KEY is the TYPE SYMBOL
-      (`type_ref.namespace.type_ref.name`; empty ns → bare name), NOT the file:
-      two types packaged in one declaring file are DISTINCT dependencies, and a
-      partial type spanning two files is ONE dependency (review P0-1). A type
-      edge WITHOUT a type_ref (or with an empty name) is an ERROR, not a file
-      fallback (tur-3 P1-2 — the symbol is required). Representative
-      semantics is gone at this granularity: adding a lexicographically earlier
-      file to a namespace does NOT shift type-level keys, so the v1.1
-      "removed + new for the same semantic dependency" artifact disappears.
+      edge PER referenced type. The dependency KEY is the FULL TYPE SYMBOL —
+      metadata-style: `ns.Outer+Inner` for nested types (containing chain
+      joined with `+`), ``ns.Box`1`` for generics (arity backtick) — NOT the
+      file: two types packaged in one declaring file are DISTINCT
+      dependencies, and a partial type spanning two files is ONE dependency
+      (review P0-1). v1.3 (#167 tur-5 identity amendment): arity and the
+      containing chain are identity components — ``ev.Box`1`` vs ``ev.Box`2``
+      and `ev.Inner` vs `ev.Outer+Inner` are DISTINCT dependencies. A type
+      edge WITHOUT a type_ref, with an empty name, with a missing/non-list
+      containing, a missing/non-int arity, or an empty containing segment is
+      an ERROR, not a fallback (tur-3 P1-2 + tur-5 — the symbol is required,
+      whole). Representative semantics is gone at this granularity: adding a
+      lexicographically earlier file to a namespace does NOT shift type-level
+      keys, so the v1.1 "removed + new for the same semantic dependency"
+      artifact disappears.
 Partition semantics (below) are granularity-independent and frozen at v1.1.
 
 TERMINOLOGY (frozen; see dogfood/neighborhood-ledger.jsonl amendment): the
@@ -96,7 +102,7 @@ import argparse
 import json
 from pathlib import Path
 
-SCHEMA = "neighborhood-accounting-v1.2"
+SCHEMA = "neighborhood-accounting-v1.3"
 
 GRANULARITY_KINDS = {
     "namespace": "imports",
@@ -127,25 +133,54 @@ def load_snapshot(
 def _dep_key(e: dict, id_to_path: dict[int, str], granularity: str) -> str:
     """Dependency key at the selected granularity.
 
-    namespace -> target file path (v1.1 semantics). type -> TYPE SYMBOL
-    (ns.Name; bare name for global-ns types) — REQUIRED: a type edge without
-    type_ref, or with an empty name, raises (identity IS the symbol; the file
-    fallback would re-collapse same-file types — review tur-3 P1-2).
+    namespace -> target file path (v1.1 semantics). type -> FULL TYPE SYMBOL,
+    metadata-style (#167 tur-5 identity amendment): containing chain joined
+    with `+`, arity as a backtick suffix on the name, namespace dotted in
+    front (`ev.Outer+Inner`, ``ev.Box`1``; bare name for global-ns types) —
+    REQUIRED WHOLE: a type edge without a type_ref, with an empty name, with a
+    missing/malformed containing or arity, or with an empty containing segment
+    raises (identity IS the symbol; a partial identity would re-collapse
+    distinct C# symbols — tur-3 P1-2 + tur-5).
     """
     if granularity == "type":
         tref = e.get("type_ref")
+        # Review tur-3 P1-2: symbol identity MISSING is an ERROR, not a
+        # file fallback. Falling back to the target path would re-collapse
+        # two types packaged in one file — exactly the P0-1 collapse this
+        # instrument exists to separate. Empty namespace (global ns) is
+        # valid; an empty NAME is not (identity IS the name).
         if not tref or not tref.get("name"):
-            # Review tur-3 P1-2: symbol identity MISSING is an ERROR, not a
-            # file fallback. Falling back to the target path would re-collapse
-            # two types packaged in one file — exactly the P0-1 collapse this
-            # instrument exists to separate. Empty namespace (global ns) is
-            # valid; an empty NAME is not (identity IS the name).
             raise ValueError(
                 f"type-granularity edge {e['from']}->{e['to']} lacks symbol identity "
                 "(type_ref missing or type_ref.name empty) — in type granularity the "
                 "type symbol is REQUIRED; file-path fallback removed (#167 review tur-3)"
             )
-        ns, name = tref.get("namespace", ""), tref["name"]
+        # Tur-5: containing + arity are identity components, not optional
+        # metadata. Missing/malformed components mean a pre-v1.3 artifact —
+        # accepting them would silently fold `Box`1`/`Box`2` and
+        # `Inner`/`Outer+Inner` back together.
+        containing = tref.get("containing")
+        if not isinstance(containing, list) or any(
+            not isinstance(s, str) or not s for s in containing
+        ):
+            raise ValueError(
+                f"type-granularity edge {e['from']}->{e['to']} has malformed "
+                "type_ref.containing (missing/non-list/empty-segment) — v1.3 "
+                "requires the whole symbol identity (#167 review tur-5)"
+            )
+        arity = tref.get("arity")
+        if not isinstance(arity, int) or isinstance(arity, bool) or arity < 0:
+            raise ValueError(
+                f"type-granularity edge {e['from']}->{e['to']} has malformed "
+                "type_ref.arity (missing/non-int/negative) — v1.3 requires the "
+                "whole symbol identity (#167 review tur-5)"
+            )
+        ns = tref.get("namespace", "")
+        name = tref["name"]
+        if arity:
+            name = f"{name}`{arity}"
+        if containing:
+            name = "+".join(containing) + "+" + name
         return f"{ns}.{name}" if ns else name
     return id_to_path[e["to"]]
 
@@ -397,11 +432,11 @@ def self_check() -> int:
         {"from": 1, "to": 90, "kind": "imports"},
         {"from": 2, "to": 90, "kind": "imports"},
         {"from": 1, "to": 10, "kind": "type_imports",
-         "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+         "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
         {"from": 1, "to": 10, "kind": "type_imports",
-         "type_ref": {"namespace": "ev", "name": "ChargebackEvent"}},
+         "type_ref": {"namespace": "ev", "name": "ChargebackEvent", "containing": [], "arity": 0}},
         {"from": 2, "to": 11, "kind": "type_imports",
-         "type_ref": {"namespace": "ev", "name": "RefundEvent"}},
+         "type_ref": {"namespace": "ev", "name": "RefundEvent", "containing": [], "arity": 0}},
     ]
     path = write_snapshot(nodes, edges)
     ns_ids, ns_edges, _ = load_snapshot(path, "namespace")
@@ -426,7 +461,7 @@ def self_check() -> int:
         [
             {"from": 1, "to": 91, "kind": "imports"},
             {"from": 1, "to": 10, "kind": "type_imports",
-             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
         ],
     )
     after = write_snapshot(
@@ -434,7 +469,7 @@ def self_check() -> int:
         [
             {"from": 1, "to": 92, "kind": "imports"},
             {"from": 1, "to": 10, "kind": "type_imports",
-             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
         ],
     )
     b_ids2, b_edges2, _ = load_snapshot(before, "namespace")
@@ -455,20 +490,20 @@ def self_check() -> int:
     bm = write_snapshot(
         {1: NA, 10: "ev/FraudEvent.cs"},
         [{"from": 1, "to": 10, "kind": "type_imports",
-          "type_ref": {"namespace": "ev", "name": "FraudEvent"}}],
+          "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}}],
     )
     am_moved = write_snapshot(
         {5: NL, 10: "ev/FraudEvent.cs"},
         [{"from": 5, "to": 10, "kind": "type_imports",
-          "type_ref": {"namespace": "ev", "name": "FraudEvent"}}],
+          "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}}],
     )
     am_mult = write_snapshot(
         {1: NA, 2: NB, 10: "ev/FraudEvent.cs"},
         [
             {"from": 1, "to": 10, "kind": "type_imports",
-             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
             {"from": 2, "to": 10, "kind": "type_imports",
-             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
         ],
     )
     bM, eM, _ = load_snapshot(bm, "type")
@@ -481,29 +516,60 @@ def self_check() -> int:
     if mult_rec["per_dependency"]["ev.FraudEvent"]["class"] != "multiplied":
         raise RuntimeError(f"type true-multiplication drift: {mult_rec['per_dependency']}")
 
-    # (v) tur-3 P1-2 fail-closed: sembol kimligi EKSIK tip kenari (ref'siz ya
-    # da bos isim) hata verir — path fallback KALDIRILDI (ayni dosyadaki iki
-    # tipi yeniden cokertmesin diye; P0-1 ontolojisi).
+    # (v) tur-3 P1-2 + tur-5 fail-closed: sembol kimligi EKSIK/YARIM tip kenari
+    # (ref'siz, bos isim, containing/arity eksik ya da bozuk) hata verir —
+    # path/varsayilan fallback KALDIRILDI (ayni dosyadaki iki tipi ve ayni
+    # adin farkli arity/containing'li sembollerini yeniden cokertmesin diye;
+    # P0-1 + tur-5 ontolojisi).
     for bad_edge in (
         {"from": 1, "to": 10, "kind": "type_imports"},  # type_ref yok
         {"from": 1, "to": 10, "kind": "type_imports",
          "type_ref": {"namespace": "ev", "name": ""}},   # bos isim
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "Box", "arity": 1}},  # containing yok
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "Box", "containing": [], "arity": "1"}},  # arity str
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "Inner", "containing": [""], "arity": 0}},  # bos segment
     ):
         bad = write_snapshot({1: NA, 10: "ev/FraudEvent.cs"}, [bad_edge])
         try:
             load_snapshot(bad, "type")
         except ValueError as exc:
-            if "symbol" not in str(exc):
+            if "identity" not in str(exc):
                 raise RuntimeError(f"fail-closed mesaj drift: {exc}")
         else:
-            raise RuntimeError(f"eksik sembol kimligi red edilmeli: {bad_edge}")
+            raise RuntimeError(f"eksik/bozuk sembol kimligi red edilmeli: {bad_edge}")
         # namespace kipinde ayni kenar sorun degil (kind filtresi disarida birakar).
         load_snapshot(bad, "namespace")
 
-    print("self-check PASS (v1.2 granularity fixtures: S2 disambiguation + same-file"
+    # (vi) tur-5 P0: arity + containing KIMLIK bilesenleridir — `ev.Box`1` vs
+    # `ev.Box`2` ve `ev.Inner` vs `ev.Outer+Inner` AYRI bagimliliklardir.
+    # v1.2 duz-ad anahtari bu dort kenari 2 anahtara cokertirdi.
+    ident = write_snapshot(
+        {1: NA, 10: "ev/Box.cs", 11: "ev/Inner.cs"},
+        [
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Box", "containing": [], "arity": 1}},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Box", "containing": [], "arity": 2}},
+            {"from": 1, "to": 11, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Inner", "containing": [], "arity": 0}},
+            {"from": 1, "to": 11, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Inner", "containing": ["Outer"], "arity": 0}},
+        ],
+    )
+    _, ident_edges, _ = load_snapshot(ident, "type")
+    keys = set(ident_edges[1])
+    expected_keys = {"ev.Box`1", "ev.Box`2", "ev.Inner", "ev.Outer+Inner"}
+    if keys != expected_keys:
+        raise RuntimeError(f"tur-5 identity keys drift: {sorted(keys)} != {sorted(expected_keys)}")
+
+    print("self-check PASS (v1.3 granularity fixtures: S2 disambiguation + same-file"
           " P0-1 symbol keys (ns union 1 vs type union 3); representative-shift"
-          " artifact ns-only; type-symbol moved/multiplied; missing-symbol"
-          " fail-closed (no file fallback)")
+          " artifact ns-only; type-symbol moved/multiplied; missing/partial-symbol"
+          " fail-closed (no file fallback); tur-5 arity+containing identity keys"
+          " (Box`1/Box`2, Inner/Outer+Inner)")
     return 0
 
 

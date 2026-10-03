@@ -205,7 +205,9 @@ pub fn analyze_repo_with_config(
                         is_type_only: false,
                         type_ref: Some(osp_core::space::EdgeTypeRef {
                             namespace: target.namespace.clone(),
+                            containing: target.containing.clone(),
                             name: target.type_name.clone(),
+                            arity: target.arity,
                         }),
                     });
                 }
@@ -221,7 +223,9 @@ pub fn analyze_repo_with_config(
                         is_type_only: false,
                         type_ref: Some(osp_core::space::EdgeTypeRef {
                             namespace: target.namespace.clone(),
+                            containing: target.containing.clone(),
                             name: target.type_name.clone(),
+                            arity: target.arity,
                         }),
                     });
                 }
@@ -1255,6 +1259,8 @@ class Service
             Some(EdgeTypeRef {
                 namespace: "Ns".to_string(),
                 name: name.to_string(),
+                containing: Vec::new(),
+                arity: 0,
             })
         };
         for (to, kind, tref) in [

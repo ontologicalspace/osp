@@ -243,15 +243,25 @@ pub struct ResolvedImport {
     pub target_path: Option<PathBuf>,
 }
 
-/// #167 (P0-1): tip-gren bağımlılık hedefi — kimlik TİP SEMBOLÜDÜR, dosya değil.
-/// Aynı dosyada 2 tip → 2 hedef; partial tip → sembol başına dosya-başına hedef
-/// (pipeline her hedef için ayrı kenar üretir; `x_type` distinct sembol sayar).
+/// #167 (P0-1 + tur-5): tip-gren bağımlılık hedefi — kimlik TAM TİP SEMBOLÜDÜR
+/// (namespace + containing zinciri + ad + arity; tur-5 identity amendment —
+/// issue #167 karar kaydı), dosya değil. Aynı dosyada 2 tip → 2 hedef; partial
+/// tip → sembol başına dosya-başına hedef (pipeline her hedef için ayrı kenar
+/// üretir; `x_type` distinct sembol sayar — `Box<T>` ve `Box<T1,T2>` AYRI
+/// bağımlılıklardır).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TypeImportTarget {
     /// Tipin declare edildiği namespace (global ns = `""`).
     pub namespace: String,
-    /// Tip sembolü (nested tiplerde düz ad — Tier-1 düz ad eşleşmesi).
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    /// Tur-5: `Ns.Inner` (top-level) ile `Ns.Outer.Inner` (nested) ayrı
+    /// sembollerdir — eski düz-ad indeksleme bu ikisini çökertiyordu.
+    pub containing: Vec<String>,
+    /// Tipin basit adı.
     pub type_name: String,
+    /// Type parameter sayısı (tur-5 kural 8: use-site arity = yazılan tip
+    /// argümanları; kural 9: arity birebir eşleşir).
+    pub arity: u16,
     /// Tipi declare eden dosya.
     pub file: PathBuf,
 }
@@ -260,7 +270,8 @@ pub struct TypeImportTarget {
 ///
 /// Adapter `resolve_type_references` döndürür; `None` = dil tip-düzeyi
 /// çözümlemesi desteklemiyor (coupling_type alanı ölçümü yok). Dönen hedefler
-/// (namespace, type_name, file) ÜÇLÜSÜYLE deduplu + SIRALIdır (determinizm).
+/// (namespace, containing, type_name, arity, file) beşlisiyle deduplu +
+/// SIRALIdır (determinizm).
 #[derive(Debug, Clone, Default)]
 pub struct TypeReferenceResolution {
     /// Çözümlenmiş tip referansları → `EdgeKind::TypeImports`. KADE-1
