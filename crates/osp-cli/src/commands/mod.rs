@@ -204,6 +204,12 @@ pub struct TrajectoryAttemptArgs {
     /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
     #[arg(long, default_value = "human")]
     pub format: String,
+    /// #166: Kanonik attempt artifact'ın yazılacağı path (şemalı run envelope v1).
+    /// Format modundan bağımsız yazılır. Ek olarak HER modda state-dir altına
+    /// `attempts/task-<task_id>-<unix_millis>.json` kalıcı kayıt yazılır — kanıt
+    /// hattı (ledger attempt_ref) stdout biçiminden bağımsızlaşır.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
     /// Runtime state directory (`.osp/` artifacts: pending-authorizations +
     /// persisted space identity). Default = CWD.
     /// Invariant (#152 R1 P1-2, her iki execution mode): mutlaka analyzed repo
@@ -1431,16 +1437,26 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     };
     let result = nav.run_task(args.task_id, 1);
     // 6. Output — versioned JSON envelope (json) veya human (default).
+    //
+    // #166 (kanonik attempt artifact): envelope HER modda bir kez üretilir ve
+    // (a) state-dir altına `attempts/task-<id>-<unix_millis>.json` olarak daima
+    //     kalıcı yazılır (kanıt hattı stdout biçiminden bağımsızlaşır),
+    // (b) `--out` verilmişse aynı şemalı içerik oraya kopyalanır,
+    // (c) insan-modunda progress satırları stderr'e taşınır — stdout yalnız
+    //     makine-okunur evidence dizisi taşır (akış ayrımı).
+    // Artifact yazımı exit-code dallanmasından ÖNCE: maneuver-limit/held gibi
+    // sıfır-dışında çıkan akışlarda da kanıt kalıcıdır.
+    let envelope = run_envelope::build_run_envelope_v1(
+        &result,
+        &evidence,
+        args.execution_mode,
+        args.witness,
+        task_source,
+        snapshot.head.as_str(),
+    );
+    persist_canonical_attempt_artifact(&envelope, args, state_dir)?;
     let is_json = args.format.eq_ignore_ascii_case("json");
     if is_json {
-        let envelope = run_envelope::build_run_envelope_v1(
-            &result,
-            &evidence,
-            args.execution_mode,
-            args.witness,
-            task_source,
-            snapshot.head.as_str(),
-        );
         let json = serde_json::to_string_pretty(&envelope)?;
         // Diagnostics stderr'e — stdout JSON-only.
         // **#96 MD-2 + #95-A MD-1 cutover:** navigator ölçümü engine-native
@@ -1461,7 +1477,34 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     Ok(())
 }
 
+/// #166: Kanonik attempt artifact'ı kalıcı yap — state-dir altına daima,
+/// `--out` verilmişse ek kopya. Path bildirimi (progress) stderr'de.
+fn persist_canonical_attempt_artifact(
+    envelope: &run_envelope::CliRunEnvelopeV1,
+    args: &TrajectoryAttemptArgs,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    let json = serde_json::to_string_pretty(envelope)?;
+    let attempts_dir = state_dir.join("attempts");
+    std::fs::create_dir_all(&attempts_dir)?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let canonical = attempts_dir.join(format!("task-{}-{}.json", args.task_id, millis));
+    std::fs::write(&canonical, &json)?;
+    eprintln!("Canonical attempt artifact: {}", canonical.display());
+    if let Some(out) = &args.out {
+        std::fs::write(out, &json)?;
+        eprintln!("Attempt artifact (--out): {}", out.display());
+    }
+    Ok(())
+}
+
 /// Print human-readable navigator result (non-json mode).
+///
+/// #166 akış ayrımı: progress satırları stderr'e yazılır; stdout yalnız
+/// makine-okunur evidence JSON dizisi taşır (elle ayıklama gerektirmez).
 fn print_human_result(
     result: &osp_core::navigator::NavigatorResult,
     task_id: u64,
@@ -1473,34 +1516,34 @@ fn print_human_result(
             attempts,
             total_tokens,
         } => {
-            println!("✓ Task completed in {attempts} attempts");
-            println!("  Total tokens: {}", total_tokens.total_tokens);
+            eprintln!("✓ Task completed in {attempts} attempts");
+            eprintln!("  Total tokens: {}", total_tokens.total_tokens);
         }
         NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
-            println!("✗ Maneuver limit exceeded after {attempts} attempts");
+            eprintln!("✗ Maneuver limit exceeded after {attempts} attempts");
         }
         NavigatorResult::AwaitingWitnesses {
             pending,
             persistence,
         } => {
-            println!(
+            eprintln!(
                 "⏸ Awaiting witnesses (INV-T9) — task {}, claim {}",
                 pending.task_id, pending.claim_id
             );
-            println!(
+            eprintln!(
                 "  Witness hold reason: {}",
                 pending.witness_hold_reason.as_reason_str()
             );
-            println!("  Commit state: awaiting_witnesses");
-            println!("  Mainline mutation: not_applied");
-            println!("  Next action: await external evidence");
-            println!(
+            eprintln!("  Commit state: awaiting_witnesses");
+            eprintln!("  Mainline mutation: not_applied");
+            eprintln!("  Next action: await external evidence");
+            eprintln!(
                 "  Pending artifact: {}",
                 persistence.artifact_path.display()
             );
         }
         NavigatorResult::RequiresRevision(rev) => {
-            println!(
+            eprintln!(
                 "↻ Requires revision (explicit witness rejection) — task {}, claim {}",
                 rev.task_id(),
                 rev.claim_id()
@@ -1512,34 +1555,34 @@ fn print_human_result(
             claim_id,
             ..
         } => {
-            println!(
+            eprintln!(
                 "❄ Awaiting cold-start operator approval (INV-T9 ext) — task {}, claim {}, attempt {}",
                 task_id, claim_id, attempts
             );
         }
         NavigatorResult::PendingAuthorizationPersistenceFailure { pending, error } => {
-            println!(
+            eprintln!(
                 "✗ Pending authorization persistence failed — task {}, claim {}: {error}",
                 pending.task_id, pending.claim_id
             );
         }
         NavigatorResult::WitnessEvaluationError(msg) => {
-            println!("✗ Witness evaluation error: {msg}");
+            eprintln!("✗ Witness evaluation error: {msg}");
         }
         NavigatorResult::SystemFailure(msg) => {
-            println!("✗ System failure: {msg}");
+            eprintln!("✗ System failure: {msg}");
         }
         NavigatorResult::TaskNotFound => {
-            println!("✗ Task {task_id} not found");
+            eprintln!("✗ Task {task_id} not found");
         }
         NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
-            println!("⚠ Operator approval required after {attempts} attempts");
+            eprintln!("⚠ Operator approval required after {attempts} attempts");
         }
         NavigatorResult::LlmError(e) => {
-            println!("✗ LLM error: {e}");
+            eprintln!("✗ LLM error: {e}");
         }
     }
-    println!("  Evidence entries: {}", evidence.len());
+    eprintln!("  Evidence entries: {}", evidence.len());
     if !evidence.is_empty() {
         let json = serde_json::to_string_pretty(evidence)?;
         println!("{json}");
@@ -1627,6 +1670,7 @@ mod mode_matrix_tests {
             execution_mode: mode,
             witness: CliWitnessMode::default(),
             format: "human".into(),
+            out: None,
             state_dir: None,
         }
     }
