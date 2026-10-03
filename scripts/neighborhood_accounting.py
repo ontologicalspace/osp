@@ -18,7 +18,11 @@ GRANULARITY (v1.2, #167): the script reads one edge class at a time.
       `imports` — one using-line maps to ONE namespace-representative file via
       a sorted-first resolver. The representative caveat below applies HERE.
   --granularity type: edges of kind `type_imports` — one using-line maps to one
-      edge PER referenced type, keyed by the declaring type file. Representative
+      edge PER referenced type. The dependency KEY is the TYPE SYMBOL
+      (`type_ref.namespace.type_ref.name`; empty ns → bare name), NOT the file:
+      two types packaged in one declaring file are DISTINCT dependencies, and a
+      partial type spanning two files is ONE dependency (review P0-1). Fallback
+      when an edge carries no type_ref: the target path. Representative
       semantics is gone at this granularity: adding a lexicographically earlier
       file to a namespace does NOT shift type-level keys, so the v1.1
       "removed + new for the same semantic dependency" artifact disappears.
@@ -101,20 +105,39 @@ GRANULARITY_KINDS = {
 
 def load_snapshot(
     path: str, granularity: str = "namespace"
-) -> tuple[dict[int, str], dict[int, list[int]], dict[int, dict]]:
+) -> tuple[dict[int, str], dict[int, list[str]], dict[int, dict]]:
     kind = GRANULARITY_KINDS[granularity]
     with open(path, encoding="utf-8") as f:
         d = json.load(f)
     id_to_path = {n["node_id"]: n["path"] for n in d["nodes"]}
     metrics = {n["node_id"]: n for n in d["nodes"]}
-    out_edges: dict[int, list[int]] = {}
+    out_edges: dict[int, list[str]] = {}
     for e in d["edges"]:
         if e["from"] == e["to"] or e.get("is_type_only"):
             continue
         if e.get("kind") != kind:
             continue
-        out_edges.setdefault(e["from"], []).append(e["to"])
+        out_edges.setdefault(e["from"], []).append(
+            _dep_key(e, id_to_path, granularity)
+        )
     return id_to_path, out_edges, metrics
+
+
+def _dep_key(e: dict, id_to_path: dict[int, str], granularity: str) -> str:
+    """Dependency key at the selected granularity.
+
+    namespace -> target file path (v1.1 semantics). type -> TYPE SYMBOL
+    (ns.Name; bare name for global-ns types) when the edge carries `type_ref`
+    (#167 review P0-1: two types in one file are distinct dependencies; a
+    partial type across files is one), else target path (robustness fallback
+    for type edges without identity).
+    """
+    if granularity == "type":
+        tref = e.get("type_ref")
+        if tref:
+            ns, name = tref.get("namespace", ""), tref.get("name", "")
+            return f"{ns}.{name}" if ns else name
+    return id_to_path[e["to"]]
 
 
 def holder_map(
@@ -129,8 +152,8 @@ def holder_map(
     for nid, npath in id_to_path.items():
         if npath not in wanted:
             continue
-        for tid in out_edges.get(nid, []):
-            deps.setdefault(id_to_path[tid], set()).add(npath)
+        for key in out_edges.get(nid, []):
+            deps.setdefault(key, set()).add(npath)
     return deps
 
 
@@ -300,9 +323,11 @@ def self_check() -> int:
     A, B, C, D, E, G = "dep/A.cs", "dep/B.cs", "dep/C.cs", "dep/D.cs", "dep/E.cs", "dep/G.cs"
     b_ids = {1: T, 2: G2, 10: A, 11: B, 12: C, 13: D, 14: G}
     a_ids = {1: T, 2: G2, 4: F, 10: A, 11: B, 12: C, 13: D, 14: G, 15: E}
+    # Edges are DEPENDENCY-KEYED (load_snapshot/_dep_key contract): here,
+    # representative file paths (namespace-granularity fixture).
     # before: T holds A,B,C,D,G(shared with G2); after: F(new) holds C,D,E; T keeps B,D; G2 keeps G
-    b_edges = {1: [10, 11, 12, 13, 14], 2: [14]}
-    a_edges = {1: [11, 13], 2: [14], 4: [12, 13, 15]}
+    b_edges = {1: [A, B, C, D, G], 2: [G]}
+    a_edges = {1: [B, D], 2: [G], 4: [C, D, E]}
     rec = account([T, G2, F], b_ids, b_edges, a_ids, a_edges)
     per = {k.split("/")[-1]: v for k, v in rec["per_dependency"].items()}
     expected = {
@@ -354,13 +379,19 @@ def self_check() -> int:
 
     # (ii) S2a~=S2b disambiguation: two holders reference DIFFERENT types from
     # the same namespace. ns-mode: ONE representative key held by both (looks
-    # shared). type-mode: TWO keys held by one holder each (not shared at all).
+    # shared). type-mode: symbol keys, one holder each (not shared at all).
+    # P0-1: FraudEvent + ChargebackEvent AYNI dosyada (10) — dosya-anahtarlı
+    # muhasebe ikisini çökertirdi; sembol anahtarlar ayırır (type union 3).
     nodes = {1: NA, 2: NB, 10: "ev/FraudEvent.cs", 11: "ev/RefundEvent.cs", 90: "ev/Rep.cs"}
     edges = [
         {"from": 1, "to": 90, "kind": "imports"},
         {"from": 2, "to": 90, "kind": "imports"},
-        {"from": 1, "to": 10, "kind": "type_imports"},
-        {"from": 2, "to": 11, "kind": "type_imports"},
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "ChargebackEvent"}},
+        {"from": 2, "to": 11, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "RefundEvent"}},
     ]
     path = write_snapshot(nodes, edges)
     ns_ids, ns_edges, _ = load_snapshot(path, "namespace")
@@ -369,12 +400,14 @@ def self_check() -> int:
     ty_rec = account([NA, NB], ty_ids, ty_edges, ty_ids, ty_edges)
     if ns_rec["summary"]["dependency_union_before"] != 1:
         raise RuntimeError(f"ns union drift: {ns_rec['summary']}")
-    if ty_rec["summary"]["dependency_union_before"] != 2:
-        raise RuntimeError(f"type union drift (S2a~=S2b ayrismasi): {ty_rec['summary']}")
+    if ty_rec["summary"]["dependency_union_before"] != 3:
+        raise RuntimeError(f"type union drift (S2 disambiguation + same-file P0-1): {ty_rec['summary']}")
+    if "ev.FraudEvent" not in ty_rec["per_dependency"] or "ev.ChargebackEvent" not in ty_rec["per_dependency"]:
+        raise RuntimeError(f"type symbol keys missing: {sorted(ty_rec['per_dependency'])}")
     if ns_rec["summary"]["neighborhood_out_sum_before"] != 2:
         raise RuntimeError("ns out-sum drift")
-    if ty_rec["summary"]["neighborhood_out_sum_before"] != 2:
-        raise RuntimeError("type out-sum drift")
+    if ty_rec["summary"]["neighborhood_out_sum_before"] != 3:
+        raise RuntimeError("type out-sum drift (P0-1: ayni dosya 2 sembol = 2 kenar)")
 
     # (iv) representative-shift artifact: new lexicographically-earlier file in
     # the ns SHIFTS the ns key (removed+new) but type keys are stable (unchanged).
@@ -382,14 +415,16 @@ def self_check() -> int:
         {1: NA, 10: "ev/FraudEvent.cs", 91: "ev/OldRep.cs"},
         [
             {"from": 1, "to": 91, "kind": "imports"},
-            {"from": 1, "to": 10, "kind": "type_imports"},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
         ],
     )
     after = write_snapshot(
         {1: NA, 10: "ev/FraudEvent.cs", 92: "ev/AaaRep.cs"},
         [
             {"from": 1, "to": 92, "kind": "imports"},
-            {"from": 1, "to": 10, "kind": "type_imports"},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
         ],
     )
     b_ids2, b_edges2, _ = load_snapshot(before, "namespace")
@@ -409,31 +444,36 @@ def self_check() -> int:
     # changes {A}->{L} → moved; {A}->{A,B} → multiplied.
     bm = write_snapshot(
         {1: NA, 10: "ev/FraudEvent.cs"},
-        [{"from": 1, "to": 10, "kind": "type_imports"}],
+        [{"from": 1, "to": 10, "kind": "type_imports",
+          "type_ref": {"namespace": "ev", "name": "FraudEvent"}}],
     )
     am_moved = write_snapshot(
         {5: NL, 10: "ev/FraudEvent.cs"},
-        [{"from": 5, "to": 10, "kind": "type_imports"}],
+        [{"from": 5, "to": 10, "kind": "type_imports",
+          "type_ref": {"namespace": "ev", "name": "FraudEvent"}}],
     )
     am_mult = write_snapshot(
         {1: NA, 2: NB, 10: "ev/FraudEvent.cs"},
         [
-            {"from": 1, "to": 10, "kind": "type_imports"},
-            {"from": 2, "to": 10, "kind": "type_imports"},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
+            {"from": 2, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent"}},
         ],
     )
     bM, eM, _ = load_snapshot(bm, "type")
     aL, eL, _ = load_snapshot(am_moved, "type")
     moved_rec = account([NA, NL], bM, eM, aL, eL)
-    if moved_rec["per_dependency"]["ev/FraudEvent.cs"]["class"] != "moved":
+    if moved_rec["per_dependency"]["ev.FraudEvent"]["class"] != "moved":
         raise RuntimeError(f"type moved drift: {moved_rec['per_dependency']}")
     aP, eP, _ = load_snapshot(am_mult, "type")
     mult_rec = account([NA, NB], bM, eM, aP, eP)
-    if mult_rec["per_dependency"]["ev/FraudEvent.cs"]["class"] != "multiplied":
+    if mult_rec["per_dependency"]["ev.FraudEvent"]["class"] != "multiplied":
         raise RuntimeError(f"type true-multiplication drift: {mult_rec['per_dependency']}")
 
-    print("self-check PASS (v1.2 granularity fixtures: S2 disambiguation union 1 vs 2;"
-          " representative-shift artifact ns-only; type-level moved/multiplied)")
+    print("self-check PASS (v1.2 granularity fixtures: S2 disambiguation + same-file"
+          " P0-1 symbol keys (ns union 1 vs type union 3); representative-shift"
+          " artifact ns-only; type-symbol moved/multiplied")
     return 0
 
 

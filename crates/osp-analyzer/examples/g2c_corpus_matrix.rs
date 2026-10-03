@@ -757,6 +757,7 @@ fn run_synthetic_rq9(
             to: dep,
             kind: EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
     }
     // node 1→0 incoming import → instability balanced.
@@ -765,6 +766,7 @@ fn run_synthetic_rq9(
         to: 0,
         kind: EdgeKind::Imports,
         is_type_only: false,
+        type_ref: None,
     });
 
     // 2. Engine — değerlendirilebilir vision (instability measured'a yakın).

@@ -511,8 +511,8 @@ impl SpaceSlice {
         let edges: Vec<Edge> = space
             .edges
             .iter()
-            .copied()
             .filter(|e| ids.contains(&e.from) && ids.contains(&e.to))
+            .cloned()
             .collect();
         Self {
             node_ids: ids,

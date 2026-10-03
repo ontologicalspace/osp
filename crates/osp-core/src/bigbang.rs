@@ -73,7 +73,7 @@ pub fn apply_delta(space: &mut Space, delta: &Delta) -> Vec<NodeId> {
         new_node_ids.push(id);
     }
     for e in &delta.new_edges {
-        space.insert_edge(*e);
+        space.insert_edge(e.clone());
     }
     // G2c-2: subtractive structural delta — edge kaldırma (coupling/instability düşürme).
     for er in &delta.removed_edges {

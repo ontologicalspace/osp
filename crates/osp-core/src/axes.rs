@@ -99,14 +99,19 @@ impl Axis for CouplingAxis {
 
 /// `x_type` ekseni — **Kuplaj (tip-grenlilik)** (#167).
 ///
-/// `CouplingAxis` (x, ns-grenlilik) ile AYNI formül, farklı kenar sınıfı:
+/// `CouplingAxis` (x, ns-grenlilik) ile AYNI formül, farklı ölçüLEN şey:
 ///
-/// `x_type = out_degree(TypeImports) / (1 + out_degree(TypeImports))` ∈ [0, 1)
+/// `x_type = |distinct TypeImports tip sembolleri| / (1 + aynı)` ∈ [0, 1)
+///
+/// **Review P0-1 kararı (issue'ya donduruldu):** bağımlılık kimliği TİP SEMBOLÜDÜR
+/// (`Edge.type_ref`), declaring dosya DEĞİL. Aynı dosyadaki 2 tip = 2 bağımlılık
+/// (2 kenar); partial tip 2 dosyada = 2 kenar AMA 1 sembol → 1 bağımlılık
+/// (`Space::out_distinct_type_refs`). `type_ref`'siz TypeImports kenarları ölçüme
+/// girmez (tip kimliği olmayan tip-gren kenarı katkıda değildir).
 ///
 /// İki-grenlilik sözleşmesi (#167 tasarım kararı (b), issue'ya donduruldu):
 /// - `CouplingAxis` DEĞİŞMEZ — canonical karar katmanı/pre-registration aynen.
-/// - Bu eksen `EdgeKind::TypeImports` kenarlarından hesaplanır; `SameNsType`
-///   kenarları (B3 maskelenmiş yüzey) DAHİL DEĞİL — raporlama sınıfıdır.
+/// - `SameNsType` kenarları (B3 maskelenmiş yüzey) DAHİL DEĞİL — raporlama sınıfıdır.
 /// - Coordinate-system standard eksenlerinden DEĞİL (analyzer-level ölçüm);
 ///   pipeline `compute()` üzerinden kullanır, karar katmanına bağlanmaz.
 #[derive(Debug, Clone, Copy)]
@@ -134,7 +139,7 @@ impl TypeGranularCouplingAxis {
     }
 
     fn compute_value(&self, node: &Node, space: &Space) -> f64 {
-        let deg = space.out_degree_value(node.id, EdgeKind::TypeImports) as f64;
+        let deg = space.out_distinct_type_refs(node.id, EdgeKind::TypeImports) as f64;
         deg / (1.0 + deg)
     }
 }
@@ -592,6 +597,10 @@ mod tests {
             from,
             to,
             kind: EdgeKind::TypeImports,
+            type_ref: Some(crate::space::EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                name: format!("T{from}_{to}"),
+            }),
             ..Default::default()
         }
     }
@@ -617,6 +626,10 @@ mod tests {
             from: 1,
             to: 2,
             kind: EdgeKind::SameNsType,
+            type_ref: Some(crate::space::EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                name: "Same".to_string(),
+            }),
             ..Default::default()
         });
 
@@ -626,8 +639,72 @@ mod tests {
         let x_type = type_axis.compute(&node(1), &space);
         // ns-gren: Imports out-degree 1 → 1/2 (SameNsType Imports DEĞİL — sayılmaz)
         assert!((x - 0.5).abs() < 1e-9, "x = {}", x);
-        // tip-gren: TypeImports out-degree 2 → 2/3
+        // tip-gren: 2 distinct tip sembolü → 2/3
         assert!((x_type - 2.0 / 3.0).abs() < 1e-9, "x_type = {}", x_type);
+    }
+
+    #[test]
+    fn type_coupling_counts_distinct_symbols_not_files_or_edges() {
+        // Review P0-1 pin'i — kimlik TİP SEMBOLÜDÜR:
+        // (i) aynı dosyadaki 2 tip (2 kenar, aynı (from,to)) → 2 bağımlılık;
+        // (ii) partial tip 2 dosyada (2 kenar, aynı ref) → 1 bağımlılık;
+        // (iii) type_ref'siz TypeImports kenarı ölçüme GİRMEZ.
+        let mut space = Space::new();
+        space.insert_node(node(1));
+        space.insert_node(node(2));
+        space.insert_node(node(3));
+        let r = |name: &str, ns: &str| {
+            Some(crate::space::EdgeTypeRef {
+                namespace: ns.to_string(),
+                name: name.to_string(),
+            })
+        };
+        // (i) Request + Response, ikisi de Contracts.cs (node 2)'de
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r("Request", "App.Contracts"),
+            ..Default::default()
+        });
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r("Response", "App.Contracts"),
+            ..Default::default()
+        });
+        // (ii) partial Wallet — Part1.cs (node 2) + Part2.cs (node 3), tek sembol
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::TypeImports,
+            type_ref: r("Wallet", "App.Ledger"),
+            ..Default::default()
+        });
+        space.insert_edge(Edge {
+            from: 1,
+            to: 3,
+            kind: EdgeKind::TypeImports,
+            type_ref: r("Wallet", "App.Ledger"),
+            ..Default::default()
+        });
+        // (iii) eski/foreign TypeImports kenarı — tip kimliği yok
+        space.insert_edge(Edge {
+            from: 1,
+            to: 3,
+            kind: EdgeKind::TypeImports,
+            ..Default::default()
+        });
+
+        let axis = TypeGranularCouplingAxis::new();
+        let x_type = axis.compute(&node(1), &space);
+        // distinct semboller: Request, Response, Wallet = 3 → 3/4.
+        // (dosya-gren olsaydı 2 dosya → 1/2; kenar-gren olsaydı 5 kenar → 5/6.)
+        assert!((x_type - 3.0 / 4.0).abs() < 1e-9, "x_type = {}", x_type);
+        // Space.degree karşılaştırması: out_degree 5, distinct refs 3.
+        assert_eq!(space.out_degree(1, EdgeKind::TypeImports), 5);
+        assert_eq!(space.out_distinct_type_refs(1, EdgeKind::TypeImports), 3);
     }
 
     #[test]
@@ -644,6 +721,10 @@ mod tests {
             to: 3,
             kind: EdgeKind::TypeImports,
             is_type_only: true,
+            type_ref: Some(crate::space::EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                name: "Only".to_string(),
+            }),
         });
 
         let axis = TypeGranularCouplingAxis::new();
@@ -709,6 +790,7 @@ mod tests {
             to: 3,
             kind: EdgeKind::Imports,
             is_type_only: true,
+            type_ref: None,
         });
 
         let axis = CouplingAxis::new();
@@ -747,6 +829,7 @@ mod tests {
             to: 3,
             kind: EdgeKind::Imports,
             is_type_only: true,
+            type_ref: None,
         });
         // value-only Ce hâlâ 1 (type-only hariç) → I hâlâ 1.0
         let v_with_type_only = axis.compute(&node(1), &space);

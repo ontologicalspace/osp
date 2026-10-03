@@ -369,14 +369,24 @@ pub struct Node {
 ///
 /// **Self-loop semantiği:** `from == to` bazı türler için anlamlı (`Calls` — rekürsiyon),
 /// bazıları için değil (`Imports` — modül kendini import edemez; `Witnesses` — self-witness
-/// reddi). Tür-bazlı self-loop validasyonu Faz 1.2/1.3 graf kurulumında eklenecek.
+/// reddi). Tür-bazlı self-loop validasyonu Faz 1.2/1.3 graf kurulumunda eklenecek.
 ///
 /// **Type-only import ayrımı:** `is_type_only` bayrağı TS `import type {Foo}` gibi
 /// runtime dependency üretmeyen import'ları işaretler. CouplingAxis/InstabilityAxis
 /// bu edge'leri *value-only* degree metotlarıyla (`out_degree_value`/`in_degree_value`)
 /// dışlar — type-only import runtime coupling değildir. `#[serde(default)]` eski
 /// snapshot'larla backward-compat sağlar (Node.classification pattern'i).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+///
+/// **#167 tip-gren kenar kimliği (review P0-1):** `TypeImports`/`SameNsType`
+/// kenarlarında `type_ref = Some(EdgeTypeRef)` taşınır — bağımlılık kimliği
+/// TİP SEMBOLÜDÜR (aynı dosyadaki 2 tip → 2 ayrı kenar; partial tip → sembol
+/// başına dosya-başına kenar). Kimlik ailesi böylece `E ⊆ V × V × EdgeKind × T̄`
+/// olur (T̄ = {⊥} ∪ TypeRef; diğer kind'larda daima ⊥). `x_type` KENAR sayısını
+/// değil **distinct sembol** sayısını okur (`Space::out_distinct_type_refs`) —
+/// partial tip bir bağımlılıktır, iki değil.
+///
+/// NOT: `type_ref` alanı String taşıdığından `Edge` artık `Copy` DEĞİL (`Clone` aynen).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
@@ -386,6 +396,30 @@ pub struct Edge {
     /// Backward-compat: eski snapshot'larda yok → `false` (value import varsay).
     #[serde(default)]
     pub is_type_only: bool,
+    /// #167 (P0-1): tip-gren kenarın tip kimliği. Yalnız `TypeImports`/
+    /// `SameNsType` kind'larında `Some`; eski snapshot'larda/other kind'larda
+    /// yok → `None` (serde default).
+    /// NOT: `skip_serializing_if` BURADA YASAK — core `Edge` bincode'a serileşir
+    /// (SnapshotStore milestone/delta); bincode self-describing değildir, skip
+    /// deserialize'ta UnexpectedEof üretir (persistence testi pin'li). JSON
+    /// wire'da (`CliEdge`) alan skip'li, orada güvenli.
+    #[serde(default)]
+    pub type_ref: Option<EdgeTypeRef>,
+}
+
+/// #167 (P0-1): tip-gren kenarın tip kimliği — namespace + tip sembolü.
+///
+/// `namespace` = tipin DECLARE edildiği namespace (global ns = `""`).
+/// `name` = tip sembolü (nested tiplerde düz ad — Tier-1 düz ad eşleşmesinin
+/// uzantısı; `A.B` ayrımı yapılmaz, belgeli sınırlama).
+///
+/// `Ord` sırası `(namespace, name)` — deterministik kenar sıralaması için.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct EdgeTypeRef {
+    pub namespace: String,
+    pub name: String,
 }
 
 /// Kütleçekim vektörü — `Rule`'lardan gelen kısıt ağırlıkları (`ℝᵏ`).
@@ -550,6 +584,22 @@ impl Space {
             .iter()
             .filter(|e| e.from == id && e.kind == kind && !e.is_type_only)
             .count()
+    }
+
+    /// #167 (P0-1): düğümün tip-gren kenarlarında referans verilen AYRIK tip
+    /// sembolü sayısı. `TypeGranularCouplingAxis` (x_type) bunu kullanır —
+    /// kenar sayısını DEĞİL: partial tip 2 dosyada declare edilirse 2 kenar
+    /// üretilir (graf topolojisi her taşıyıcı dosyayı gösterir) ama sembol
+    /// tektir → 1 bağımlılık sayılır. `type_ref` taşımayan kenarlar (eski
+    /// artifact/other kind) sayılmaz — tip kimliği olmayan tip-gren kenarı
+    /// ölçüm KatKATıZ değildir.
+    pub fn out_distinct_type_refs(&self, id: NodeId, kind: EdgeKind) -> usize {
+        self.edges
+            .iter()
+            .filter(|e| e.from == id && e.kind == kind && !e.is_type_only)
+            .filter_map(|e| e.type_ref.as_ref())
+            .collect::<std::collections::BTreeSet<&EdgeTypeRef>>()
+            .len()
     }
 
     /// Value-only in-degree — type-only import'lar hariç (InstabilityAxis Ca için).

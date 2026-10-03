@@ -243,20 +243,34 @@ pub struct ResolvedImport {
     pub target_path: Option<PathBuf>,
 }
 
+/// #167 (P0-1): tip-gren bağımlılık hedefi — kimlik TİP SEMBOLÜDÜR, dosya değil.
+/// Aynı dosyada 2 tip → 2 hedef; partial tip → sembol başına dosya-başına hedef
+/// (pipeline her hedef için ayrı kenar üretir; `x_type` distinct sembol sayar).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypeImportTarget {
+    /// Tipin declare edildiği namespace (global ns = `""`).
+    pub namespace: String,
+    /// Tip sembolü (nested tiplerde düz ad — Tier-1 düz ad eşleşmesi).
+    pub type_name: String,
+    /// Tipi declare eden dosya.
+    pub file: PathBuf,
+}
+
 /// #167: bir dosyanın tip-düzeyi referans çözümlemesi (tek geçiş, iki kenar sınıfı).
 ///
 /// Adapter `resolve_type_references` döndürür; `None` = dil tip-düzeyi
-/// çözümlemesi desteklemiyor (coupling_type alanı ölçümü yok). Dönen hedef
-/// dosya yolları DEDUPLU + SIRALI'dır (determinizm) — pipeline aynı (from,to)
-/// çifti için tek kenar üretir.
+/// çözümlemesi desteklemiyor (coupling_type alanı ölçümü yok). Dönen hedefler
+/// (namespace, type_name, file) ÜÇLÜSÜYLE deduplu + SIRALIdır (determinizm).
 #[derive(Debug, Clone, Default)]
 pub struct TypeReferenceResolution {
-    /// `using N.S;` satırlarının çözümlenmiş tip referansları → `EdgeKind::TypeImports`
-    /// (1 using satırı → N kenar; hedef = tipi declare eden dosya; temsilci YOK).
-    pub type_import_targets: Vec<PathBuf>,
+    /// Çözümlenmiş tip referansları → `EdgeKind::TypeImports`. KADE-1
+    /// (namespace-backed using → dosyada geçen tipler) VE KADE-2 (type-backed
+    /// using `using static N.T;` / `using Alias = N.T;` — directive'in kendisi
+    /// tip referansıdır; occurrence-match mümkün değildir, belgeli Tier-1 sınır).
+    pub type_import_targets: Vec<TypeImportTarget>,
     /// Using gerektirmeyen aynı-ns çapraz-dosya referansları → `EdgeKind::SameNsType`
     /// (B3 maskelenmiş yüzey; coupling_type hesabına DAHİL DEĞİL).
-    pub same_ns_targets: Vec<PathBuf>,
+    pub same_ns_targets: Vec<TypeImportTarget>,
     /// Belirsiz tip adları (birden çok using'de çözümlenen) — kenar üretilmedi,
     /// pipeline diagnostic basar (CS0104 aynası; fail-visible).
     pub ambiguous_type_names: Vec<String>,

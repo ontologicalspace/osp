@@ -79,6 +79,7 @@ pub fn build_claim_from_proposal(
             to: spec.to,
             kind: spec.kind,
             is_type_only: false,
+            type_ref: None,
         })
         .collect();
     // connected_to edge'leri delta_edges'e ekle (NewNodeSpec.connected_to).
@@ -90,6 +91,7 @@ pub fn build_claim_from_proposal(
                 to: *target,
                 kind: *kind,
                 is_type_only: false,
+                type_ref: None,
             });
         }
     }

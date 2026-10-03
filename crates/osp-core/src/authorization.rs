@@ -2235,6 +2235,7 @@ pub fn restore_claim_for_resume(basis: &AuthorizationBasis) -> crate::witness::C
             to: e.to,
             kind: e.kind.into(),
             is_type_only: e.is_type_only,
+            type_ref: None,
         })
         .collect();
     let removed_edges = basis
@@ -13014,6 +13015,7 @@ mod tests {
                 to: 2,
                 kind: EdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             });
             space
         };
@@ -13040,27 +13042,30 @@ mod tests {
             to: 2,
             kind: EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         };
         let edge_b = Edge {
             from: 1,
             to: 3,
             kind: EdgeKind::Calls,
             is_type_only: true,
+            type_ref: None,
         };
         let mut a = Space::default();
         a.nodes.insert(1, mk_node(1));
         a.nodes.insert(2, mk_node(2));
         a.nodes.insert(3, mk_node(3));
-        a.edges.push(edge_a);
-        a.edges.push(edge_b);
+        a.edges.push(edge_a.clone());
+
+        a.edges.push(edge_b.clone());
 
         let mut b = Space::default();
         b.nodes.insert(1, mk_node(1));
         b.nodes.insert(2, mk_node(2));
         b.nodes.insert(3, mk_node(3));
         // Ters insertion order.
-        b.edges.push(edge_b);
-        b.edges.push(edge_a);
+        b.edges.push(edge_b.clone());
+        b.edges.push(edge_a.clone());
 
         assert_eq!(
             SpaceDigest::compute(&a).unwrap(),

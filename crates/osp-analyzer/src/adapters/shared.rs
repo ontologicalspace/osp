@@ -927,12 +927,17 @@ impl CSharpNamespaceIndex {
             if namespaces.is_empty() && types.is_empty() {
                 continue;
             }
-            let ns_set: std::collections::BTreeSet<String> = namespaces.iter().cloned().collect();
+            // Review P1-2: namespace bildirmeyen dosya GLOBAL namespace ("")
+            // üyesidir — "" gerçek ns kimliği olarak indekslenir; SameNsType ve
+            // kendi-ns öncelik kuralları global ns'te de çalışır.
+            let mut ns_set: std::collections::BTreeSet<String> =
+                namespaces.iter().cloned().collect();
+            if ns_set.is_empty() {
+                ns_set.insert(String::new());
+            }
             let ty_set: std::collections::BTreeSet<String> =
                 types.iter().map(|(_, n)| n.clone()).collect();
-            if !ns_set.is_empty() {
-                file_namespaces.insert(f.clone(), ns_set.clone());
-            }
+            file_namespaces.insert(f.clone(), ns_set);
             if !ty_set.is_empty() {
                 file_types.insert(f.clone(), ty_set);
             }
@@ -1009,6 +1014,22 @@ impl CSharpNamespaceIndex {
     ) -> Option<&std::collections::BTreeSet<String>> {
         self.file_namespaces.get(file)
     }
+
+    /// #167 (P1-1): dosyada bu adda tip bildirimi varsa bildirildiği ns'i döndür
+    /// (KADE-2 directive-referansının sembol ns'i için). Aynı dosyada aynı ad
+    /// birden çok ns bloğunda bildirilmişse lexicographically en küçük ns —
+    /// HashMap iterasyon bağımsızlığı için deterministik seçim.
+    pub fn find_type_declaration(&self, file: &std::path::Path, type_name: &str) -> Option<String> {
+        self.ns_types
+            .iter()
+            .filter(|(_, types)| {
+                types
+                    .get(type_name)
+                    .is_some_and(|files| files.iter().any(|f| f == file))
+            })
+            .map(|(ns, _)| ns.clone())
+            .min()
+    }
 }
 
 /// #167: bir `.cs` dosyasının kaynak kodundaki TİP-REFERANS adayları — identifier
@@ -1052,10 +1073,16 @@ fn walk_reference_names(
                 // using satırındaki identifier'lar tip referansı değil — alt ağacı atla.
                 "using_directive" => continue,
                 "type_parameter" => {
-                    if let Ok(text) = c.utf8_text(source) {
-                        let name = text.trim();
-                        if !name.is_empty() {
-                            type_params.insert(name.to_string());
+                    // Review P1-3: node'un TAM METNİ değil `name` FIELD'ı okunur —
+                    // grammar `attributes* optional(in|out) name` biçimindedir;
+                    // tam metin `out T` / attribute'lu halleri yakalar, `T`'yi
+                    // identifiers kümesinde bırakırdı (false TypeImports).
+                    if let Some(name_node) = c.child_by_field_name("name") {
+                        if let Ok(text) = name_node.utf8_text(source) {
+                            let name = text.trim();
+                            if !name.is_empty() {
+                                type_params.insert(name.to_string());
+                            }
                         }
                     }
                     continue;
