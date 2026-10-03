@@ -2285,3 +2285,121 @@ fn attempt_zero_evidence_human_stdout_is_empty_json_array() {
     );
     fx.assert_repo_clean();
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #166 review tur-2 — P0/P1-1 --out hedef fence'i + P2-1 drift negatifi
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn attempt_out_inside_repo_rejected_preflight() {
+    // P1-1: --out analyzed repo içinde → navigator ÇALIŞMADAN reddedilir
+    // (final fence'i geçtikten sonra analyzed source'u değiştiremezdi).
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let out_inside = fx.repo_path().join("attempt-out.json");
+    let output = run_attempt_with_out(&fx, &task_path, &proposals_path, &out_inside);
+    assert!(
+        !output.status.success(),
+        "--out inside analyzed repo must be rejected preflight"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("inside the analyzed repository"),
+        "stderr explains the --out repo fence: {stderr}"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn attempt_out_targeting_canonical_store_rejected_preflight() {
+    // P0: --out state-dir'in .osp/ (space identity) veya attempts/ (no-clobber
+    // canonical evidence) alanına yazamaz — canonical store'un immutability'si
+    // caller-controlled rename ile kırılamaz. Preflight red; state-dir kökü serbest.
+    let fx = HarnessFixture::new();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    for reserved in ["attempts/task-7-999.json", ".osp/space-identity"] {
+        let output = run_attempt_with_out(
+            &fx,
+            &task_path,
+            &proposals_path,
+            &fx.work_path().join(reserved),
+        );
+        assert!(
+            !output.status.success(),
+            "--out under {reserved} must be rejected preflight"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("canonical state store"),
+            "stderr explains the canonical-store fence ({reserved}): {stderr}"
+        );
+    }
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn attempt_drift_after_navigator_leaves_no_canonical_artifact() {
+    // P2-1 (regression, review tur-1 P1-1'in negatifi): navigator SONUÇ ÜRETTİKTE
+    // SONRA analyzed repo drift ederse final snapshot fence başarısız olur ve
+    // diskte canonical artifact YOKTUR (--out da yazılmaz). "Persistent evidence
+    // ≠ canonical validated evidence" kontratının doğrudan testi.
+    //
+    // Controlled drift: state-dir'e space-identity ilk kez ERKEN yazılır (engine
+    // kurulumundan önce) — bu deterministik tetik; izleyici thread onu görünce
+    // tracked+analyzed a.rs'yi kirletir. Fence attempt'in EN SONUNDA koşar.
+    let fx = HarnessFixture::new_with_use_edges();
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let out_path = fx.work_path().join("attempt-out.json");
+    let identity_marker = fx.work_path().join(".osp").join("space-identity");
+    let repo_a = fx.repo_path().join("a.rs");
+    let watcher = std::thread::spawn(move || {
+        for _ in 0..25_000 {
+            if identity_marker.exists() {
+                // Drift: analyzed-scope kirliliği — post-fence bunu yakalar.
+                let _ = std::fs::write(&repo_a, "pub struct A;\n// drift\n");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    });
+
+    let output = run_attempt_with_out(&fx, &task_path, &proposals_path, &out_path);
+    watcher.join().expect("watcher thread");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "post-attempt drift must fail the attempt. stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("modified or untracked (after attempt)"),
+        "post-fence fence message. stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("Canonical attempt artifact"),
+        "NO canonical artifact announcement on fence failure. stderr={stderr}"
+    );
+
+    // Disk gerçeği: attempts/ altında artifact yok; --out yok.
+    let attempts_dir = fx.work_path().join("attempts");
+    let artifacts: Vec<_> = match std::fs::read_dir(&attempts_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("task-"))
+            .collect(),
+        Err(_) => Vec::new(),
+    };
+    assert!(
+        artifacts.is_empty(),
+        "fence-failed attempt must leave NO canonical artifacts: {artifacts:?}"
+    );
+    assert!(
+        !out_path.exists(),
+        "--out copy must not be written on fence failure"
+    );
+}

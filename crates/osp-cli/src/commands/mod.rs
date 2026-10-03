@@ -204,10 +204,13 @@ pub struct TrajectoryAttemptArgs {
     /// Output format: human (default) veya json (machine-readable, stdout'a yalnız JSON).
     #[arg(long, default_value = "human")]
     pub format: String,
-    /// #166: Kanonik attempt artifact'ın yazılacağı path (şemalı run envelope v1).
-    /// Format modundan bağımsız yazılır. Ek olarak HER modda state-dir altına
-    /// `attempts/task-<task_id>-<unix_millis>.json` kalıcı kayıt yazılır — kanıt
-    /// hattı (ledger attempt_ref) stdout biçiminden bağımsızlaşır.
+    /// #166: Kanonik attempt artifact'ın çağırıcıya ait kopyası (şemalı run
+    /// envelope v1; atomic temp+rename yazım). Canonical KALICI kayıt her modda
+    /// state-dir'e yazılır: `attempts/task-<task_id>-<unix_millis>-<pid>[-N].json`
+    /// (no-clobber; final snapshot fence GEÇTİKTEN SONRA publish edilir — sıra:
+    /// navigator → fence → canonical publish → emit → exit). `--out` analyzed
+    /// repo'yu ve state-dir'in `.osp/` + `attempts/` canonical alanlarını
+    /// hedefleyemez (preflight'te reddedilir).
     #[arg(long)]
     pub out: Option<PathBuf>,
     /// Runtime state directory (`.osp/` artifacts: pending-authorizations +
@@ -586,6 +589,67 @@ fn resolve_state_dir(
     Ok(state_dir)
 }
 
+/// #166 review tur-2 (P0 + P1-1): `--out` hedefi preflight'te doğrulanır —
+/// navigator ÇALIŞMADAN önce. İki bütünlük koruması:
+///
+/// 1. **Analyzed repo dışı:** `--out` repo içine yazarsa final snapshot fence'i
+///    GEÇTİKTEN SONRA analyzed source'u değiştirebilir (fence'ten kaçış). State-dir
+///    invariant'ı ve `reject_output_inside_repo` precedent'iyle aynı ilke.
+/// 2. **Canonical state mağazaları dokunulmaz:** `<state-dir>/.osp/**` (space
+///    identity + pending-authorizations) ve `<state-dir>/attempts/**` (no-clobber
+///    canonical evidence store) hedeflenemez — `--out` kopyası `rename` ile REPLACE
+///    eder; canonical store'un immutability'si `--out` arka kapısıyla kırılamaz.
+///    State-dir KÖKÜNDEK caller-owned dosyalara (ör. attempt-out.json) izin verilir.
+///
+/// Karşılaştırma `canonicalize_with_missing_tail` ile (symlink/relative/`..`
+/// kaçışlarına karşı component-wise; string-match değil).
+fn validate_attempt_output_path(
+    repo: &std::path::Path,
+    state_dir: &std::path::Path,
+    out: &std::path::Path,
+) -> anyhow::Result<()> {
+    let abs_out = if out.is_absolute() {
+        out.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(out)
+    };
+    let canon_out = canonicalize_with_missing_tail(&abs_out);
+
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    if canon_out.starts_with(&canon_repo) {
+        anyhow::bail!(
+            "--out {} resolves inside the analyzed repository; --out must be outside the \
+             repo (writing it after the final snapshot fence would modify analyzed source \
+             post-validation). Set --out to an external path.",
+            out.display()
+        );
+    }
+
+    let abs_state = if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(state_dir)
+    };
+    let canon_state = canonicalize_with_missing_tail(&abs_state);
+    for reserved in [".osp", "attempts"] {
+        let reserved_root = canon_state.join(reserved);
+        if canon_out.starts_with(&reserved_root) {
+            anyhow::bail!(
+                "--out {} resolves inside the canonical state store ({}/); the no-clobber \
+                 evidence store and space identity are immutable — --out cannot target them. \
+                 Choose a caller-owned path (state-dir root is allowed).",
+                out.display(),
+                reserved
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Mutlak path'i, var olmayan kuyruk bileşenlerini KORUYARAK canonicalize et.
 ///
 /// En derin VAR OLAN atayı `canonicalize` eder (symlink/UNC çözümü), var olmayan
@@ -703,6 +767,12 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // Harness mode REQUIRES state-dir outside analyzed repo (Held artifacts must not dirty
     // repo → subsequent snapshot-bound runs rejected). Production allows CWD default.
     let state_dir = resolve_state_dir(args.state_dir.as_deref(), args.execution_mode, &args.repo)?;
+
+    // #166 review tur-2 (P0 + P1-1): --out hedefi navigator ÇALIŞMADAN doğrulanır —
+    // analyzed repo ve canonical state mağazaları (.osp/, attempts/) dışını zorlar.
+    if let Some(out) = &args.out {
+        validate_attempt_output_path(&args.repo, &state_dir, out)?;
+    }
 
     // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
     // Pre-capture repository snapshot (HEAD + tracked paths + dirty-path set).
@@ -1498,7 +1568,6 @@ fn persist_canonical_attempt_artifact(
     args: &TrajectoryAttemptArgs,
     state_dir: &std::path::Path,
 ) -> anyhow::Result<()> {
-    use std::io::Write as _;
     let payload = serde_json::to_vec_pretty(envelope)?;
     let attempts_dir = state_dir.join("attempts");
     std::fs::create_dir_all(&attempts_dir)?;
@@ -1507,7 +1576,41 @@ fn persist_canonical_attempt_artifact(
         .map(|d| d.as_millis())
         .unwrap_or(0);
     let pid = std::process::id();
+    let canonical =
+        publish_no_clobber_attempt_artifact(&attempts_dir, args.task_id, millis, pid, &payload)?;
+    eprintln!("Canonical attempt artifact: {}", canonical.display());
 
+    // --out kopyası: çağırıcıya ait hedef — atomic yazım (temp+rename), üzerine
+    // yazmak çağırıcının açık isteğidir; canonical garanti state-dir kaydındadır
+    // (hedef zaten validate_attempt_output_path ile repo/canonical-store dışı).
+    if let Some(out) = &args.out {
+        use std::io::Write as _;
+        let out_tmp = out.with_extension("json.tmp-osp");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&out_tmp)?;
+            file.write_all(&payload).and_then(|_| file.sync_all())?;
+        }
+        std::fs::rename(&out_tmp, out)?;
+        eprintln!("Attempt artifact (--out): {}", out.display());
+    }
+    Ok(())
+}
+
+/// #166 review tur-2 (P2-2): no-clobber publish çekirdeği — millis/pid PARAMETRE
+/// (test edilebilirlik; gerçek değerler wrapper'dan). Deterministic kimlik +
+/// collision yolu (`-N` soneği) unit testlerde pinli.
+fn publish_no_clobber_attempt_artifact(
+    attempts_dir: &std::path::Path,
+    task_id: u64,
+    millis: u128,
+    pid: u32,
+    payload: &[u8],
+) -> anyhow::Result<PathBuf> {
+    use std::io::Write as _;
     // Same-dir temp — ad per-attempt benzersiz (pid+millis): aynı process aynı
     // thread'in bir sonraki attempt'i stale temp'e takılmaz.
     let tmp = attempts_dir.join(format!("attempt.tmp.{pid}.{millis}"));
@@ -1516,15 +1619,15 @@ fn persist_canonical_attempt_artifact(
             .write(true)
             .create_new(true)
             .open(&tmp)?;
-        file.write_all(&payload).and_then(|_| file.sync_all())?;
+        file.write_all(payload).and_then(|_| file.sync_all())?;
     }
 
     // No-clobber publish — candidate çakışırsa -N sonekiyle devam (fail-closed).
-    let mut canonical: Option<std::path::PathBuf> = None;
+    let mut canonical: Option<PathBuf> = None;
     for suffix in 0..=64u32 {
         let name = match suffix {
-            0 => format!("task-{}-{millis}-{pid}.json", args.task_id),
-            n => format!("task-{}-{millis}-{pid}-{n}.json", args.task_id),
+            0 => format!("task-{task_id}-{millis}-{pid}.json"),
+            n => format!("task-{task_id}-{millis}-{pid}-{n}.json"),
         };
         let candidate = attempts_dir.join(name);
         match std::fs::hard_link(&tmp, &candidate) {
@@ -1547,26 +1650,9 @@ fn persist_canonical_attempt_artifact(
         }
     };
     // Directory durability — best-effort (Windows'ta no-op).
-    let _ = std::fs::File::open(&attempts_dir).and_then(|d| d.sync_all());
+    let _ = std::fs::File::open(attempts_dir).and_then(|d| d.sync_all());
     let _ = std::fs::remove_file(&tmp);
-    eprintln!("Canonical attempt artifact: {}", canonical.display());
-
-    // --out kopyası: çağıracıya ait hedef — atomic yazım (temp+rename), üzerine
-    // yazmak çağırıcının açık isteğidir; canonical garanti state-dir kaydındadır.
-    if let Some(out) = &args.out {
-        let out_tmp = out.with_extension("json.tmp-osp");
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&out_tmp)?;
-            file.write_all(&payload).and_then(|_| file.sync_all())?;
-        }
-        std::fs::rename(&out_tmp, out)?;
-        eprintln!("Attempt artifact (--out): {}", out.display());
-    }
-    Ok(())
+    Ok(canonical)
 }
 
 /// #166: attempt çıktısını yayınla — json modunda stdout'a tam envelope;
@@ -2022,5 +2108,105 @@ mod trajectory_vision_authority_tests {
             "trajectory vision must use UserLoaded authority — GlobalDefault is rejected \
              at the authorization-gated mutation surface (INV-T9 Step 4b, issue #105)"
         );
+    }
+}
+
+#[cfg(test)]
+mod attempt_artifact_persistence_tests {
+    //! #166 review tur-2: no-clobber publish çekirdeği + --out hedef doğrulaması.
+    use super::*;
+
+    #[test]
+    fn publish_no_clobber_collision_takes_suffix_path() {
+        // P2-2: aynı deterministic kimlik (task/millis/pid) ikinci publish'de
+        // `-1` soneğine düşer; içerikler korunur; temp artığı kalmaz.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let attempts = dir.path().join("attempts");
+        std::fs::create_dir_all(&attempts).expect("mkdir");
+
+        let first = publish_no_clobber_attempt_artifact(&attempts, 7, 123, 42, b"first")
+            .expect("first publish");
+        assert_eq!(
+            first.file_name().unwrap().to_string_lossy(),
+            "task-7-123-42.json"
+        );
+
+        let second = publish_no_clobber_attempt_artifact(&attempts, 7, 123, 42, b"second")
+            .expect("second publish (collision -> -1)");
+        assert_eq!(
+            second.file_name().unwrap().to_string_lossy(),
+            "task-7-123-42-1.json",
+            "collision must take the -1 suffix, not clobber"
+        );
+
+        let third = publish_no_clobber_attempt_artifact(&attempts, 7, 123, 42, b"third")
+            .expect("third publish (collision -> -2)");
+        assert_eq!(
+            third.file_name().unwrap().to_string_lossy(),
+            "task-7-123-42-2.json"
+        );
+
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            b"first",
+            "first artifact content must be untouched"
+        );
+        assert_eq!(std::fs::read(&second).unwrap(), b"second");
+
+        // Temp artığı kalmaz (başarılı publish temp'i temizler).
+        let leftovers: Vec<_> = std::fs::read_dir(&attempts)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("attempt.tmp."))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp leftovers: {leftovers:?}");
+    }
+
+    #[test]
+    fn validate_attempt_output_path_rejects_repo_and_canonical_stores() {
+        // P0 + P1-1: --out analyzed repo içine, state-dir/.osp/** ve
+        // state-dir/attempts/** altına yazılamaz; state-dir kökü serbest.
+        let repo = tempfile::tempdir().expect("repo tempdir");
+        let state = tempfile::tempdir().expect("state tempdir");
+        std::fs::create_dir_all(state.path().join(".osp")).expect("mkdir .osp");
+        std::fs::create_dir_all(state.path().join("attempts")).expect("mkdir attempts");
+
+        // Repo içi → red.
+        let err = validate_attempt_output_path(
+            repo.path(),
+            state.path(),
+            &repo.path().join("src/foo.rs"),
+        )
+        .expect_err("out inside repo must be rejected");
+        assert!(
+            err.to_string().contains("inside the analyzed repository"),
+            "message: {err}"
+        );
+
+        // Canonical store'lar → red.
+        for reserved in ["space-identity", "attempts/task-7-1.json"] {
+            let target = if reserved.starts_with("attempts") {
+                state.path().join(reserved)
+            } else {
+                state.path().join(".osp").join(reserved)
+            };
+            let err = validate_attempt_output_path(repo.path(), state.path(), &target)
+                .expect_err(&format!("must reject {reserved}"));
+            assert!(
+                err.to_string().contains("canonical state store"),
+                "message for {reserved}: {err}"
+            );
+        }
+
+        // State-dir kökü (caller-owned) → serbest; tamamen dış path → serbest.
+        validate_attempt_output_path(
+            repo.path(),
+            state.path(),
+            &state.path().join("attempt-out.json"),
+        )
+        .expect("state-dir root file is caller-owned");
+        let external = tempfile::tempdir().expect("external tempdir");
+        validate_attempt_output_path(repo.path(), state.path(), &external.path().join("out.json"))
+            .expect("external path is fine");
     }
 }
