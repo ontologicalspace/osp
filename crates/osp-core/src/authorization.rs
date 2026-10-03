@@ -1508,6 +1508,16 @@ impl SpaceDigest {
             .edges
             .iter()
             .map(|e| {
+                // **tur-3 P1-3:** publication boundary — cross-field invariant
+                // fail-closed. Ref'siz TypeImports kenarı digest'te görünür ama
+                // x_type sessizce yok sayardı (iki truth surface ayrı söz söyler);
+                // Imports+type_ref ise digest uzantısını geçersiz biçimde büyütür.
+                crate::space::validate_edge_type_ref_invariant(e).map_err(|detail| {
+                    AuthorizationBasisDigestError::EncodingFailed(format!(
+                        "edge {}→{}: {}",
+                        e.from, e.to, detail
+                    ))
+                })?;
                 Ok(CanonicalEdge {
                     from: e.from,
                     to: e.to,
@@ -13043,6 +13053,46 @@ mod tests {
             "sembol farki digest'e dusmeli"
         );
         assert_eq!(d_req.as_bytes(), d_req2.as_bytes(), "deterministik");
+    }
+
+    #[test]
+    fn space_digest_rejects_edge_type_ref_invariant_violations() {
+        // tur-3 P1-3: publication boundary — ref'siz TypeImports (x_type'in sessizce
+        // yok saydığı yarım kimlik) ve ref'li Imports digest hesabına GİREMEZ.
+        let mut space = crate::space::Space::new();
+        space.insert_node(crate::space::Node {
+            id: 1,
+            ..Default::default()
+        });
+        space.insert_node(crate::space::Node {
+            id: 2,
+            ..Default::default()
+        });
+
+        let mut s = space.clone();
+        s.insert_edge(crate::space::Edge {
+            from: 1,
+            to: 2,
+            kind: crate::space::EdgeKind::TypeImports,
+            type_ref: None,
+            ..Default::default()
+        });
+        let err = SpaceDigest::compute(&s).expect_err("ref'siz TypeImports red");
+        assert!(format!("{err}").contains("symbol identity"), "{err}");
+
+        let mut s = space;
+        s.insert_edge(crate::space::Edge {
+            from: 1,
+            to: 2,
+            kind: crate::space::EdgeKind::Imports,
+            type_ref: Some(crate::space::EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                name: "T".to_string(),
+            }),
+            ..Default::default()
+        });
+        let err = SpaceDigest::compute(&s).expect_err("ref'li Imports red");
+        assert!(format!("{err}").contains("must not carry"), "{err}");
     }
 
     #[test]

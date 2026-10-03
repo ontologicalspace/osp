@@ -422,6 +422,37 @@ pub struct EdgeTypeRef {
     pub name: String,
 }
 
+/// **#167 tur-3 P1-3:** `EdgeKind ↔ type_ref` cross-field invariant'ı — tek
+/// merkezî doğrulayıcı:
+///
+/// ```text
+/// TypeImports | SameNsType  ⇒  type_ref = Some(..) VE name boş değil
+/// diğer tüm kind'lar        ⇒  type_ref = None
+/// ```
+///
+/// `namespace` boş olabilir (global ns geçerli); `name` boş OLAMAZ (sembol
+/// kimliği adın kendisidir). `Space::insert_edge` her kombinasyonu kabul
+/// ettiğinden (API yeniden tasarımı bu PR'ın kapsamı dışı — bilinçli),
+/// invariant publication boundary'lerinde fail-closed uygulanır:
+/// `SpaceDigest::compute` (identity yüzeyi — digest'in type_ref uzantısının
+/// güvenli yorumu bu invariant'a dayanır) ve analyzer pipeline üretimi
+/// (yapısal olarak doğru çiftler üretir).
+pub fn validate_edge_type_ref_invariant(edge: &Edge) -> Result<(), &'static str> {
+    match edge.kind {
+        EdgeKind::TypeImports | EdgeKind::SameNsType => match &edge.type_ref {
+            None => Err("type-granular edge must carry type_ref (missing symbol identity)"),
+            Some(r) if r.name.is_empty() => {
+                Err("type-granular edge type_ref.name must be non-empty")
+            }
+            Some(_) => Ok(()),
+        },
+        _ => match &edge.type_ref {
+            None => Ok(()),
+            Some(_) => Err("non-type-granular edge must not carry type_ref"),
+        },
+    }
+}
+
 /// Kütleçekim vektörü — `Rule`'lardan gelen kısıt ağırlıkları (`ℝᵏ`).
 ///
 /// Örn: `Rule = "Feature'lar Test olmadan var olamaz"` ihlali → ilgili düğümün
@@ -619,6 +650,59 @@ impl Default for Space {
 
 #[cfg(test)]
 mod tests {
+
+    // --- #167 tur-3 P1-3: EdgeKind <-> type_ref cross-field invariant ---
+
+    #[test]
+    fn edge_type_ref_invariant_matrix() {
+        let tref = |ns: &str, name: &str| {
+            Some(EdgeTypeRef {
+                namespace: ns.to_string(),
+                name: name.to_string(),
+            })
+        };
+        // Tip-gren kind + Some(geçerli) → OK (global ns dahil).
+        for kind in [EdgeKind::TypeImports, EdgeKind::SameNsType] {
+            let e = Edge {
+                kind,
+                type_ref: tref("", "T"),
+                ..Default::default()
+            };
+            assert!(
+                validate_edge_type_ref_invariant(&e).is_ok(),
+                "{kind:?} + Some"
+            );
+        }
+        // Tip-gren kind + None → HATA (eksik sembol kimliği).
+        let e = Edge {
+            kind: EdgeKind::TypeImports,
+            type_ref: None,
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Tip-gren kind + boş name → HATA (sembol kimliği adın kendisi).
+        let e = Edge {
+            kind: EdgeKind::SameNsType,
+            type_ref: tref("Ns", ""),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Diğer kind + None → OK.
+        let e = Edge {
+            kind: EdgeKind::Imports,
+            type_ref: None,
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_ok());
+        // Diğer kind + Some → HATA.
+        let e = Edge {
+            kind: EdgeKind::Imports,
+            type_ref: tref("Ns", "T"),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+    }
+
     use super::*;
 
     fn mod_node(id: NodeId, mass: f64) -> Node {

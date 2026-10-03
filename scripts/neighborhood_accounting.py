@@ -21,8 +21,9 @@ GRANULARITY (v1.2, #167): the script reads one edge class at a time.
       edge PER referenced type. The dependency KEY is the TYPE SYMBOL
       (`type_ref.namespace.type_ref.name`; empty ns → bare name), NOT the file:
       two types packaged in one declaring file are DISTINCT dependencies, and a
-      partial type spanning two files is ONE dependency (review P0-1). Fallback
-      when an edge carries no type_ref: the target path. Representative
+      partial type spanning two files is ONE dependency (review P0-1). A type
+      edge WITHOUT a type_ref (or with an empty name) is an ERROR, not a file
+      fallback (tur-3 P1-2 — the symbol is required). Representative
       semantics is gone at this granularity: adding a lexicographically earlier
       file to a namespace does NOT shift type-level keys, so the v1.1
       "removed + new for the same semantic dependency" artifact disappears.
@@ -127,16 +128,25 @@ def _dep_key(e: dict, id_to_path: dict[int, str], granularity: str) -> str:
     """Dependency key at the selected granularity.
 
     namespace -> target file path (v1.1 semantics). type -> TYPE SYMBOL
-    (ns.Name; bare name for global-ns types) when the edge carries `type_ref`
-    (#167 review P0-1: two types in one file are distinct dependencies; a
-    partial type across files is one), else target path (robustness fallback
-    for type edges without identity).
+    (ns.Name; bare name for global-ns types) — REQUIRED: a type edge without
+    type_ref, or with an empty name, raises (identity IS the symbol; the file
+    fallback would re-collapse same-file types — review tur-3 P1-2).
     """
     if granularity == "type":
         tref = e.get("type_ref")
-        if tref:
-            ns, name = tref.get("namespace", ""), tref.get("name", "")
-            return f"{ns}.{name}" if ns else name
+        if not tref or not tref.get("name"):
+            # Review tur-3 P1-2: symbol identity MISSING is an ERROR, not a
+            # file fallback. Falling back to the target path would re-collapse
+            # two types packaged in one file — exactly the P0-1 collapse this
+            # instrument exists to separate. Empty namespace (global ns) is
+            # valid; an empty NAME is not (identity IS the name).
+            raise ValueError(
+                f"type-granularity edge {e['from']}->{e['to']} lacks symbol identity "
+                "(type_ref missing or type_ref.name empty) — in type granularity the "
+                "type symbol is REQUIRED; file-path fallback removed (#167 review tur-3)"
+            )
+        ns, name = tref.get("namespace", ""), tref["name"]
+        return f"{ns}.{name}" if ns else name
     return id_to_path[e["to"]]
 
 
@@ -471,9 +481,29 @@ def self_check() -> int:
     if mult_rec["per_dependency"]["ev.FraudEvent"]["class"] != "multiplied":
         raise RuntimeError(f"type true-multiplication drift: {mult_rec['per_dependency']}")
 
+    # (v) tur-3 P1-2 fail-closed: sembol kimligi EKSIK tip kenari (ref'siz ya
+    # da bos isim) hata verir — path fallback KALDIRILDI (ayni dosyadaki iki
+    # tipi yeniden cokertmesin diye; P0-1 ontolojisi).
+    for bad_edge in (
+        {"from": 1, "to": 10, "kind": "type_imports"},  # type_ref yok
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": ""}},   # bos isim
+    ):
+        bad = write_snapshot({1: NA, 10: "ev/FraudEvent.cs"}, [bad_edge])
+        try:
+            load_snapshot(bad, "type")
+        except ValueError as exc:
+            if "symbol" not in str(exc):
+                raise RuntimeError(f"fail-closed mesaj drift: {exc}")
+        else:
+            raise RuntimeError(f"eksik sembol kimligi red edilmeli: {bad_edge}")
+        # namespace kipinde ayni kenar sorun degil (kind filtresi disarida birakar).
+        load_snapshot(bad, "namespace")
+
     print("self-check PASS (v1.2 granularity fixtures: S2 disambiguation + same-file"
           " P0-1 symbol keys (ns union 1 vs type union 3); representative-shift"
-          " artifact ns-only; type-symbol moved/multiplied")
+          " artifact ns-only; type-symbol moved/multiplied; missing-symbol"
+          " fail-closed (no file fallback)")
     return 0
 
 
