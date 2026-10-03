@@ -608,12 +608,20 @@ fn validate_attempt_output_path(
     state_dir: &std::path::Path,
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
+    // #166 review tur-3 (P2): CWD çözülemiyorsa fail-closed — relative path fence
+    // doğrulaması bilinmeyen bir tabana düşmemeli (resolve_state_dir ile tutarlı).
+    let cwd = |what: &str| -> anyhow::Result<PathBuf> {
+        std::env::current_dir().map_err(|e| {
+            anyhow::anyhow!(
+                "cannot resolve relative {what} {}: current dir unavailable: {e}",
+                out.display()
+            )
+        })
+    };
     let abs_out = if out.is_absolute() {
         out.to_path_buf()
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(out)
+        cwd("--out")?.join(out)
     };
     let canon_out = canonicalize_with_missing_tail(&abs_out);
 
@@ -630,13 +638,15 @@ fn validate_attempt_output_path(
     let abs_state = if state_dir.is_absolute() {
         state_dir.to_path_buf()
     } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(state_dir)
+        cwd("--state-dir")?.join(state_dir)
     };
     let canon_state = canonicalize_with_missing_tail(&abs_state);
     for reserved in [".osp", "attempts"] {
-        let reserved_root = canon_state.join(reserved);
+        // #166 review tur-3 (P0): reserved root'un KENDİSİ de canonicalize edilir.
+        // `<state-dir>/attempts` bir symlink/junction ile `/external/attempts`'a
+        // giderse `--out <state-dir>/attempts/x.json` tam yolu çözülür ama sabit
+        // root eşleşmezdi → bypass. Gerçek (çözülmüş) store root'u ile karşılaştır.
+        let reserved_root = canonicalize_with_missing_tail(&canon_state.join(reserved));
         if canon_out.starts_with(&reserved_root) {
             anyhow::bail!(
                 "--out {} resolves inside the canonical state store ({}/); the no-clobber \
@@ -1580,22 +1590,70 @@ fn persist_canonical_attempt_artifact(
         publish_no_clobber_attempt_artifact(&attempts_dir, args.task_id, millis, pid, &payload)?;
     eprintln!("Canonical attempt artifact: {}", canonical.display());
 
-    // --out kopyası: çağırıcıya ait hedef — atomic yazım (temp+rename), üzerine
-    // yazmak çağırıcının açık isteğidir; canonical garanti state-dir kaydındadır
-    // (hedef zaten validate_attempt_output_path ile repo/canonical-store dışı).
+    // --out kopyası: çağırıcıya ait hedef (validate_attempt_output_path ile
+    // repo/canonical-store dışı guarantee'li) — unique temp + create_new ile
+    // yazılır (tur-3 P1: temp adı caller verisine DEĞMEZ), rename final hedefi
+    // replace eder (çağırıcının açık isteği).
     if let Some(out) = &args.out {
-        use std::io::Write as _;
-        let out_tmp = out.with_extension("json.tmp-osp");
-        {
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(&out_tmp)?;
-            file.write_all(&payload).and_then(|_| file.sync_all())?;
-        }
-        std::fs::rename(&out_tmp, out)?;
+        write_attempt_out_copy(out, &payload)?;
         eprintln!("Attempt artifact (--out): {}", out.display());
+    }
+    Ok(())
+}
+
+/// #166 review tur-3 (P1): `--out` kopyası — unique same-dir temp + `create_new`
+/// + write/sync + rename + hata durumunda temp temizliği.
+///
+/// Eski sabit `<target>.json.tmp-osp` adı, o adda duran ilgisiz bir caller
+/// dosyasını `truncate` edebilir ve iki eşzamanlı çağrı aynı temp'i
+/// paylaşabilirdi; canonical store'daki pattern ile aynı disiplin. `rename`
+/// final hedefi replace eder — overwrite çağırıcının açık isteğidir (kasıtlı).
+fn write_attempt_out_copy(out: &std::path::Path, payload: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let dir = out
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("--out {} has no parent directory", out.display()))?;
+    let stem = out
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "attempt".to_string());
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+
+    let mut tmp: Option<PathBuf> = None;
+    for suffix in 0..=64u32 {
+        let name = match suffix {
+            0 => format!(".{stem}.osp-tmp-{pid}-{millis}"),
+            n => format!(".{stem}.osp-tmp-{pid}-{millis}-{n}"),
+        };
+        let candidate = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(payload).and_then(|_| file.sync_all()) {
+                    let _ = std::fs::remove_file(&candidate);
+                    anyhow::bail!("--out temp write failed: {e}");
+                }
+                tmp = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => anyhow::bail!("--out temp open failed: {e}"),
+        }
+    }
+    let tmp = match tmp {
+        Some(p) => p,
+        None => anyhow::bail!("--out temp collision budget exhausted"),
+    };
+    if let Err(e) = std::fs::rename(&tmp, out) {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("--out rename failed: {e}");
     }
     Ok(())
 }
@@ -2208,5 +2266,90 @@ mod attempt_artifact_persistence_tests {
         let external = tempfile::tempdir().expect("external tempdir");
         validate_attempt_output_path(repo.path(), state.path(), &external.path().join("out.json"))
             .expect("external path is fine");
+    }
+}
+
+#[cfg(test)]
+mod attempt_output_path_hardening_tests {
+    //! #166 review tur-3: symlink'li reserved store bypass'ı + --out temp clobber.
+    use super::*;
+
+    /// Platform symlink oluşturucu — Windows'ta ayrıcalık gerektirebilir;
+    /// bu durumda test skip (CI ubuntu-latest'te tam koşar).
+    fn try_symlink(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(src, dst)
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(src, dst)
+        }
+    }
+
+    #[test]
+    fn validate_attempt_output_path_resolves_symlinked_reserved_stores() {
+        // P0 (tur-3): <state>/attempts veya <state>/.osp bir symlink ile başka
+        // yere yönlendirilirse --out o GERÇEK hedefe düşse bile reddedilmelidir —
+        // reserved root'un kendisi canonicalize edilerek karşılaştırılır.
+        let base = tempfile::tempdir().expect("base tempdir");
+        let state = base.path().join("state");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&state).expect("mkdir state");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+
+        for reserved in ["attempts", ".osp"] {
+            let real = base.path().join(format!("real-{reserved}"));
+            std::fs::create_dir_all(&real).expect("mkdir real store");
+            let link = state.join(reserved);
+            if let Err(e) = try_symlink(&real, &link) {
+                eprintln!(
+                    "skipped (symlink unsupported here: {e}) — CI ubuntu-latest covers this path"
+                );
+                return;
+            }
+            let target = link.join("task-7-1.json");
+            let err = validate_attempt_output_path(&repo, &state, &target)
+                .expect_err("symlinked reserved store must be rejected");
+            assert!(
+                err.to_string().contains("canonical state store"),
+                "message for {reserved}: {err}"
+            );
+        }
+
+        // Negatif kontrol: symlink'li store DIŞINDAKI bir path serbest kalmalı.
+        let external = base.path().join("caller-out.json");
+        validate_attempt_output_path(&repo, &state, &external)
+            .expect("external caller-owned path stays allowed");
+    }
+
+    #[test]
+    fn out_copy_temp_never_touches_caller_files() {
+        // P1 (tur-3): unique temp — eski sabit ad şemasına (`report.json.tmp-osp`)
+        // uyan caller dosyası DOKUNULMAMALI; hedef doğru yazılmalı; temp artığı
+        // kalmamalı; ikinci yazım overwrite etmek kasıtlı.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("report.json");
+        let decoy = dir.path().join("report.json.tmp-osp");
+        std::fs::write(&decoy, b"caller data").expect("decoy");
+
+        write_attempt_out_copy(&out, b"payload-one").expect("first copy");
+        assert_eq!(std::fs::read(&out).unwrap(), b"payload-one");
+        assert_eq!(
+            std::fs::read(&decoy).unwrap(),
+            b"caller data",
+            "same-named caller file must NOT be truncated"
+        );
+
+        write_attempt_out_copy(&out, b"payload-two").expect("second copy (overwrite intended)");
+        assert_eq!(std::fs::read(&out).unwrap(), b"payload-two");
+        assert_eq!(std::fs::read(&decoy).unwrap(), b"caller data");
+
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".osp-tmp-"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp leftovers: {leftovers:?}");
     }
 }

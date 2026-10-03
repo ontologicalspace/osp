@@ -17,8 +17,14 @@ stdout biçiminden bağımsızlaşır:
 Yazım yerleri:
 
 1. **Kalıcı kayıt (daima):** `<state-dir>/attempts/task-<task_id>-<unix_millis>-<pid>[-N].json`
-2. **`--out <path>` (opsiyonel):** aynı içeriğin çağırıcıya ait kopyası (atomic yazım;
-   üzerine yazmak çağırıcının açık isteğidir — canonical garanti 1. maddededir).
+2. **`--out <path>` (opsiyonel):** aynı içeriğin çağırıcıya ait kopyası — unique
+   same-dir temp + `create_new` + write/sync + rename (temp adı caller verisine
+   değmez); üzerine yazmak çağırıcının açık isteğidir — canonical garanti 1.
+   maddededir. **Preflight hedef fence'i:** analyzed repo içi ve `<state-dir>/.osp/**`
+   + `<state-dir>/attempts/**` canonical mağazaları reddedilir; reserved root'lar
+   symlink/junction üzerinden GERÇEK hedeflerine çözülerek karşılaştırılır
+   (`canonicalize_with_missing_tail`; state-dir kökü serbest; relative `--out`'ta
+   CWD çözülemazsa fail-closed).
 
 **Persistence modeli (P1-2)** — pending-authorization/space-identity precedent'i:
 same-dir temp (`create_new`) → `write_all` + `sync_all` → **`hard_link` no-clobber
