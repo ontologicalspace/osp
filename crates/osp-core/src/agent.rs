@@ -336,6 +336,23 @@ impl OutputContract {
             }
         }
 
+        // 2b. #167 review tur-4 P0: SUBTRACTIVE mutation yolu da observational
+        // stratum için fail-closed. EdgeRef kimliği (from,to,kind) — type_ref
+        // YOK; Space::remove_edge retain çifti bazında eşleştirdiğinden
+        // Remove(Request) aynı (from,to,kind) üzerindeki TÜM sembolleri siler
+        // (Request+Response). Removal identity sembol taşıyana dek remove da yasak.
+        for (i, edge) in proposal.removed_edges.iter().enumerate() {
+            if is_analyzer_owned_edge_kind(edge.kind) {
+                return Err(SyntaxViolation {
+                    claim_id: 0,
+                    detail: format!(
+                        "removed_edges[{}]: edge kind {:?} is analyzer-owned observational (#167) — not removable via proposals",
+                        i, edge.kind
+                    ),
+                });
+            }
+        }
+
         // 3. modified_entities: EntityChangeSpec.changes alanı Faz 5 stub —
         //    doğrulanacak içerik henüz yok. Faz 5'te EntityChanges gelince
         //    buraya validation eklenecek.
@@ -705,6 +722,32 @@ mod tests {
             ..Default::default() // G2c-2: removed_edges, affected_nodes default
         };
         assert!(contract.validate(&proposal).is_ok());
+    }
+
+    #[test]
+    fn output_contract_rejects_analyzer_owned_kinds_in_removed_edges() {
+        // **tur-4 P0:** SUBTRACTIVE yol — EdgeRef kimligi (from,to,kind);
+        // RemoveIdentity hala sembol tasimiyor, o yuzden remove de yasak.
+        let contract = OutputContract::default();
+        let proposal = DeltaProposal {
+            new_nodes: vec![],
+            new_edges: vec![],
+            modified_entities: vec![],
+            position_hints: vec![],
+            reasoning: "remove type edge".to_string(),
+            removed_edges: vec![EdgeRef {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::TypeImports,
+            }],
+            ..Default::default()
+        };
+        let err = contract.validate(&proposal).expect_err("removal red");
+        assert!(
+            err.detail.contains("not removable"),
+            "mesaj: {}",
+            err.detail
+        );
     }
 
     #[test]

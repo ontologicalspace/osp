@@ -568,6 +568,16 @@ impl Space {
     /// **G2c-2 (arkadaş review 7 #3):** Kenar kaldır — kaç edge silindiğini döndür.
     /// `0` = nonexistent edge removal (Q4/Q6 yakalar: agent olmayan edge'i
     /// kaldırdığını iddia edemez). Coupling/instability düşürme = import kaldırma.
+    ///
+    /// **#167 (review tur-4 P2) — kapsam uyarısı:** bu API yalnız **pre-#167 /
+    /// mutable structural** kenar kaldırmadır. Kimlik `(from, to, kind)` —
+    /// tip-gren kenarların `type_ref` sembol kimliğini TAŞIYAMAZ: `retain` çifti
+    /// bazında eşleştiğinden `remove_edge(1, 2, TypeImports)` aynı çift üzerindeki
+    /// TÜM sembolleri (Request + Response gibi) birden siler. Analyzer-owned
+    /// `TypeImports`/`SameNsType` bu API'ye ULAŞMAMALIDIR (iki fail-closed kapı:
+    /// `OutputContract::validate` + `validate_claim_structure`); removal identity
+    /// `type_ref` ile genişletilene dek (#169/#171) bu API'yi generic edge removal
+    /// olarak yeniden açmayın.
     pub fn remove_edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) -> usize {
         let before = self.edges.len();
         self.edges

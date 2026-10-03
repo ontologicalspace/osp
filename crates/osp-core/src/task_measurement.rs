@@ -177,12 +177,34 @@ pub fn validate_claim_structure(claim: &Claim) -> Result<(), EngineCommitError> 
                 },
             });
         }
+
         // Imports self-loop: module cannot import itself (semantic rule)
         if edge.kind == EdgeKind::Imports && edge.from == edge.to {
             return Err(EngineCommitError::SyntaxViolation {
                 violation: SyntaxViolation {
                     claim_id: claim.id,
                     detail: format!("self-import edge: node {} imports itself", edge.from),
+                },
+            });
+        }
+    }
+
+    // 4. **#167 review tur-4 P0:** SUBTRACTIVE yol — claim.removed_edges de
+    // observational stratum için fail-closed. Navigator yolu Live Contract
+    // op-matrix (yalnız Imports removal) sayesinde bugün kapalı; DIRECT engine
+    // caller bu katmandan geçmez — burası defense-in-depth. EdgeRef kimliği
+    // (from,to,kind) type_ref taşımaz; Space::remove_edge retain aynı
+    // (from,to,kind) üzerindeki TÜM sembolleri siler (Remove(Request) =>
+    // Remove(Request,Response)).
+    for edge in &claim.removed_edges {
+        if crate::agent::is_analyzer_owned_edge_kind(edge.kind) {
+            return Err(EngineCommitError::SyntaxViolation {
+                violation: SyntaxViolation {
+                    claim_id: claim.id,
+                    detail: format!(
+                        "removed edge kind {:?} is analyzer-owned observational (#167) — not removable via claims",
+                        edge.kind
+                    ),
                 },
             });
         }
@@ -637,6 +659,72 @@ mod tests {
 
     // Not: kapsamlı test envanteri (yarış, construction contract, cross-pin) W8'de;
     // burada yalnız taşınan fonksiyonların bit-identical pin'leri.
+
+    /// **#167 review tur-4 P0:** direct-engine karsi-ornegi — navigatorin
+    /// Imports-only op-matrix katmanindan GECMEYEN caller, claim.removed_edges
+    /// ile TypeImports kaldiramaz; iki-sembol uzayinda kaldirma claimi reddedilir
+    /// VE kapinin yuku pin'lenir: remove_edge (from,to,kind) cift-bazli RETAIN
+    /// oldugundan kapasiz olsaydi Remove(Request) => Remove(Request,Response).
+    #[test]
+    fn claim_removal_of_analyzer_owned_kind_rejected_before_apply() {
+        // Iki-sembol uzayi: ayni (1,2,TypeImports) cifti, farkli semboller.
+        let mut space = crate::space::Space::new();
+        space.insert_node(Node {
+            id: 1,
+            ..Default::default()
+        });
+        space.insert_node(Node {
+            id: 2,
+            ..Default::default()
+        });
+        for name in ["Request", "Response"] {
+            space.insert_edge(Edge {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::TypeImports,
+                type_ref: Some(crate::space::EdgeTypeRef {
+                    namespace: "App.Contracts".to_string(),
+                    name: name.to_string(),
+                }),
+                ..Default::default()
+            });
+        }
+        assert_eq!(space.edge_count(), 2);
+
+        // TEHLIKE pin'i: remove_edge cift-bazlidir — sembol ayrimi YOK.
+        // (Kapi olmasaydi apply_delta bu cagriyi yapacakti.)
+        let mut hazard = space.clone();
+        assert_eq!(hazard.remove_edge(1, 2, EdgeKind::TypeImports), 2);
+
+        // Direct-engine claim: removed_edges ile ayni kaldirma.
+        let claim = Claim {
+            id: 9,
+            intent: crate::witness::Intent::new(1, Default::default()),
+            author: 1,
+            computed_raw: Default::default(),
+            delta_nodes: vec![],
+            delta_edges: vec![],
+            task_id: Some(7),
+            removed_edges: vec![crate::agent::EdgeRef {
+                from: 1,
+                to: 2,
+                kind: EdgeKind::TypeImports,
+            }],
+        };
+        let err = validate_claim_structure(&claim).expect_err("removal red");
+        match err {
+            EngineCommitError::SyntaxViolation { violation } => {
+                assert!(
+                    violation.detail.contains("not removable"),
+                    "{}",
+                    violation.detail
+                );
+            }
+            other => panic!("beklenen SyntaxViolation: {other:?}"),
+        }
+        // Uzay hala iki kenarli: kaldirma apply asamasina ULASAMADI.
+        assert_eq!(space.edge_count(), 2);
+    }
 
     /// **#167 review tur-2 P0-2:** ikinci kapı — claim delta'sında observational
     /// kind reddi (agent `validate` birinci kapı; doğrudan engine caller'ları için).
