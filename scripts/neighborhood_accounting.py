@@ -11,19 +11,34 @@ still exist elsewhere in the graph. This is not a system-removal claim.
 
 Inputs are two `osp analyze` space snapshots of the SAME repository (before
 and after the promoted patch) plus the neighborhood node paths. Dependencies
-are keyed by the representative target-file path of each import edge (OSP's
-import graph maps one using-line to one representative file via a
-sorted-first namespace resolver). The mapping is deterministic per analysis
-and empirically stable for runs 9-11, but it is NOT an analyzer invariant:
-adding a lexicographically earlier file to a namespace can shift the
-representative path, which would surface here as `removed + new` for the same
-semantic dependency. #167 (type-level edges) is the structural fix.
+are keyed by the target-file path of each import edge.
+
+GRANULARITY (v1.3, #167 tur-5): the script reads one edge class at a time.
+  --granularity namespace (default; v1.1 semantics unchanged): edges of kind
+      `imports` — one using-line maps to ONE namespace-representative file via
+      a sorted-first resolver. The representative caveat below applies HERE.
+  --granularity type: edges of kind `type_imports` — one using-line maps to one
+      edge PER referenced type. The dependency KEY is the FULL TYPE SYMBOL —
+      metadata-style: `ns.Outer+Inner` for nested types (containing chain
+      joined with `+`), ``ns.Box`1`` for generics (arity backtick) — NOT the
+      file: two types packaged in one declaring file are DISTINCT
+      dependencies, and a partial type spanning two files is ONE dependency
+      (review P0-1). v1.3 (#167 tur-5 identity amendment): arity and the
+      containing chain are identity components — ``ev.Box`1`` vs ``ev.Box`2``
+      and `ev.Inner` vs `ev.Outer+Inner` are DISTINCT dependencies. A type
+      edge WITHOUT a type_ref, with an empty name, with a missing/non-list
+      containing, a missing/non-int arity, or an empty containing segment is
+      an ERROR, not a fallback (tur-3 P1-2 + tur-5 — the symbol is required,
+      whole). Representative semantics is gone at this granularity: adding a
+      lexicographically earlier file to a namespace does NOT shift type-level
+      keys, so the v1.1 "removed + new for the same semantic dependency"
+      artifact disappears.
+Partition semantics (below) are granularity-independent and frozen at v1.1.
 
 TERMINOLOGY (frozen; see dogfood/neighborhood-ledger.jsonl amendment): the
 counted quantity is *neighborhood edge multiplication* — represented
-dependency multiplicity in the import-graph representation. It is NOT a claim
-about architectural complexity: until type-level edges (#167) land, edge
-identity is namespace-representative, not a semantic dependency.
+dependency multiplicity in the import-graph representation, at the selected
+granularity. It is NOT a claim about architectural complexity.
 
 PARTITION SEMANTICS (frozen at v1.1):
 For each dependency d with before-owner set B_d and after-owner set A_d:
@@ -62,17 +77,22 @@ tasarim.md) must run THIS script AS RECORDED in its instrument_commit
 (e.g. `git show <sha>:scripts/neighborhood_accounting.py`), not whatever
 later lives on main. Writing the SHA into the artifact while running a newer
 script is not a freeze.
+v1.2 amendment (recorded in dogfood/neighborhood-ledger.jsonl): the v1.1
+finding "mapping is deterministic per analysis ... but NOT an analyzer
+invariant" is now scoped to the namespace granularity; #167 type-level edges
+are the structural fix and v1.2 exposes them via --granularity type.
 
-Output: JSON record (schema neighborhood-accounting-v1.1) and a markdown
+Output: JSON record (schema neighborhood-accounting-v1.2) and a markdown
 table on stdout. Companion to dogfood/ledger.jsonl — a separate measurement
 stratum; it does NOT edit finalized ledger lines.
 
 Usage:
   py scripts/neighborhood_accounting.py \
-      --before dogfood/runs/<run>/baseline.json \
-      --after  dogfood/runs/<run>/after.json \
-      --nodes  path/to/Target.cs,path/to/NewBoundary.cs \
-      [--out   dogfood/runs/<run>/neighborhood.json] \
+    --before dogfood/runs/<run>/baseline.json \
+    --after  dogfood/runs/<run>/after.json \
+    --nodes  path/to/Target.cs,path/to/NewBoundary.cs \
+    [--granularity {namespace,type}] \
+    [--out   dogfood/runs/<run>/neighborhood.json] \
   py scripts/neighborhood_accounting.py --check
 """
 
@@ -82,22 +102,87 @@ import argparse
 import json
 from pathlib import Path
 
-SCHEMA = "neighborhood-accounting-v1.1"
+SCHEMA = "neighborhood-accounting-v1.3"
+
+GRANULARITY_KINDS = {
+    "namespace": "imports",
+    "type": "type_imports",
+}
 
 
-def load_snapshot(path: str) -> tuple[dict[int, str], dict[int, list[int]], dict[int, dict]]:
+def load_snapshot(
+    path: str, granularity: str = "namespace"
+) -> tuple[dict[int, str], dict[int, list[str]], dict[int, dict]]:
+    kind = GRANULARITY_KINDS[granularity]
     with open(path, encoding="utf-8") as f:
         d = json.load(f)
     id_to_path = {n["node_id"]: n["path"] for n in d["nodes"]}
     metrics = {n["node_id"]: n for n in d["nodes"]}
-    out_edges: dict[int, list[int]] = {}
+    out_edges: dict[int, list[str]] = {}
     for e in d["edges"]:
         if e["from"] == e["to"] or e.get("is_type_only"):
             continue
-        if e.get("kind") != "imports":
+        if e.get("kind") != kind:
             continue
-        out_edges.setdefault(e["from"], []).append(e["to"])
+        out_edges.setdefault(e["from"], []).append(
+            _dep_key(e, id_to_path, granularity)
+        )
     return id_to_path, out_edges, metrics
+
+
+def _dep_key(e: dict, id_to_path: dict[int, str], granularity: str) -> str:
+    """Dependency key at the selected granularity.
+
+    namespace -> target file path (v1.1 semantics). type -> FULL TYPE SYMBOL,
+    metadata-style (#167 tur-5 identity amendment): containing chain joined
+    with `+`, arity as a backtick suffix on the name, namespace dotted in
+    front (`ev.Outer+Inner`, ``ev.Box`1``; bare name for global-ns types) —
+    REQUIRED WHOLE: a type edge without a type_ref, with an empty name, with a
+    missing/malformed containing or arity, or with an empty containing segment
+    raises (identity IS the symbol; a partial identity would re-collapse
+    distinct C# symbols — tur-3 P1-2 + tur-5).
+    """
+    if granularity == "type":
+        tref = e.get("type_ref")
+        # Review tur-3 P1-2: symbol identity MISSING is an ERROR, not a
+        # file fallback. Falling back to the target path would re-collapse
+        # two types packaged in one file — exactly the P0-1 collapse this
+        # instrument exists to separate. Empty namespace (global ns) is
+        # valid; an empty NAME is not (identity IS the name).
+        if not tref or not tref.get("name"):
+            raise ValueError(
+                f"type-granularity edge {e['from']}->{e['to']} lacks symbol identity "
+                "(type_ref missing or type_ref.name empty) — in type granularity the "
+                "type symbol is REQUIRED; file-path fallback removed (#167 review tur-3)"
+            )
+        # Tur-5: containing + arity are identity components, not optional
+        # metadata. Missing/malformed components mean a pre-v1.3 artifact —
+        # accepting them would silently fold `Box`1`/`Box`2` and
+        # `Inner`/`Outer+Inner` back together.
+        containing = tref.get("containing")
+        if not isinstance(containing, list) or any(
+            not isinstance(s, str) or not s for s in containing
+        ):
+            raise ValueError(
+                f"type-granularity edge {e['from']}->{e['to']} has malformed "
+                "type_ref.containing (missing/non-list/empty-segment) — v1.3 "
+                "requires the whole symbol identity (#167 review tur-5)"
+            )
+        arity = tref.get("arity")
+        if not isinstance(arity, int) or isinstance(arity, bool) or arity < 0:
+            raise ValueError(
+                f"type-granularity edge {e['from']}->{e['to']} has malformed "
+                "type_ref.arity (missing/non-int/negative) — v1.3 requires the "
+                "whole symbol identity (#167 review tur-5)"
+            )
+        ns = tref.get("namespace", "")
+        name = tref["name"]
+        if arity:
+            name = f"{name}`{arity}"
+        if containing:
+            name = "+".join(containing) + "+" + name
+        return f"{ns}.{name}" if ns else name
+    return id_to_path[e["to"]]
 
 
 def holder_map(
@@ -105,14 +190,15 @@ def holder_map(
     id_to_path: dict[int, str],
     out_edges: dict[int, list[int]],
 ) -> dict[str, set[str]]:
-    """deps: representative target path -> set of holder node paths."""
+    """deps: dependency key (ns-representative OR type file, per granularity)
+    -> set of holder node paths."""
     deps: dict[str, set[str]] = {}
     wanted = set(neighborhood)
     for nid, npath in id_to_path.items():
         if npath not in wanted:
             continue
-        for tid in out_edges.get(nid, []):
-            deps.setdefault(id_to_path[tid], set()).add(npath)
+        for key in out_edges.get(nid, []):
+            deps.setdefault(key, set()).add(npath)
     return deps
 
 
@@ -205,12 +291,23 @@ def account(
 def node_couplings(
     neighborhood: list[str],
     snapshots: list[tuple[str, dict[int, str], dict[int, dict]]],
+    granularity: str = "namespace",
 ) -> dict[str, dict[str, float | None]]:
+    """Per-holder coupling at the selected granularity.
+
+    namespace → node `coupling` (x, unchanged since v1.1); type → node
+    `coupling_type` (x_type, #167) when present, else None (language/file
+    without type-level resolution).
+    """
+    field = "coupling" if granularity == "namespace" else "coupling_type"
     result: dict[str, dict[str, float | None]] = {}
     for label, ids, metrics in snapshots:
         for nid, npath in ids.items():
             if npath in set(neighborhood):
-                result.setdefault(npath, {})[label] = round(metrics[nid]["coupling"]["value"], 6)
+                raw = metrics[nid].get(field)
+                result.setdefault(npath, {})[label] = (
+                    round(raw["value"], 6) if raw is not None else None
+                )
     for npath, labels in result.items():  # absent side -> null
         for label, _, _ in snapshots:
             labels.setdefault(label, None)
@@ -219,11 +316,13 @@ def node_couplings(
 
 def run(args: argparse.Namespace) -> int:
     neighborhood = [p.strip() for p in args.nodes.split(",") if p.strip()]
-    b_ids, b_edges, b_metrics = load_snapshot(args.before)
-    a_ids, a_edges, a_metrics = load_snapshot(args.after)
+    b_ids, b_edges, b_metrics = load_snapshot(args.before, args.granularity)
+    a_ids, a_edges, a_metrics = load_snapshot(args.after, args.granularity)
     record = account(neighborhood, b_ids, b_edges, a_ids, a_edges)
     record = {
         "schema_version": SCHEMA,
+        "granularity": args.granularity,
+        "edge_kind": GRANULARITY_KINDS[args.granularity],
         "before_snapshot": str(Path(args.before)),
         "after_snapshot": str(Path(args.after)),
         "neighborhood": neighborhood,
@@ -231,6 +330,7 @@ def run(args: argparse.Namespace) -> int:
         "node_coupling": node_couplings(
             neighborhood,
             [("before", b_ids, b_metrics), ("after", a_ids, a_metrics)],
+            args.granularity,
         ),
     }
     if args.out:
@@ -240,12 +340,14 @@ def run(args: argparse.Namespace) -> int:
         print(f"written: {args.out}")
 
     s = record["summary"]
-    print(f"\nneighborhood ({len(neighborhood)} nodes)")
+    key_header = "dependency (ns-representative)" if args.granularity == "namespace" \
+        else "dependency (type file)"
+    print(f"\nneighborhood ({len(neighborhood)} nodes, granularity={args.granularity})")
     print(f"  dependency union: {s['dependency_union_before']} -> {s['dependency_union_after']}"
           f"   (new entering: {len(s['new_dependencies_entering'])})")
     print(f"  out-edge sum:     {s['neighborhood_out_sum_before']} -> {s['neighborhood_out_sum_after']}")
     print(f"  classes: {json.dumps(s['classes'])}")
-    print("\n| dependency (representative) | cardinality | ownership | class | before | after |")
+    print(f"\n| {key_header} | cardinality | ownership | class | before | after |")
     print("|---|---|---|---|---|---|")
     for key, v in record["per_dependency"].items():
         short = key.split("src/")[-1] if "src/" in key else key
@@ -266,9 +368,11 @@ def self_check() -> int:
     A, B, C, D, E, G = "dep/A.cs", "dep/B.cs", "dep/C.cs", "dep/D.cs", "dep/E.cs", "dep/G.cs"
     b_ids = {1: T, 2: G2, 10: A, 11: B, 12: C, 13: D, 14: G}
     a_ids = {1: T, 2: G2, 4: F, 10: A, 11: B, 12: C, 13: D, 14: G, 15: E}
+    # Edges are DEPENDENCY-KEYED (load_snapshot/_dep_key contract): here,
+    # representative file paths (namespace-granularity fixture).
     # before: T holds A,B,C,D,G(shared with G2); after: F(new) holds C,D,E; T keeps B,D; G2 keeps G
-    b_edges = {1: [10, 11, 12, 13, 14], 2: [14]}
-    a_edges = {1: [11, 13], 2: [14], 4: [12, 13, 15]}
+    b_edges = {1: [A, B, C, D, G], 2: [G]}
+    a_edges = {1: [B, D], 2: [G], 4: [C, D, E]}
     rec = account([T, G2, F], b_ids, b_edges, a_ids, a_edges)
     per = {k.split("/")[-1]: v for k, v in rec["per_dependency"].items()}
     expected = {
@@ -294,6 +398,178 @@ def self_check() -> int:
         raise RuntimeError(f"classes shape drift: {s['classes']}")
     print("self-check PASS (six-class fixtures + cardinality/ownership cross-derivation;"
           " all-six-key classes; out-sum 6->6; union 5->5)")
+
+    # --- v1.2 (#167): granularity fixtures — ns-representative vs type-file keys ---
+    import tempfile
+
+    NA, NB = "svc/HolderA.cs", "svc/HolderB.cs"
+    NL = "svc/Ledger.cs"
+
+    def write_snapshot(nodes: dict[int, str], edges: list[dict]) -> str:
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        json.dump(
+            {
+                "schema_version": 2,
+                "nodes": [
+                    {"node_id": nid, "path": p, "coupling": {"value": 0.5}} for nid, p in nodes.items()
+                ],
+                "edges": edges,
+            },
+            tmp,
+        )
+        tmp.close()
+        return tmp.name
+
+    # (ii) S2a~=S2b disambiguation: two holders reference DIFFERENT types from
+    # the same namespace. ns-mode: ONE representative key held by both (looks
+    # shared). type-mode: symbol keys, one holder each (not shared at all).
+    # P0-1: FraudEvent + ChargebackEvent AYNI dosyada (10) — dosya-anahtarlı
+    # muhasebe ikisini çökertirdi; sembol anahtarlar ayırır (type union 3).
+    nodes = {1: NA, 2: NB, 10: "ev/FraudEvent.cs", 11: "ev/RefundEvent.cs", 90: "ev/Rep.cs"}
+    edges = [
+        {"from": 1, "to": 90, "kind": "imports"},
+        {"from": 2, "to": 90, "kind": "imports"},
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "ChargebackEvent", "containing": [], "arity": 0}},
+        {"from": 2, "to": 11, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "RefundEvent", "containing": [], "arity": 0}},
+    ]
+    path = write_snapshot(nodes, edges)
+    ns_ids, ns_edges, _ = load_snapshot(path, "namespace")
+    ty_ids, ty_edges, _ = load_snapshot(path, "type")
+    ns_rec = account([NA, NB], ns_ids, ns_edges, ns_ids, ns_edges)
+    ty_rec = account([NA, NB], ty_ids, ty_edges, ty_ids, ty_edges)
+    if ns_rec["summary"]["dependency_union_before"] != 1:
+        raise RuntimeError(f"ns union drift: {ns_rec['summary']}")
+    if ty_rec["summary"]["dependency_union_before"] != 3:
+        raise RuntimeError(f"type union drift (S2 disambiguation + same-file P0-1): {ty_rec['summary']}")
+    if "ev.FraudEvent" not in ty_rec["per_dependency"] or "ev.ChargebackEvent" not in ty_rec["per_dependency"]:
+        raise RuntimeError(f"type symbol keys missing: {sorted(ty_rec['per_dependency'])}")
+    if ns_rec["summary"]["neighborhood_out_sum_before"] != 2:
+        raise RuntimeError("ns out-sum drift")
+    if ty_rec["summary"]["neighborhood_out_sum_before"] != 3:
+        raise RuntimeError("type out-sum drift (P0-1: ayni dosya 2 sembol = 2 kenar)")
+
+    # (iv) representative-shift artifact: new lexicographically-earlier file in
+    # the ns SHIFTS the ns key (removed+new) but type keys are stable (unchanged).
+    before = write_snapshot(
+        {1: NA, 10: "ev/FraudEvent.cs", 91: "ev/OldRep.cs"},
+        [
+            {"from": 1, "to": 91, "kind": "imports"},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
+        ],
+    )
+    after = write_snapshot(
+        {1: NA, 10: "ev/FraudEvent.cs", 92: "ev/AaaRep.cs"},
+        [
+            {"from": 1, "to": 92, "kind": "imports"},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
+        ],
+    )
+    b_ids2, b_edges2, _ = load_snapshot(before, "namespace")
+    a_ids2, a_edges2, _ = load_snapshot(after, "namespace")
+    ns_shift = account([NA], b_ids2, b_edges2, a_ids2, a_edges2)
+    if ns_shift["summary"]["classes"]["removed"] != 1 or ns_shift["summary"]["classes"]["new"] != 1:
+        raise RuntimeError(f"ns representative-shift fixture drift: {ns_shift['summary']}")
+    b_ids3, b_edges3, _ = load_snapshot(before, "type")
+    a_ids3, a_edges3, _ = load_snapshot(after, "type")
+    ty_stable = account([NA], b_ids3, b_edges3, a_ids3, a_edges3)
+    if ty_stable["summary"]["classes"] != {
+        "removed": 0, "moved": 0, "multiplied": 0, "unchanged": 1, "new": 0, "reduced": 0
+    }:
+        raise RuntimeError(f"type stability drift: {ty_stable['summary']}")
+
+    # (iii)+(i) type-level moved / true multiplied: same type key, holder set
+    # changes {A}->{L} → moved; {A}->{A,B} → multiplied.
+    bm = write_snapshot(
+        {1: NA, 10: "ev/FraudEvent.cs"},
+        [{"from": 1, "to": 10, "kind": "type_imports",
+          "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}}],
+    )
+    am_moved = write_snapshot(
+        {5: NL, 10: "ev/FraudEvent.cs"},
+        [{"from": 5, "to": 10, "kind": "type_imports",
+          "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}}],
+    )
+    am_mult = write_snapshot(
+        {1: NA, 2: NB, 10: "ev/FraudEvent.cs"},
+        [
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
+            {"from": 2, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "FraudEvent", "containing": [], "arity": 0}},
+        ],
+    )
+    bM, eM, _ = load_snapshot(bm, "type")
+    aL, eL, _ = load_snapshot(am_moved, "type")
+    moved_rec = account([NA, NL], bM, eM, aL, eL)
+    if moved_rec["per_dependency"]["ev.FraudEvent"]["class"] != "moved":
+        raise RuntimeError(f"type moved drift: {moved_rec['per_dependency']}")
+    aP, eP, _ = load_snapshot(am_mult, "type")
+    mult_rec = account([NA, NB], bM, eM, aP, eP)
+    if mult_rec["per_dependency"]["ev.FraudEvent"]["class"] != "multiplied":
+        raise RuntimeError(f"type true-multiplication drift: {mult_rec['per_dependency']}")
+
+    # (v) tur-3 P1-2 + tur-5 fail-closed: sembol kimligi EKSIK/YARIM tip kenari
+    # (ref'siz, bos isim, containing/arity eksik ya da bozuk) hata verir —
+    # path/varsayilan fallback KALDIRILDI (ayni dosyadaki iki tipi ve ayni
+    # adin farkli arity/containing'li sembollerini yeniden cokertmesin diye;
+    # P0-1 + tur-5 ontolojisi).
+    for bad_edge in (
+        {"from": 1, "to": 10, "kind": "type_imports"},  # type_ref yok
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": ""}},   # bos isim
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "Box", "arity": 1}},  # containing yok
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "Box", "containing": [], "arity": "1"}},  # arity str
+        {"from": 1, "to": 10, "kind": "type_imports",
+         "type_ref": {"namespace": "ev", "name": "Inner", "containing": [""], "arity": 0}},  # bos segment
+    ):
+        bad = write_snapshot({1: NA, 10: "ev/FraudEvent.cs"}, [bad_edge])
+        try:
+            load_snapshot(bad, "type")
+        except ValueError as exc:
+            if "identity" not in str(exc):
+                raise RuntimeError(f"fail-closed mesaj drift: {exc}")
+        else:
+            raise RuntimeError(f"eksik/bozuk sembol kimligi red edilmeli: {bad_edge}")
+        # namespace kipinde ayni kenar sorun degil (kind filtresi disarida birakar).
+        load_snapshot(bad, "namespace")
+
+    # (vi) tur-5 P0: arity + containing KIMLIK bilesenleridir — `ev.Box`1` vs
+    # `ev.Box`2` ve `ev.Inner` vs `ev.Outer+Inner` AYRI bagimliliklardir.
+    # v1.2 duz-ad anahtari bu dort kenari 2 anahtara cokertirdi.
+    ident = write_snapshot(
+        {1: NA, 10: "ev/Box.cs", 11: "ev/Inner.cs"},
+        [
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Box", "containing": [], "arity": 1}},
+            {"from": 1, "to": 10, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Box", "containing": [], "arity": 2}},
+            {"from": 1, "to": 11, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Inner", "containing": [], "arity": 0}},
+            {"from": 1, "to": 11, "kind": "type_imports",
+             "type_ref": {"namespace": "ev", "name": "Inner", "containing": ["Outer"], "arity": 0}},
+        ],
+    )
+    _, ident_edges, _ = load_snapshot(ident, "type")
+    keys = set(ident_edges[1])
+    expected_keys = {"ev.Box`1", "ev.Box`2", "ev.Inner", "ev.Outer+Inner"}
+    if keys != expected_keys:
+        raise RuntimeError(f"tur-5 identity keys drift: {sorted(keys)} != {sorted(expected_keys)}")
+
+    print("self-check PASS (v1.3 granularity fixtures: S2 disambiguation + same-file"
+          " P0-1 symbol keys (ns union 1 vs type union 3); representative-shift"
+          " artifact ns-only; type-symbol moved/multiplied; missing/partial-symbol"
+          " fail-closed (no file fallback); tur-5 arity+containing identity keys"
+          " (Box`1/Box`2, Inner/Outer+Inner)")
     return 0
 
 
@@ -302,6 +578,9 @@ def main() -> int:
     ap.add_argument("--before", help="baseline.json space snapshot")
     ap.add_argument("--after", help="after.json space snapshot")
     ap.add_argument("--nodes", help="comma-separated neighborhood node paths")
+    ap.add_argument("--granularity", choices=sorted(GRANULARITY_KINDS), default="namespace",
+                    help="edge class to account: namespace (v1.1 semantics, kind=imports)"
+                         " or type (#167 type-level edges, kind=type_imports)")
     ap.add_argument("--out", help="optional path for the JSON record")
     ap.add_argument("--check", action="store_true",
                     help="run embedded instrument self-check fixtures (behavioral sanity;"

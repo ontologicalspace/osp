@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use osp_core::axes::{CouplingAxis, InstabilityAxis};
+use osp_core::axes::{CouplingAxis, InstabilityAxis, TypeGranularCouplingAxis};
 use osp_core::coords::{Axis, MetricSource};
 use osp_core::space::{Edge, EdgeKind, Node as CoreNode, NodeId, NodeKind, Space};
 
@@ -159,7 +159,88 @@ pub fn analyze_repo_with_config(
             to: *to_id,
             kind: EdgeKind::Imports,
             is_type_only: *is_type_only,
+            type_ref: None,
         });
+    }
+
+    // 5b. Phase 2b (#167): tip-düzeyi kenarlar — TypeImports + SameNsType.
+    // `resolve_import` sözleşmesi DEĞİŞMEDİ (ns-gren temsilci kenarları yukarıda,
+    // birebir aynı); burada İKİNCİ gren eklenir. Adapter `None` dönerse dil
+    // desteklemiyordur → kenar yok + coupling_type None (alan snapshot'ta görünmez).
+    // Review P0-1: her hedef (= tip sembolü × declare eden dosya; partial tip →
+    // sembol başına dosya-başına) AYRI kenar üretir ve kenar tip kimliğini
+    // (`type_ref`) taşır — aynı dosyadaki 2 tip 2 kenardır; x_type distinct
+    // sembol sayar (TypeGranularCouplingAxis).
+    let mut type_resolved_nodes: std::collections::HashSet<NodeId> =
+        std::collections::HashSet::new();
+    for fd in &file_data {
+        let adapter = match registry.adapter_for_extension(&fd.ext) {
+            Some(a) => a,
+            None => continue,
+        };
+        let source = match std::fs::read_to_string(&fd.path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let Some(resolution) =
+            adapter.resolve_type_references(&source, &fd.imports, &fd.path, &repo_ctx)
+        else {
+            continue;
+        };
+        let from_id = node_map[&fd.path];
+        type_resolved_nodes.insert(from_id);
+        let rel_file = fd
+            .path
+            .strip_prefix(&repo)
+            .unwrap_or(&fd.path)
+            .to_string_lossy()
+            .into_owned();
+        for target in &resolution.type_import_targets {
+            if let Some(&to_id) = node_map.get(&target.file) {
+                if from_id != to_id {
+                    space.insert_edge(Edge {
+                        from: from_id,
+                        to: to_id,
+                        kind: EdgeKind::TypeImports,
+                        is_type_only: false,
+                        type_ref: Some(osp_core::space::EdgeTypeRef {
+                            namespace: target.namespace.clone(),
+                            containing: target.containing.clone(),
+                            name: target.type_name.clone(),
+                            arity: target.arity,
+                        }),
+                    });
+                }
+            }
+        }
+        for target in &resolution.same_ns_targets {
+            if let Some(&to_id) = node_map.get(&target.file) {
+                if from_id != to_id {
+                    space.insert_edge(Edge {
+                        from: from_id,
+                        to: to_id,
+                        kind: EdgeKind::SameNsType,
+                        is_type_only: false,
+                        type_ref: Some(osp_core::space::EdgeTypeRef {
+                            namespace: target.namespace.clone(),
+                            containing: target.containing.clone(),
+                            name: target.type_name.clone(),
+                            arity: target.arity,
+                        }),
+                    });
+                }
+            }
+        }
+        for name in &resolution.ambiguous_type_names {
+            diagnostics.push(AnalysisDiagnostic {
+                severity: DiagnosticSeverity::Info,
+                code: DiagnosticCode::AmbiguousTypeReference,
+                message: format!(
+                    "Ambiguous type reference: '{name}' declared in multiple using'd namespaces — no TypeImports edge"
+                ),
+                file: Some(rel_file.clone()),
+            });
+        }
     }
 
     // 5. Abstractness (real A!)
@@ -183,6 +264,7 @@ pub fn analyze_repo_with_config(
 
     // 8. Module metrics (per-file coupling/instability via osp_core axes + SCIP cohesion)
     let coupling_axis = CouplingAxis::new();
+    let type_coupling_axis = TypeGranularCouplingAxis::new();
     let instability_axis = InstabilityAxis::new();
     let mut module_metrics = std::collections::HashMap::new();
     for (i, fd) in file_data.iter().enumerate() {
@@ -190,6 +272,8 @@ pub fn analyze_repo_with_config(
         let node = space.nodes.get(&node_id).expect("node inserted above");
         let coupling = coupling_axis.compute(node, &space);
         let instability = instability_axis.compute(node, &space);
+        // #167: x_type ham değeri — borrows `node`/`&space`'i get_mut'ten ÖNCE kapat.
+        let type_coupling_value = type_coupling_axis.compute(node, &space);
         let cohesion = compute_module_cohesion(fd.path.as_path(), &repo, &semantic_index);
         // **INV-T9 #70 (P0):** Wire cohesion into Node → CoordinateSystem::CohesionAxis reads
         // it (per-node y-axis). Yalnız gerçek SCIP sonucu `Some` — Placeholder/Heuristic/
@@ -208,6 +292,11 @@ pub fn analyze_repo_with_config(
                 coupling: MetricValue::tree_sitter(coupling, 1.0),
                 cohesion,
                 instability: MetricValue::tree_sitter(instability, 1.0),
+                // #167: x_type — yalnız tip-düzeyi çözümlemesi olan dosyalarda
+                // (None = dil desteklemiyor; Some(0.0) = destekli + 0 tip kenarı).
+                coupling_type: type_resolved_nodes
+                    .contains(&node_id)
+                    .then(|| MetricValue::tree_sitter(type_coupling_value, 1.0)),
             },
         );
     }
@@ -217,15 +306,12 @@ pub fn analyze_repo_with_config(
     // Şimdi edges + metrics hazır: in/out degree ve instability ile role'ü röfiniş et.
     // Örn: incoming=44, outgoing=2, instability=0.043 → Runtime yerine Core.
     {
-        // Her node için in/out degree hesapla (edges'ten)
-        let mut in_degree: std::collections::HashMap<NodeId, f64> =
-            std::collections::HashMap::new();
-        let mut out_degree: std::collections::HashMap<NodeId, f64> =
-            std::collections::HashMap::new();
-        for e in &space.edges {
-            *out_degree.entry(e.from).or_insert(0.0) += 1.0;
-            *in_degree.entry(e.to).or_insert(0.0) += 1.0;
-        }
+        // Her node için in/out degree hesapla (edges'ten).
+        // Review P0-2 (#167): dereceler YALNIZ pre-#167 kenar stratum'undan —
+        // yeni observational kind'lar (TypeImports/SameNsType) role heuristiğini
+        // DEĞİŞTİRMEZ (aynı Imports grafiğine keyfî tip-gren kenarı eklemek
+        // NodeRole'ü flip ettirmemeli; `role_refinement_degrees` pin'li).
+        let (in_degree, out_degree) = role_refinement_degrees(&space);
         // Role refinement: sadece Runtime default'ta kalanlar için (TypeSurface/Support
         // zaten path/classification'dan doğru çıktı). Metric shape ile Core/Adapter/
         // Utility'ye yükselt.
@@ -482,6 +568,28 @@ fn extract_file_data(
         });
     }
     (all_class_defs, file_data)
+}
+
+/// Review P0-2 (#167): role-refinement dereceleri — pre-#167 kenar stratum'undan.
+/// `TypeImports`/`SameNsType` (ölçüm-gözlem sınıfları) hesaba GİRMEZ; `Imports`
+/// (type-only dahil), `Calls` ve diğer tüm pre-#167 kind'lar eskiden olduğu
+/// gibi sayılır → mevcut `NodeRole` sonuçları bit-özdeş korunur.
+fn role_refinement_degrees(
+    space: &Space,
+) -> (
+    std::collections::HashMap<NodeId, f64>,
+    std::collections::HashMap<NodeId, f64>,
+) {
+    let mut in_degree: std::collections::HashMap<NodeId, f64> = std::collections::HashMap::new();
+    let mut out_degree: std::collections::HashMap<NodeId, f64> = std::collections::HashMap::new();
+    for e in &space.edges {
+        if matches!(e.kind, EdgeKind::TypeImports | EdgeKind::SameNsType) {
+            continue;
+        }
+        *out_degree.entry(e.from).or_insert(0.0) += 1.0;
+        *in_degree.entry(e.to).or_insert(0.0) += 1.0;
+    }
+    (in_degree, out_degree)
 }
 
 fn collect_source_files(repo: &Path, registry: &AdapterRegistry) -> anyhow::Result<Vec<PathBuf>> {
@@ -804,7 +912,14 @@ fn compute_repo_instability(space: &Space) -> f64 {
     let axis = InstabilityAxis::new();
     let mut weighted_sum = 0.0;
     let mut total_mass = 0.0;
-    for node in space.nodes.values() {
+    // Determinizm (#167 review sonrası yeniden doğrulamada yakalandı — önceden
+    // var olan gizli nondeterminizm): `space.nodes` HashMap'tir; RandomState
+    // iterasyon sırası süreç-başına değişir → float toplamı son-bit sarsılır →
+    // snapshot byte-özdeşliği bozulur. Id-sıralı yürüyüş sözleşmeyi geri getirir.
+    let mut node_ids: Vec<NodeId> = space.nodes.keys().copied().collect();
+    node_ids.sort_unstable();
+    for id in node_ids {
+        let node = &space.nodes[&id];
         let i = axis.compute(node, space);
         weighted_sum += i * node.mass;
         total_mass += node.mass;
@@ -1034,6 +1149,233 @@ mod tests {
             (a - (1.0 / 3.0)).abs() < 0.01,
             "A should be 1/3 (1 abstract / 3 total), got {a}"
         );
+    }
+
+    /// #167 iki-grenlilik entegrasyonu: tek snapshot'ta ns-gren `Imports`
+    /// (temsilci, DEĞİŞMEDİ) + tip-gren `TypeImports` + B3 `SameNsType`
+    /// birarada; `coupling_type` yalnız desteklenen dosyalarda.
+    /// Review P0-1: aynı dosyadaki 2 tip = 2 bağımlılık. 2 TypeImports kenarı
+    /// (aynı (from,to), farklı type_ref) + x_type = 2/3 (distinct sembol);
+    /// ns-gren Imports kenarı tek (temsilci) ve x DEĞİŞMEZ.
+    #[test]
+    fn analyze_repo_two_types_one_file_two_type_imports_edges() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir_all(dir.path().join("cs")).unwrap();
+        fs::write(
+            dir.path().join("cs/Contracts.cs"),
+            "namespace Cs.Contracts;
+
+public class Request { }
+public class Response { }
+",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("cs/Service.cs"),
+            "namespace Cs.App;
+
+using Cs.Contracts;
+
+class Service
+{
+    Request req;
+    Response res;
+}
+",
+        )
+        .unwrap();
+
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+        let service_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("Service.cs"))
+            .map(|(id, _)| id)
+            .expect("service node");
+
+        // Kenar sayıları: ns-gren 1 (temsilci Contracts.cs), tip-gren 2 (Request +
+        // Response — aynı dosya, farklı semboller).
+        assert_eq!(result.space.edge_count_of(EdgeKind::Imports), 1);
+        assert_eq!(result.space.edge_count_of(EdgeKind::TypeImports), 2);
+        // x_type distinct SEMBOL sayar: 2 → 2/3 (dosya/kenar çökmesi YOK).
+        let ct = result.module_metrics[&service_id]
+            .coupling_type
+            .as_ref()
+            .expect("cs destekler");
+        assert!((ct.value - 2.0 / 3.0).abs() < 1e-9, "x_type = {}", ct.value);
+        // ns-gren coupling değişmedi: 1 import → 1/2.
+        assert!(
+            (result.module_metrics[&service_id].coupling.value - 0.5).abs() < 1e-9,
+            "x = {}",
+            result.module_metrics[&service_id].coupling.value
+        );
+        // Kenarlar type_ref taşır ve semboller ayrışır.
+        let mut refs = Vec::new();
+        for e in &result.space.edges {
+            if e.kind == EdgeKind::TypeImports && e.from == service_id {
+                refs.push(e.type_ref.clone().expect("tip-gren kenar ref taşır"));
+            }
+        }
+        refs.sort();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].name, "Request");
+        assert_eq!(refs[1].name, "Response");
+    }
+
+    /// Review P0-2: role-refinement dereceleri yeni observational kind'lardan
+    /// YALITILMIŞTIR — aynı Imports grafiğine keyfî TypeImports/SameNsType eklemek
+    /// dereceleri (dolayısıyla NodeRole'ü) DEĞİŞTİRMEZ.
+    #[test]
+    fn role_refinement_degrees_ignore_type_granular_kinds() {
+        use osp_core::space::{EdgeTypeRef, Node as CoreNode, NodeKind};
+
+        let mut space = Space::new();
+        for id in 1..=3u64 {
+            space.insert_node(CoreNode {
+                id,
+                kind: NodeKind::Module,
+                ..Default::default()
+            });
+        }
+        // ns-gren Imports grafiği: 1→2, 1→3 (out(1)=2)
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::Imports,
+            ..Default::default()
+        });
+        space.insert_edge(Edge {
+            from: 1,
+            to: 3,
+            kind: EdgeKind::Imports,
+            ..Default::default()
+        });
+        let (base_in, base_out) = role_refinement_degrees(&space);
+        assert_eq!(base_out.get(&1), Some(&2.0), "out(1)=2");
+        assert_eq!(base_in.get(&2), Some(&1.0));
+
+        // Keyfî tip-gren kenarlar (aynı dosyalara, sembollerle) — dereceler AYNI.
+        let r = |name: &str| {
+            Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                name: name.to_string(),
+                containing: Vec::new(),
+                arity: 0,
+            })
+        };
+        for (to, kind, tref) in [
+            (2u64, EdgeKind::TypeImports, r("A")),
+            (2, EdgeKind::TypeImports, r("B")),
+            (3, EdgeKind::TypeImports, r("C")),
+            (2, EdgeKind::SameNsType, r("D")),
+            (3, EdgeKind::SameNsType, r("E")),
+        ] {
+            space.insert_edge(Edge {
+                from: 1,
+                to,
+                kind,
+                type_ref: tref,
+                ..Default::default()
+            });
+        }
+        let (after_in, after_out) = role_refinement_degrees(&space);
+        assert_eq!(base_in, after_in, "in-degree izolasyonu");
+        assert_eq!(base_out, after_out, "out-degree izolasyonu");
+        // Kontrol: ham out_degree (izole DEĞİL) 2 → 5; izolasyon gerçektir.
+        assert_eq!(space.out_degree(1, EdgeKind::Imports), 2);
+        assert_eq!(space.out_degree(1, EdgeKind::TypeImports), 3);
+        assert_eq!(space.out_degree(1, EdgeKind::SameNsType), 2);
+    }
+
+    #[test]
+    fn analyze_repo_two_granularity_edges_coexist() {
+        let dir = TempDir::new().unwrap();
+        // Client: using Cs.Svc (Svc referans EDİLİYOR) + using Cs.Extra (kullanılMIYOR)
+        // → Imports kenarları 2 (temsilci), TypeImports kenarı 1 (yalnız Svc.cs)
+        // → coupling (ns-gren) 2/3 ≠ coupling_type 1/2 — iki gren ayırt edilir.
+        fs::create_dir_all(dir.path().join("cs")).unwrap();
+        fs::write(
+            dir.path().join("cs/Svc.cs"),
+            "namespace Cs.Svc;\n\npublic class Svc { }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("cs/Extra.cs"),
+            "namespace Cs.Extra;\n\npublic class Extra { }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("cs/Client.cs"),
+            "namespace Cs.App;\n\nusing Cs.Svc;\nusing Cs.Extra;\n\nclass Client\n{\n    Svc s = new Svc();\n    Partner p = new Partner();\n}\n",
+        )
+        .unwrap();
+        // Aynı-ns (B3): Client'ın ns'inde başka dosya — using gerektirmeden referans
+        fs::write(
+            dir.path().join("cs/Partner.cs"),
+            "namespace Cs.App;\n\npublic class Partner { }\n",
+        )
+        .unwrap();
+        // Desteklemeyen dil: coupling_type None olmalı
+        fs::write(dir.path().join("plain.py"), "x = 1\n").unwrap();
+
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+
+        // Kenar sınıfları: Imports 2 (Client→Svc.cs, Client→Extra.cs temsilci),
+        // TypeImports 1 (Client→Svc.cs), SameNsType 1 (Client→Partner.cs, B3).
+        assert_eq!(result.space.edge_count_of(EdgeKind::Imports), 2);
+        assert_eq!(result.space.edge_count_of(EdgeKind::TypeImports), 1);
+        assert_eq!(result.space.edge_count_of(EdgeKind::SameNsType), 1);
+
+        let client_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("Client.cs"))
+            .map(|(id, _)| id)
+            .expect("client node");
+        let client_metrics = result
+            .module_metrics
+            .get(&client_id)
+            .expect("client metrics");
+
+        // ns-gren coupling DEĞİŞMEDİ: 2 import kenarı → 2/3.
+        assert!(
+            (client_metrics.coupling.value - 2.0 / 3.0).abs() < 1e-9,
+            "coupling = {}",
+            client_metrics.coupling.value
+        );
+        // tip-gren coupling_type: 1 TypeImports kenarı → 1/2 (Some — desteklenen dosya).
+        let ct = client_metrics
+            .coupling_type
+            .as_ref()
+            .expect("cs dosyası destekler");
+        assert!(
+            (ct.value - 0.5).abs() < 1e-9,
+            "coupling_type = {}",
+            ct.value
+        );
+        assert_eq!(ct.source, crate::contract::MetricSource::TreeSitter);
+
+        // Partner: destekli + 0 tip kenarı → Some(0.0) (None DEĞİL — ölçüm var).
+        let partner_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("Partner.cs"))
+            .map(|(id, _)| id)
+            .expect("partner node");
+        let partner_ct = result.module_metrics[&partner_id]
+            .coupling_type
+            .as_ref()
+            .expect("partner destekler");
+        assert!(partner_ct.value.abs() < 1e-9);
+
+        // Python: desteklemiyor → None (snapshot'ta alan görünmez).
+        let py_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("plain.py"))
+            .map(|(id, _)| id)
+            .expect("py node");
+        assert!(result.module_metrics[&py_id].coupling_type.is_none());
     }
 
     #[test]

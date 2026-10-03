@@ -77,6 +77,9 @@ pub enum DiagnosticCode {
     PlaceholderMetric,
     GeneratedExcluded,
     CoverageLow,
+    /// #167: tip adı birden çok using'de çözümleniyor (CS0104 aynası) —
+    /// `TypeImports` kenarı üretilmedi, belirsizlik fail-visible raporlanır.
+    AmbiguousTypeReference,
 }
 
 /// Tek diagnostic mesajı.
@@ -95,9 +98,14 @@ pub struct AnalysisDiagnostic {
 /// Per-module (dosya) metrik paketi.
 #[derive(Debug, Clone)]
 pub struct ModuleMetrics {
-    pub coupling: MetricValue,    // x
+    pub coupling: MetricValue,    // x (ns-grenlilik — #167 ile DEĞİŞMEDİ)
     pub cohesion: MetricValue,    // y (SCIP ise gerçek LCOM4; yoksa Placeholder)
     pub instability: MetricValue, // z (Martin I saf)
+    /// #167: `x_type` — tip-grenlilik coupling'i (`TypeImports` kenarlarından).
+    /// `None` = dil/adapter tip-düzeyi çözümlemesi desteklemiyor (alan YOK
+    /// snapshot'ta; eski tüketiciler için geriye-uyumlu). `Some(0.0)` GERÇEK
+    /// ölçümdür: desteklenen dilde dosyanın tip-referans kenarı yok.
+    pub coupling_type: Option<MetricValue>,
 }
 
 /// Repo-level metrik paketi.
@@ -233,6 +241,50 @@ pub struct ResolvedImport {
     pub kind: ImportKind,
     /// Internal ise çözümlenen dosya yolu.
     pub target_path: Option<PathBuf>,
+}
+
+/// #167 (P0-1 + tur-5): tip-gren bağımlılık hedefi — kimlik TAM TİP SEMBOLÜDÜR
+/// (namespace + containing zinciri + ad + arity; tur-5 identity amendment —
+/// issue #167 karar kaydı), dosya değil. Aynı dosyada 2 tip → 2 hedef; partial
+/// tip → sembol başına dosya-başına hedef (pipeline her hedef için ayrı kenar
+/// üretir; `x_type` distinct sembol sayar — `Box<T>` ve `Box<T1,T2>` AYRI
+/// bağımlılıklardır).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypeImportTarget {
+    /// Tipin declare edildiği namespace (global ns = `""`).
+    pub namespace: String,
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    /// Tur-5: `Ns.Inner` (top-level) ile `Ns.Outer.Inner` (nested) ayrı
+    /// sembollerdir — eski düz-ad indeksleme bu ikisini çökertiyordu.
+    pub containing: Vec<String>,
+    /// Tipin basit adı.
+    pub type_name: String,
+    /// Type parameter sayısı (tur-5 kural 8: use-site arity = yazılan tip
+    /// argümanları; kural 9: arity birebir eşleşir).
+    pub arity: u16,
+    /// Tipi declare eden dosya.
+    pub file: PathBuf,
+}
+
+/// #167: bir dosyanın tip-düzeyi referans çözümlemesi (tek geçiş, iki kenar sınıfı).
+///
+/// Adapter `resolve_type_references` döndürür; `None` = dil tip-düzeyi
+/// çözümlemesi desteklemiyor (coupling_type alanı ölçümü yok). Dönen hedefler
+/// (namespace, containing, type_name, arity, file) beşlisiyle deduplu +
+/// SIRALIdır (determinizm).
+#[derive(Debug, Clone, Default)]
+pub struct TypeReferenceResolution {
+    /// Çözümlenmiş tip referansları → `EdgeKind::TypeImports`. KADE-1
+    /// (namespace-backed using → dosyada geçen tipler) VE KADE-2 (type-backed
+    /// using `using static N.T;` / `using Alias = N.T;` — directive'in kendisi
+    /// tip referansıdır; occurrence-match mümkün değildir, belgeli Tier-1 sınır).
+    pub type_import_targets: Vec<TypeImportTarget>,
+    /// Using gerektirmeyen aynı-ns çapraz-dosya referansları → `EdgeKind::SameNsType`
+    /// (B3 maskelenmiş yüzey; coupling_type hesabına DAHİL DEĞİL).
+    pub same_ns_targets: Vec<TypeImportTarget>,
+    /// Belirsiz tip adları (birden çok using'de çözümlenen) — kenar üretilmedi,
+    /// pipeline diagnostic basar (CS0104 aynası; fail-visible).
+    pub ambiguous_type_names: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

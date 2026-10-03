@@ -323,6 +323,16 @@ pub enum EdgeKind {
     Approves,
     /// `from` düğümü `to` kuralını ihlal ediyor (negatif-uzay sinyali).
     Violates,
+    /// #167: `from` dosyasının using satırının çözümlenmiş TİP referansı — `to`,
+    /// referans verilen tipi declare eden dosyadır (tip-grenlilik). ns-gren
+    /// `Imports` (temsilci semantiği) YAN YANA yaşar; resolution-indexed ölçüm
+    /// ailesi — `Imports` ASLA değiştirilmez/Değiştirilmez (geriye-uyumluluk:
+    /// eski snapshot/ledger karşılaştırılabilirliği).
+    TypeImports,
+    /// #167 (B3): using gerektirmeyen aynı-namespace çapraz-dosya tip referansı
+    /// (ns-gren grafta görünmeyen maskelenmiş yüzey). Raporlama/körlük-ölçüm
+    /// sınıfıdır — tip-gren coupling (`x_type`) hesabına DAHİL DEĞİL.
+    SameNsType,
 }
 
 /// Kavramsal uzay düğümü (OSP-formalism.md §1.1).
@@ -359,14 +369,24 @@ pub struct Node {
 ///
 /// **Self-loop semantiği:** `from == to` bazı türler için anlamlı (`Calls` — rekürsiyon),
 /// bazıları için değil (`Imports` — modül kendini import edemez; `Witnesses` — self-witness
-/// reddi). Tür-bazlı self-loop validasyonu Faz 1.2/1.3 graf kurulumında eklenecek.
+/// reddi). Tür-bazlı self-loop validasyonu Faz 1.2/1.3 graf kurulumunda eklenecek.
 ///
 /// **Type-only import ayrımı:** `is_type_only` bayrağı TS `import type {Foo}` gibi
 /// runtime dependency üretmeyen import'ları işaretler. CouplingAxis/InstabilityAxis
 /// bu edge'leri *value-only* degree metotlarıyla (`out_degree_value`/`in_degree_value`)
 /// dışlar — type-only import runtime coupling değildir. `#[serde(default)]` eski
 /// snapshot'larla backward-compat sağlar (Node.classification pattern'i).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+///
+/// **#167 tip-gren kenar kimliği (review P0-1):** `TypeImports`/`SameNsType`
+/// kenarlarında `type_ref = Some(EdgeTypeRef)` taşınır — bağımlılık kimliği
+/// TİP SEMBOLÜDÜR (aynı dosyadaki 2 tip → 2 ayrı kenar; partial tip → sembol
+/// başına dosya-başına kenar). Kimlik ailesi böylece `E ⊆ V × V × EdgeKind × T̄`
+/// olur (T̄ = {⊥} ∪ TypeRef; diğer kind'larda daima ⊥). `x_type` KENAR sayısını
+/// değil **distinct sembol** sayısını okur (`Space::out_distinct_type_refs`) —
+/// partial tip bir bağımlılıktır, iki değil.
+///
+/// NOT: `type_ref` alanı String taşıdığından `Edge` artık `Copy` DEĞİL (`Clone` aynen).
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Edge {
     pub from: NodeId,
     pub to: NodeId,
@@ -376,6 +396,91 @@ pub struct Edge {
     /// Backward-compat: eski snapshot'larda yok → `false` (value import varsay).
     #[serde(default)]
     pub is_type_only: bool,
+    /// #167 (P0-1): tip-gren kenarın tip kimliği. Yalnız `TypeImports`/
+    /// `SameNsType` kind'larında `Some`; eski snapshot'larda/other kind'larda
+    /// yok → `None` (serde default).
+    /// NOT: `skip_serializing_if` BURADA YASAK — core `Edge` bincode'a serileşir
+    /// (SnapshotStore milestone/delta); bincode self-describing değildir, skip
+    /// deserialize'ta UnexpectedEof üretir (persistence testi pin'li). JSON
+    /// wire'da (`CliEdge`) alan skip'li, orada güvenli.
+    #[serde(default)]
+    pub type_ref: Option<EdgeTypeRef>,
+}
+
+/// #167 (P0-1 + tur-5 P0): tip-gren kenarın tip kimliği — TAM TİP SEMBOLÜ.
+///
+/// `namespace` = tipin DECLARE edildiği namespace (global ns = `""`).
+/// `containing` = containing-type zinciri, dıştan içe (`[]` = top-level).
+/// `name` = tipin basit adı.
+/// `arity` = type parameter sayısı (`Box<T>` = 1; metadata `` İsim`1 ``
+/// kavramının ayrıştırılmış hali).
+///
+/// **Tur-5 identity amendment** (issue #167 karar kaydı): kimlik artık
+/// `TypeSymbolRef₁ = TypeSymbolRef₂ ⟺ C# sembolü aynı` (Tier-1'in gördüğü
+/// ölçüde). `(namespace, name)` çifti iki yasal sembolü çökertiyordu:
+/// `Box<T>` vs `Box<T1,T2>` (aynı ns, aynı ad, farklı arity) ve
+/// `Ns.Inner` vs `Ns.Outer.Inner` (nested containing path). Tier-1 bir
+/// kullanımın sembolünü bilemeyebilir (belgeli miss'ler — karar kaydı);
+/// ama bildiğini iddia ettiği kimlik çökertmez.
+///
+/// `Ord` sırası `(namespace, containing, name, arity)` — deterministik
+/// kenar sıralaması için (digest preimage + CLI wire sıralaması aynı
+/// sözlükbilimsel sırayı kullanır).
+///
+/// Serde: `containing`/`arity` `#[serde(default)]` — JSON wire'da eski
+/// (branch-içi) artifact'lar `[]`/`0` ile okunur. Core `Edge` bincode'a
+/// serileştiğinden GERÇEK geri-uyumluluk persistence version kırılmasıyla
+/// sağlanır (`SNAPSHOT_FORMAT_VERSION` 3 — v1/v2 peek'de reddedilir);
+/// serde default burada yalnız deserialize hatasına karşı kaba koruma.
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct EdgeTypeRef {
+    pub namespace: String,
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    #[serde(default)]
+    pub containing: Vec<String>,
+    pub name: String,
+    /// Type parameter sayısı (u16 — metadata arity sınırının altında).
+    #[serde(default)]
+    pub arity: u16,
+}
+
+/// **#167 tur-3 P1-3 + tur-5:** `EdgeKind ↔ type_ref` cross-field invariant'ı —
+/// tek merkezî doğrulayıcı:
+///
+/// ```text
+/// TypeImports | SameNsType  ⇒  type_ref = Some(..) VE name boş değil
+///                              VE containing segmentleri boş değil (tur-5)
+/// diğer tüm kind'lar        ⇒  type_ref = None
+/// ```
+///
+/// `namespace` boş olabilir (global ns geçerli); `name` boş OLAMAZ (sembol
+/// kimliği adın kendisidir); `containing` segmenti boş OLAMAZ (tur-5 — boş
+/// segment yarım kimliktir: `["", "Inner"]` ne `[]` ne `["Outer"]` ile
+/// özdeşleştirilebilir). Arity kısıtsızdır (0 geçerli — generic olmayan sembol).
+/// `Space::insert_edge` her kombinasyonu kabul ettiğinden (API yeniden tasarımı
+/// bu PR'ın kapsamı dışı — bilinçli), invariant publication boundary'lerinde
+/// fail-closed uygulanır: `SpaceDigest::compute` (identity yüzeyi — digest'in
+/// type_ref uzantısının güvenli yorumu bu invariant'a dayanır) ve analyzer
+/// pipeline üretimi (yapısal olarak doğru çiftler üretir).
+pub fn validate_edge_type_ref_invariant(edge: &Edge) -> Result<(), &'static str> {
+    match edge.kind {
+        EdgeKind::TypeImports | EdgeKind::SameNsType => match &edge.type_ref {
+            None => Err("type-granular edge must carry type_ref (missing symbol identity)"),
+            Some(r) if r.name.is_empty() => {
+                Err("type-granular edge type_ref.name must be non-empty")
+            }
+            Some(r) if r.containing.iter().any(|s| s.is_empty()) => Err(
+                "type-granular edge type_ref.containing segments must be non-empty (partial identity)",
+            ),
+            Some(_) => Ok(()),
+        },
+        _ => match &edge.type_ref {
+            None => Ok(()),
+            Some(_) => Err("non-type-granular edge must not carry type_ref"),
+        },
+    }
 }
 
 /// Kütleçekim vektörü — `Rule`'lardan gelen kısıt ağırlıkları (`ℝᵏ`).
@@ -493,6 +598,16 @@ impl Space {
     /// **G2c-2 (arkadaş review 7 #3):** Kenar kaldır — kaç edge silindiğini döndür.
     /// `0` = nonexistent edge removal (Q4/Q6 yakalar: agent olmayan edge'i
     /// kaldırdığını iddia edemez). Coupling/instability düşürme = import kaldırma.
+    ///
+    /// **#167 (review tur-4 P2) — kapsam uyarısı:** bu API yalnız **pre-#167 /
+    /// mutable structural** kenar kaldırmadır. Kimlik `(from, to, kind)` —
+    /// tip-gren kenarların `type_ref` sembol kimliğini TAŞIYAMAZ: `retain` çifti
+    /// bazında eşleştiğinden `remove_edge(1, 2, TypeImports)` aynı çift üzerindeki
+    /// TÜM sembolleri (Request + Response gibi) birden siler. Analyzer-owned
+    /// `TypeImports`/`SameNsType` bu API'ye ULAŞMAMALIDIR (iki fail-closed kapı:
+    /// `OutputContract::validate` + `validate_claim_structure`); removal identity
+    /// `type_ref` ile genişletilene dek (#169/#171) bu API'yi generic edge removal
+    /// olarak yeniden açmayın.
     pub fn remove_edge(&mut self, from: NodeId, to: NodeId, kind: EdgeKind) -> usize {
         let before = self.edges.len();
         self.edges
@@ -542,6 +657,22 @@ impl Space {
             .count()
     }
 
+    /// #167 (P0-1): düğümün tip-gren kenarlarında referans verilen AYRIK tip
+    /// sembolü sayısı. `TypeGranularCouplingAxis` (x_type) bunu kullanır —
+    /// kenar sayısını DEĞİL: partial tip 2 dosyada declare edilirse 2 kenar
+    /// üretilir (graf topolojisi her taşıyıcı dosyayı gösterir) ama sembol
+    /// tektir → 1 bağımlılık sayılır. `type_ref` taşımayan kenarlar (eski
+    /// artifact/other kind) sayılmaz — tip kimliği olmayan tip-gren kenarı
+    /// ölçüm KatKATıZ değildir.
+    pub fn out_distinct_type_refs(&self, id: NodeId, kind: EdgeKind) -> usize {
+        self.edges
+            .iter()
+            .filter(|e| e.from == id && e.kind == kind && !e.is_type_only)
+            .filter_map(|e| e.type_ref.as_ref())
+            .collect::<std::collections::BTreeSet<&EdgeTypeRef>>()
+            .len()
+    }
+
     /// Value-only in-degree — type-only import'lar hariç (InstabilityAxis Ca için).
     pub fn in_degree_value(&self, id: NodeId, kind: EdgeKind) -> usize {
         self.edges
@@ -559,6 +690,86 @@ impl Default for Space {
 
 #[cfg(test)]
 mod tests {
+
+    // --- #167 tur-3 P1-3: EdgeKind <-> type_ref cross-field invariant ---
+
+    #[test]
+    fn edge_type_ref_invariant_matrix() {
+        let tref = |ns: &str, name: &str| {
+            Some(EdgeTypeRef {
+                namespace: ns.to_string(),
+                containing: Vec::new(),
+                name: name.to_string(),
+                arity: 0,
+            })
+        };
+        // Tip-gren kind + Some(geçerli) → OK (global ns dahil).
+        for kind in [EdgeKind::TypeImports, EdgeKind::SameNsType] {
+            let e = Edge {
+                kind,
+                type_ref: tref("", "T"),
+                ..Default::default()
+            };
+            assert!(
+                validate_edge_type_ref_invariant(&e).is_ok(),
+                "{kind:?} + Some"
+            );
+        }
+        // Tip-gren kind + None → HATA (eksik sembol kimliği).
+        let e = Edge {
+            kind: EdgeKind::TypeImports,
+            type_ref: None,
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Tip-gren kind + boş name → HATA (sembol kimliği adın kendisi).
+        let e = Edge {
+            kind: EdgeKind::SameNsType,
+            type_ref: tref("Ns", ""),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Tur-5: boş containing segmenti → HATA (yarım kimlik — ne []
+        // ne ["Outer"] ile özdeşleştirilebilir).
+        let e = Edge {
+            kind: EdgeKind::TypeImports,
+            type_ref: Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: vec!["".to_string()],
+                name: "Inner".to_string(),
+                arity: 0,
+            }),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+        // Tur-5: geçerli containing + arity > 0 → OK.
+        let e = Edge {
+            kind: EdgeKind::TypeImports,
+            type_ref: Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: vec!["Outer".to_string()],
+                name: "Inner".to_string(),
+                arity: 2,
+            }),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_ok());
+        // Diğer kind + None → OK.
+        let e = Edge {
+            kind: EdgeKind::Imports,
+            type_ref: None,
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_ok());
+        // Diğer kind + Some → HATA.
+        let e = Edge {
+            kind: EdgeKind::Imports,
+            type_ref: tref("Ns", "T"),
+            ..Default::default()
+        };
+        assert!(validate_edge_type_ref_invariant(&e).is_err());
+    }
+
     use super::*;
 
     fn mod_node(id: NodeId, mass: f64) -> Node {

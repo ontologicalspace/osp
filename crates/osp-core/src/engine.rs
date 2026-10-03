@@ -3480,7 +3480,7 @@ impl SpaceEngine {
             hypothetical.insert_node(node.clone());
         }
         for edge in delta_edges {
-            hypothetical.insert_edge(*edge);
+            hypothetical.insert_edge(edge.clone());
         }
 
         // 4. Ölçülecek node setini belirle.
@@ -3615,7 +3615,7 @@ impl SpaceEngine {
             hypothetical.insert_node(node.clone());
         }
         for edge in &bound.claim.delta_edges {
-            hypothetical.insert_edge(*edge);
+            hypothetical.insert_edge(edge.clone());
         }
 
         // 7. P1-5 (v2): Baseline availability matrix.
@@ -3844,7 +3844,7 @@ impl SpaceEngine {
             hypothetical.insert_node(node.clone());
         }
         for edge in &claim.delta_edges {
-            hypothetical.insert_edge(*edge);
+            hypothetical.insert_edge(edge.clone());
         }
         // Hypothetical'ta subject mevcudiyeti (measure_task_delta pre-check ile aynı).
         for &id in subject_scope.member_ids() {
@@ -4497,7 +4497,7 @@ impl SpaceEngine {
             hypothetical.insert_node(node.clone());
         }
         for edge in delta_edges {
-            hypothetical.insert_edge(*edge);
+            hypothetical.insert_edge(edge.clone());
         }
 
         let measure_ids: Vec<crate::space::NodeId> = if !affected_nodes.is_empty() {
@@ -6199,6 +6199,7 @@ v = 0.5
                 to: 2,
                 kind: EdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             }],
             vec![],
         );
@@ -9058,6 +9059,7 @@ v = 0.5
             to: 2,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         space
     }
@@ -9162,12 +9164,14 @@ v = 0.5
             to: 2,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         engine.space_mut().insert_edge(crate::space::Edge {
             from: 1,
             to: 3,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
 
         // Direct measured_position_of (Node 1).
@@ -11159,6 +11163,7 @@ v = 0.5
             to: 9,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         let engine_b = SpaceEngine::new(
             space_b,

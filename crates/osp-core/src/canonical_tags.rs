@@ -122,7 +122,10 @@ canonical_tag_newtype! {
 }
 
 canonical_tag_newtype! {
-    /// Edge kind canonical tag — `EdgeKind`'ın 8 varyantının stable numeric temsili.
+    /// Edge kind canonical tag — `EdgeKind`'ın 10 varyantının stable numeric temsili.
+    /// #167: `TypeImports => 8` / `SameNsType => 9` APPEND edildi (mevcut 0-7 eşlemeleri
+    /// değişmedi; eski artifact'larda 8/9 asla görünmez, eski okuyucular bilinmeyen
+    /// tag'de fail-closed kalır).
     pub struct CanonicalEdgeKind;
     domain: crate::space::EdgeKind;
     Imports => 0,
@@ -133,6 +136,8 @@ canonical_tag_newtype! {
     Witnesses => 5,
     Approves => 6,
     Violates => 7,
+    TypeImports => 8,
+    SameNsType => 9,
 }
 
 canonical_tag_newtype! {
@@ -457,6 +462,8 @@ impl From<CanonicalEdgeKind> for crate::space::EdgeKind {
             5 => crate::space::EdgeKind::Witnesses,
             6 => crate::space::EdgeKind::Approves,
             7 => crate::space::EdgeKind::Violates,
+            8 => crate::space::EdgeKind::TypeImports,
+            9 => crate::space::EdgeKind::SameNsType,
             _ => unreachable!("CanonicalEdgeKind VALID_TAGS invariant"),
         }
     }
@@ -532,6 +539,8 @@ mod tests {
             (EdgeKind::Witnesses, 5),
             (EdgeKind::Approves, 6),
             (EdgeKind::Violates, 7),
+            (EdgeKind::TypeImports, 8),
+            (EdgeKind::SameNsType, 9),
         ];
         for (kind, expected) in cases {
             let tag = CanonicalEdgeKind::try_from(&kind).unwrap();
@@ -619,6 +628,8 @@ mod tests {
             EdgeKind::Witnesses,
             EdgeKind::Approves,
             EdgeKind::Violates,
+            EdgeKind::TypeImports,
+            EdgeKind::SameNsType,
         ];
         for kind in cases {
             let tag = CanonicalEdgeKind::try_from(&kind).unwrap();

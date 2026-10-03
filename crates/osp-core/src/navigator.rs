@@ -1675,6 +1675,7 @@ mod tests {
             to: 1,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         let cs = CoordinateSystem::default_raw_five(
             crate::coords::MetricSource::Scip, // #96: native coupling source Scip — coupling_task required_source=Some(Scip) native ölçümle onurlanır
@@ -2336,6 +2337,7 @@ mod tests {
                 to: 0,
                 kind: crate::space::EdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             }],
             &[], // G2c-2: removed_edges
             &[], // G2c-2: affected_nodes
@@ -2598,12 +2600,14 @@ mod tests {
             to: 1,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         space.insert_edge(Edge {
             from: 0,
             to: 2,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         // 2 edge kaldır (0→1 Imports) — count 1 döner (sadece 0→1 mevcut).
         let count = space.remove_edge(0, 1, crate::space::EdgeKind::Imports);
@@ -2911,6 +2915,7 @@ mod tests {
                 to: dep,
                 kind: crate::space::EdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             });
         }
         // node 1→0 incoming import → instability balanced (Ca>0).
@@ -2919,6 +2924,7 @@ mod tests {
             to: 0,
             kind: crate::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         let cs = CoordinateSystem::default_raw_five(
             crate::coords::MetricSource::Scip, // #96: native coupling source Scip — coupling_task required_source=Some(Scip) native ölçümle onurlanır

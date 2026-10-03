@@ -1467,7 +1467,15 @@ impl SpaceDigest {
     /// Node'lar id'ye göre sıralanır ve canonical encode edilir (id, kind, mass, cohesion,
     /// classification, role). **Position DAHİL DEĞİL** — engine-derived, author-controlled
     /// değil (authorization.rs:55-73 inclusion table). Edge'ler canonical sıralanır ve
-    /// encode edilir (from, to, kind, is_type_only).
+    /// encode edilir (from, to, kind, is_type_only, **type_ref** — #167 review tur-2 P0-1).
+    ///
+    /// **#167 review tur-2 P0-1 — type_ref bağlanır:** tip-gren kenarların kimliği
+    /// TİP SEMBOLÜDÜR; digest'in onu görmemesi `S₁ ≠ S₂ ⇒ Digest(S₁) ≠ Digest(S₂)`
+    /// invariant'ını kırardı (aynı dosyada Request/Response ayrımı kaybolurdu —
+    /// `SpaceViewRevision.content_digest` space identity olarak tüketilir).
+    /// Encoding uzantısı geriye-uyumlu: `type_ref: None` hiçbir bayt EKLEMEZ →
+    /// type_ref'siz space'lerin digest'ı eski algoritmayla BYTE-ÖZDEŞ kalır
+    /// (persisted digest'ler geçerli kalır); `Some` tagged uzantı ekler.
     ///
     /// Önceki placeholder yalnız `t_c` üzerinden hash üretiyordu — iki farklı space
     /// aynı `t_c`'de aynı digest üretiyordu.
@@ -1485,14 +1493,31 @@ impl SpaceDigest {
             encode_canonical_node(&mut hasher, &canonical)?;
         }
 
-        // Edge'leri canonical sırala → encode. **Step 6 P0:** `encode_canonical_edge_vec`
-        // as-is encode eder (Step 5 — structural delta için tek canonicalization try_new'de).
-        // SpaceDigest için sort burada yapılır; `Space.edges` insertion-order'dır, canonical
-        // content identity için sıralama zorunlu. Encoder yeniden sort ETMEZ.
-        let mut canonical_edges: Vec<CanonicalEdge> = space
+        // Edge'leri canonical sırala → encode. **Step 6 P0:** structural-delta
+        // encoder'ından FARKLI akış — SpaceDigest space kenarını `type_ref` ile
+        // birlikte bağlar (`encode_space_edge_preimage_to_vec`; structural delta
+        // `CanonicalEdge`'de ref TAŞIMAZ — proposal akışı observational kind'ları
+        // reddeder, agent.rs/`validate` + `validate_claim_structure` kapıları).
+        //
+        // Sıralama TUPLE üzerinde kalır (`push_u64` little-endian'dır — preimage
+        // bayt sırası sayısal sırayla örtüşmez; bayt-sıralama digest'ı değiştirirdi).
+        // `type_ref` yalnız eş-tuple kenarlar arasında ayrışır: (is_some, ns,
+        // containing, name, arity) — None < Some (tur-5: tüm kimlik eksenleri).
+        // None-only space'lerde sıra ve digest eski algoritmayla birebir.
+        let mut canonical_edges: Vec<(CanonicalEdge, Option<crate::space::EdgeTypeRef>)> = space
             .edges
             .iter()
             .map(|e| {
+                // **tur-3 P1-3:** publication boundary — cross-field invariant
+                // fail-closed. Ref'siz TypeImports kenarı digest'te görünür ama
+                // x_type sessizce yok sayardı (iki truth surface ayrı söz söyler);
+                // Imports+type_ref ise digest uzantısını geçersiz biçimde büyütür.
+                crate::space::validate_edge_type_ref_invariant(e).map_err(|detail| {
+                    AuthorizationBasisDigestError::EncodingFailed(format!(
+                        "edge {}→{}: {}",
+                        e.from, e.to, detail
+                    ))
+                })?;
                 Ok(CanonicalEdge {
                     from: e.from,
                     to: e.to,
@@ -1503,10 +1528,26 @@ impl SpaceDigest {
                     )?,
                     is_type_only: e.is_type_only,
                 })
+                .map(|canonical| (canonical, e.type_ref.clone()))
             })
             .collect::<Result<Vec<_>, AuthorizationBasisDigestError>>()?;
-        canonical_edges.sort_unstable();
-        encode_canonical_edge_vec(&mut hasher, &canonical_edges)?;
+        canonical_edges.sort_by(|a, b| {
+            a.0.cmp(&b.0).then_with(|| {
+                // **tur-5:** eş-tuple kenarlar arasında deterministik type_ref
+                // sıralaması — `None < Some`, `Some` içinde türetilmiş `Ord`
+                // `(ns, containing, name, arity)`. Tuple sıralaması korunur
+                // (LE `push_u64` nedeniyle bayt-sıralaması sayısal sırayla
+                // örtüşmez).
+                a.1.cmp(&b.1)
+            })
+        });
+        // LABEL FROZEN: "new_edge_count" — structural-delta encoder'ının akışıyla
+        // byte-özdeşlik (None-only space'lerde digest compat); per-edge preimage
+        // `encode_space_edge_preimage_to_vec` (P0-1 uzantılı).
+        encode_u64(&mut hasher, canonical_edges.len() as u64, "new_edge_count");
+        for (canonical, type_ref) in &canonical_edges {
+            hasher.update(&encode_space_edge_preimage_to_vec(canonical, type_ref));
+        }
 
         let hash = hasher.finalize();
         Ok(Self(hash.into()))
@@ -2235,6 +2276,7 @@ pub fn restore_claim_for_resume(basis: &AuthorizationBasis) -> crate::witness::C
             to: e.to,
             kind: e.kind.into(),
             is_type_only: e.is_type_only,
+            type_ref: None,
         })
         .collect();
     let removed_edges = basis
@@ -4315,6 +4357,41 @@ pub(crate) fn encode_canonical_edge_to_vec(edge: &CanonicalEdge) -> Vec<u8> {
     push_u64(&mut bytes, edge.to);
     push_tag(&mut bytes, edge.kind);
     push_u8(&mut bytes, edge.is_type_only as u8);
+    bytes
+}
+
+/// **#167 review tur-2 P0-1 + tur-5:** SpaceDigest kenar preimage'i — structural
+/// `encode_canonical_edge_to_vec` baytları + `type_ref` uzantısı:
+/// `None → (hiçbir bayt eklenmez)`; `Some → [1][u64 len][ns][u64 adet][segment
+/// başına u64 len + bayt][u64 len][name][u16 arity]`.
+///
+/// Tur-5 identity amendment: `containing` + `arity` preimage'e BAĞLANIR —
+/// kimlik eksenleri digest'te ayrışmalı (`S₁ ≠ S₂ ⇒ Digest ≠ Digest(S₂)`
+/// invariant'ı; `Box<T>` vs `Box<T1,T2>` ve `Ns.Inner` vs `Ns.Outer.Inner`
+/// artık farklı preimage üretir).
+///
+/// Compat invariant'ı: `None` UZANTISIZDIR → type_ref'siz space'lerin digest
+/// preimage'ı (ve dolayısıyla digest'i) eski algoritmayla byte-özdeş kalır —
+/// persisted `SpaceViewRevision.content_digest` değerleri geçerliliğini korur.
+/// `Some` tag'i 1'dir; 0 rezerve (None açık-kodlu ayrım gelecekte gerekirse).
+pub(crate) fn encode_space_edge_preimage_to_vec(
+    canonical: &CanonicalEdge,
+    type_ref: &Option<crate::space::EdgeTypeRef>,
+) -> Vec<u8> {
+    let mut bytes = encode_canonical_edge_to_vec(canonical);
+    if let Some(r) = type_ref {
+        push_u8(&mut bytes, 1);
+        push_u64(&mut bytes, r.namespace.len() as u64);
+        bytes.extend_from_slice(r.namespace.as_bytes());
+        push_u64(&mut bytes, r.containing.len() as u64);
+        for seg in &r.containing {
+            push_u64(&mut bytes, seg.len() as u64);
+            bytes.extend_from_slice(seg.as_bytes());
+        }
+        push_u64(&mut bytes, r.name.len() as u64);
+        bytes.extend_from_slice(r.name.as_bytes());
+        bytes.extend_from_slice(&r.arity.to_le_bytes());
+    }
     bytes
 }
 
@@ -12945,6 +13022,163 @@ mod tests {
         );
     }
 
+    // --- #167 review tur-2 P0-1: SpaceDigest type_ref binding ---
+
+    #[test]
+    fn space_digest_distinguishes_type_refs_on_same_edge_tuple() {
+        // Reviewer ornegi: ayni (from,to,kind) TypeImports kenari, sembol
+        // Request vs Response — space'ler FARKLI ise digest'ler FARKLI olmali
+        // (S1 != S2 => Digest(S1) != Digest(S2); SpaceViewRevision.content_digest
+        // space identity olarak tuketilir).
+        let mk = |r: crate::space::EdgeTypeRef| {
+            let mut space = crate::space::Space::new();
+            space.insert_node(crate::space::Node {
+                id: 1,
+                ..Default::default()
+            });
+            space.insert_node(crate::space::Node {
+                id: 2,
+                ..Default::default()
+            });
+            space.insert_edge(crate::space::Edge {
+                from: 1,
+                to: 2,
+                kind: crate::space::EdgeKind::TypeImports,
+                type_ref: Some(r),
+                ..Default::default()
+            });
+            space
+        };
+        let tref =
+            |ns: &str, containing: &[&str], name: &str, arity: u16| crate::space::EdgeTypeRef {
+                namespace: ns.to_string(),
+                containing: containing.iter().map(|s| s.to_string()).collect(),
+                name: name.to_string(),
+                arity,
+            };
+        let d_req = SpaceDigest::compute(&mk(tref("App.Contracts", &[], "Request", 0))).unwrap();
+        let d_res = SpaceDigest::compute(&mk(tref("App.Contracts", &[], "Response", 0))).unwrap();
+        let d_req2 = SpaceDigest::compute(&mk(tref("App.Contracts", &[], "Request", 0))).unwrap();
+        assert_ne!(
+            d_req.as_bytes(),
+            d_res.as_bytes(),
+            "sembol farki digest'e dusmeli"
+        );
+        assert_eq!(d_req.as_bytes(), d_req2.as_bytes(), "deterministik");
+
+        // **tur-5 P0-1 (generic arity):** `Box<T>` vs `Box<T1,T2>` — aynı ns,
+        // aynı ad, farklı arity → farklı sembol → farklı digest.
+        let d_box1 = SpaceDigest::compute(&mk(tref("App.Svc", &[], "Box", 1))).unwrap();
+        let d_box2 = SpaceDigest::compute(&mk(tref("App.Svc", &[], "Box", 2))).unwrap();
+        assert_ne!(
+            d_box1.as_bytes(),
+            d_box2.as_bytes(),
+            "tur-5: arity farki digest'e dusmeli (Box`1 vs Box`2)"
+        );
+        // **tur-5 P0-2 (nested containing):** `Ns.Inner` (top-level) vs
+        // `Ns.Outer.Inner` (nested) → farklı sembol → farklı digest.
+        let d_top = SpaceDigest::compute(&mk(tref("App.Svc", &[], "Inner", 0))).unwrap();
+        let d_nested = SpaceDigest::compute(&mk(tref("App.Svc", &["Outer"], "Inner", 0))).unwrap();
+        assert_ne!(
+            d_top.as_bytes(),
+            d_nested.as_bytes(),
+            "tur-5: containing farki digest'e dusmeli (Ns.Inner vs Ns.Outer.Inner)"
+        );
+    }
+
+    #[test]
+    fn space_digest_rejects_edge_type_ref_invariant_violations() {
+        // tur-3 P1-3: publication boundary — ref'siz TypeImports (x_type'in sessizce
+        // yok saydığı yarım kimlik) ve ref'li Imports digest hesabına GİREMEZ.
+        let mut space = crate::space::Space::new();
+        space.insert_node(crate::space::Node {
+            id: 1,
+            ..Default::default()
+        });
+        space.insert_node(crate::space::Node {
+            id: 2,
+            ..Default::default()
+        });
+
+        let mut s = space.clone();
+        s.insert_edge(crate::space::Edge {
+            from: 1,
+            to: 2,
+            kind: crate::space::EdgeKind::TypeImports,
+            type_ref: None,
+            ..Default::default()
+        });
+        let err = SpaceDigest::compute(&s).expect_err("ref'siz TypeImports red");
+        assert!(format!("{err}").contains("symbol identity"), "{err}");
+
+        let mut s = space;
+        s.insert_edge(crate::space::Edge {
+            from: 1,
+            to: 2,
+            kind: crate::space::EdgeKind::Imports,
+            type_ref: Some(crate::space::EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: Vec::new(),
+                name: "T".to_string(),
+                arity: 0,
+            }),
+            ..Default::default()
+        });
+        let err = SpaceDigest::compute(&s).expect_err("ref'li Imports red");
+        assert!(format!("{err}").contains("must not carry"), "{err}");
+    }
+
+    #[test]
+    fn space_edge_preimage_none_extension_is_empty_for_digest_compat() {
+        // P0-1 compat pini: type_ref: None preimage'a HIC bayt eklemez —
+        // type_ref'siz space'lerin digest'i eski algoritmayla byte-ozdes kalir
+        // (persisted digest'ler gecerli). Tur-5 Some akışı: [1][u64 len][ns]
+        // [u64 adet][segment: u64 len + bayt]... [u64 len][name][u16 arity LE].
+        use crate::space::EdgeTypeRef;
+        let canonical = CanonicalEdge {
+            from: 7,
+            to: 9,
+            kind: CanonicalEdgeKind::try_from(&crate::space::EdgeKind::TypeImports).unwrap(),
+            is_type_only: false,
+        };
+        let none = encode_space_edge_preimage_to_vec(&canonical, &None);
+        assert_eq!(
+            none,
+            encode_canonical_edge_to_vec(&canonical),
+            "None = uzantisiz"
+        );
+
+        let some = encode_space_edge_preimage_to_vec(
+            &canonical,
+            &Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: vec!["Outer".to_string()],
+                name: "T".to_string(),
+                arity: 2,
+            }),
+        );
+        // 1 (tag) + 8+2 (ns) + 8 (count) + 8+5 (containing) + 8+1 (name) + 2 (arity)
+        assert_eq!(some.len(), none.len() + 1 + 8 + 2 + 8 + 8 + 5 + 8 + 1 + 2);
+        assert_eq!(
+            &some[some.len() - 2..],
+            &2u16.to_le_bytes(),
+            "arity LE sonda"
+        );
+
+        // **tur-5:** arity/containing preimage'i AYRIŞTIRIR — aynı ns+ad, farklı
+        // eksen → farklı baytlar (digest ayrışmasının preimage düzeyinde pini).
+        let plain = encode_space_edge_preimage_to_vec(
+            &canonical,
+            &Some(EdgeTypeRef {
+                namespace: "Ns".to_string(),
+                containing: Vec::new(),
+                name: "T".to_string(),
+                arity: 0,
+            }),
+        );
+        assert_ne!(some, plain, "containing+arity preimage'i değiştirir");
+    }
+
     #[test]
     fn persisted_space_view_id_has_expected_length() {
         // **reviewer P0-3:** CSPRNG identity — 16 byte.
@@ -13014,6 +13248,7 @@ mod tests {
                 to: 2,
                 kind: EdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             });
             space
         };
@@ -13040,27 +13275,30 @@ mod tests {
             to: 2,
             kind: EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         };
         let edge_b = Edge {
             from: 1,
             to: 3,
             kind: EdgeKind::Calls,
             is_type_only: true,
+            type_ref: None,
         };
         let mut a = Space::default();
         a.nodes.insert(1, mk_node(1));
         a.nodes.insert(2, mk_node(2));
         a.nodes.insert(3, mk_node(3));
-        a.edges.push(edge_a);
-        a.edges.push(edge_b);
+        a.edges.push(edge_a.clone());
+
+        a.edges.push(edge_b.clone());
 
         let mut b = Space::default();
         b.nodes.insert(1, mk_node(1));
         b.nodes.insert(2, mk_node(2));
         b.nodes.insert(3, mk_node(3));
         // Ters insertion order.
-        b.edges.push(edge_b);
-        b.edges.push(edge_a);
+        b.edges.push(edge_b.clone());
+        b.edges.push(edge_a.clone());
 
         assert_eq!(
             SpaceDigest::compute(&a).unwrap(),

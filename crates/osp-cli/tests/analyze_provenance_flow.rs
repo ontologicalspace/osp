@@ -81,7 +81,10 @@ fn analyze_json_emits_provenance_envelope() {
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("stdout not JSON: {e}\n{stdout}"));
 
     // Review P1-1 — analysis provenance is axis-specific (not "native" — MD-2 term).
-    assert_eq!(envelope["schema_version"], 1, "schema_version");
+    assert_eq!(
+        envelope["schema_version"], 2,
+        "schema_version 2 (#167: type-granular edge kinds + optional coupling_type)"
+    );
     assert_eq!(
         envelope["analysis"]["metric_representation"], "axis_provenanced_v1",
         "analysis metric representation"
@@ -248,7 +251,7 @@ fn analyze_human_default_still_emits_envelope() {
         .arg(dir.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"schema_version\": 1"))
+        .stdout(predicate::str::contains("\"schema_version\": 2"))
         .stdout(predicate::str::contains("\"axis_provenanced_v1\""));
 }
 
@@ -268,7 +271,7 @@ fn analyze_out_flag_writes_envelope_file() {
 
     let written = fs::read_to_string(&out_path).expect("read snapshot.json");
     let envelope: serde_json::Value = serde_json::from_str(&written).expect("written file is JSON");
-    assert_eq!(envelope["schema_version"], 1);
+    assert_eq!(envelope["schema_version"], 2);
     assert_eq!(
         envelope["analysis"]["provenance_model"],
         "analyzer_axis_specific"

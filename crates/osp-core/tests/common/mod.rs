@@ -2204,7 +2204,7 @@ pub fn v1_compute_raw_from_delta(
         hypothetical.insert_node(node.clone());
     }
     for edge in delta_edges {
-        hypothetical.insert_edge(*edge);
+        hypothetical.insert_edge(edge.clone());
     }
     let measure_ids: Vec<osp_core::space::NodeId> = if !affected_nodes.is_empty() {
         affected_nodes.to_vec()

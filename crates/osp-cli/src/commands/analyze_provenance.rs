@@ -174,6 +174,9 @@ pub struct CliAxisMeasurement {
 ///
 /// V1 yalnız coupling/cohesion/instability taşır (analyzer ModuleMetrics scope).
 /// entropy/witness_depth native engine measurement (#96) gelene kadar yok — fabricate edilmez.
+/// #167: `coupling_type` (tip-grenlilik x_type) OPSEYONELDİR — dil tip-düzeyi
+/// çözümlemesi desteklemiyorsa alan snapshot'ta görünmez (`skip_serializing_if`);
+/// eski snapshot'lar (v1) alanı olmadan sorunsuz deserialize olur (`serde(default)`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CliAnalyzeNode {
     pub node_id: u64,
@@ -183,6 +186,8 @@ pub struct CliAnalyzeNode {
     pub role: CliNodeRole,
     pub mass: f64,
     pub coupling: CliAxisMeasurement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling_type: Option<CliAxisMeasurement>,
     pub cohesion: CliAxisMeasurement,
     pub instability: CliAxisMeasurement,
 }
@@ -207,6 +212,12 @@ impl CliAnalyzeNode {
                 confidence: metrics.coupling.confidence,
                 coverage: metrics.coupling.coverage,
             },
+            coupling_type: metrics.coupling_type.as_ref().map(|mv| CliAxisMeasurement {
+                value: mv.value,
+                source: mv.source.into(),
+                confidence: mv.confidence,
+                coverage: mv.coverage,
+            }),
             cohesion: CliAxisMeasurement {
                 value: metrics.cohesion.value,
                 source: metrics.cohesion.source.into(),
@@ -234,6 +245,32 @@ pub struct CliEdge {
     pub kind: CliEdgeKind,
     #[serde(default)]
     pub is_type_only: bool,
+    /// #167 (review P0-1): tip-gren kenarların TİP SEMBOLÜ kimliği.
+    /// Yalnız `type_imports`/`same_ns_type` kind'larında görünür (skip-if-none);
+    /// eski snapshot'larda alan yok → `None` (serde default). JSON wire —
+    /// core `Edge`'in aksine bincode YOK, skip burada güvenli.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_ref: Option<CliEdgeTypeRef>,
+}
+
+/// #167 (P0-1 + tur-5): tip-gren kenarın TAM TİP SEMBOLÜ kimliği — wire
+/// karşılığı (snake_case). `Ord` sırası `(namespace, containing, name,
+/// arity)` — canonical wire sort için (core `EdgeTypeRef` ile aynı sözlük
+/// sırası). Tur-5 identity amendment: `Box<T>` vs `Box<T1,T2>` (arity) ve
+/// `Ns.Inner` vs `Ns.Outer.Inner` (containing) ayrı kimliklerdir.
+/// `containing`/`arity` serde-default — eski (branch-içi) JSON artifact'lar
+/// `[]`/`0` ile okunur (kalıcı veri değil; bincode persistence ayrıca v3
+/// kırmaktadır).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+pub struct CliEdgeTypeRef {
+    pub namespace: String,
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    #[serde(default)]
+    pub containing: Vec<String>,
+    pub name: String,
+    /// Type parameter sayısı (metadata `` İsim`1 `` kavramının ayrıştırılmışı).
+    #[serde(default)]
+    pub arity: u16,
 }
 
 /// Edge kind — CLI wire formatı (snake_case). Core `EdgeKind` ile birebir varyant
@@ -249,6 +286,10 @@ pub enum CliEdgeKind {
     Witnesses,
     Approves,
     Violates,
+    /// #167: using satırının çözümlenmiş tip referansı (tip-grenlilik).
+    TypeImports,
+    /// #167 (B3): using gerektirmeyen aynı-ns çapraz-dosya tip referansı.
+    SameNsType,
 }
 
 impl CliEdgeKind {
@@ -257,6 +298,8 @@ impl CliEdgeKind {
     /// Enum declaration order'a bağımlı DEĞİL: explicit map. Declaration sırası
     /// kazara değişirse wire ordering sessizce değişmemeli — wire contract'ı
     /// `sort_edges_canonical` içinde kapsüllenmiştir.
+    /// #167: TypeImports=8 / SameNsType=9 APPEND — mevcut kenarların göreli
+    /// canonical sırası ve eski snapshot baytları DEĞİŞMEZ.
     const fn wire_rank(self) -> u8 {
         match self {
             Self::Imports => 0,
@@ -267,6 +310,8 @@ impl CliEdgeKind {
             Self::Witnesses => 5,
             Self::Approves => 6,
             Self::Violates => 7,
+            Self::TypeImports => 8,
+            Self::SameNsType => 9,
         }
     }
 }
@@ -282,6 +327,8 @@ impl From<osp_core::space::EdgeKind> for CliEdgeKind {
             osp_core::space::EdgeKind::Witnesses => Self::Witnesses,
             osp_core::space::EdgeKind::Approves => Self::Approves,
             osp_core::space::EdgeKind::Violates => Self::Violates,
+            osp_core::space::EdgeKind::TypeImports => Self::TypeImports,
+            osp_core::space::EdgeKind::SameNsType => Self::SameNsType,
         }
     }
 }
@@ -294,6 +341,12 @@ impl CliEdge {
             to: edge.to,
             kind: edge.kind.into(),
             is_type_only: edge.is_type_only,
+            type_ref: edge.type_ref.as_ref().map(|r| CliEdgeTypeRef {
+                namespace: r.namespace.clone(),
+                containing: r.containing.clone(),
+                name: r.name.clone(),
+                arity: r.arity,
+            }),
         }
     }
 }
@@ -301,10 +354,20 @@ impl CliEdge {
 /// Canonical wire-order sort — envelope construction katmanı enum sıralama
 /// ayrıntısını bilmez (P0-1 kapsülleme).
 ///
-/// Order: `(from, to, kind_wire_rank, is_type_only)` ascending. Deterministik
-/// wire output — `space.edges` insertion-order geliyor, kendi sıralamamız lazım.
+/// Order: `(from, to, kind_wire_rank, is_type_only, type_ref)` ascending.
+/// Deterministik wire output — `space.edges` insertion-order geliyor, kendi sıralamamız lazım.
+/// #167 (P0-1): `type_ref` anahtarın SON halkası — `None < Some`, `Some` içinde
+/// `(namespace, name)`; mevcut (type_ref'siz) kenarların göreli sırası DEĞİŞMEZ.
 pub fn sort_edges_canonical(edges: &mut [CliEdge]) {
-    edges.sort_by_key(|edge| (edge.from, edge.to, edge.kind.wire_rank(), edge.is_type_only));
+    edges.sort_by_key(|edge| {
+        (
+            edge.from,
+            edge.to,
+            edge.kind.wire_rank(),
+            edge.is_type_only,
+            edge.type_ref.clone(),
+        )
+    });
 }
 
 /// Analyze envelope integrity error (review P1-3 — exact-set node identity + path bijection).
@@ -866,11 +929,14 @@ mod tests {
 
     #[test]
     fn cli_edge_serializes_exact_wire_shape() {
+        // type_ref: None + skip_serializing_if → 4-alanlı wire şekli KORUNUR
+        // (eski snapshot/tüketici sözleşmesi; #167 P0-1 yalnız VARSA ekler).
         let edge = CliEdge {
             from: 2,
             to: 0,
             kind: CliEdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         };
         assert_eq!(
             serde_json::to_value(edge).unwrap(),
@@ -890,6 +956,7 @@ mod tests {
             to: 9,
             kind: osp_core::space::EdgeKind::DerivesFrom,
             is_type_only: true,
+            type_ref: None,
         };
         let cli = CliEdge::from_edge(&core);
         assert_eq!(cli.from, 7);
@@ -918,6 +985,7 @@ mod tests {
             to: 2,
             kind: osp_core::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         assert!(validate_edge_endpoints(&space).is_ok());
     }
@@ -931,6 +999,7 @@ mod tests {
             to: 2,
             kind: osp_core::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         assert!(matches!(
             validate_edge_endpoints(&space),
@@ -951,6 +1020,7 @@ mod tests {
             to: 2,
             kind: osp_core::space::EdgeKind::Imports,
             is_type_only: false,
+            type_ref: None,
         });
         assert!(matches!(
             validate_edge_endpoints(&space),
@@ -972,30 +1042,35 @@ mod tests {
                 to: 2,
                 kind: CliEdgeKind::Calls,
                 is_type_only: false,
+                type_ref: None,
             },
             CliEdge {
                 from: 1,
                 to: 2,
                 kind: CliEdgeKind::Imports,
                 is_type_only: true,
+                type_ref: None,
             },
             CliEdge {
                 from: 2,
                 to: 0,
                 kind: CliEdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             },
             CliEdge {
                 from: 1,
                 to: 2,
                 kind: CliEdgeKind::Imports,
                 is_type_only: false,
+                type_ref: None,
             },
             CliEdge {
                 from: 0,
                 to: 9,
                 kind: CliEdgeKind::Violates,
                 is_type_only: false,
+                type_ref: None,
             },
         ];
         sort_edges_canonical(&mut edges);

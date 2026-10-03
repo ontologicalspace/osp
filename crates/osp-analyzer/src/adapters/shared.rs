@@ -852,6 +852,23 @@ impl ImportResolver {
 // C# namespace index (#137) — namespace → dosyalar
 // ═══════════════════════════════════════════════════════════════════════════════
 
+/// #167 tur-5 (identity amendment): bir ns altındaki tip sembolünün kimlik
+/// anahtarı — `(containing zinciri, basit ad, arity)`.
+///
+/// `(namespace, name)` çifti iki yasal C# sembolünü çökertiyordu:
+/// `Box<T>` vs `Box<T1,T2>` (farklı arity) ve `Ns.Inner` vs `Ns.Outer.Inner`
+/// (farklı containing). `Ord` türetilmiş sıra `(containing, name, arity)` —
+/// deterministik iterasyon ve kimlik karşılaştırması.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TypeSymbolKey {
+    /// Containing-type basit-ad zinciri, dıştan içe (`[]` = top-level).
+    pub containing: Vec<String>,
+    /// Tipin basit adı.
+    pub name: String,
+    /// Type parameter sayısı (bildirim tarafı: `type_parameter_list` çocukları).
+    pub arity: u16,
+}
+
 /// C# namespace'lerini dosyalarıyla indeksleyen harita — `using N.S;`
 /// (namespace-form, C#'ta baskın form) çözümlemesi için.
 ///
@@ -861,21 +878,52 @@ impl ImportResolver {
 /// C#'ta sözdizimsel işaret yoktur — declare edilmişlik o işareti sağlar).
 /// Kenar hedefi temsilci dosyadır (sorted-first, deterministik).
 ///
-/// Build maliyeti: her `.cs` dosyası bir kez parse edilir (namespace_declaration
-/// ağacı için). Non-C# repo'da boş indeks — maliyet sıfır.
+/// Build maliyeti: her `.cs` dosyası bir kez parse edilir (namespace VE tip
+/// bildirimleri için — #167 tip indeksi aynı geçişte doldurulur). Non-C# repo'da
+/// boş indeks — maliyet sıfır.
 #[derive(Debug, Clone, Default)]
 pub struct CSharpNamespaceIndex {
     map: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+    /// #167 (tur-5): namespace → tip sembol KİMLİĞİ → declare eden dosyalar
+    /// (sorted; partial tip → çoklu). Kimlik = `TypeSymbolKey` (containing
+    /// zinciri + basit ad + arity) — iç içe tipler containing zinciriyle,
+    /// generic tipler arity ile ayrışır. Tip bildirim türleri: class/struct/
+    /// record/record-struct/interface/enum/delegate.
+    ns_types: std::collections::HashMap<
+        String,
+        std::collections::BTreeMap<TypeSymbolKey, Vec<std::path::PathBuf>>,
+    >,
+    /// #167: dosya → declare ettiği tip adları (kendi-ad düşürme kuralı — yerel
+    /// bildirim using'd ns adayından önce gelir; ad-düzeyi: C# bildirim
+    /// önceliği arity'den bağımsızdır, yerel ad tüm arity'leri gölgeler).
+    file_types: std::collections::HashMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
+    /// #167: dosya → declare ettiği namespace'ler (SameNsType + kendi-ns öncelik
+    /// kuralı). Boş küme = namespace bildirmeyen dosya (global ns).
+    file_namespaces:
+        std::collections::HashMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
 }
 
 impl CSharpNamespaceIndex {
-    /// Tüm `.cs` dosyalarını parse edip `namespace_declaration` isimlerini
-    /// indeksle. Dosya-başına (`namespace A;`) VE blok (`namespace A { }`)
-    /// formları desteklenir; iç içe bloklarda üst adlar önek olarak birleştirilir
-    /// (`namespace A { namespace B { } }` → "A" ve "A.B").
+    /// Tüm `.cs` dosyalarını parse edip `namespace_declaration` isimlerini VE tip
+    /// bildirimlerini (tam sembol kimliğiyle) indeksle. Dosya-başına
+    /// (`namespace A;`) VE blok (`namespace A { }`) formları desteklenir; iç içe
+    /// bloklarda üst adlar önek olarak birleştirilir (`namespace A { namespace
+    /// B { } }` → "A" ve "A.B").
     pub fn build(all_files: &[std::path::PathBuf]) -> Self {
         let mut map: std::collections::HashMap<String, Vec<std::path::PathBuf>> =
             std::collections::HashMap::new();
+        let mut ns_types: std::collections::HashMap<
+            String,
+            std::collections::BTreeMap<TypeSymbolKey, Vec<std::path::PathBuf>>,
+        > = std::collections::HashMap::new();
+        let mut file_types: std::collections::HashMap<
+            std::path::PathBuf,
+            std::collections::BTreeSet<String>,
+        > = std::collections::HashMap::new();
+        let mut file_namespaces: std::collections::HashMap<
+            std::path::PathBuf,
+            std::collections::BTreeSet<String>,
+        > = std::collections::HashMap::new();
         for f in all_files {
             if f.extension().and_then(|e| e.to_str()) != Some("cs") {
                 continue;
@@ -888,16 +936,63 @@ impl CSharpNamespaceIndex {
                 Some(t) => t,
                 None => continue,
             };
-            let mut names = Vec::new();
-            collect_namespace_names(tree.root_node(), source.as_bytes(), "", &mut names);
-            for name in names {
-                map.entry(name).or_default().push(f.clone());
+            let mut namespaces = Vec::new();
+            let mut types: Vec<(String, Vec<String>, String, u16)> = Vec::new();
+            collect_namespace_and_type_names(
+                tree.root_node(),
+                source.as_bytes(),
+                "",
+                &[],
+                &mut namespaces,
+                &mut types,
+            );
+            if namespaces.is_empty() && types.is_empty() {
+                continue;
+            }
+            // Review P1-2: namespace bildirmeyen dosya GLOBAL namespace ("")
+            // üyesidir — "" gerçek ns kimliği olarak indekslenir; SameNsType ve
+            // kendi-ns öncelik kuralları global ns'te de çalışır.
+            let mut ns_set: std::collections::BTreeSet<String> =
+                namespaces.iter().cloned().collect();
+            if ns_set.is_empty() {
+                ns_set.insert(String::new());
+            }
+            let ty_set: std::collections::BTreeSet<String> =
+                types.iter().map(|(_, _, n, _)| n.clone()).collect();
+            file_namespaces.insert(f.clone(), ns_set);
+            if !ty_set.is_empty() {
+                file_types.insert(f.clone(), ty_set);
+            }
+            for name in namespaces {
+                map.entry(name.clone()).or_default().push(f.clone());
+            }
+            for (ns, containing, name, arity) in types {
+                ns_types
+                    .entry(ns)
+                    .or_default()
+                    .entry(TypeSymbolKey {
+                        containing,
+                        name,
+                        arity,
+                    })
+                    .or_default()
+                    .push(f.clone());
             }
         }
         for files in map.values_mut() {
             files.sort();
         }
-        Self { map }
+        for types in ns_types.values_mut() {
+            for files in types.values_mut() {
+                files.sort();
+            }
+        }
+        Self {
+            map,
+            ns_types,
+            file_types,
+            file_namespaces,
+        }
     }
 
     /// İndekslenen namespace sayısı (diagnostic).
@@ -914,38 +1009,505 @@ impl CSharpNamespaceIndex {
     pub fn resolve(&self, namespace: &str) -> Option<&std::path::PathBuf> {
         self.map.get(namespace).and_then(|files| files.first())
     }
+
+    /// #167: `ns` repo içinde declare edilmiş bir namespace mi? (KADE-1 koşulu —
+    /// namespace-backed using testi; type-backed using'ler bu testte elenir.)
+    pub fn is_declared_namespace(&self, ns: &str) -> bool {
+        self.map.contains_key(ns)
+    }
+
+    /// #167 (tur-5): `ns` altında declare edilen tip sembolleri (kimlik →
+    /// dosyalar). BTreeMap → deterministik sıralı iterasyon.
+    pub fn types_under(
+        &self,
+        ns: &str,
+    ) -> Option<&std::collections::BTreeMap<TypeSymbolKey, Vec<std::path::PathBuf>>> {
+        self.ns_types.get(ns)
+    }
+
+    /// #167 (tur-5): tam sembol kimliğiyle tip araması — `(ns, containing,
+    /// name, arity)` birebir. Zincir bağlamanın (kural 10) nested-önce
+    /// yorumunun ve basit-ad bağlamanın (kural 9) tek lookup noktası.
+    pub fn type_files(
+        &self,
+        ns: &str,
+        containing: &[String],
+        name: &str,
+        arity: u16,
+    ) -> Option<&Vec<std::path::PathBuf>> {
+        self.ns_types.get(ns).and_then(|types| {
+            types.get(&TypeSymbolKey {
+                containing: containing.to_vec(),
+                name: name.to_string(),
+                arity,
+            })
+        })
+    }
+
+    /// #167: dosyanın declare ettiği tip adları (kendi-ad düşürme kuralı).
+    pub fn file_declared_types(
+        &self,
+        file: &std::path::Path,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.file_types.get(file)
+    }
+
+    /// #167: dosyanın declare ettiği namespace'ler (SameNsType + öncelik kuralı).
+    pub fn file_declared_namespaces(
+        &self,
+        file: &std::path::Path,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.file_namespaces.get(file)
+    }
+
+    /// #167 (P1-1 + tur-5 kural 12): dosyada bu adda tip bildirimi varsa
+    /// bildirildiği ns + containing + arity döndür (KADE-2
+    /// directive-referansının sembol kimliği için). Deterministik tercih sırası:
+    /// (i) arity birebir eşleşenler, yoksa tümü; (ii) içinde bu sıra —
+    /// top-level (`[]`) önce, sonra en kısa containing, sonra en küçük arity,
+    /// sonra lexicographic. HashMap iterasyon bağımsızlığı için toplam sıradır.
+    pub fn find_type_declaration(
+        &self,
+        file: &std::path::Path,
+        type_name: &str,
+        arity: u16,
+    ) -> Option<(String, Vec<String>)> {
+        let candidates: Vec<(String, Vec<String>, u16)> = self
+            .ns_types
+            .iter()
+            .flat_map(|(ns, types)| {
+                types
+                    .iter()
+                    .filter(|(key, files)| key.name == type_name && files.iter().any(|f| f == file))
+                    .map(|(key, _)| (ns.clone(), key.containing.clone(), key.arity))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let exact_arity: Vec<_> = candidates.iter().filter(|(_, _, a)| *a == arity).collect();
+        let pool: Vec<&(String, Vec<String>, u16)> = if exact_arity.is_empty() {
+            candidates.iter().collect()
+        } else {
+            exact_arity
+        };
+        pool.iter()
+            .min_by_key(|(_, containing, a)| (containing.len(), containing.clone(), *a))
+            .map(|(ns, containing, _)| (ns.clone(), containing.clone()))
+    }
 }
 
-/// `namespace_declaration` (blok formu) VE `file_scoped_namespace_declaration`
-/// (`namespace X;` — C# 10+, modern default) ağaçlarından isimleri topla —
-/// iç içe bloklarda önek birleştirmeli recursive walk. İki kind da `name`
-/// field'ı taşır (node-types).
-fn collect_namespace_names(node: Node, source: &[u8], prefix: &str, out: &mut Vec<String>) {
+/// #167 tur-5 (identity amendment): bir `.cs` dosyasının TİP-REFERANS
+/// evreni — use-site kimlik eksenleriyle (ad + arity) ve nitelikli zincirlerle.
+///
+/// Üç bileşen:
+/// - `simple`: yalın (nitelenmemiş) referanslar — `(basit ad, use-site arity)`.
+///   Arity kural 8: `generic_name` içindeki ad → yazılan tip-argüman sayısı
+///   (`Box<int>` → 1, `Box<int,string>` → 2, `typeof(Box<>)` → 0 — belgeli
+///   Tier-1 sınır); yalın identifier → 0.
+/// - `chains`: nitelikli zincirler (`Outer.Inner`, `Ns.Type.Member`), uzunluk
+///   ≥ 2 — tip konumunda `qualified_name` VE yalın-sol'lu ifadelerde
+///   `member_access_expression`. Zincir yapısal yorumlamaya girer (kural 10:
+///   nested-önce, sonra ns-önek, sonra durur — üye konumundaki segmentler
+///   `simple`'a DÜŞMEZ; eski yürüyüşün member-access sağ-taraf düz
+///   eşleşmeleri bu kapsamda kaldırılır).
+/// - `type_params`: tip-parametre basit adları (ad-düzeyi düşürme — kural 3;
+///   C# gölgelemesi arity'den bağımsızdır).
+///
+/// Dışlamalar (önceki yürüyüşle aynı): `using_directive` alt ağaçları (ns
+/// segmentleri referans değil), namespace bildiriminin `name` düğümü (blok
+/// gövdesi taranmaya devam eder), comment/string node-kind'ları (`identifier`
+/// değildirler). Tip ARGÜMANLARI referanstır (`Box<Other>` → `Other` simple'a
+/// girer) — argüman alt ağaçları taranır.
+#[derive(Debug, Clone, Default)]
+pub struct CSharpTypeReferenceUniverse {
+    /// (basit ad, use-site arity) — yalın referanslar.
+    pub simple: std::collections::BTreeSet<(String, u16)>,
+    /// Nitelikli zincirler: dıştan içe segmentler `(ad, use-site arity)`,
+    /// uzunluk ≥ 2. Zincir başları adapter'da `simple`'a eklenir (L0 düz
+    /// bağlanır — kural 10).
+    pub chains: std::collections::BTreeSet<Vec<(String, u16)>>,
+    /// Tip-parametre basit adları (ad-düzeyi düşürme).
+    pub type_params: std::collections::BTreeSet<String>,
+}
+
+/// Bir zincir segmentini oku: `identifier` → (ad, 0); `generic_name` →
+/// (ad, tip-argüman sayısı). Diğer node-kind'lar segment DEĞİLDİR.
+fn flatten_segment(node: Node, source: &[u8]) -> Option<(String, u16)> {
+    match node.kind() {
+        "identifier" => node
+            .utf8_text(source)
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|n| !n.is_empty())
+            .map(|n| (n, 0)),
+        "generic_name" => generic_name_parts(node, source),
+        _ => None,
+    }
+}
+
+/// `generic_name` → (ad, arity). İlk `identifier` çocuğu addır; arity =
+/// `type_argument_list` içindeki NAMED çocuk sayısı (yazılan tip argümanları —
+/// kural 8). `child_count` DEĞİL — `<`, `,`, `>` anonim token'ları da sayardı
+/// (`Box<int>` → 3 çıkardı; empirik S-expression + debug doğrulaması).
+fn generic_name_parts(node: Node, source: &[u8]) -> Option<(String, u16)> {
+    let mut name: Option<String> = None;
+    let mut arity: u16 = 0;
+    for i in 0..node.child_count() {
+        if let Some(c) = node.child(i) {
+            match c.kind() {
+                "identifier" => {
+                    if name.is_none() {
+                        if let Ok(text) = c.utf8_text(source) {
+                            let n = text.trim();
+                            if !n.is_empty() {
+                                name = Some(n.to_string());
+                            }
+                        }
+                    }
+                }
+                "type_argument_list" => {
+                    arity = c.named_child_count().min(u16::MAX as usize) as u16;
+                }
+                _ => {}
+            }
+        }
+    }
+    name.map(|n| (n, arity))
+}
+
+/// `qualified_name` zincirini düzleştir (qualifier alanı boyunca sola-iç içe)
+/// VE segmentlerin tip-argüman alt ağaçlarını `universe`'e tarar. Top-down
+/// yürüyüşte karşılaşılan her `qualified_name` zincirinin EN DIŞ düğümüdür
+/// (iç içe geçme yalnız `qualifier` alanı üzerinden olur; `name` alanı daima
+/// identifier/generic_name'dir — S-expression doğrulaması).
+fn flatten_qualified_chain(
+    node: Node,
+    source: &[u8],
+    segments: &mut Vec<(String, u16)>,
+    universe: &mut CSharpTypeReferenceUniverse,
+) {
+    if let Some(qualifier) = node.child_by_field_name("qualifier") {
+        match qualifier.kind() {
+            "qualified_name" => {
+                flatten_qualified_chain(qualifier, source, segments, universe);
+            }
+            _ => {
+                if let Some(seg) = flatten_segment(qualifier, source) {
+                    segments.push(seg);
+                }
+                walk_type_arguments(qualifier, source, universe);
+            }
+        }
+    }
+    if let Some(name_node) = node.child_by_field_name("name") {
+        if let Some(seg) = flatten_segment(name_node, source) {
+            segments.push(seg);
+        }
+        walk_type_arguments(name_node, source, universe);
+    }
+}
+
+/// `member_access_expression` yalın-sol zinciri: `expression` alanı
+/// identifier/generic_name ya da (recursive olarak) yalın-sol'lu bir
+/// `member_access_expression` ise zincir düzleştirilebilir; değilse (metot
+/// çağrısı sonucu, `this`/`base`, indeksleyici...) `None` — alt ağaç bugünkü
+/// gibi normal taranır (asimetri bilinçli: tur-5 karar kaydı, belgeli
+/// Tier-1 sınır).
+fn flatten_member_chain(
+    node: Node,
+    source: &[u8],
+    universe: &mut CSharpTypeReferenceUniverse,
+) -> Option<Vec<(String, u16)>> {
+    let name_node = node.child_by_field_name("name")?;
+    let name_seg = flatten_segment(name_node, source)?;
+    // Segment bir `generic_name` ise (generic METOT adı — `GetGrain<IFoo>(x)`
+    // member_access'in name alanında generic_name durur; empirik S-expression
+    // doğrulaması) tip argümanları da referanstır: IFoo kaybolmamalı.
+    walk_type_arguments(name_node, source, universe);
+    let expr = node.child_by_field_name("expression")?;
+    match expr.kind() {
+        "identifier" | "generic_name" => {
+            let head = flatten_segment(expr, source)?;
+            walk_type_arguments(expr, source, universe);
+            Some(vec![head, name_seg])
+        }
+        "member_access_expression" => {
+            let mut chain = flatten_member_chain(expr, source, universe)?;
+            chain.push(name_seg);
+            Some(chain)
+        }
+        _ => None,
+    }
+}
+
+/// Node'un `type_argument_list` alt ağaçlarını tarar (tip argümanları da
+/// referanstır: `Box<Other>` → `Other`). Argüman düğümleri serbest tipler
+/// olabilir (identifier/generic_name/qualified_name) — normal yürüyüşle.
+fn walk_type_arguments(node: Node, source: &[u8], universe: &mut CSharpTypeReferenceUniverse) {
+    for i in 0..node.child_count() {
+        if let Some(c) = node.child(i) {
+            if c.kind() == "type_argument_list" {
+                walk_reference_names(c, source, universe);
+            }
+        }
+    }
+}
+
+/// #167: bir `.cs` dosyasının tip-referans evrenini topla (tur-5).
+pub fn collect_csharp_reference_universe(source: &str) -> CSharpTypeReferenceUniverse {
+    let mut universe = CSharpTypeReferenceUniverse::default();
+    let tree = match parse_root(source, tree_sitter_c_sharp::LANGUAGE.into()) {
+        Some(t) => t,
+        None => return universe,
+    };
+    walk_reference_names(tree.root_node(), source.as_bytes(), &mut universe);
+    universe
+}
+
+fn walk_reference_names(node: Node, source: &[u8], universe: &mut CSharpTypeReferenceUniverse) {
+    for i in 0..node.child_count() {
+        if let Some(c) = node.child(i) {
+            let k = c.kind();
+            match k {
+                // using satırındaki identifier'lar tip referansı değil — alt ağacı atla.
+                "using_directive" => continue,
+                "type_parameter" => {
+                    // Review P1-3: node'un TAM METNİ değil `name` FIELD'ı okunur —
+                    // grammar `attributes* optional(in|out) name` biçimindedir;
+                    // tam metin `out T` / attribute'lu halleri yakalar, `T`'yi
+                    // identifiers kümesinde bırakırdı (false TypeImports).
+                    if let Some(name_node) = c.child_by_field_name("name") {
+                        if let Ok(text) = name_node.utf8_text(source) {
+                            let name = text.trim();
+                            if !name.is_empty() {
+                                universe.type_params.insert(name.to_string());
+                            }
+                        }
+                    }
+                    continue;
+                }
+                "identifier" => {
+                    if let Ok(text) = c.utf8_text(source) {
+                        let name = text.trim();
+                        if !name.is_empty() {
+                            universe.simple.insert((name.to_string(), 0));
+                        }
+                    }
+                    continue;
+                }
+                "generic_name" => {
+                    // Kural 8: use-site arity = yazılan tip-argüman sayısı.
+                    // Argümanlar da referanstır — yalnız onların alt ağacı taranır.
+                    if let Some((name, arity)) = generic_name_parts(c, source) {
+                        universe.simple.insert((name, arity));
+                    }
+                    walk_type_arguments(c, source, universe);
+                    continue;
+                }
+                "qualified_name" => {
+                    // Kural 10: tip konumundaki nitelikli zincir — yapısal yorum.
+                    let mut segments = Vec::new();
+                    flatten_qualified_chain(c, source, &mut segments, universe);
+                    if segments.len() >= 2 {
+                        universe.chains.insert(segments);
+                    }
+                    continue;
+                }
+                "member_access_expression" => {
+                    // Kural 10 (ifade tarafı): yalın-sol zincirler yapısal yorumlanır.
+                    // Segmentlerin (generic metot adları dahil) tip argümanları
+                    // flatten sırasında taranır.
+                    if let Some(chain) = flatten_member_chain(c, source, universe) {
+                        universe.chains.insert(chain);
+                    } else {
+                        // Yapısal değil (metot-sonucu vb.): alt ağaç normal taranır
+                        // — `name` alanı simple'a girer (tur-5 karar kaydındaki
+                        // bilinçli asimetri).
+                        walk_reference_names(c, source, universe);
+                    }
+                    continue;
+                }
+                "namespace_declaration" | "file_scoped_namespace_declaration" => {
+                    // name düğümü atlanır (ns segmentleri referans değil);
+                    // declaration_list gövdesi normal taranır.
+                    let name_child = c.child_by_field_name("name");
+                    for j in 0..c.child_count() {
+                        if let Some(cc) = c.child(j) {
+                            if name_child.map(|n| n.id()) == Some(cc.id()) {
+                                continue;
+                            }
+                            walk_reference_names(cc, source, universe);
+                        }
+                    }
+                    continue;
+                }
+                _ => walk_reference_names(c, source, universe),
+            }
+        }
+    }
+}
+
+/// `namespace_declaration` VE tip bildirimlerini (TAM sembol kimliğiyle:
+/// ns + containing zinciri + ad + arity) TEK geçişte topla — #167 tip indeksi
+/// (`ns_types`) için. Tip bildirim türleri ve iç içe tipler (`class A { class
+/// B {} }` → A `(containing=[])` ve B `(containing=[A])`, ikisi de dosyanın
+/// ns'i altında). Arity = `type_parameter_list` içindeki `type_parameter`
+/// çocuk sayısı (tur-5 kural 8'in bildirim-tarağı).
+///
+/// **Gramer notu ( empirik, S-expression doğrulaması):** file-scoped form
+/// (`namespace X;`) DÜZ ağaç üretir — sonraki tip bildirimleri compilation_unit
+/// altında KARDEŞ olarak durur (ns düğümünün çocuğu değiller). Bu yüzden
+/// sibling-yürüyüş ambient önek taşır: file-scoped ns görülünce SONRAKİ
+/// kardeşler o ns'e atanır; blok formunda (`namespace X { ... }`) yalnız
+/// declaration_list ÇOCUKLARI yeni öneği alır (kardeşler dışarıdadır).
+fn collect_namespace_and_type_names(
+    node: Node,
+    source: &[u8],
+    prefix: &str,
+    containing: &[String],
+    out_namespaces: &mut Vec<String>,
+    out_types: &mut Vec<(String, Vec<String>, String, u16)>,
+) {
+    let mut ambient = prefix.to_string();
     for i in 0..node.child_count() {
         if let Some(c) = node.child(i) {
             let k = c.kind();
             if k == "namespace_declaration" || k == "file_scoped_namespace_declaration" {
+                let Some(name_node) = c.child_by_field_name("name") else {
+                    // İsim okunamadı — alt ağacı mevcut önek ile tara.
+                    collect_namespace_and_type_names(
+                        c,
+                        source,
+                        &ambient,
+                        containing,
+                        out_namespaces,
+                        out_types,
+                    );
+                    continue;
+                };
+                let Ok(text) = name_node.utf8_text(source) else {
+                    collect_namespace_and_type_names(
+                        c,
+                        source,
+                        &ambient,
+                        containing,
+                        out_namespaces,
+                        out_types,
+                    );
+                    continue;
+                };
+                let name = text.trim();
+                let full = if ambient.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{ambient}.{name}")
+                };
+                out_namespaces.push(full.clone());
+                // Blok içindekiler (nested ns'ler / tipler) declaration_list'te;
+                // name düğümü atlanır. File-scoped'da bu liste tipikçe boştur
+                // (düz gramer) — içerik kardeşlerde, aşağıda ambient ile taranır.
+                // Tipten GELEN containing zinciri ns SIFIRLANIR (nested tip ns
+                // değildir — dıştaki tipin ns'i geçerlidir; gramer bu yolu
+                // üretmez, savunma).
+                let name_id = name_node.id();
+                for j in 0..c.child_count() {
+                    if let Some(cc) = c.child(j) {
+                        if cc.id() == name_id {
+                            continue;
+                        }
+                        collect_namespace_and_type_names(
+                            cc,
+                            source,
+                            &full,
+                            &[],
+                            out_namespaces,
+                            out_types,
+                        );
+                    }
+                }
+                // File-scoped: SONRAKİ kardeşler bu ns'indedir. Blok formunda
+                // ambient değişmez — kardeşler bloğun DIŞINDADIR.
+                if k == "file_scoped_namespace_declaration" {
+                    ambient = full;
+                }
+            } else if matches!(
+                k,
+                "class_declaration"
+                    | "struct_declaration"
+                    | "record_declaration"
+                    | "record_struct_declaration"
+                    | "interface_declaration"
+                    | "enum_declaration"
+                    | "delegate_declaration"
+            ) {
                 if let Some(name_node) = c.child_by_field_name("name") {
                     if let Ok(text) = name_node.utf8_text(source) {
                         let name = text.trim();
-                        let full = if prefix.is_empty() {
-                            name.to_string()
-                        } else {
-                            format!("{prefix}.{name}")
-                        };
-                        out.push(full.clone());
-                        // Blok içindekiler (nested namespaces / using'ler) declaration_list'te.
-                        collect_namespace_names(c, source, &full, out);
-                        continue;
+                        if !name.is_empty() {
+                            // Tur-5: arity = type_parameter_list içindeki
+                            // type_parameter çocuk sayısı (class/struct/record/
+                            // interface alan-childe; delegate `type_parameters`
+                            // alanı — kind taraması ikisini de kapsar).
+                            let arity = declaration_arity(c);
+                            out_types.push((
+                                ambient.clone(),
+                                containing.to_vec(),
+                                name.to_string(),
+                                arity,
+                            ));
+                        }
                     }
                 }
-                // İsim okunamadıysa bile alt ağacı tara (öneksiz).
-                collect_namespace_names(c, source, prefix, out);
+                // İç içe tip bildirimleri de indekse girer — containing zinciri
+                // BU tipin basit adıyla uzar (tur-5: düz ad DEĞİL).
+                let mut nested_containing = containing.to_vec();
+                if let Some(name_node) = c.child_by_field_name("name") {
+                    if let Ok(text) = name_node.utf8_text(source) {
+                        let name = text.trim();
+                        if !name.is_empty() {
+                            nested_containing.push(name.to_string());
+                        }
+                    }
+                }
+                collect_namespace_and_type_names(
+                    c,
+                    source,
+                    &ambient,
+                    &nested_containing,
+                    out_namespaces,
+                    out_types,
+                );
             } else {
-                collect_namespace_names(c, source, prefix, out);
+                collect_namespace_and_type_names(
+                    c,
+                    source,
+                    &ambient,
+                    containing,
+                    out_namespaces,
+                    out_types,
+                );
             }
         }
     }
+}
+
+/// Bildirim düğümünün generic arity'si — `type_parameter_list` çocuğundaki
+/// `type_parameter` çocuk sayısı (tur-5; S-expression doğrulaması: class
+/// düz-child, delegate `type_parameters` alanı — kind taraması ikisini de
+/// bulur). Liste yoksa 0 (generic olmayan sembol).
+fn declaration_arity(decl: Node) -> u16 {
+    for i in 0..decl.child_count() {
+        if let Some(c) = decl.child(i) {
+            if c.kind() == "type_parameter_list" {
+                let count = (0..c.child_count())
+                    .filter(|j| c.child(*j).is_some_and(|tp| tp.kind() == "type_parameter"))
+                    .count();
+                return count.min(u16::MAX as usize) as u16;
+            }
+        }
+    }
+    0
 }
 
 /// Eski linear resolver — geri uyumluluk için (deprecated, ImportResolver kullanın).
@@ -1379,6 +1941,129 @@ mod tests {
         std::fs::write(dir.join("main.py"), "import os\n").unwrap();
         let idx = CSharpNamespaceIndex::build(&[dir.join("main.py")]);
         assert!(idx.is_empty());
+    }
+
+    // --- #167 tur-5: tip sembol kimliği indeksi (containing + arity) ---
+
+    #[test]
+    fn csharp_index_keys_generic_arity_and_nested_containing() {
+        // Tur-5 P0: aynı ns + aynı ad, farklı arity → AYRI anahtarlar; nested
+        // tip containing zinciri taşır. Eski düz-ad anahtarı bu sembolleri
+        // çökertiyordu.
+        let dir = tempdir();
+        std::fs::write(
+            dir.join("Svc.cs"),
+            "namespace App.Svc;\n\npublic class Box<T> { }\npublic class Box<T1, T2> { }\npublic class Inner { }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("Outer.cs"),
+            "namespace App.Svc;\n\npublic class Outer\n{\n    public class Inner { }\n    public class Pair<T> { }\n}\n",
+        )
+        .unwrap();
+        let idx = CSharpNamespaceIndex::build(&[dir.join("Svc.cs"), dir.join("Outer.cs")]);
+        assert!(idx.type_files("App.Svc", &[], "Box", 1).is_some());
+        assert!(idx.type_files("App.Svc", &[], "Box", 2).is_some());
+        // Kısmi-anahtar ayrışması: arity-3 Box YOK.
+        assert!(idx.type_files("App.Svc", &[], "Box", 3).is_none());
+        // Top-level Inner Svc.cs'te; nested Inner Outer.cs'te — aynı ad,
+        // farklı containing, farklı dosyalar.
+        let top_inner = idx.type_files("App.Svc", &[], "Inner", 0).unwrap();
+        assert!(top_inner.iter().all(|f| f.ends_with("Svc.cs")));
+        let nested_containing = vec!["Outer".to_string()];
+        let nested_inner = idx
+            .type_files("App.Svc", &nested_containing, "Inner", 0)
+            .expect("nested Inner indekste");
+        assert!(nested_inner.iter().all(|f| f.ends_with("Outer.cs")));
+        // Nested GENERIC: Pair<T> containing=[Outer] arity=1.
+        assert!(idx
+            .type_files("App.Svc", &nested_containing, "Pair", 1)
+            .is_some());
+        assert!(idx
+            .type_files("App.Svc", &nested_containing, "Pair", 0)
+            .is_none());
+    }
+
+    #[test]
+    fn csharp_reference_universe_arity_and_chains() {
+        // Tur-5 kural 8: use-site arity = yazılan tip argümanları (NAMED çocuk
+        // sayısı — `<`/`,`/`>` anonim token'ları sayılmaz: `Box<int>` → 1).
+        // Kural 10: nitelikli zincirler (tip + ifade konumu) yapısal toplanır;
+        // zincir segment ADLARI simple'a düşmez (adapter yorumlar).
+        let u = collect_csharp_reference_universe(
+            "namespace App;\nusing App.Svc;\nclass P\n{\n    Box<int> a;\n    Box<int, string> b;\n    Outer.Inner c;\n    void M(Logger log) { log.Information(\"x\"); App.Svc.Mail.Send(); }\n}\n",
+        );
+        assert!(
+            u.simple.contains(&("Box".to_string(), 1)),
+            "generic_name arity 1: {:?}",
+            u.simple
+        );
+        assert!(
+            u.simple.contains(&("Box".to_string(), 2)),
+            "generic_name arity 2: {:?}",
+            u.simple
+        );
+        // Zincirler: [Outer, Inner], [log, Information], [App, Svc, Mail, Send].
+        assert!(
+            u.chains
+                .contains(&vec![("Outer".to_string(), 0), ("Inner".to_string(), 0)]),
+            "tip konumu zinciri: {:?}",
+            u.chains
+        );
+        assert!(
+            u.chains.contains(&vec![
+                ("log".to_string(), 0),
+                ("Information".to_string(), 0)
+            ]),
+            "ifade zinciri: {:?}",
+            u.chains
+        );
+        assert!(
+            u.chains.contains(&vec![
+                ("App".to_string(), 0),
+                ("Svc".to_string(), 0),
+                ("Mail".to_string(), 0),
+                ("Send".to_string(), 0)
+            ]),
+            "uzun ifade zinciri: {:?}",
+            u.chains
+        );
+        // Segment adları simple'a DÜŞMEMELİ (adapter yorumlayacak) — Information
+        // yalnız zincirde, Outer yalnız zincir başı olarak head havuzuna
+        // adapter'da eklenir.
+        assert!(
+            !u.simple.iter().any(|(n, _)| n == "Information"),
+            "üye konumu simple'a düşmez: {:?}",
+            u.simple
+        );
+        assert!(
+            !u.simple
+                .iter()
+                .any(|(n, _)| n == "Inner" || n == "Svc" || n == "Send"),
+            "zincir gövde segmentleri simple'a düşmez: {:?}",
+            u.simple
+        );
+    }
+
+    #[test]
+    fn csharp_reference_universe_open_generic_typeof_is_zero_arity() {
+        // Tur-5 belgeli sınırı pini: `typeof(Box<>)` → boş argüman listesi →
+        // use-site arity 0.
+        let u =
+            collect_csharp_reference_universe("class P { object T() { return typeof(Box<>); } }\n");
+        assert!(
+            u.simple.contains(&("Box".to_string(), 0)),
+            "açık generic → arity 0: {:?}",
+            u.simple
+        );
+    }
+
+    #[test]
+    fn csharp_reference_universe_type_arguments_are_references() {
+        // Tip argümanları da referanstır: `Box<Other>` → Other simple'da.
+        let u = collect_csharp_reference_universe("class P { Box<Other> f; }\n");
+        assert!(u.simple.contains(&("Other".to_string(), 0)));
+        assert!(u.simple.contains(&("Box".to_string(), 1)));
     }
 
     fn tempdir() -> std::path::PathBuf {

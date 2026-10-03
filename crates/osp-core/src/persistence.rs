@@ -21,7 +21,20 @@ use crate::witness::ClaimId;
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// bincode format sürümü (reviewer #4). Uyumsuzluk → graceful error.
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+/// **v2 (#167 review tur-2 P0-3):** `Edge.type_ref` alanı bincode gövdesine
+/// girdi — v1 `Edge` baytları (4 alan) yeni struct'ta `UnexpectedEof` üretir.
+/// **v3 (#167 review tur-5 identity amendment):** `EdgeTypeRef` kimliği
+/// `{namespace, name}` → `{namespace, containing, name, arity}` — tam tip
+/// sembol kimliği. v2 baytları serde-default ile okunabilir ANCAK bu yarım
+/// kimliği `[]`/`0`'a çökertirdiğinden (belirsiz kimliğin sessiz
+/// launder'i — "yarım kimlik YASAK" ilkesi) v2 de v1 gibi BİLİNÇLİ REDDEDİLİR:
+/// version-peek fail-visible `VersionMismatch`. v2 yalnız bu branch'in iç
+/// artifact'larında vardı (main'de hiç yayımlanmadı) → kırılma bedelsiz.
+/// Bilinçli format kırılması: eski kayıtlar MİGRE EDİLMEZ; version-peek
+/// (deserialize'tan ÖNCE ilk 4 bayt) sayesinde fail-visible `VersionMismatch`
+/// ile reddedilirler (opak Bincode EOF'u yerine). Eski store kökleri yeniden
+/// üretilmelidir. Gerçek migration gerektiğinde: LegacyV1/V2 mirror + dönüşüm.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 3;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PersistenceError {
@@ -101,6 +114,12 @@ impl SnapshotStore {
 
     /// Tam Space snapshot kaydet (`milestones/milestone_t{t_c}.bincode`).
     pub fn save_milestone(&self, snapshot: SpaceSnapshot) -> Result<PathBuf, PersistenceError> {
+        // **tur-3 P1-1:** version WRITER-OWNED — caller alanına ne yazdıysa güncel
+        // format etiketi DAMGALANIR. Format tag body-encoding contract'ıdır,
+        // metadata değil: v2 gövdesini v1 etiketiyle yazıp kendi reader'ında
+        // VersionMismatch üretmek (writer footgun) imkânsızlaşır.
+        let mut snapshot = snapshot;
+        snapshot.version = SNAPSHOT_FORMAT_VERSION;
         let path = self
             .milestones_dir
             .join(format!("milestone_t{}.bincode", snapshot.t_c));
@@ -115,6 +134,10 @@ impl SnapshotStore {
             .milestones_dir
             .join(format!("milestone_t{}.bincode", t_c));
         let bytes = std::fs::read(&path)?;
+        // P0-3: version önce (peek) — eski-format baytları struct'a düşünmeden reddet.
+        if let Some(found) = Self::peek_format_version(&bytes) {
+            self.check_version(found)?;
+        }
         let snapshot: SpaceSnapshot = bincode::deserialize(&bytes)?;
         self.check_version(snapshot.version)?;
         Ok(snapshot)
@@ -148,6 +171,9 @@ impl SnapshotStore {
 
     /// Per-commit delta kaydet (`deltas/delta_t{t_c}.bincode`).
     pub fn save_delta(&self, record: DeltaRecord) -> Result<PathBuf, PersistenceError> {
+        // **tur-3 P1-1:** version WRITER-OWNED (save_milestone ile aynı sözleşme).
+        let mut record = record;
+        record.version = SNAPSHOT_FORMAT_VERSION;
         let path = self
             .deltas_dir
             .join(format!("delta_t{}.bincode", record.t_c));
@@ -159,6 +185,10 @@ impl SnapshotStore {
     fn load_delta_by_t_c(&self, t_c: u64) -> Result<DeltaRecord, PersistenceError> {
         let path = self.deltas_dir.join(format!("delta_t{}.bincode", t_c));
         let bytes = std::fs::read(&path)?;
+        // P0-3: version önce (peek) — eski-format baytları struct'a düşünmeden reddet.
+        if let Some(found) = Self::peek_format_version(&bytes) {
+            self.check_version(found)?;
+        }
         let record: DeltaRecord = bincode::deserialize(&bytes)?;
         self.check_version(record.version)?;
         Ok(record)
@@ -232,6 +262,19 @@ impl SnapshotStore {
     }
 
     // ── Version check ─────────────────────────────────────────────────────
+
+    /// **#167 review tur-2 P0-3:** bincode (fixint, little-endian) serileştirmede
+    /// `version` her iki kayıt türünün de İLK alanıdır — deserialize ETMEDEN ilk
+    /// 4 bayttan okunabilir. Eski-format baytlar yeni struct'ta `UnexpectedEof`
+    /// verir; version kontrolü deserialize'tan sonra geldiğinde hata opak
+    /// `Bincode` olarak yüzeye çıkardı (VersionMismatch aşamasına gelemiyordu).
+    /// Peek önce kontrol eder → eski format fail-visible reddedilir.
+    fn peek_format_version(bytes: &[u8]) -> Option<u32> {
+        if bytes.len() < 4 {
+            return None; // aşırı-kısa kayıt: deserialize kendi hatasını üretir
+        }
+        Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
 
     fn check_version(&self, file_version: u32) -> Result<(), PersistenceError> {
         if file_version != SNAPSHOT_FORMAT_VERSION {
@@ -407,6 +450,107 @@ mod tests {
         assert_eq!(restored.space.edges[0].to, 11);
     }
 
+    /// **tur-3 P1-1:** writer version'ı SAHİPLENİR — caller `version: 1` verse bile
+    /// diske güncel etiket yazılır (ilk 4 bayt), reader kabul eder. v2-gövde +
+    /// v1-etiket kombinasyonu (kendi ürettiğini okuyamama) üretilemez.
+    #[test]
+    fn save_stamps_current_format_version_regardless_of_caller_field() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(tmp.path()).unwrap();
+
+        let snap = SpaceSnapshot {
+            version: 1, // yanlış etiket — writer damgalamalı
+            t_c: 3,
+            timestamp_ms: 0,
+            space: Space::new(),
+        };
+        store.save_milestone(snap).unwrap();
+        let bytes = std::fs::read(store.milestones_dir.join("milestone_t3.bincode")).unwrap();
+        assert_eq!(
+            SnapshotStore::peek_format_version(&bytes),
+            Some(SNAPSHOT_FORMAT_VERSION),
+            "disk etiketi writer tarafından damgalanmalı"
+        );
+        store
+            .load_milestone_by_t_c(3)
+            .expect("kendi yazdığını okumalı");
+
+        let rec = delta_record(7, &[1], &[]);
+        // not: delta_record zaten SNAPSHOT_FORMAT_VERSION kullanır; alanı bozup
+        // damgalamanın caller-alanını ezip ezenmediğini de doğrula
+        let mut rec = rec;
+        rec.version = 999;
+        store.save_delta(rec).unwrap();
+        let db = std::fs::read(store.deltas_dir.join("delta_t7.bincode")).unwrap();
+        assert_eq!(
+            SnapshotStore::peek_format_version(&db),
+            Some(SNAPSHOT_FORMAT_VERSION)
+        );
+    }
+
+    /// **tur-3 P2-1:** delta reader simetrisi — gerçek v1 baytları (type_ref'siz
+    /// Edge gövdesi) `load_delta_by_t_c` üzerinde de fail-visible VersionMismatch.
+    #[test]
+    fn legacy_v1_delta_bytes_fail_visible_version_mismatch() {
+        #[derive(serde::Serialize)]
+        struct LegacyEdgeV1 {
+            from: u64,
+            to: u64,
+            kind: crate::space::EdgeKind,
+            is_type_only: bool,
+        }
+        #[derive(serde::Serialize)]
+        struct LegacyDeltaV1 {
+            new_nodes: Vec<()>,
+            new_edges: Vec<LegacyEdgeV1>,
+            removed_edges: Vec<()>,
+            repositioned: Vec<()>,
+        }
+        #[derive(serde::Serialize)]
+        struct LegacyDeltaRecordV1 {
+            version: u32,
+            t_c: u64,
+            claim_id: ClaimId,
+            delta: LegacyDeltaV1,
+            safety_weakened: bool,
+        }
+
+        let legacy = LegacyDeltaRecordV1 {
+            version: 1,
+            t_c: 5,
+            claim_id: 5,
+            delta: LegacyDeltaV1 {
+                new_nodes: vec![],
+                new_edges: vec![LegacyEdgeV1 {
+                    from: 1,
+                    to: 2,
+                    kind: crate::space::EdgeKind::Imports,
+                    is_type_only: false,
+                }],
+                removed_edges: vec![],
+                repositioned: vec![],
+            },
+            safety_weakened: false,
+        };
+        let bytes = bincode::serialize(&legacy).unwrap();
+        assert!(
+            bincode::deserialize::<DeltaRecord>(&bytes).is_err(),
+            "v1 delta baytları mevcut struct'a deserialize OLAMAMALI"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(tmp.path()).unwrap();
+        std::fs::write(store.deltas_dir.join("delta_t5.bincode"), &bytes).unwrap();
+        let result = store.load_delta_by_t_c(5);
+        assert!(matches!(
+            result,
+            Err(PersistenceError::VersionMismatch {
+                file: 1,
+                expected: SNAPSHOT_FORMAT_VERSION
+            })
+        ));
+    }
+
     // --- edge cases ---
 
     #[test]
@@ -466,7 +610,80 @@ mod tests {
             result,
             Err(PersistenceError::VersionMismatch {
                 file: 999,
-                expected: 1
+                expected: SNAPSHOT_FORMAT_VERSION
+            })
+        ));
+    }
+
+    /// **#167 review tur-2 P0-3:** eski-format (v1 `Edge` — type_ref'siz) baytlar
+    /// deserialize'a DÜŞMEDEN fail-visible `VersionMismatch` alır. Peek olmasaydı:
+    /// `bincode::deserialize::<SpaceSnapshot>` aynı baytlarda `UnexpectedEof`
+    /// üretirdi (aşağıda pin'lendi) — hata opak `Bincode` olarak yüzeye çıkardı.
+    #[test]
+    fn legacy_v1_bytes_fail_visible_version_mismatch() {
+        // v1 gövde aynası: alan SIRASI mevcut Space/Snapshot ile aynı, Edge
+        // type_ref'siz (v1 şekli). Boş map'ler değer tipinden bağımsız aynı
+        // baytları üretir; TimeLayer aynı tip.
+        #[derive(serde::Serialize)]
+        struct LegacyEdgeV1 {
+            from: u64,
+            to: u64,
+            kind: crate::space::EdgeKind,
+            is_type_only: bool,
+        }
+        #[derive(serde::Serialize)]
+        struct LegacySpaceV1 {
+            nodes: std::collections::HashMap<u64, ()>,
+            edges: Vec<LegacyEdgeV1>,
+            gravity: std::collections::HashMap<u64, Vec<f64>>,
+            time_layer: crate::space::TimeLayer,
+        }
+        #[derive(serde::Serialize)]
+        struct LegacySnapshotV1 {
+            version: u32,
+            t_c: u64,
+            timestamp_ms: u64,
+            space: LegacySpaceV1,
+        }
+
+        let legacy = LegacySnapshotV1 {
+            version: 1,
+            t_c: 5,
+            timestamp_ms: 0,
+            space: LegacySpaceV1 {
+                nodes: Default::default(),
+                edges: vec![LegacyEdgeV1 {
+                    from: 1,
+                    to: 2,
+                    kind: crate::space::EdgeKind::Imports,
+                    is_type_only: false,
+                }],
+                gravity: Default::default(),
+                time_layer: crate::space::TimeLayer::Simdiki,
+            },
+        };
+        let bytes = bincode::serialize(&legacy).unwrap();
+
+        // Neden peek şart: aynı baytlar mevcut struct'ta EOF verir (v1 Edge
+        // 4 alan; v2 decode 5. alanın baytlarını arar).
+        assert!(
+            bincode::deserialize::<SpaceSnapshot>(&bytes).is_err(),
+            "v1 baytlar mevcut struct'a deserialize OLAMAMALI (UnexpectedEof)"
+        );
+
+        // Peek: deserialize'tan ÖNCE version reddi — fail-visible.
+        assert_eq!(SnapshotStore::peek_format_version(&bytes), Some(1));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(tmp.path()).unwrap();
+        let path = store.milestones_dir.join("milestone_t5.bincode");
+        std::fs::write(&path, &bytes).unwrap();
+        let result = store.load_milestone_by_t_c(5);
+        assert!(matches!(
+            result,
+            Err(PersistenceError::VersionMismatch {
+                file: 1,
+                expected: SNAPSHOT_FORMAT_VERSION
             })
         ));
     }
@@ -527,7 +744,7 @@ mod tests {
             big_space.insert_node(mod_node(i));
         }
         let snap = SpaceSnapshot {
-            version: 1,
+            version: SNAPSHOT_FORMAT_VERSION, // tur-3 P2-2: format sabiti
             t_c: 0,
             timestamp_ms: 0,
             space: big_space,
