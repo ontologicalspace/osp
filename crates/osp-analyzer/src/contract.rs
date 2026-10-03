@@ -77,6 +77,9 @@ pub enum DiagnosticCode {
     PlaceholderMetric,
     GeneratedExcluded,
     CoverageLow,
+    /// #167: tip adı birden çok using'de çözümleniyor (CS0104 aynası) —
+    /// `TypeImports` kenarı üretilmedi, belirsizlik fail-visible raporlanır.
+    AmbiguousTypeReference,
 }
 
 /// Tek diagnostic mesajı.
@@ -95,9 +98,14 @@ pub struct AnalysisDiagnostic {
 /// Per-module (dosya) metrik paketi.
 #[derive(Debug, Clone)]
 pub struct ModuleMetrics {
-    pub coupling: MetricValue,    // x
+    pub coupling: MetricValue,    // x (ns-grenlilik — #167 ile DEĞİŞMEDİ)
     pub cohesion: MetricValue,    // y (SCIP ise gerçek LCOM4; yoksa Placeholder)
     pub instability: MetricValue, // z (Martin I saf)
+    /// #167: `x_type` — tip-grenlilik coupling'i (`TypeImports` kenarlarından).
+    /// `None` = dil/adapter tip-düzeyi çözümlemesi desteklemiyor (alan YOK
+    /// snapshot'ta; eski tüketiciler için geriye-uyumlu). `Some(0.0)` GERÇEK
+    /// ölçümdür: desteklenen dilde dosyanın tip-referans kenarı yok.
+    pub coupling_type: Option<MetricValue>,
 }
 
 /// Repo-level metrik paketi.
@@ -233,6 +241,25 @@ pub struct ResolvedImport {
     pub kind: ImportKind,
     /// Internal ise çözümlenen dosya yolu.
     pub target_path: Option<PathBuf>,
+}
+
+/// #167: bir dosyanın tip-düzeyi referans çözümlemesi (tek geçiş, iki kenar sınıfı).
+///
+/// Adapter `resolve_type_references` döndürür; `None` = dil tip-düzeyi
+/// çözümlemesi desteklemiyor (coupling_type alanı ölçümü yok). Dönen hedef
+/// dosya yolları DEDUPLU + SIRALI'dır (determinizm) — pipeline aynı (from,to)
+/// çifti için tek kenar üretir.
+#[derive(Debug, Clone, Default)]
+pub struct TypeReferenceResolution {
+    /// `using N.S;` satırlarının çözümlenmiş tip referansları → `EdgeKind::TypeImports`
+    /// (1 using satırı → N kenar; hedef = tipi declare eden dosya; temsilci YOK).
+    pub type_import_targets: Vec<PathBuf>,
+    /// Using gerektirmeyen aynı-ns çapraz-dosya referansları → `EdgeKind::SameNsType`
+    /// (B3 maskelenmiş yüzey; coupling_type hesabına DAHİL DEĞİL).
+    pub same_ns_targets: Vec<PathBuf>,
+    /// Belirsiz tip adları (birden çok using'de çözümlenen) — kenar üretilmedi,
+    /// pipeline diagnostic basar (CS0104 aynası; fail-visible).
+    pub ambiguous_type_names: Vec<String>,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

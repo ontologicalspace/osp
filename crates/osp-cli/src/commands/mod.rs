@@ -411,8 +411,11 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
     // Analyze provenance envelope (review P1-1 — analyzer_axis_specific, not "native").
     // repository.head tek kaynaktan: snapshot_after.head (review P1-2 — semantic_coverage
     // kısa SHA taşır, envelope authority'si olamaz).
+    // #167: schema_version 1 → 2 — edge-kind kümesi genişledi (type_imports,
+    // same_ns_type) ve node'a opsiyonel coupling_type eklendi; "edges yalnız
+    // imports kinds" varsayımı yapan tüketiciler fail-visible uyarılmalı.
     let envelope = serde_json::json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "analysis": {
             "metric_representation": "axis_provenanced_v1",
             "provenance_model": "analyzer_axis_specific",

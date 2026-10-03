@@ -475,6 +475,8 @@ mod tests {
                     coupling: osp_core::coords::MetricValue::tree_sitter(0.5, 1.0),
                     cohesion: osp_core::coords::MetricValue::tree_sitter(0.7, 1.0),
                     instability: osp_core::coords::MetricValue::tree_sitter(0.3, 1.0),
+                    // Sentetik köprü metriği — tip-düzeyi çözümlemesi yok (None).
+                    coupling_type: None,
                 },
             );
         }

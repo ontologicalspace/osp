@@ -579,6 +579,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![
             (1, "src/a.rs", metrics.clone()),
@@ -610,6 +611,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
@@ -641,6 +643,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: placeholder(0.5), // Placeholder → skip
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
@@ -672,6 +675,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: heuristic(0.7, 0.5), // Heuristic → skip
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
@@ -685,6 +689,7 @@ mod tests {
             coupling: scip(0.5),
             cohesion: scip(0.7),
             instability: scip(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
@@ -704,6 +709,7 @@ mod tests {
             coupling: MetricValue::tree_sitter(0.5, 0.0), // coverage=0 → conf=0
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
@@ -724,6 +730,7 @@ mod tests {
             },
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let err = project_code_metrics(&analysis, &index).unwrap_err();
@@ -748,6 +755,7 @@ mod tests {
             },
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let err = project_code_metrics(&analysis, &index).unwrap_err();
@@ -772,6 +780,7 @@ mod tests {
             },
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let err = project_code_metrics(&analysis, &index).unwrap_err();
@@ -798,6 +807,7 @@ mod tests {
             },
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         assert!(project_code_metrics(&analysis, &index).is_err());
@@ -814,6 +824,7 @@ mod tests {
             },
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let err = project_code_metrics(&analysis, &index).unwrap_err();
@@ -835,6 +846,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, _) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         // Boş index → node 1 için identity yok.
@@ -896,6 +908,7 @@ mod tests {
             coupling: coupling_mv.clone(),
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![(1, "src/a.rs", metrics)]);
         let proj = project_code_metrics(&analysis, &index).unwrap();
@@ -923,6 +936,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let (analysis, index) = analysis_with_metrics(vec![
             (1, "src/a.rs", metrics.clone()),
@@ -945,6 +959,7 @@ mod tests {
             coupling: ts(0.5),
             cohesion: ts(0.7),
             instability: ts(0.3),
+            coupling_type: None,
         };
         let mut space = Space::default();
         let mut node_paths = HashMap::new();

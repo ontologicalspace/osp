@@ -78,6 +78,25 @@ pub trait LanguageAdapter: Send + Sync {
 
     /// Class/function tanımlarını çıkar (abstractness için).
     fn extract_class_defs(&self, source: &str) -> Vec<ClassDef>;
+
+    /// #167: tip-düzeyi referans çözümlemesi (using satırı → referans verilen
+    /// TİP dosyaları + aynı-ns çapraz-dosya referansları).
+    ///
+    /// `resolve_import`'tan farkı: (i) ÇOK hedef döndürür (1 using → N kenar),
+    /// (ii) import eden dosyanın KAYNAĞINA ihtiyaç duyar (tip-adı geçiş denetimi).
+    ///
+    /// Default `None` = dil tip-düzeyi çözümlemesi desteklemiyor → pipeline
+    /// `TypeImports`/`SameNsType` kenarı üretmez, `ModuleMetrics::coupling_type`
+    /// `None` kalır (alan snapshot'ta görünmez). Şu anda yalnız C# override eder.
+    fn resolve_type_references(
+        &self,
+        _source: &str,
+        _imports: &[ImportStatement],
+        _from_file: &Path,
+        _repo: &RepoContext,
+    ) -> Option<crate::contract::TypeReferenceResolution> {
+        None
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

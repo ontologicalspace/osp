@@ -11,19 +11,23 @@ still exist elsewhere in the graph. This is not a system-removal claim.
 
 Inputs are two `osp analyze` space snapshots of the SAME repository (before
 and after the promoted patch) plus the neighborhood node paths. Dependencies
-are keyed by the representative target-file path of each import edge (OSP's
-import graph maps one using-line to one representative file via a
-sorted-first namespace resolver). The mapping is deterministic per analysis
-and empirically stable for runs 9-11, but it is NOT an analyzer invariant:
-adding a lexicographically earlier file to a namespace can shift the
-representative path, which would surface here as `removed + new` for the same
-semantic dependency. #167 (type-level edges) is the structural fix.
+are keyed by the target-file path of each import edge.
+
+GRANULARITY (v1.2, #167): the script reads one edge class at a time.
+  --granularity namespace (default; v1.1 semantics unchanged): edges of kind
+      `imports` — one using-line maps to ONE namespace-representative file via
+      a sorted-first resolver. The representative caveat below applies HERE.
+  --granularity type: edges of kind `type_imports` — one using-line maps to one
+      edge PER referenced type, keyed by the declaring type file. Representative
+      semantics is gone at this granularity: adding a lexicographically earlier
+      file to a namespace does NOT shift type-level keys, so the v1.1
+      "removed + new for the same semantic dependency" artifact disappears.
+Partition semantics (below) are granularity-independent and frozen at v1.1.
 
 TERMINOLOGY (frozen; see dogfood/neighborhood-ledger.jsonl amendment): the
 counted quantity is *neighborhood edge multiplication* — represented
-dependency multiplicity in the import-graph representation. It is NOT a claim
-about architectural complexity: until type-level edges (#167) land, edge
-identity is namespace-representative, not a semantic dependency.
+dependency multiplicity in the import-graph representation, at the selected
+granularity. It is NOT a claim about architectural complexity.
 
 PARTITION SEMANTICS (frozen at v1.1):
 For each dependency d with before-owner set B_d and after-owner set A_d:
@@ -62,17 +66,22 @@ tasarim.md) must run THIS script AS RECORDED in its instrument_commit
 (e.g. `git show <sha>:scripts/neighborhood_accounting.py`), not whatever
 later lives on main. Writing the SHA into the artifact while running a newer
 script is not a freeze.
+v1.2 amendment (recorded in dogfood/neighborhood-ledger.jsonl): the v1.1
+finding "mapping is deterministic per analysis ... but NOT an analyzer
+invariant" is now scoped to the namespace granularity; #167 type-level edges
+are the structural fix and v1.2 exposes them via --granularity type.
 
-Output: JSON record (schema neighborhood-accounting-v1.1) and a markdown
+Output: JSON record (schema neighborhood-accounting-v1.2) and a markdown
 table on stdout. Companion to dogfood/ledger.jsonl — a separate measurement
 stratum; it does NOT edit finalized ledger lines.
 
 Usage:
   py scripts/neighborhood_accounting.py \
-      --before dogfood/runs/<run>/baseline.json \
-      --after  dogfood/runs/<run>/after.json \
-      --nodes  path/to/Target.cs,path/to/NewBoundary.cs \
-      [--out   dogfood/runs/<run>/neighborhood.json] \
+    --before dogfood/runs/<run>/baseline.json \
+    --after  dogfood/runs/<run>/after.json \
+    --nodes  path/to/Target.cs,path/to/NewBoundary.cs \
+    [--granularity {namespace,type}] \
+    [--out   dogfood/runs/<run>/neighborhood.json] \
   py scripts/neighborhood_accounting.py --check
 """
 
@@ -82,10 +91,18 @@ import argparse
 import json
 from pathlib import Path
 
-SCHEMA = "neighborhood-accounting-v1.1"
+SCHEMA = "neighborhood-accounting-v1.2"
+
+GRANULARITY_KINDS = {
+    "namespace": "imports",
+    "type": "type_imports",
+}
 
 
-def load_snapshot(path: str) -> tuple[dict[int, str], dict[int, list[int]], dict[int, dict]]:
+def load_snapshot(
+    path: str, granularity: str = "namespace"
+) -> tuple[dict[int, str], dict[int, list[int]], dict[int, dict]]:
+    kind = GRANULARITY_KINDS[granularity]
     with open(path, encoding="utf-8") as f:
         d = json.load(f)
     id_to_path = {n["node_id"]: n["path"] for n in d["nodes"]}
@@ -94,7 +111,7 @@ def load_snapshot(path: str) -> tuple[dict[int, str], dict[int, list[int]], dict
     for e in d["edges"]:
         if e["from"] == e["to"] or e.get("is_type_only"):
             continue
-        if e.get("kind") != "imports":
+        if e.get("kind") != kind:
             continue
         out_edges.setdefault(e["from"], []).append(e["to"])
     return id_to_path, out_edges, metrics
@@ -105,7 +122,8 @@ def holder_map(
     id_to_path: dict[int, str],
     out_edges: dict[int, list[int]],
 ) -> dict[str, set[str]]:
-    """deps: representative target path -> set of holder node paths."""
+    """deps: dependency key (ns-representative OR type file, per granularity)
+    -> set of holder node paths."""
     deps: dict[str, set[str]] = {}
     wanted = set(neighborhood)
     for nid, npath in id_to_path.items():
@@ -205,12 +223,23 @@ def account(
 def node_couplings(
     neighborhood: list[str],
     snapshots: list[tuple[str, dict[int, str], dict[int, dict]]],
+    granularity: str = "namespace",
 ) -> dict[str, dict[str, float | None]]:
+    """Per-holder coupling at the selected granularity.
+
+    namespace → node `coupling` (x, unchanged since v1.1); type → node
+    `coupling_type` (x_type, #167) when present, else None (language/file
+    without type-level resolution).
+    """
+    field = "coupling" if granularity == "namespace" else "coupling_type"
     result: dict[str, dict[str, float | None]] = {}
     for label, ids, metrics in snapshots:
         for nid, npath in ids.items():
             if npath in set(neighborhood):
-                result.setdefault(npath, {})[label] = round(metrics[nid]["coupling"]["value"], 6)
+                raw = metrics[nid].get(field)
+                result.setdefault(npath, {})[label] = (
+                    round(raw["value"], 6) if raw is not None else None
+                )
     for npath, labels in result.items():  # absent side -> null
         for label, _, _ in snapshots:
             labels.setdefault(label, None)
@@ -219,11 +248,13 @@ def node_couplings(
 
 def run(args: argparse.Namespace) -> int:
     neighborhood = [p.strip() for p in args.nodes.split(",") if p.strip()]
-    b_ids, b_edges, b_metrics = load_snapshot(args.before)
-    a_ids, a_edges, a_metrics = load_snapshot(args.after)
+    b_ids, b_edges, b_metrics = load_snapshot(args.before, args.granularity)
+    a_ids, a_edges, a_metrics = load_snapshot(args.after, args.granularity)
     record = account(neighborhood, b_ids, b_edges, a_ids, a_edges)
     record = {
         "schema_version": SCHEMA,
+        "granularity": args.granularity,
+        "edge_kind": GRANULARITY_KINDS[args.granularity],
         "before_snapshot": str(Path(args.before)),
         "after_snapshot": str(Path(args.after)),
         "neighborhood": neighborhood,
@@ -231,6 +262,7 @@ def run(args: argparse.Namespace) -> int:
         "node_coupling": node_couplings(
             neighborhood,
             [("before", b_ids, b_metrics), ("after", a_ids, a_metrics)],
+            args.granularity,
         ),
     }
     if args.out:
@@ -240,12 +272,14 @@ def run(args: argparse.Namespace) -> int:
         print(f"written: {args.out}")
 
     s = record["summary"]
-    print(f"\nneighborhood ({len(neighborhood)} nodes)")
+    key_header = "dependency (ns-representative)" if args.granularity == "namespace" \
+        else "dependency (type file)"
+    print(f"\nneighborhood ({len(neighborhood)} nodes, granularity={args.granularity})")
     print(f"  dependency union: {s['dependency_union_before']} -> {s['dependency_union_after']}"
           f"   (new entering: {len(s['new_dependencies_entering'])})")
     print(f"  out-edge sum:     {s['neighborhood_out_sum_before']} -> {s['neighborhood_out_sum_after']}")
     print(f"  classes: {json.dumps(s['classes'])}")
-    print("\n| dependency (representative) | cardinality | ownership | class | before | after |")
+    print(f"\n| {key_header} | cardinality | ownership | class | before | after |")
     print("|---|---|---|---|---|---|")
     for key, v in record["per_dependency"].items():
         short = key.split("src/")[-1] if "src/" in key else key
@@ -294,6 +328,112 @@ def self_check() -> int:
         raise RuntimeError(f"classes shape drift: {s['classes']}")
     print("self-check PASS (six-class fixtures + cardinality/ownership cross-derivation;"
           " all-six-key classes; out-sum 6->6; union 5->5)")
+
+    # --- v1.2 (#167): granularity fixtures — ns-representative vs type-file keys ---
+    import tempfile
+
+    NA, NB = "svc/HolderA.cs", "svc/HolderB.cs"
+    NL = "svc/Ledger.cs"
+
+    def write_snapshot(nodes: dict[int, str], edges: list[dict]) -> str:
+        tmp = tempfile.NamedTemporaryFile(
+            "w", suffix=".json", delete=False, encoding="utf-8"
+        )
+        json.dump(
+            {
+                "schema_version": 2,
+                "nodes": [
+                    {"node_id": nid, "path": p, "coupling": {"value": 0.5}} for nid, p in nodes.items()
+                ],
+                "edges": edges,
+            },
+            tmp,
+        )
+        tmp.close()
+        return tmp.name
+
+    # (ii) S2a~=S2b disambiguation: two holders reference DIFFERENT types from
+    # the same namespace. ns-mode: ONE representative key held by both (looks
+    # shared). type-mode: TWO keys held by one holder each (not shared at all).
+    nodes = {1: NA, 2: NB, 10: "ev/FraudEvent.cs", 11: "ev/RefundEvent.cs", 90: "ev/Rep.cs"}
+    edges = [
+        {"from": 1, "to": 90, "kind": "imports"},
+        {"from": 2, "to": 90, "kind": "imports"},
+        {"from": 1, "to": 10, "kind": "type_imports"},
+        {"from": 2, "to": 11, "kind": "type_imports"},
+    ]
+    path = write_snapshot(nodes, edges)
+    ns_ids, ns_edges, _ = load_snapshot(path, "namespace")
+    ty_ids, ty_edges, _ = load_snapshot(path, "type")
+    ns_rec = account([NA, NB], ns_ids, ns_edges, ns_ids, ns_edges)
+    ty_rec = account([NA, NB], ty_ids, ty_edges, ty_ids, ty_edges)
+    if ns_rec["summary"]["dependency_union_before"] != 1:
+        raise RuntimeError(f"ns union drift: {ns_rec['summary']}")
+    if ty_rec["summary"]["dependency_union_before"] != 2:
+        raise RuntimeError(f"type union drift (S2a~=S2b ayrismasi): {ty_rec['summary']}")
+    if ns_rec["summary"]["neighborhood_out_sum_before"] != 2:
+        raise RuntimeError("ns out-sum drift")
+    if ty_rec["summary"]["neighborhood_out_sum_before"] != 2:
+        raise RuntimeError("type out-sum drift")
+
+    # (iv) representative-shift artifact: new lexicographically-earlier file in
+    # the ns SHIFTS the ns key (removed+new) but type keys are stable (unchanged).
+    before = write_snapshot(
+        {1: NA, 10: "ev/FraudEvent.cs", 91: "ev/OldRep.cs"},
+        [
+            {"from": 1, "to": 91, "kind": "imports"},
+            {"from": 1, "to": 10, "kind": "type_imports"},
+        ],
+    )
+    after = write_snapshot(
+        {1: NA, 10: "ev/FraudEvent.cs", 92: "ev/AaaRep.cs"},
+        [
+            {"from": 1, "to": 92, "kind": "imports"},
+            {"from": 1, "to": 10, "kind": "type_imports"},
+        ],
+    )
+    b_ids2, b_edges2, _ = load_snapshot(before, "namespace")
+    a_ids2, a_edges2, _ = load_snapshot(after, "namespace")
+    ns_shift = account([NA], b_ids2, b_edges2, a_ids2, a_edges2)
+    if ns_shift["summary"]["classes"]["removed"] != 1 or ns_shift["summary"]["classes"]["new"] != 1:
+        raise RuntimeError(f"ns representative-shift fixture drift: {ns_shift['summary']}")
+    b_ids3, b_edges3, _ = load_snapshot(before, "type")
+    a_ids3, a_edges3, _ = load_snapshot(after, "type")
+    ty_stable = account([NA], b_ids3, b_edges3, a_ids3, a_edges3)
+    if ty_stable["summary"]["classes"] != {
+        "removed": 0, "moved": 0, "multiplied": 0, "unchanged": 1, "new": 0, "reduced": 0
+    }:
+        raise RuntimeError(f"type stability drift: {ty_stable['summary']}")
+
+    # (iii)+(i) type-level moved / true multiplied: same type key, holder set
+    # changes {A}->{L} → moved; {A}->{A,B} → multiplied.
+    bm = write_snapshot(
+        {1: NA, 10: "ev/FraudEvent.cs"},
+        [{"from": 1, "to": 10, "kind": "type_imports"}],
+    )
+    am_moved = write_snapshot(
+        {5: NL, 10: "ev/FraudEvent.cs"},
+        [{"from": 5, "to": 10, "kind": "type_imports"}],
+    )
+    am_mult = write_snapshot(
+        {1: NA, 2: NB, 10: "ev/FraudEvent.cs"},
+        [
+            {"from": 1, "to": 10, "kind": "type_imports"},
+            {"from": 2, "to": 10, "kind": "type_imports"},
+        ],
+    )
+    bM, eM, _ = load_snapshot(bm, "type")
+    aL, eL, _ = load_snapshot(am_moved, "type")
+    moved_rec = account([NA, NL], bM, eM, aL, eL)
+    if moved_rec["per_dependency"]["ev/FraudEvent.cs"]["class"] != "moved":
+        raise RuntimeError(f"type moved drift: {moved_rec['per_dependency']}")
+    aP, eP, _ = load_snapshot(am_mult, "type")
+    mult_rec = account([NA, NB], bM, eM, aP, eP)
+    if mult_rec["per_dependency"]["ev/FraudEvent.cs"]["class"] != "multiplied":
+        raise RuntimeError(f"type true-multiplication drift: {mult_rec['per_dependency']}")
+
+    print("self-check PASS (v1.2 granularity fixtures: S2 disambiguation union 1 vs 2;"
+          " representative-shift artifact ns-only; type-level moved/multiplied)")
     return 0
 
 
@@ -302,6 +442,9 @@ def main() -> int:
     ap.add_argument("--before", help="baseline.json space snapshot")
     ap.add_argument("--after", help="after.json space snapshot")
     ap.add_argument("--nodes", help="comma-separated neighborhood node paths")
+    ap.add_argument("--granularity", choices=sorted(GRANULARITY_KINDS), default="namespace",
+                    help="edge class to account: namespace (v1.1 semantics, kind=imports)"
+                         " or type (#167 type-level edges, kind=type_imports)")
     ap.add_argument("--out", help="optional path for the JSON record")
     ap.add_argument("--check", action="store_true",
                     help="run embedded instrument self-check fixtures (behavioral sanity;"

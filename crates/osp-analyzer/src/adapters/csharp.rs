@@ -24,7 +24,9 @@
 use std::path::Path;
 
 use super::shared;
-use crate::contract::{ClassDef, ImportKind, ImportStatement, ResolvedImport};
+use crate::contract::{
+    ClassDef, ImportKind, ImportStatement, ResolvedImport, TypeReferenceResolution,
+};
 use crate::language::{LanguageAdapter, RepoContext};
 
 pub struct CSharpAdapter;
@@ -141,6 +143,110 @@ impl LanguageAdapter for CSharpAdapter {
             ),
         ];
         shared::walk_class_defs_with_specs(tree.root_node(), source, CSHARP_SPECS)
+    }
+
+    /// #167: tip-düzeyi referans çözümlemesi — dondurulmuş kurallar (issue
+    /// #167 tasarım yorumu, "Eşleşme kuralları" 1-7):
+    ///
+    /// 1. Tip evreni: using'd ns altında repo'da declare edilen tipler
+    ///    (partial → çoklu dosya, her dosyaya ayrı kenar; temsilci YOK).
+    /// 2. Eşleşme: identifier düğümleri (comment/string node-kind doğal dışlanır;
+    ///    using-direktifi alt ağacı ve ns-bildirim adı HARİÇ), case-sensitive tam ad.
+    /// 3. Çıkarımlar: dosyanın KENDİ tip adları + kendi tip-parametre adları.
+    /// 4. Belirsizlik: ad birden çok using'd ns'te → kenar YOK + ambiguity raporu
+    ///    (CS0104 aynası — nitelikli kullanım Tier-1'de atırt edilemez).
+    /// 5. Öncelik: kendi-ns bildirimi using'd adayı ezer (C# çözümleme önceliği)
+    ///    → SameNsType üretilir, TypeImports üretilmez.
+    /// 6. Hiçbir tip geçmiyorsa (unused using): 0 tip kenarı (ns-kenar kalır).
+    /// 7. SameNsType: using gerektirmeyen aynı-ns çapraz-dosya referansları.
+    fn resolve_type_references(
+        &self,
+        source: &str,
+        imports: &[ImportStatement],
+        from_file: &Path,
+        repo: &RepoContext,
+    ) -> Option<TypeReferenceResolution> {
+        let index = &repo.csharp_namespace_index;
+
+        // Kural 2-3: identifier evreni (kendi tip adları + tip-param adları düşürülür).
+        let (identifiers, type_params) = shared::collect_csharp_reference_names(source);
+        let own_types = index
+            .file_declared_types(from_file)
+            .cloned()
+            .unwrap_or_default();
+        let available: std::collections::BTreeSet<&str> = identifiers
+            .iter()
+            .map(|s| s.as_str())
+            .filter(|n| !type_params.contains(*n) && !own_types.contains(*n))
+            .collect();
+
+        // Aday using'd ns'ler: dotted path tam olarak declare edilmiş ns (KADE-1
+        // koşulu) — type-backed using'ler (KADE 2) burada elenir (çöküş yoktur).
+        let candidate_ns: std::collections::BTreeSet<String> = imports
+            .iter()
+            .map(|imp| imp.path.trim().replace('/', "."))
+            .filter(|p| index.is_declared_namespace(p))
+            .collect();
+
+        // Kural 7 + 5: kendi-ns tipleri (başka dosyalarda) → SameNsType; adları
+        // using'd adaylarını ezer.
+        let own_ns: std::collections::BTreeSet<String> = index
+            .file_declared_namespaces(from_file)
+            .cloned()
+            .unwrap_or_default();
+        let mut own_ns_names: std::collections::BTreeSet<String> = Default::default();
+        let mut same_ns_targets: std::collections::BTreeSet<std::path::PathBuf> =
+            Default::default();
+        for ns in &own_ns {
+            if let Some(types) = index.types_under(ns) {
+                for (name, files) in types {
+                    if available.contains(name.as_str()) {
+                        own_ns_names.insert(name.clone());
+                        for f in files {
+                            if f != from_file {
+                                same_ns_targets.insert(f.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Kural 1-4-6: TypeImports + belirsizlik.
+        let mut type_import_targets: std::collections::BTreeSet<std::path::PathBuf> =
+            Default::default();
+        let mut ambiguous: Vec<String> = Vec::new();
+        for name in &available {
+            let decl_ns: Vec<&String> = candidate_ns
+                .iter()
+                .filter(|ns| {
+                    index
+                        .types_under(ns.as_str())
+                        .is_some_and(|types| types.contains_key(*name))
+                })
+                .collect();
+            if decl_ns.is_empty() {
+                continue; // bu using'd ns'lerde geçen bir tip değil (kural 6 zuhur etmedi)
+            }
+            if own_ns_names.contains(*name) {
+                continue; // kural 5: kendi-ns bildirimi kazandı (SameNsType üretildi)
+            }
+            if decl_ns.len() > 1 {
+                ambiguous.push((*name).to_string()); // kural 4: CS0104 aynası
+                continue;
+            }
+            for f in &index.types_under(decl_ns[0].as_str()).unwrap()[*name] {
+                if f != from_file {
+                    type_import_targets.insert(f.clone());
+                }
+            }
+        }
+
+        Some(TypeReferenceResolution {
+            type_import_targets: type_import_targets.into_iter().collect(),
+            same_ns_targets: same_ns_targets.into_iter().collect(),
+            ambiguous_type_names: ambiguous,
+        })
     }
 }
 
@@ -426,5 +532,469 @@ namespace App.Web.Controllers
             "{:?}",
             imports
         );
+    }
+
+    // --- #167: tip-düzeyi referans çözümlemesi (dondurulmuş kurallar 1-7) ---
+
+    use tempfile::TempDir;
+
+    /// (dosya, içerik) çiftlerinden C# fixture repo + RepoContext kur.
+    fn make_type_ref_repo(files: &[(&str, &str)]) -> (TempDir, RepoContext) {
+        let dir = TempDir::new().expect("temp dir");
+        let mut paths = Vec::new();
+        for (rel, content) in files {
+            let p = dir.path().join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&p, content).unwrap();
+            paths.push(p);
+        }
+        paths.sort();
+        let repo = RepoContext::new(dir.path().to_path_buf(), paths);
+        (dir, repo)
+    }
+
+    const SVC_NS: &str = "namespace App.Svc;\n\npublic class MailService { }\n";
+
+    #[test]
+    fn type_imports_one_using_line_to_n_type_edges_not_delegate() {
+        // Kural 1+2: 1 using satırı → dosyada geçen HER tip için ayrı kenar;
+        // hedef tip dosyası (temsilci DEĞİL — temsilci sorted-first MailResult.cs
+        // olurdu; MailService'e referans MailService.cs'e gitmeli).
+        let (_dir, repo) = make_type_ref_repo(&[
+            ("svc/MailResult.cs", "namespace App.Svc;\n\npublic class MailResult { }\n"),
+            ("svc/MailService.cs", SVC_NS),
+            ("svc/Unused.cs", "namespace App.Svc;\n\npublic enum Unused { A, B }\n"),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Svc;\n\nclass Program\n{\n    MailService s = new MailService();\n    MailResult r = new MailResult();\n}\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let imports = adapter.extract_imports(&std::fs::read_to_string(program).unwrap());
+        let res = adapter
+            .resolve_type_references(
+                &std::fs::read_to_string(program).unwrap(),
+                &imports,
+                program,
+                &repo,
+            )
+            .expect("C# destekler");
+
+        assert_eq!(
+            res.type_import_targets.len(),
+            2,
+            "{:?}",
+            res.type_import_targets
+        );
+        assert!(res
+            .type_import_targets
+            .iter()
+            .any(|p| p.ends_with("MailService.cs")));
+        assert!(res
+            .type_import_targets
+            .iter()
+            .any(|p| p.ends_with("MailResult.cs")));
+        assert!(
+            !res.type_import_targets
+                .iter()
+                .any(|p| p.ends_with("Unused.cs")),
+            "referans verilmeyen tip kenar üretmez (kural 6): {:?}",
+            res.type_import_targets
+        );
+        assert!(res.same_ns_targets.is_empty());
+        assert!(res.ambiguous_type_names.is_empty());
+    }
+
+    #[test]
+    fn type_imports_unused_using_yields_zero_type_edges() {
+        // Kural 6: using var, tip referansı yok → 0 tip kenarı (using yüzeyi ≠
+        // gerçek referans; ns-gren kenar resolve_import'ta aynen kalır).
+        let (_dir, repo) = make_type_ref_repo(&[
+            ("svc/MailService.cs", SVC_NS),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Svc;\n\nclass Program { }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert!(
+            res.type_import_targets.is_empty(),
+            "{:?}",
+            res.type_import_targets
+        );
+    }
+
+    #[test]
+    fn type_imports_using_directive_identifiers_do_not_count() {
+        // Kural 2 (dışlama): using satırındaki ns-segment identifier'ları tip
+        // referansı DEĞİL — `using App.Mailer;` tek başına Mailer tipine kenar
+        // üretmemeli.
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "svc/Mailer.cs",
+                "namespace App.Mailer;\n\npublic class Mailer { }\n",
+            ),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Mailer;\n\nclass Program { }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert!(
+            res.type_import_targets.is_empty(),
+            "using-direktifi identifier'ı kenar üretmez: {:?}",
+            res.type_import_targets
+        );
+    }
+
+    #[test]
+    fn type_imports_partial_type_edges_to_each_declaring_file() {
+        // Kural 1: partial tip → her declare eden dosyaya ayrı kenar (temsilci YOK).
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "ledger/WalletPart1.cs",
+                "namespace App.Ledger;\n\npublic partial class Wallet { }\n",
+            ),
+            (
+                "ledger/WalletPart2.cs",
+                "namespace App.Ledger;\n\npublic partial class Wallet { }\n",
+            ),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Ledger;\n\nclass Program { Wallet w; }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert_eq!(
+            res.type_import_targets.len(),
+            2,
+            "{:?}",
+            res.type_import_targets
+        );
+        assert!(res
+            .type_import_targets
+            .iter()
+            .any(|p| p.ends_with("WalletPart1.cs")));
+        assert!(res
+            .type_import_targets
+            .iter()
+            .any(|p| p.ends_with("WalletPart2.cs")));
+    }
+
+    #[test]
+    fn type_imports_own_declared_type_name_subtracted() {
+        // Kural 3: dosyanın KENDİ declare ettiği ad using'd ns adayından önce
+        // düşürülür (yerel bildirim kazanır).
+        let (_dir, repo) = make_type_ref_repo(&[
+            ("svc/MailService.cs", SVC_NS),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Svc;\n\nclass MailService { }\n\nclass Program { MailService m = new MailService(); }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert!(
+            res.type_import_targets.is_empty(),
+            "{:?}",
+            res.type_import_targets
+        );
+    }
+
+    #[test]
+    fn type_imports_generic_type_parameter_subtracted() {
+        // Kural 3: kendi generic tip-parametre adı using'd ns'teki tip adıyla
+        // çakışırsa düşürülür (deterministik false-positive önleme).
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "svc/Target.cs",
+                "namespace App.Svc;\n\npublic class Target { }\n",
+            ),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Svc;\n\nclass Program\n{\n    void Run<Target>()\n    {\n        var t = default(Target);\n    }\n}\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert!(
+            res.type_import_targets.is_empty(),
+            "{:?}",
+            res.type_import_targets
+        );
+    }
+
+    #[test]
+    fn type_imports_ambiguous_name_skipped_and_reported() {
+        // Kural 4: ad birden çok using'd ns'te → kenar YOK + belirsizlik raporu
+        // (CS0104 aynası — fail-visible).
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "a/Shared.cs",
+                "namespace Ns.A;\n\npublic class Shared { }\n",
+            ),
+            (
+                "b/Shared.cs",
+                "namespace Ns.B;\n\npublic class Shared { }\n",
+            ),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing Ns.A;\nusing Ns.B;\n\nclass Program { Shared s; }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert!(
+            res.type_import_targets.is_empty(),
+            "{:?}",
+            res.type_import_targets
+        );
+        assert_eq!(res.ambiguous_type_names, vec!["Shared".to_string()]);
+    }
+
+    #[test]
+    fn same_ns_reference_visible_without_using_and_wins_precedence() {
+        // Kural 5+7 (B3): using gerektirmeyen aynı-ns çapraz-dosya referansı
+        // görünür; kendi-ns bildirimi using'd adayı Ezer (TypeImports üretilmez).
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "pay/ApprovalFlow.cs",
+                "namespace Nexus.Pay;\n\npublic class ApprovalFlow { }\n",
+            ),
+            // AYNI ad using'd ns'te de var — öncelik kendi-ns'te.
+            (
+                "other/ApprovalFlow.cs",
+                "namespace Nexus.Other;\n\npublic class ApprovalFlow { }\n",
+            ),
+            (
+                "pay/PaymentService.cs",
+                "namespace Nexus.Pay;\n\nusing Nexus.Other;\n\npublic class PaymentService { ApprovalFlow flow; }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let svc = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("PaymentService.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(svc).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, svc, &repo)
+            .unwrap();
+
+        assert_eq!(res.same_ns_targets.len(), 1, "{:?}", res.same_ns_targets);
+        assert!(
+            res.same_ns_targets[0].ends_with("pay/ApprovalFlow.cs")
+                || res.same_ns_targets[0].ends_with("\\pay\\ApprovalFlow.cs")
+        );
+        // Öncelik: aynı ad using'd ns'te de declare edilmiş ama TypeImports ÜRETİLMEDİ
+        // ve belirsizlik de raporlanmadı (kendi-ns çözdü).
+        assert!(
+            res.type_import_targets.is_empty(),
+            "{:?}",
+            res.type_import_targets
+        );
+        assert!(
+            res.ambiguous_type_names.is_empty(),
+            "{:?}",
+            res.ambiguous_type_names
+        );
+    }
+
+    #[test]
+    fn same_ns_reference_run16_pattern_exception_visible() {
+        // Run-16 altın standardı (B3 somut örneği): `ApprovalNotApprovedException`
+        // T'nin KENDİ ns'inde başka dosyada — ns-gren grafta kenar YOK, #167'de
+        // SameNsType olarak görünür.
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "approvals/ApprovalNotApprovedException.cs",
+                "namespace Nexus.AI.Application.Approvals;\n\npublic class ApprovalNotApprovedException { }\n",
+            ),
+            (
+                "approvals/ApprovalService.cs",
+                "namespace Nexus.AI.Application.Approvals;\n\npublic class ApprovalService\n{\n    public void Review() { throw new ApprovalNotApprovedException(); }\n}\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let svc = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("ApprovalService.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(svc).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, svc, &repo)
+            .unwrap();
+        assert_eq!(res.same_ns_targets.len(), 1, "{:?}", res.same_ns_targets);
+        assert!(res.type_import_targets.is_empty());
+    }
+
+    #[test]
+    fn type_imports_delegate_declaration_indexed() {
+        // Kural 1: delegate de tiptir — referans edilirse kenar üretir.
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "svc/SendMail.cs",
+                "namespace App.Svc;\n\npublic delegate void SendMail(string to);\n",
+            ),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Svc;\n\nclass Program { SendMail send; }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert_eq!(
+            res.type_import_targets.len(),
+            1,
+            "{:?}",
+            res.type_import_targets
+        );
+        assert!(res.type_import_targets[0].ends_with("SendMail.cs"));
+    }
+
+    #[test]
+    fn type_imports_type_backed_using_not_a_candidate() {
+        // Tasarım kararı (a): TypeImports yalnız KADE-1 (namespace-backed)
+        // using'lerde üretilir — type-backed using'de çöküş yoktur (KADE-2 zaten
+        // tip dosyasına çözümler; ns-gren kenar orada kalır). NOT: KADE-2'nin
+        // dosya bulması dizin≈ns konvansiyonuna bağlıdır (ayrı mekanizma,
+        // csharp_resolve_internal_type_backed pin'lidir) — burada yalnız
+        // tip-gren aday OLMADIĞI sınanır.
+        let (_dir, repo) = make_type_ref_repo(&[
+            ("svc/MailService.cs", SVC_NS),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing static App.Svc.MailService;\n\nclass Program { MailService m = new MailService(); }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        // Tip-gren: "App.Svc.MailService" declare edilmiş bir ns DEĞİL → aday
+        // değil → TypeImports üretmez (referans olsa bile).
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert!(
+            res.type_import_targets.is_empty(),
+            "{:?}",
+            res.type_import_targets
+        );
+    }
+
+    #[test]
+    fn type_imports_nested_type_indexed_under_declaring_ns() {
+        // İç içe tip bildirimi de indekse girer (aynı ns, düz ad — Tier-1 düz
+        // ad eşleşmesi).
+        let (_dir, repo) = make_type_ref_repo(&[
+            (
+                "svc/Outer.cs",
+                "namespace App.Svc;\n\npublic class Outer\n{\n    public class Inner { }\n}\n",
+            ),
+            (
+                "app/Program.cs",
+                "namespace App;\n\nusing App.Svc;\n\nclass Program { Outer.Inner pair; }\n",
+            ),
+        ]);
+        let adapter = CSharpAdapter;
+        let program = repo
+            .all_files
+            .iter()
+            .find(|f| f.ends_with("Program.cs"))
+            .unwrap();
+        let source = std::fs::read_to_string(program).unwrap();
+        let imports = adapter.extract_imports(&source);
+        let res = adapter
+            .resolve_type_references(&source, &imports, program, &repo)
+            .unwrap();
+        assert_eq!(
+            res.type_import_targets.len(),
+            1,
+            "{:?}",
+            res.type_import_targets
+        );
+        assert!(res.type_import_targets[0].ends_with("Outer.cs"));
     }
 }

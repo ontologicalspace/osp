@@ -323,6 +323,16 @@ pub enum EdgeKind {
     Approves,
     /// `from` düğümü `to` kuralını ihlal ediyor (negatif-uzay sinyali).
     Violates,
+    /// #167: `from` dosyasının using satırının çözümlenmiş TİP referansı — `to`,
+    /// referans verilen tipi declare eden dosyadır (tip-grenlilik). ns-gren
+    /// `Imports` (temsilci semantiği) YAN YANA yaşar; resolution-indexed ölçüm
+    /// ailesi — `Imports` ASLA değiştirilmez/Değiştirilmez (geriye-uyumluluk:
+    /// eski snapshot/ledger karşılaştırılabilirliği).
+    TypeImports,
+    /// #167 (B3): using gerektirmeyen aynı-namespace çapraz-dosya tip referansı
+    /// (ns-gren grafta görünmeyen maskelenmiş yüzey). Raporlama/körlük-ölçüm
+    /// sınıfıdır — tip-gren coupling (`x_type`) hesabına DAHİL DEĞİL.
+    SameNsType,
 }
 
 /// Kavramsal uzay düğümü (OSP-formalism.md §1.1).

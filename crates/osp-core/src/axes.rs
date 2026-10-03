@@ -94,6 +94,78 @@ impl Axis for CouplingAxis {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// x_type — Kuplaj, tip-grenlilik (#167)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// `x_type` ekseni — **Kuplaj (tip-grenlilik)** (#167).
+///
+/// `CouplingAxis` (x, ns-grenlilik) ile AYNI formül, farklı kenar sınıfı:
+///
+/// `x_type = out_degree(TypeImports) / (1 + out_degree(TypeImports))` ∈ [0, 1)
+///
+/// İki-grenlilik sözleşmesi (#167 tasarım kararı (b), issue'ya donduruldu):
+/// - `CouplingAxis` DEĞİŞMEZ — canonical karar katmanı/pre-registration aynen.
+/// - Bu eksen `EdgeKind::TypeImports` kenarlarından hesaplanır; `SameNsType`
+///   kenarları (B3 maskelenmiş yüzey) DAHİL DEĞİL — raporlama sınıfıdır.
+/// - Coordinate-system standard eksenlerinden DEĞİL (analyzer-level ölçüm);
+///   pipeline `compute()` üzerinden kullanır, karar katmanına bağlanmaz.
+#[derive(Debug, Clone, Copy)]
+pub struct TypeGranularCouplingAxis {
+    source: MetricSource,
+}
+
+impl TypeGranularCouplingAxis {
+    /// Güvenli default — provenance bilinmiyor (Placeholder).
+    pub fn new() -> Self {
+        Self {
+            source: MetricSource::Placeholder,
+        }
+    }
+
+    /// Fallible constructor — Mixed reddedilir. Production: TreeSitter.
+    pub fn try_with_source(source: MetricSource) -> Result<Self, AxisSourceError> {
+        Ok(Self {
+            source: validate_direct_source(source)?,
+        })
+    }
+
+    pub fn source(&self) -> MetricSource {
+        self.source
+    }
+
+    fn compute_value(&self, node: &Node, space: &Space) -> f64 {
+        let deg = space.out_degree_value(node.id, EdgeKind::TypeImports) as f64;
+        deg / (1.0 + deg)
+    }
+}
+
+impl Default for TypeGranularCouplingAxis {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Axis for TypeGranularCouplingAxis {
+    fn name(&self) -> &'static str {
+        "coupling_type"
+    }
+    /// CouplingAxis ile aynı formula marker (0 — value-level out-degree `deg/(1+deg)`);
+    /// ayrım eksen adı + okuduğu kenar sınıfıyladır (`Imports` vs `TypeImports`).
+    fn descriptor(&self) -> Result<AxisDescriptor, AxisDescriptorError> {
+        let mut params = AxisParameterEncoder::new();
+        params.push_u8(0); // formula marker: parametresiz, value-level out-degree
+        params.push_bytes(self.source.descriptor_id())?; // P1-1 source encoding
+        AxisDescriptor::try_new(self.name(), 2, params)
+    }
+    fn measure(&self, node: &Node, space: &Space) -> Result<AxisMeasurement, AxisMeasurementError> {
+        AxisMeasurement::try_new(self.compute_value(node, space), self.source)
+    }
+    fn compute(&self, node: &Node, space: &Space) -> f64 {
+        self.compute_value(node, space)
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // w — Entropi (repo-level)
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -513,6 +585,80 @@ mod tests {
             kind: EdgeKind::Imports,
             ..Default::default()
         }
+    }
+
+    fn type_import_edge(from: u64, to: u64) -> Edge {
+        Edge {
+            from,
+            to,
+            kind: EdgeKind::TypeImports,
+            ..Default::default()
+        }
+    }
+
+    // --- TypeGranularCouplingAxis (#167) ---
+
+    #[test]
+    fn type_coupling_reflects_type_imports_degree_only() {
+        // İki-grenlilik ayrımı pin'i: x_type YALNIZ TypeImports kenarlarından
+        // hesaplanır — ns-gren Imports ve B3 SameNsType kenarları DAHİL DEĞİL.
+        let mut space = Space::new();
+        space.insert_node(node(1));
+        space.insert_node(node(2));
+        space.insert_node(node(3));
+        space.insert_node(node(4));
+        // ns-gren kenar (x'i etkiler, x_type'ı etkilemez)
+        space.insert_edge(import_edge(1, 2));
+        // tip-gren kenarlar
+        space.insert_edge(type_import_edge(1, 3));
+        space.insert_edge(type_import_edge(1, 4));
+        // B3 kenarı — x_type'a DAHİL DEĞİL (raporlama sınıfı)
+        space.insert_edge(Edge {
+            from: 1,
+            to: 2,
+            kind: EdgeKind::SameNsType,
+            ..Default::default()
+        });
+
+        let ns_axis = CouplingAxis::new();
+        let type_axis = TypeGranularCouplingAxis::new();
+        let x = ns_axis.compute(&node(1), &space);
+        let x_type = type_axis.compute(&node(1), &space);
+        // ns-gren: Imports out-degree 1 → 1/2 (SameNsType Imports DEĞİL — sayılmaz)
+        assert!((x - 0.5).abs() < 1e-9, "x = {}", x);
+        // tip-gren: TypeImports out-degree 2 → 2/3
+        assert!((x_type - 2.0 / 3.0).abs() < 1e-9, "x_type = {}", x_type);
+    }
+
+    #[test]
+    fn type_coupling_excludes_type_only_type_imports() {
+        // value-only derece tutarlılığı: is_type_only=true TypeImports kenarı
+        // x_type'a girmez (CouplingAxis ile aynı kural).
+        let mut space = Space::new();
+        space.insert_node(node(1));
+        space.insert_node(node(2));
+        space.insert_node(node(3));
+        space.insert_edge(type_import_edge(1, 2));
+        space.insert_edge(Edge {
+            from: 1,
+            to: 3,
+            kind: EdgeKind::TypeImports,
+            is_type_only: true,
+        });
+
+        let axis = TypeGranularCouplingAxis::new();
+        let v = axis.compute(&node(1), &space);
+        assert!((v - 0.5).abs() < 1e-9, "type-only hariç, x_type = {}", v);
+    }
+
+    #[test]
+    fn type_coupling_descriptor_name_differs_from_coupling() {
+        // Ayrı eksen adı — CoordinateSystem kaydına girmese de descriptor
+        // kimliği CouplingAxis'ten ayrık olmalı (ölçüm-provenans ayrımı).
+        let ns = CouplingAxis::new().descriptor().unwrap();
+        let ty = TypeGranularCouplingAxis::new().descriptor().unwrap();
+        assert_eq!(ns.axis_id(), "coupling");
+        assert_eq!(ty.axis_id(), "coupling_type");
     }
 
     // --- CouplingAxis ---

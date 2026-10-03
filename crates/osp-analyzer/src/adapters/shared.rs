@@ -861,21 +861,48 @@ impl ImportResolver {
 /// C#'ta sözdizimsel işaret yoktur — declare edilmişlik o işareti sağlar).
 /// Kenar hedefi temsilci dosyadır (sorted-first, deterministik).
 ///
-/// Build maliyeti: her `.cs` dosyası bir kez parse edilir (namespace_declaration
-/// ağacı için). Non-C# repo'da boş indeks — maliyet sıfır.
+/// Build maliyeti: her `.cs` dosyası bir kez parse edilir (namespace VE tip
+/// bildirimleri için — #167 tip indeksi aynı geçişte doldurulur). Non-C# repo'da
+/// boş indeks — maliyet sıfır.
 #[derive(Debug, Clone, Default)]
 pub struct CSharpNamespaceIndex {
     map: std::collections::HashMap<String, Vec<std::path::PathBuf>>,
+    /// #167: namespace → tip adı → declare eden dosyalar (sorted; partial tip →
+    /// çoklu). Tip bildirim türleri: class/struct/record/record-struct/
+    /// interface/enum/delegate; iç içe tipler dosyanın ns'i altında düz adla.
+    ns_types: std::collections::HashMap<
+        String,
+        std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
+    >,
+    /// #167: dosya → declare ettiği tip adları (kendi-ad düşürme kuralı — yerel
+    /// bildirim using'd ns adayından önce gelir).
+    file_types: std::collections::HashMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
+    /// #167: dosya → declare ettiği namespace'ler (SameNsType + kendi-ns öncelik
+    /// kuralı). Boş küme = namespace bildirmeyen dosya (global ns).
+    file_namespaces:
+        std::collections::HashMap<std::path::PathBuf, std::collections::BTreeSet<String>>,
 }
 
 impl CSharpNamespaceIndex {
-    /// Tüm `.cs` dosyalarını parse edip `namespace_declaration` isimlerini
-    /// indeksle. Dosya-başına (`namespace A;`) VE blok (`namespace A { }`)
-    /// formları desteklenir; iç içe bloklarda üst adlar önek olarak birleştirilir
-    /// (`namespace A { namespace B { } }` → "A" ve "A.B").
+    /// Tüm `.cs` dosyalarını parse edip `namespace_declaration` isimlerini VE tip
+    /// bildirimlerini indeksle. Dosya-başına (`namespace A;`) VE blok
+    /// (`namespace A { }`) formları desteklenir; iç içe bloklarda üst adlar önek
+    /// olarak birleştirilir (`namespace A { namespace B { } }` → "A" ve "A.B").
     pub fn build(all_files: &[std::path::PathBuf]) -> Self {
         let mut map: std::collections::HashMap<String, Vec<std::path::PathBuf>> =
             std::collections::HashMap::new();
+        let mut ns_types: std::collections::HashMap<
+            String,
+            std::collections::BTreeMap<String, Vec<std::path::PathBuf>>,
+        > = std::collections::HashMap::new();
+        let mut file_types: std::collections::HashMap<
+            std::path::PathBuf,
+            std::collections::BTreeSet<String>,
+        > = std::collections::HashMap::new();
+        let mut file_namespaces: std::collections::HashMap<
+            std::path::PathBuf,
+            std::collections::BTreeSet<String>,
+        > = std::collections::HashMap::new();
         for f in all_files {
             if f.extension().and_then(|e| e.to_str()) != Some("cs") {
                 continue;
@@ -888,16 +915,53 @@ impl CSharpNamespaceIndex {
                 Some(t) => t,
                 None => continue,
             };
-            let mut names = Vec::new();
-            collect_namespace_names(tree.root_node(), source.as_bytes(), "", &mut names);
-            for name in names {
-                map.entry(name).or_default().push(f.clone());
+            let mut namespaces = Vec::new();
+            let mut types = Vec::new();
+            collect_namespace_and_type_names(
+                tree.root_node(),
+                source.as_bytes(),
+                "",
+                &mut namespaces,
+                &mut types,
+            );
+            if namespaces.is_empty() && types.is_empty() {
+                continue;
+            }
+            let ns_set: std::collections::BTreeSet<String> = namespaces.iter().cloned().collect();
+            let ty_set: std::collections::BTreeSet<String> =
+                types.iter().map(|(_, n)| n.clone()).collect();
+            if !ns_set.is_empty() {
+                file_namespaces.insert(f.clone(), ns_set.clone());
+            }
+            if !ty_set.is_empty() {
+                file_types.insert(f.clone(), ty_set);
+            }
+            for name in namespaces {
+                map.entry(name.clone()).or_default().push(f.clone());
+            }
+            for (ns, ty) in types {
+                ns_types
+                    .entry(ns.clone())
+                    .or_default()
+                    .entry(ty)
+                    .or_default()
+                    .push(f.clone());
             }
         }
         for files in map.values_mut() {
             files.sort();
         }
-        Self { map }
+        for types in ns_types.values_mut() {
+            for files in types.values_mut() {
+                files.sort();
+            }
+        }
+        Self {
+            map,
+            ns_types,
+            file_types,
+            file_namespaces,
+        }
     }
 
     /// İndekslenen namespace sayısı (diagnostic).
@@ -914,35 +978,212 @@ impl CSharpNamespaceIndex {
     pub fn resolve(&self, namespace: &str) -> Option<&std::path::PathBuf> {
         self.map.get(namespace).and_then(|files| files.first())
     }
+
+    /// #167: `ns` repo içinde declare edilmiş bir namespace mi? (KADE-1 koşulu —
+    /// namespace-backed using testi; type-backed using'ler bu testte elenir.)
+    pub fn is_declared_namespace(&self, ns: &str) -> bool {
+        self.map.contains_key(ns)
+    }
+
+    /// #167: `ns` altında declare edilen tipler (ad → dosyalar). BTreeMap →
+    /// deterministik sıralı iterasyon.
+    pub fn types_under(
+        &self,
+        ns: &str,
+    ) -> Option<&std::collections::BTreeMap<String, Vec<std::path::PathBuf>>> {
+        self.ns_types.get(ns)
+    }
+
+    /// #167: dosyanın declare ettiği tip adları (kendi-ad düşürme kuralı).
+    pub fn file_declared_types(
+        &self,
+        file: &std::path::Path,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.file_types.get(file)
+    }
+
+    /// #167: dosyanın declare ettiği namespace'ler (SameNsType + öncelik kuralı).
+    pub fn file_declared_namespaces(
+        &self,
+        file: &std::path::Path,
+    ) -> Option<&std::collections::BTreeSet<String>> {
+        self.file_namespaces.get(file)
+    }
 }
 
-/// `namespace_declaration` (blok formu) VE `file_scoped_namespace_declaration`
-/// (`namespace X;` — C# 10+, modern default) ağaçlarından isimleri topla —
-/// iç içe bloklarda önek birleştirmeli recursive walk. İki kind da `name`
-/// field'ı taşır (node-types).
-fn collect_namespace_names(node: Node, source: &[u8], prefix: &str, out: &mut Vec<String>) {
+/// #167: bir `.cs` dosyasının kaynak kodundaki TİP-REFERANS adayları — identifier
+/// düğümleri; (i) `using_directive` alt ağaçları (oradaki identifier'lar tip
+/// referansı DEĞİL — ns segmentleri false-positive verirdi), (ii) namespace
+/// bildiriminin `name` düğümü hariç (blok gövdesi taranmaya devam eder),
+/// (iii) `type_parameter` düğümleri ayrı küme olarak döner (jenerik param adı
+/// using'd ns'teki bir tip adıyla çakışırsa düşürülür — deterministik).
+/// Comment/string node-kind'ları `identifier` olmadığından doğal dışlanır.
+pub fn collect_csharp_reference_names(
+    source: &str,
+) -> (
+    std::collections::BTreeSet<String>,
+    std::collections::BTreeSet<String>,
+) {
+    let mut identifiers = std::collections::BTreeSet::new();
+    let mut type_params = std::collections::BTreeSet::new();
+    let tree = match parse_root(source, tree_sitter_c_sharp::LANGUAGE.into()) {
+        Some(t) => t,
+        None => return (identifiers, type_params),
+    };
+    walk_reference_names(
+        tree.root_node(),
+        source.as_bytes(),
+        &mut identifiers,
+        &mut type_params,
+    );
+    (identifiers, type_params)
+}
+
+fn walk_reference_names(
+    node: Node,
+    source: &[u8],
+    identifiers: &mut std::collections::BTreeSet<String>,
+    type_params: &mut std::collections::BTreeSet<String>,
+) {
+    for i in 0..node.child_count() {
+        if let Some(c) = node.child(i) {
+            let k = c.kind();
+            match k {
+                // using satırındaki identifier'lar tip referansı değil — alt ağacı atla.
+                "using_directive" => continue,
+                "type_parameter" => {
+                    if let Ok(text) = c.utf8_text(source) {
+                        let name = text.trim();
+                        if !name.is_empty() {
+                            type_params.insert(name.to_string());
+                        }
+                    }
+                    continue;
+                }
+                "identifier" => {
+                    if let Ok(text) = c.utf8_text(source) {
+                        let name = text.trim();
+                        if !name.is_empty() {
+                            identifiers.insert(name.to_string());
+                        }
+                    }
+                    continue;
+                }
+                "namespace_declaration" | "file_scoped_namespace_declaration" => {
+                    // name düğümü atlanır (ns segmentleri referans değil);
+                    // declaration_list gövdesi normal taranır.
+                    let name_child = c.child_by_field_name("name");
+                    for j in 0..c.child_count() {
+                        if let Some(cc) = c.child(j) {
+                            if name_child.map(|n| n.id()) == Some(cc.id()) {
+                                continue;
+                            }
+                            walk_reference_names(cc, source, identifiers, type_params);
+                        }
+                    }
+                    continue;
+                }
+                _ => walk_reference_names(c, source, identifiers, type_params),
+            }
+        }
+    }
+}
+
+/// `namespace_declaration` VE tip bildirimlerini TEK geçişte topla — #167 tip
+/// indeksi (`ns_types`) için. Tip bildirim türleri ve iç içe tipler
+/// (`class A { class B {} }` → A ve B, ikisi de A'nın ns'i altında düz adla).
+///
+/// **Gramer notu ( empirik, S-expression doğrulaması):** file-scoped form
+/// (`namespace X;`) DÜZ ağaç üretir — sonraki tip bildirimleri compilation_unit
+/// altında KARDEŞ olarak durur (ns düğümünün çocuğu değiller). Bu yüzden
+/// sibling-yürüyüş ambient önek taşır: file-scoped ns görülünce SONRAKİ
+/// kardeşler o ns'e atanır; blok formunda (`namespace X { ... }`) yalnız
+/// declaration_list ÇOCUKLARI yeni öneği alır (kardeşler dışarıdadır).
+fn collect_namespace_and_type_names(
+    node: Node,
+    source: &[u8],
+    prefix: &str,
+    out_namespaces: &mut Vec<String>,
+    out_types: &mut Vec<(String, String)>,
+) {
+    let mut ambient = prefix.to_string();
     for i in 0..node.child_count() {
         if let Some(c) = node.child(i) {
             let k = c.kind();
             if k == "namespace_declaration" || k == "file_scoped_namespace_declaration" {
+                let Some(name_node) = c.child_by_field_name("name") else {
+                    // İsim okunamadı — alt ağacı mevcut önek ile tara.
+                    collect_namespace_and_type_names(
+                        c,
+                        source,
+                        &ambient,
+                        out_namespaces,
+                        out_types,
+                    );
+                    continue;
+                };
+                let Ok(text) = name_node.utf8_text(source) else {
+                    collect_namespace_and_type_names(
+                        c,
+                        source,
+                        &ambient,
+                        out_namespaces,
+                        out_types,
+                    );
+                    continue;
+                };
+                let name = text.trim();
+                let full = if ambient.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{ambient}.{name}")
+                };
+                out_namespaces.push(full.clone());
+                // Blok içindekiler (nested ns'ler / tipler) declaration_list'te;
+                // name düğümü atlanır. File-scoped'da bu liste tipikçe boştur
+                // (düz gramer) — içerik kardeşlerde, aşağıda ambient ile taranır.
+                let name_id = name_node.id();
+                for j in 0..c.child_count() {
+                    if let Some(cc) = c.child(j) {
+                        if cc.id() == name_id {
+                            continue;
+                        }
+                        collect_namespace_and_type_names(
+                            cc,
+                            source,
+                            &full,
+                            out_namespaces,
+                            out_types,
+                        );
+                    }
+                }
+                // File-scoped: SONRAKİ kardeşler bu ns'indedir. Blok formunda
+                // ambient değişmez — kardeşler bloğun DIŞINDADIR.
+                if k == "file_scoped_namespace_declaration" {
+                    ambient = full;
+                }
+            } else if matches!(
+                k,
+                "class_declaration"
+                    | "struct_declaration"
+                    | "record_declaration"
+                    | "record_struct_declaration"
+                    | "interface_declaration"
+                    | "enum_declaration"
+                    | "delegate_declaration"
+            ) {
                 if let Some(name_node) = c.child_by_field_name("name") {
                     if let Ok(text) = name_node.utf8_text(source) {
                         let name = text.trim();
-                        let full = if prefix.is_empty() {
-                            name.to_string()
-                        } else {
-                            format!("{prefix}.{name}")
-                        };
-                        out.push(full.clone());
-                        // Blok içindekiler (nested namespaces / using'ler) declaration_list'te.
-                        collect_namespace_names(c, source, &full, out);
-                        continue;
+                        if !name.is_empty() {
+                            out_types.push((ambient.clone(), name.to_string()));
+                        }
                     }
                 }
-                // İsim okunamadıysa bile alt ağacı tara (öneksiz).
-                collect_namespace_names(c, source, prefix, out);
+                // İç içe tip bildirimleri de indekse girer (aynı ns, düz ad).
+                collect_namespace_and_type_names(c, source, &ambient, out_namespaces, out_types);
             } else {
-                collect_namespace_names(c, source, prefix, out);
+                collect_namespace_and_type_names(c, source, &ambient, out_namespaces, out_types);
             }
         }
     }

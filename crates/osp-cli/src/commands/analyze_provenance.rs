@@ -174,6 +174,9 @@ pub struct CliAxisMeasurement {
 ///
 /// V1 yalnız coupling/cohesion/instability taşır (analyzer ModuleMetrics scope).
 /// entropy/witness_depth native engine measurement (#96) gelene kadar yok — fabricate edilmez.
+/// #167: `coupling_type` (tip-grenlilik x_type) OPSEYONELDİR — dil tip-düzeyi
+/// çözümlemesi desteklemiyorsa alan snapshot'ta görünmez (`skip_serializing_if`);
+/// eski snapshot'lar (v1) alanı olmadan sorunsuz deserialize olur (`serde(default)`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CliAnalyzeNode {
     pub node_id: u64,
@@ -183,6 +186,8 @@ pub struct CliAnalyzeNode {
     pub role: CliNodeRole,
     pub mass: f64,
     pub coupling: CliAxisMeasurement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coupling_type: Option<CliAxisMeasurement>,
     pub cohesion: CliAxisMeasurement,
     pub instability: CliAxisMeasurement,
 }
@@ -207,6 +212,12 @@ impl CliAnalyzeNode {
                 confidence: metrics.coupling.confidence,
                 coverage: metrics.coupling.coverage,
             },
+            coupling_type: metrics.coupling_type.as_ref().map(|mv| CliAxisMeasurement {
+                value: mv.value,
+                source: mv.source.into(),
+                confidence: mv.confidence,
+                coverage: mv.coverage,
+            }),
             cohesion: CliAxisMeasurement {
                 value: metrics.cohesion.value,
                 source: metrics.cohesion.source.into(),
@@ -249,6 +260,10 @@ pub enum CliEdgeKind {
     Witnesses,
     Approves,
     Violates,
+    /// #167: using satırının çözümlenmiş tip referansı (tip-grenlilik).
+    TypeImports,
+    /// #167 (B3): using gerektirmeyen aynı-ns çapraz-dosya tip referansı.
+    SameNsType,
 }
 
 impl CliEdgeKind {
@@ -257,6 +272,8 @@ impl CliEdgeKind {
     /// Enum declaration order'a bağımlı DEĞİL: explicit map. Declaration sırası
     /// kazara değişirse wire ordering sessizce değişmemeli — wire contract'ı
     /// `sort_edges_canonical` içinde kapsüllenmiştir.
+    /// #167: TypeImports=8 / SameNsType=9 APPEND — mevcut kenarların göreli
+    /// canonical sırası ve eski snapshot baytları DEĞİŞMEZ.
     const fn wire_rank(self) -> u8 {
         match self {
             Self::Imports => 0,
@@ -267,6 +284,8 @@ impl CliEdgeKind {
             Self::Witnesses => 5,
             Self::Approves => 6,
             Self::Violates => 7,
+            Self::TypeImports => 8,
+            Self::SameNsType => 9,
         }
     }
 }
@@ -282,6 +301,8 @@ impl From<osp_core::space::EdgeKind> for CliEdgeKind {
             osp_core::space::EdgeKind::Witnesses => Self::Witnesses,
             osp_core::space::EdgeKind::Approves => Self::Approves,
             osp_core::space::EdgeKind::Violates => Self::Violates,
+            osp_core::space::EdgeKind::TypeImports => Self::TypeImports,
+            osp_core::space::EdgeKind::SameNsType => Self::SameNsType,
         }
     }
 }

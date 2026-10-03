@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use osp_core::axes::{CouplingAxis, InstabilityAxis};
+use osp_core::axes::{CouplingAxis, InstabilityAxis, TypeGranularCouplingAxis};
 use osp_core::coords::{Axis, MetricSource};
 use osp_core::space::{Edge, EdgeKind, Node as CoreNode, NodeId, NodeKind, Space};
 
@@ -162,6 +162,70 @@ pub fn analyze_repo_with_config(
         });
     }
 
+    // 5b. Phase 2b (#167): tip-düzeyi kenarlar — TypeImports + SameNsType.
+    // `resolve_import` sözleşmesi DEĞİŞMEDİ (ns-gren temsilci kenarları yukarıda,
+    // birebir aynı); burada İKİNCİ gren eklenir. Adapter `None` dönerse dil
+    // desteklemiyordur → kenar yok + coupling_type None (alan snapshot'ta görünmez).
+    let mut type_resolved_nodes: std::collections::HashSet<NodeId> =
+        std::collections::HashSet::new();
+    for fd in &file_data {
+        let adapter = match registry.adapter_for_extension(&fd.ext) {
+            Some(a) => a,
+            None => continue,
+        };
+        let source = match std::fs::read_to_string(&fd.path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let Some(resolution) =
+            adapter.resolve_type_references(&source, &fd.imports, &fd.path, &repo_ctx)
+        else {
+            continue;
+        };
+        let from_id = node_map[&fd.path];
+        type_resolved_nodes.insert(from_id);
+        let rel_file = fd
+            .path
+            .strip_prefix(&repo)
+            .unwrap_or(&fd.path)
+            .to_string_lossy()
+            .into_owned();
+        for target in &resolution.type_import_targets {
+            if let Some(&to_id) = node_map.get(target) {
+                if from_id != to_id {
+                    space.insert_edge(Edge {
+                        from: from_id,
+                        to: to_id,
+                        kind: EdgeKind::TypeImports,
+                        is_type_only: false,
+                    });
+                }
+            }
+        }
+        for target in &resolution.same_ns_targets {
+            if let Some(&to_id) = node_map.get(target) {
+                if from_id != to_id {
+                    space.insert_edge(Edge {
+                        from: from_id,
+                        to: to_id,
+                        kind: EdgeKind::SameNsType,
+                        is_type_only: false,
+                    });
+                }
+            }
+        }
+        for name in &resolution.ambiguous_type_names {
+            diagnostics.push(AnalysisDiagnostic {
+                severity: DiagnosticSeverity::Info,
+                code: DiagnosticCode::AmbiguousTypeReference,
+                message: format!(
+                    "Ambiguous type reference: '{name}' declared in multiple using'd namespaces — no TypeImports edge"
+                ),
+                file: Some(rel_file.clone()),
+            });
+        }
+    }
+
     // 5. Abstractness (real A!)
     let module_abs = ModuleAbstractness::from_class_defs(&all_class_defs);
     let repo_abs = RepoAbstractness::from_all_modules(&[module_abs]);
@@ -183,6 +247,7 @@ pub fn analyze_repo_with_config(
 
     // 8. Module metrics (per-file coupling/instability via osp_core axes + SCIP cohesion)
     let coupling_axis = CouplingAxis::new();
+    let type_coupling_axis = TypeGranularCouplingAxis::new();
     let instability_axis = InstabilityAxis::new();
     let mut module_metrics = std::collections::HashMap::new();
     for (i, fd) in file_data.iter().enumerate() {
@@ -190,6 +255,8 @@ pub fn analyze_repo_with_config(
         let node = space.nodes.get(&node_id).expect("node inserted above");
         let coupling = coupling_axis.compute(node, &space);
         let instability = instability_axis.compute(node, &space);
+        // #167: x_type ham değeri — borrows `node`/`&space`'i get_mut'ten ÖNCE kapat.
+        let type_coupling_value = type_coupling_axis.compute(node, &space);
         let cohesion = compute_module_cohesion(fd.path.as_path(), &repo, &semantic_index);
         // **INV-T9 #70 (P0):** Wire cohesion into Node → CoordinateSystem::CohesionAxis reads
         // it (per-node y-axis). Yalnız gerçek SCIP sonucu `Some` — Placeholder/Heuristic/
@@ -208,6 +275,11 @@ pub fn analyze_repo_with_config(
                 coupling: MetricValue::tree_sitter(coupling, 1.0),
                 cohesion,
                 instability: MetricValue::tree_sitter(instability, 1.0),
+                // #167: x_type — yalnız tip-düzeyi çözümlemesi olan dosyalarda
+                // (None = dil desteklemiyor; Some(0.0) = destekli + 0 tip kenarı).
+                coupling_type: type_resolved_nodes
+                    .contains(&node_id)
+                    .then(|| MetricValue::tree_sitter(type_coupling_value, 1.0)),
             },
         );
     }
@@ -1034,6 +1106,100 @@ mod tests {
             (a - (1.0 / 3.0)).abs() < 0.01,
             "A should be 1/3 (1 abstract / 3 total), got {a}"
         );
+    }
+
+    /// #167 iki-grenlilik entegrasyonu: tek snapshot'ta ns-gren `Imports`
+    /// (temsilci, DEĞİŞMEDİ) + tip-gren `TypeImports` + B3 `SameNsType`
+    /// birarada; `coupling_type` yalnız desteklenen dosyalarda.
+    #[test]
+    fn analyze_repo_two_granularity_edges_coexist() {
+        let dir = TempDir::new().unwrap();
+        // Client: using Cs.Svc (Svc referans EDİLİYOR) + using Cs.Extra (kullanılMIYOR)
+        // → Imports kenarları 2 (temsilci), TypeImports kenarı 1 (yalnız Svc.cs)
+        // → coupling (ns-gren) 2/3 ≠ coupling_type 1/2 — iki gren ayırt edilir.
+        fs::create_dir_all(dir.path().join("cs")).unwrap();
+        fs::write(
+            dir.path().join("cs/Svc.cs"),
+            "namespace Cs.Svc;\n\npublic class Svc { }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("cs/Extra.cs"),
+            "namespace Cs.Extra;\n\npublic class Extra { }\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.path().join("cs/Client.cs"),
+            "namespace Cs.App;\n\nusing Cs.Svc;\nusing Cs.Extra;\n\nclass Client\n{\n    Svc s = new Svc();\n    Partner p = new Partner();\n}\n",
+        )
+        .unwrap();
+        // Aynı-ns (B3): Client'ın ns'inde başka dosya — using gerektirmeden referans
+        fs::write(
+            dir.path().join("cs/Partner.cs"),
+            "namespace Cs.App;\n\npublic class Partner { }\n",
+        )
+        .unwrap();
+        // Desteklemeyen dil: coupling_type None olmalı
+        fs::write(dir.path().join("plain.py"), "x = 1\n").unwrap();
+
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+
+        // Kenar sınıfları: Imports 2 (Client→Svc.cs, Client→Extra.cs temsilci),
+        // TypeImports 1 (Client→Svc.cs), SameNsType 1 (Client→Partner.cs, B3).
+        assert_eq!(result.space.edge_count_of(EdgeKind::Imports), 2);
+        assert_eq!(result.space.edge_count_of(EdgeKind::TypeImports), 1);
+        assert_eq!(result.space.edge_count_of(EdgeKind::SameNsType), 1);
+
+        let client_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("Client.cs"))
+            .map(|(id, _)| id)
+            .expect("client node");
+        let client_metrics = result
+            .module_metrics
+            .get(&client_id)
+            .expect("client metrics");
+
+        // ns-gren coupling DEĞİŞMEDİ: 2 import kenarı → 2/3.
+        assert!(
+            (client_metrics.coupling.value - 2.0 / 3.0).abs() < 1e-9,
+            "coupling = {}",
+            client_metrics.coupling.value
+        );
+        // tip-gren coupling_type: 1 TypeImports kenarı → 1/2 (Some — desteklenen dosya).
+        let ct = client_metrics
+            .coupling_type
+            .as_ref()
+            .expect("cs dosyası destekler");
+        assert!(
+            (ct.value - 0.5).abs() < 1e-9,
+            "coupling_type = {}",
+            ct.value
+        );
+        assert_eq!(ct.source, crate::contract::MetricSource::TreeSitter);
+
+        // Partner: destekli + 0 tip kenarı → Some(0.0) (None DEĞİL — ölçüm var).
+        let partner_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("Partner.cs"))
+            .map(|(id, _)| id)
+            .expect("partner node");
+        let partner_ct = result.module_metrics[&partner_id]
+            .coupling_type
+            .as_ref()
+            .expect("partner destekler");
+        assert!(partner_ct.value.abs() < 1e-9);
+
+        // Python: desteklemiyor → None (snapshot'ta alan görünmez).
+        let py_id = *result
+            .node_paths
+            .iter()
+            .find(|(_, p)| p.ends_with("plain.py"))
+            .map(|(id, _)| id)
+            .expect("py node");
+        assert!(result.module_metrics[&py_id].coupling_type.is_none());
     }
 
     #[test]
