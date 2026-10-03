@@ -101,7 +101,9 @@ impl HarnessFixture {
     /// main.rs → a.rs + b.rs (2 çıkan kenar, coupling 2/3 = 0.6667). Mevcut
     /// `new()`'in `mod` bildirimleri güncel Rust adaptöründe kenar üretmez
     /// (yalnız `use_declaration` sayılır — #173); kenar-gerektiren testler
-    /// bu kurucuyu kullanır.
+    /// bu kurucuyu kullanır. `mod` satırları KENAR ÜRETMEZ ama fixture'ı
+    /// geçerli bir Rust programı yapar (P2-3) — graf önermesi ayrıca
+    /// `use_edge_fixture_graph_premise_holds` ile analizden assert edilir.
     fn new_with_use_edges() -> Self {
         let fx = Self::new();
         let r = fx.repo_path();
@@ -109,7 +111,7 @@ impl HarnessFixture {
         fs::write(r.join("b.rs"), "pub struct B;\n").expect("write b.rs");
         fs::write(
             r.join("main.rs"),
-            "use crate::a::A;\nuse crate::b::B;\npub fn main() { let _ = (A, B); }\n",
+            "mod a;\nmod b;\nuse crate::a::A;\nuse crate::b::B;\npub fn main() { let _ = (A, B); }\n",
         )
         .expect("write main.rs");
         // Test tempdir'i (kullanıcı reporu değil): fixture plumbing'inde add -A güvenli.
@@ -2183,6 +2185,103 @@ fn attempt_artifact_persists_on_unsatisfied_predicate() {
     assert_ne!(
         out_json["result"]["kind"], "completed",
         "predicate must remain unsatisfied in this fixture"
+    );
+    fx.assert_repo_clean();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #166 review — P2-3 fixture-graph sanity + P1-3 zero-evidence stdout contract
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[test]
+fn use_edge_fixture_graph_premise_holds() {
+    // #173 dersi (review P2-3): fixture'ın graf önermesi analiz çıktısından
+    // assert edilir — adapter ileride değişirse (ör. `mod` kenar üretmeye
+    // başlarsa) vacuous-test sınıfı kırmızıya döner, sessizce geri gelmez.
+    let fx = HarnessFixture::new_with_use_edges();
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .output()
+        .expect("run osp analyze");
+    assert!(
+        output.status.success(),
+        "analyze must succeed. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let space: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("analyze json parses: {e}. stdout={stdout}"));
+    let nodes = space["nodes"].as_array().expect("nodes");
+    let edges = space["edges"].as_array().expect("edges");
+    let import_edges: Vec<&serde_json::Value> = edges
+        .iter()
+        .filter(|e| e["kind"].as_str() == Some("imports"))
+        .collect();
+    assert_eq!(
+        import_edges.len(),
+        2,
+        "use-edges fixture must have exactly 2 import edges (got {import_edges:?})"
+    );
+    let main_node = nodes
+        .iter()
+        .find(|n| n["path"].as_str().map(|p| p.ends_with("main.rs")) == Some(true))
+        .expect("main.rs node");
+    let c_main = main_node["coupling"]["value"]
+        .as_f64()
+        .expect("coupling value");
+    assert!(
+        (c_main - 2.0 / 3.0).abs() < 1e-9,
+        "main.rs coupling must be 2/3 (got {c_main})"
+    );
+}
+
+#[test]
+fn attempt_zero_evidence_human_stdout_is_empty_json_array() {
+    // #166 P1-3: zero-evidence navigator sonucunda (legacy path + production
+    // witness → AwaitingWitnesses, evidence 0) human stdout HER ZAMAN geçerli
+    // JSON dizisidir: `[]`. Parser istisnası sınıfı yoktur. Aynı akış P1-1'i
+    // pinler: non-Completed sonuçta da fence koşar + canonical artifact yazılır.
+    let fx = HarnessFixture::new();
+    let proposals_path = fx.write_proposals(0, 1);
+    let output = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("99") // legacy hardcoded task id'si ile eşleşmez → TaskNotFound
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&proposals_path)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+    });
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let parsed: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must be valid JSON. err={e} stdout={stdout}"));
+    assert!(
+        parsed.as_array().map(|a| a.is_empty()).unwrap_or(false),
+        "zero-evidence stdout must be []. got: {stdout}"
+    );
+    // Legacy yol istenen task id'yi benimser; production witness'te
+    // AwaitingWitnesses (exit 10, min_approvers_not_met) — evidence 0.
+    // Zero-evidence outcome'u budur; P1-1 sayesinde fence + canonical artifact
+    // BU sonuç için de çalışır (non-Completed yolu).
+    assert!(
+        stderr.contains("Awaiting witnesses") && stderr.contains("Evidence entries: 0"),
+        "zero-evidence outcome progress on stderr. stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("Canonical attempt artifact"),
+        "canonical artifact persisted for non-Completed navigator result. stderr={stderr}"
+    );
+    assert!(
+        !output.status.success(),
+        "non-Completed result must exit non-zero"
     );
     fx.assert_repo_clean();
 }

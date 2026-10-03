@@ -770,7 +770,9 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     let task = resolve_task(&args, &snapshot_before, &result.node_paths)?;
 
     // 4. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
-    match args.llm.as_str() {
+    // #166 P1-1: navigator YAYIM YAPMAZ — AttemptExecution döndürür; fence +
+    // canonical persist + emit + exit aşağıda, TÜM navigator sonuçları için.
+    let execution = match args.llm.as_str() {
         "real" => {
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
@@ -782,7 +784,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 &state_dir,
                 &snapshot_before,
                 task_source,
-            )?;
+            )?
         }
         _ => {
             // mock (default)
@@ -808,12 +810,16 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 &state_dir,
                 &snapshot_before,
                 task_source,
-            )?;
+            )?
         }
-    }
+    };
 
     // 5. Post-capture drift fence (review P0-3). #155: HEAD + tracked-set eşitliği
     //    global, içerik drift'i analyzed-scope'ta (saf fonksiyon — exact matrix testli).
+    //    #166 P1-1: fence ARTIK HER navigator sonucu için koşar (Completed dışı
+    //    sonuçlarda eskiden process::exit atlıyordu). Canonical artifact bu
+    //    fence'İ GEÇTİKTEN SONRA yazılır — fence başarısızsa kanıt "canonical"
+    //    değildir ve diskte canonical artifact YOKTUR.
     let snapshot_after =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
     repo_snapshot::validate_post_attempt_snapshot(
@@ -822,6 +828,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         &result.node_paths,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 6. #166: canonical publish (no-clobber atomic) → emit (json envelope /
+    //    human: progress stderr + stdout evidence[]) → exit.
+    persist_canonical_attempt_artifact(&execution.envelope, &args, &state_dir)?;
+    emit_attempt_output(&execution, &args)?;
+    if execution.exit_code != exit_codes::COMPLETED {
+        std::process::exit(execution.exit_code);
+    }
     Ok(())
 }
 
@@ -1372,7 +1386,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     state_dir: &PathBuf,
     snapshot: &repo_snapshot::RepositorySnapshot,
     task_source: &'static str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AttemptExecution> {
     use osp_core::navigator::AgentNavigator;
     use osp_core::trajectory::{
         InMemoryTaskRegistry, MilestoneId, OperatorCapability, TrajectoryId,
@@ -1436,16 +1450,10 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         clock: Box::new(osp_core::authorization::SystemClock),
     };
     let result = nav.run_task(args.task_id, 1);
-    // 6. Output — versioned JSON envelope (json) veya human (default).
-    //
-    // #166 (kanonik attempt artifact): envelope HER modda bir kez üretilir ve
-    // (a) state-dir altına `attempts/task-<id>-<unix_millis>.json` olarak daima
-    //     kalıcı yazılır (kanıt hattı stdout biçiminden bağımsızlaşır),
-    // (b) `--out` verilmişse aynı şemalı içerik oraya kopyalanır,
-    // (c) insan-modunda progress satırları stderr'e taşınır — stdout yalnız
-    //     makine-okunur evidence dizisi taşır (akış ayrımı).
-    // Artifact yazımı exit-code dallanmasından ÖNCE: maneuver-limit/held gibi
-    // sıfır-dışında çıkan akışlarda da kanıt kalıcıdır.
+    drop(nav); // evidence'ın mutable ödünç alanı (nav field'ı) biter — taşınabilir.
+               // #166 P1-1 (review): navigator YAYIM YAPMAZ — persist/emit/exit dış katmanda,
+               // final snapshot fence'inden SONRA koşar. Envelope burada yalnız HAZIRLANIR:
+               // measured + subject-validity + persistence-validity birlikte "canonical"dir.
     let envelope = run_envelope::build_run_envelope_v1(
         &result,
         &evidence,
@@ -1453,11 +1461,124 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         args.witness,
         task_source,
         snapshot.head.as_str(),
+        args.task_id,
     );
-    persist_canonical_attempt_artifact(&envelope, args, state_dir)?;
-    let is_json = args.format.eq_ignore_ascii_case("json");
-    if is_json {
-        let json = serde_json::to_string_pretty(&envelope)?;
+    let exit_code = navigator_exit_code(&result, args.task_id);
+    Ok(AttemptExecution {
+        result,
+        evidence,
+        envelope,
+        exit_code,
+    })
+}
+
+/// #166 P1-1: navigator yürütmesinin taşınabilir sonucu — yayım (canonical
+/// persist + emit + exit) dış katmanda, final snapshot fence'inden sonra.
+struct AttemptExecution {
+    result: osp_core::navigator::NavigatorResult,
+    evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
+    envelope: run_envelope::CliRunEnvelopeV1,
+    exit_code: i32,
+}
+
+/// #166 P1-1/P1-2: kanonik attempt artifact'ı YAYINLA — final snapshot fence
+/// BAŞARILI olduktan sonra çağrılmalı (fence başarısızsa çağrılmaz: canonical
+/// artifact YOKTUR; diagnostic-artifact bilinçli olarak eklenmedi — "canonical"
+/// unvanı fence-geçmiş kanıta özeldir).
+///
+/// P1-2 persistence modeli — pending-authorization/space-identity precedent'i:
+/// same-dir temp (`create_new`) → `write_all` + `sync_all` → **`hard_link`
+/// no-clobber publish** (`fs::rename` hedefi REPLACE eder — no-clobber DEĞİL) →
+/// parent-dir sync → temp temizliği. Crash penceresi: hedef ya YOKtur ya TAM
+/// içeriktir; yarım canonical dosya üretilemez. Kimlik `task_id + unix_millis +
+/// pid` (+ çakışmada `-N` soneki, 64 deneme bütçesi — zaman tek başına kimlik
+/// değildir; `hard_link` AlreadyExists ayrımı zorlar, fail-closed).
+fn persist_canonical_attempt_artifact(
+    envelope: &run_envelope::CliRunEnvelopeV1,
+    args: &TrajectoryAttemptArgs,
+    state_dir: &std::path::Path,
+) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let payload = serde_json::to_vec_pretty(envelope)?;
+    let attempts_dir = state_dir.join("attempts");
+    std::fs::create_dir_all(&attempts_dir)?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+
+    // Same-dir temp — ad per-attempt benzersiz (pid+millis): aynı process aynı
+    // thread'in bir sonraki attempt'i stale temp'e takılmaz.
+    let tmp = attempts_dir.join(format!("attempt.tmp.{pid}.{millis}"));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(&payload).and_then(|_| file.sync_all())?;
+    }
+
+    // No-clobber publish — candidate çakışırsa -N sonekiyle devam (fail-closed).
+    let mut canonical: Option<std::path::PathBuf> = None;
+    for suffix in 0..=64u32 {
+        let name = match suffix {
+            0 => format!("task-{}-{millis}-{pid}.json", args.task_id),
+            n => format!("task-{}-{millis}-{pid}-{n}.json", args.task_id),
+        };
+        let candidate = attempts_dir.join(name);
+        match std::fs::hard_link(&tmp, &candidate) {
+            Ok(()) => {
+                canonical = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                anyhow::bail!("canonical attempt artifact publish failed: {e}");
+            }
+        }
+    }
+    let canonical = match canonical {
+        Some(p) => p,
+        None => {
+            let _ = std::fs::remove_file(&tmp);
+            anyhow::bail!("canonical attempt artifact collision budget exhausted");
+        }
+    };
+    // Directory durability — best-effort (Windows'ta no-op).
+    let _ = std::fs::File::open(&attempts_dir).and_then(|d| d.sync_all());
+    let _ = std::fs::remove_file(&tmp);
+    eprintln!("Canonical attempt artifact: {}", canonical.display());
+
+    // --out kopyası: çağıracıya ait hedef — atomic yazım (temp+rename), üzerine
+    // yazmak çağırıcının açık isteğidir; canonical garanti state-dir kaydındadır.
+    if let Some(out) = &args.out {
+        let out_tmp = out.with_extension("json.tmp-osp");
+        {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&out_tmp)?;
+            file.write_all(&payload).and_then(|_| file.sync_all())?;
+        }
+        std::fs::rename(&out_tmp, out)?;
+        eprintln!("Attempt artifact (--out): {}", out.display());
+    }
+    Ok(())
+}
+
+/// #166: attempt çıktısını yayınla — json modunda stdout'a tam envelope;
+/// human modunda progress stderr'de, stdout'ta HER ZAMAN geçerli evidence JSON
+/// dizisi (P1-3: boş evidence → `[]`; zero-evidence outcome'lar parser
+/// istisnası üretmez).
+fn emit_attempt_output(
+    execution: &AttemptExecution,
+    args: &TrajectoryAttemptArgs,
+) -> anyhow::Result<()> {
+    if args.format.eq_ignore_ascii_case("json") {
+        let json = serde_json::to_string_pretty(&execution.envelope)?;
         // Diagnostics stderr'e — stdout JSON-only.
         // **#96 MD-2 + #95-A MD-1 cutover:** navigator ölçümü engine-native
         // per-axis (opaque NativeSubjectMeasurement token) + canonical
@@ -1468,35 +1589,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         );
         println!("{json}");
     } else {
-        print_human_result(&result, args.task_id, &evidence)?;
-    }
-    let exit_code = navigator_exit_code(&result, args.task_id);
-    if exit_code != exit_codes::COMPLETED {
-        std::process::exit(exit_code);
-    }
-    Ok(())
-}
-
-/// #166: Kanonik attempt artifact'ı kalıcı yap — state-dir altına daima,
-/// `--out` verilmişse ek kopya. Path bildirimi (progress) stderr'de.
-fn persist_canonical_attempt_artifact(
-    envelope: &run_envelope::CliRunEnvelopeV1,
-    args: &TrajectoryAttemptArgs,
-    state_dir: &std::path::Path,
-) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(envelope)?;
-    let attempts_dir = state_dir.join("attempts");
-    std::fs::create_dir_all(&attempts_dir)?;
-    let millis = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
-    let canonical = attempts_dir.join(format!("task-{}-{}.json", args.task_id, millis));
-    std::fs::write(&canonical, &json)?;
-    eprintln!("Canonical attempt artifact: {}", canonical.display());
-    if let Some(out) = &args.out {
-        std::fs::write(out, &json)?;
-        eprintln!("Attempt artifact (--out): {}", out.display());
+        print_human_result(&execution.result, args.task_id, &execution.evidence)?;
     }
     Ok(())
 }
@@ -1583,10 +1676,11 @@ fn print_human_result(
         }
     }
     eprintln!("  Evidence entries: {}", evidence.len());
-    if !evidence.is_empty() {
-        let json = serde_json::to_string_pretty(evidence)?;
-        println!("{json}");
-    }
+    // #166 P1-3: stdout HER ZAMAN geçerli JSON dizisi — boş evidence'da `[]`.
+    // Zero-evidence outcome'lar (task_not_found, erken llm_error) parser istisnası
+    // üretmez; `serde_json::from_reader(stdout)` her durumda çalışır.
+    let json = serde_json::to_string_pretty(evidence)?;
+    println!("{json}");
     Ok(())
 }
 
