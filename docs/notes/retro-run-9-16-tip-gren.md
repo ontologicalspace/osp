@@ -1,5 +1,14 @@
 # Retro run 9-16 — tip-gren yeniden ölçüm ve nesil-ayrımı kapanışı (Dalga 1a)
 
+**Epistemik sınır (review notu, PR #176 tur-1 P2):** bu nottaki sayısal sonuçlar
+**private/non-versioned Nexus artifact'larından iç-yeniden-üretimle** elde edildi —
+hammadde (`dogfood/retro/run9-16/`, `.gitignore`'da `/dogfood/`) ve geçici yeniden-inşa
+script'leri (`Temp/retro_metrics.py`, `Temp/retro_neighborhoods.sh`) bilinçli olarak
+versiyonlanmıyor (Live Contract kapsamı). Bu belge **sanitize edilmiş türetilmiş kanıt
+kaydıdır**; başlı başına bir public üretim paketi değildir. Public yeniden-üretim
+istersem ham verinin yöntem tanımıyla birlikte ayrıştırılması gerekir (Paper-4 ekidir,
+bu notun kapsamı dışında).
+
 **Tarih:** 2026-10-04 · **Binary:** `d9e214a` derlemesi (bu oturumda `cargo build` ile
 yeniden doğrulandı — kaynak ağaç = d9e214a, tracked-değişiklik yok) · **Enstrüman:**
 `scripts/neighborhood_accounting.py` v1.3 (d9e214a'dan `git show` ile teyit; working-tree
