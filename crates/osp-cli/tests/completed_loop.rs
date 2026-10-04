@@ -3,8 +3,14 @@
 //! Completed-loop'u uçtan uca doğrular. osp-cli bin-only crate olduğu için tüm testler
 //! gerçek `osp` binary'sini çağırır (assert_cmd pattern — mevcut testlerle tutarlı).
 //!
-//! Fixture topolojisi: main.rs imports a.rs + b.rs → target node 2 outgoing Imports →
-//! coupling 2/3 = 0.667. RemoveImport → coupling 1/2 = 0.5 ≤ 0.55 → Completed.
+//! Fixture topolojisi (#173): varsayılan `HarnessFixture::new()` mod-bildirimlidir ve
+//! güncel Rust adaptöründe 0 kenar üretir — yalnız wiring/rejection testleri için.
+//! Kenar/coupling önermesi taşıyan testler `new_with_use_edges()` kullanır: main.rs →
+//! a.rs + b.rs (2 çıkan kenar, coupling 2/3 = 0.667); RemoveImport → 1/2 = 0.5 ≤ 0.55
+//! → Completed. Evidence semantiği (#173 repro): `before` G1 bootstrap tohumudur
+//! (x=0.7, MetricSource::Placeholder — ÖLÇÜM DEĞİL, commands/mod.rs run_navigator);
+//! `after` motordan ölçülür ve fixture'a duyarlıdır. Bu yüzden before pinleri tohumu,
+//! after pinleri gerçek ölçümü sabitler.
 //!
 //! **Isolation**: `osp trajectory attempt` `FilesystemPendingAuthorizationStore::new(".")`
 //! CWD .osp/'ye yazar. Test CWD'si analyzed repo DIŞINDA ayrı bir tempdir'dir (repo
@@ -276,6 +282,39 @@ impl HarnessFixture {
             .arg("attempt");
         build(&mut cmd);
         cmd.output().expect("run osp")
+    }
+
+    /// #173 review tur-1 (P1-2): fixture'ın ÖLÇÜLEN baseline coupling'i —
+    /// `osp analyze` çıktısından main.rs düğümünün coupling değeri. Evidence
+    /// `before` bootstrap tohumu (Placeholder 0.7) olduğundan, gerçek graf
+    /// geçişi (2/3 → 1/2) bu kanaldan ayrıca doğrulanır: epistemik kaynakları
+    /// farklı iki sayı "improvement" kanıtı olarak karşılaştırılamaz.
+    fn measured_main_coupling(&self) -> f64 {
+        let output = Command::cargo_bin("osp")
+            .expect("osp binary")
+            .current_dir(self.work_path())
+            .arg("analyze")
+            .arg(self.repo_path())
+            .arg("--format")
+            .arg("json")
+            .output()
+            .expect("run osp analyze");
+        assert!(
+            output.status.success(),
+            "analyze must succeed. stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let space: serde_json::Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("analyze json parses: {e}. stdout={stdout}"));
+        space["nodes"]
+            .as_array()
+            .expect("nodes")
+            .iter()
+            .find(|n| n["path"].as_str().map(|p| p.ends_with("main.rs")) == Some(true))
+            .expect("main.rs node")["coupling"]["value"]
+            .as_f64()
+            .expect("main.rs coupling value")
     }
 }
 
@@ -902,9 +941,11 @@ fn harness_production_witness_reaches_navigator() {
 #[test]
 fn completed_loop_exact_pin_via_json_envelope() {
     // Reviewer'ın istediği exact V1 run envelope + state-transition assertion.
-    // main.rs (Node 2) has 2 outgoing imports → coupling 2/3 = 0.667.
-    // RemoveImport 2→1 → coupling 1/2 = 0.5 ≤ 0.55 → Completed.
-    let fx = HarnessFixture::new();
+    // use-edges fixture (#173): main.rs (Node 2) GERÇEK 2 çıkan use-kenarı →
+    // ölçülen coupling 2/3 = 0.667; RemoveImport 2→1 → ölçülen 1/2 = 0.5 ≤ 0.55
+    // → Completed. Evidence `before` fixture'tan DEĞİL, G1 bootstrap tohumundan
+    // gelir (x=0.7 Placeholder — repro #173); `after` ölçülür (0.5 tam pin).
+    let fx = HarnessFixture::new_with_use_edges();
     let env = task_envelope(&fx.head, 2); // Node 2 = main.rs (2 outgoing imports)
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(2, 1); // remove main→b
@@ -985,21 +1026,34 @@ fn completed_loop_exact_pin_via_json_envelope() {
         "mutation decision"
     );
 
-    // before/after coupling: after < before, after ≤ threshold (0.55).
+    // before/after coupling (#173 semantiği + review tur-1 P1-2): üç kanal ayrışır —
+    // (i) evidence `before` = G1 bootstrap tohumu (Placeholder; graf ölçümü DEĞİL),
+    // (ii) fixture'ın ölçülen baseline'ı (analyze kanalı; gerçek 2/3),
+    // (iii) evidence `after` = manevra sonrası motor ölçümü (1/2).
+    // Geçiş iddiası yalnız (ii)↔(iii) arasında kurulur (ölçüm↔ölçüm); tohumla
+    // ölçüm karşılaştırılmaz.
     let before_coupling = entry["before"]["x"].as_f64().expect("before coupling (x)");
     let after_coupling = entry["after"]["x"].as_f64().expect("after coupling (x)");
     assert!(
-        after_coupling < before_coupling,
-        "coupling must decrease: before={before_coupling}, after={after_coupling}"
+        (before_coupling - 0.7).abs() < 1e-9,
+        "before.x == bootstrap seed 0.7 (Placeholder, not a graph measurement): {before_coupling}"
+    );
+    let baseline_coupling = fx.measured_main_coupling();
+    assert!(
+        (baseline_coupling - 2.0 / 3.0).abs() < 1e-9,
+        "fixture baseline (analyze) must be 2/3: {baseline_coupling}"
+    );
+    assert!(
+        (after_coupling - 0.5).abs() < 1e-9,
+        "after.x == measured 1/2 (RemoveImport 2→1 on use-edges fixture): {after_coupling}"
+    );
+    assert!(
+        after_coupling < baseline_coupling,
+        "real graph transition 2/3 → 1/2 (measured ↔ measured): after={after_coupling}, baseline={baseline_coupling}"
     );
     assert!(
         after_coupling <= 0.55,
         "after coupling ≤ threshold (0.55): after={after_coupling}"
-    );
-    // before coupling was 2/3 ≈ 0.667 (2 outgoing imports).
-    assert!(
-        before_coupling > 0.55,
-        "before coupling > threshold (was unsatisfied): before={before_coupling}"
     );
 }
 
@@ -1012,7 +1066,10 @@ fn analyzed_scope_fence_allows_untracked_outside_analysis() {
     // Faz 1 vaka: analiz kapsamı DIŞINDA aktif iş (untracked not/submodule işi),
     // ölçülen dosyalar HEAD-tracked ve değişmemiş → attempt ÇALIŞMALI
     // (eski global clean-worktree fence bu durumda reddediyordu).
-    let fx = HarnessFixture::new();
+    // use-edges fixture (#173 review tur-1 P1-1): başarı tanığı gerçek
+    // RemoveImport geçişinden gelir — 0-kenarlı fixture'ta Completed,
+    // fence değil coupling vakuitiesi sayesinde yeşil düşerdi.
+    let fx = HarnessFixture::new_with_use_edges();
     std::fs::write(fx.repo_path().join("notes-local.md"), "active dev work\n")
         .expect("write out-of-scope untracked file");
     let env = task_envelope(&fx.head, 2);
@@ -1233,9 +1290,11 @@ fn real_submodule_dirty_nested_analyzed_paths_reject() {
 fn v2_path_keyed_completed_loop_exact_pin() {
     // v1 exact-pin testinin path-keyed karşılığı: dosyalar id AVI gerektirmeden
     // main.rs/b.rs yollarıyla bağlanır; Completed + coupling düşüşü aynı ölçülür.
-    // main.rs 2 outgoing imports → coupling 2/3 ≈ 0.667; RemoveImport main→b
-    // → 1/2 = 0.5 ≤ 0.55 → Completed.
-    let fx = HarnessFixture::new();
+    // use-edges fixture (#173): main.rs GERÇEK 2 çıkan use-kenarı → ölçülen
+    // 2/3 = 0.667; RemoveImport main→b → ölçülen 1/2 = 0.5 ≤ 0.55 → Completed.
+    // `before` bootstrap tohumu 0.7'dir (Placeholder — v1 exact-pin testindeki
+    // semantik); `after` ölçülür.
+    let fx = HarnessFixture::new_with_use_edges();
     let task_path = fx.write_task(&task_envelope_v2(&fx.head, "main.rs"));
     let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
@@ -1268,14 +1327,28 @@ fn v2_path_keyed_completed_loop_exact_pin() {
     let before_coupling = entry["before"]["x"].as_f64().expect("before coupling");
     let after_coupling = entry["after"]["x"].as_f64().expect("after coupling");
     assert!(
-        before_coupling > 0.55,
-        "before > threshold: {before_coupling}"
+        (before_coupling - 0.7).abs() < 1e-9,
+        "before.x == bootstrap seed 0.7 (Placeholder): {before_coupling}"
+    );
+    let baseline_coupling = fx.measured_main_coupling();
+    assert!(
+        (baseline_coupling - 2.0 / 3.0).abs() < 1e-9,
+        "fixture baseline (analyze) must be 2/3: {baseline_coupling}"
+    );
+    assert!(
+        (after_coupling - 0.5).abs() < 1e-9,
+        "after.x == measured 1/2 (use-edges fixture): {after_coupling}"
+    );
+    // Geçiş iddiası ölçüm↔ölçüm kurulur (review tur-1 P1-2); tohum (0.7)
+    // yalnız telemetry olarak yukarıda pinlendi.
+    assert!(
+        after_coupling < baseline_coupling,
+        "real graph transition 2/3 → 1/2: after={after_coupling}, baseline={baseline_coupling}"
     );
     assert!(
         after_coupling <= 0.55,
         "after ≤ threshold: {after_coupling}"
     );
-    assert!(after_coupling < before_coupling, "coupling must decrease");
 
     fx.assert_repo_clean();
 }
@@ -1318,7 +1391,10 @@ fn v2_proposals_unknown_path_fails_closed_at_cli() {
 fn v1_task_with_v2_proposals_mix_works() {
     // Dispatch'ler bağımsız: v1 id-keyed task + v2 path-keyed proposals karışımı
     // geçerli (run 7-8 deseni: task el yazımı id'lerle, proposals taze).
-    let fx = HarnessFixture::new();
+    // use-edges fixture (#173 review tur-1 P1-1): main→b kenarı GERÇEK vardır —
+    // Completed, path-keyed proposal'ın gerçekten bind edilip uygulandığının
+    // kanıtıdır; 0-kenarlı fixture'ta bu yine vakuite olurdu.
+    let fx = HarnessFixture::new_with_use_edges();
     let task_path = fx.write_task(&task_envelope(&fx.head, 2));
     let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
     let output = fx.run_attempt(&task_path, &proposals_path, 7, "json");
@@ -1389,12 +1465,13 @@ fn run_production_attempt(
 
 #[test]
 fn production_witness_awaits_with_persisted_identity() {
-    // #152: predicate satisfied (coupling 0.667 → 0.5 ≤ 0.55) + production witness
+    // #152: predicate satisfied (ölçülen after 0.5 ≤ 0.55 — use-edges fixture #173;
+    // `before` bootstrap tohumu 0.7'dir, graf ölçümü değil) + production witness
     // (quorum 2/1.5, boş witness seti) → Held. Persisted identity load-or-create
     // edildiği için D3 (Ephemeral + CrossProcess → exit 70) GEÇİLİR:
     // AwaitingWitnesses (exit 10 — expected domain outcome) + gerçek pending
     // artifact + space-identity, ikisi de state-dir altında (repo temiz kalır).
-    let fx = HarnessFixture::new();
+    let fx = HarnessFixture::new_with_use_edges();
     let task_path = fx.write_task(&task_envelope(&fx.head, 2));
     let proposals_path = fx.write_proposals(2, 1);
 
