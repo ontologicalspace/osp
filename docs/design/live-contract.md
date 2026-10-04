@@ -260,6 +260,39 @@ alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"
 (`verified-bad`). İlk gerçekleşmeler ayrıca `notes.md`'de olay olarak
 kaydedilir.
 
+### Defter araçları — `draft-task` / `suggest-targets` / `finalize-run` (#172)
+
+Defter tutma ve doğrulama motora taşınmıştır (karar-kaydı: issue #172 yorumu,
+K1–K7). Üç komut da **YORUM ÜRETMEZ** — bar, şekil seçimi, tercih insanda kalır;
+ritüelin ölçüm-doğrulama kısmı motor, epistemik içeriği insan.
+
+- **`osp draft-task --repo R --target <path> --task-id N --label … --bar τ
+  [--baseline <run>/baseline.json] [--proposals-spec <file>] --out-task …
+  [--out-proposals …]`** — task v2 (+ spec verilirse proposals v2) üretir.
+  `repository_head`'i `git rev-parse`'ten alır (SHA transcription sınıfı ölür);
+  `--baseline` artifact'ı canlı HEAD ile exact-match fence'e girer (drift →
+  fail-closed), verilmezse canlı analyze koşar. `--proposals-spec` insan şekil
+  niyetini (yüz kümeleri + removed/moved kenarlar; `repository_head` YOK, kenar
+  `kind` default `Imports`) tam v2 şemaya çevirir ve TÜM temsilcileri ölçülmüş
+  baseline kenar listesine karşı doğrular; uyuşmayan kenar hatasında düğümün
+  ölçülmüş çıkış-kenarları listelenir.
+- **`osp suggest-targets --repo R [--baseline …] [--min-coupling x]
+  [--exclude-past dogfood/ledger.jsonl] [--limit N] [--format json]`** —
+  ölçülmüş c değerinden sıralı aday tablosu; `--exclude-past` ledger
+  `task_ref`'lerinden geçmiş hedefleri otomatik düşer (v1+v2 task zarflarının
+  ikisi de okunur; task_ref'ler CWD-göreli — OSP kökünden çalıştır).
+- **`osp finalize-run <run-dir> [--run-id …] [--repository …] [--out …]`** —
+  run dizininden `live-ledger-v1` satır **taslağı**: ref'ler + digest'ler
+  (sha256, ham bayt, tam 64-hex) + üç-head çapraz-fence (task = baseline =
+  attempt). `attempt.json` yalnız #166 run envelope (`--out` kopyası) olabilir;
+  el-yapımı legacy listeler reddedilir. `osp_revision` build-time gömülür.
+  **Yorum alanları null kalır** (`decision`, `patch_outcome`,
+  `decision_utility`, `counterfactual`, `human_override`, `friction`, `notes`,
+  `commands`) — insan doldurup ledger'a APPEND eder; komut dosyaya yazmaz,
+  taslak üretir. `build_verification.verified_state` yalnız after + patch
+  kanıt çiftiyle dolu (hangi head'e promote edildi + hangi yama); command ve
+  outcome insan.
+
 ## 5. İlk görev adayı — Nexus (Faz 1 başlangıç taslağı)
 
 Tip: **refactoring — gereksiz/doğrudan bir bağımlılığı kaldırarak coupling'i düşürme**

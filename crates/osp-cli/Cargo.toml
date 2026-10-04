@@ -27,8 +27,15 @@ clap = { version = "4", features = ["derive"] }
 # ölünce lock otomatik bırakılır (stale-lock state yok). fs2 bakımsız; fs4 maintained fork.
 fs4 = { workspace = true }
 thiserror = "1"
+# #172 finalize-run: task/proposal/patch digest'leri — sha256 over ham dosya baytları
+# (K3 karar-kaydı: tam 64-hex; mevcut 16-hex ledger değerleri el-dönemi annotasyondur).
+sha2 = "0.10"
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+# Entegrasyon testleri digest'i bağımsız yeniden hesaplayıp karşılaştırır (bin-only
+# crate: normal dependency'ler test binary'sine görünmez).
+sha2 = "0.10"

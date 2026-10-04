@@ -314,6 +314,23 @@ impl CliEdgeKind {
             Self::SameNsType => 9,
         }
     }
+
+    /// Snake_case wire adı (`#172` defter komutlarının insan-okur mesajları için —
+    /// serialization'a değil, enum üzerinden kararlı kılmak için).
+    pub const fn wire_name(self) -> &'static str {
+        match self {
+            Self::Imports => "imports",
+            Self::Calls => "calls",
+            Self::DependsOn => "depends_on",
+            Self::PartOf => "part_of",
+            Self::DerivesFrom => "derives_from",
+            Self::Witnesses => "witnesses",
+            Self::Approves => "approves",
+            Self::Violates => "violates",
+            Self::TypeImports => "type_imports",
+            Self::SameNsType => "same_ns_type",
+        }
+    }
 }
 
 impl From<osp_core::space::EdgeKind> for CliEdgeKind {
@@ -329,6 +346,26 @@ impl From<osp_core::space::EdgeKind> for CliEdgeKind {
             osp_core::space::EdgeKind::Violates => Self::Violates,
             osp_core::space::EdgeKind::TypeImports => Self::TypeImports,
             osp_core::space::EdgeKind::SameNsType => Self::SameNsType,
+        }
+    }
+}
+
+/// #172: okuma yönü — baseline artifact kenarlarını core enum dünyasına çevirir
+/// (defter komutları wire adlarından değil enum'dan karşılaştırır; snake_case
+/// `CliEdgeKind` wire'ı ile PascalCase core serde adı bu dönüşümde buluşur).
+impl From<CliEdgeKind> for osp_core::space::EdgeKind {
+    fn from(kind: CliEdgeKind) -> Self {
+        match kind {
+            CliEdgeKind::Imports => Self::Imports,
+            CliEdgeKind::Calls => Self::Calls,
+            CliEdgeKind::DependsOn => Self::DependsOn,
+            CliEdgeKind::PartOf => Self::PartOf,
+            CliEdgeKind::DerivesFrom => Self::DerivesFrom,
+            CliEdgeKind::Witnesses => Self::Witnesses,
+            CliEdgeKind::Approves => Self::Approves,
+            CliEdgeKind::Violates => Self::Violates,
+            CliEdgeKind::TypeImports => Self::TypeImports,
+            CliEdgeKind::SameNsType => Self::SameNsType,
         }
     }
 }

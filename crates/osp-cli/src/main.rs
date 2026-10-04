@@ -41,6 +41,13 @@ struct Cli {
 enum Commands {
     /// Repo'yu analiz et → space snapshot.
     Analyze(commands::AnalyzeArgs),
+    /// #172: task v2 (+ proposals v2) üret — temsilcileri ölçülmüş baseline'a
+    /// karşı kendisi doğrular (fail-closed); yorum insanda kalır.
+    DraftTask(commands::draft_task::DraftTaskArgs),
+    /// #172: c-sıralı hedef aday tablosu (ölçümden) + geçmiş hedef hariç listesi.
+    SuggestTargets(commands::suggest_targets::SuggestTargetsArgs),
+    /// #172: run dizininden ledger satırı taslağı (makine-alanları dolu, K4).
+    FinalizeRun(commands::finalize_run::FinalizeRunArgs),
     /// Trajectory işlemleri (init, attempt).
     Trajectory {
         #[command(subcommand)]
@@ -121,6 +128,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Analyze(args) => commands::run_analyze(args),
+        Commands::DraftTask(args) => commands::draft_task::run_draft_task(args),
+        Commands::SuggestTargets(args) => commands::suggest_targets::run_suggest_targets(args),
+        Commands::FinalizeRun(args) => commands::finalize_run::run_finalize_run(args),
         Commands::Trajectory { action } => match action {
             TrajectoryAction::Init(args) => commands::run_trajectory_init(args),
             TrajectoryAction::Attempt(args) => commands::run_trajectory_attempt(args),

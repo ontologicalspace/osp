@@ -4,11 +4,15 @@
 //! analyze_repo_with_config → CoordinateSystem::default_raw_five → SpaceEngine.
 
 pub mod analyze_provenance;
+pub mod baseline;
+pub mod draft_task;
+pub mod finalize_run;
 pub mod harness_task;
 pub mod path_bindings;
 pub mod path_keyed_proposals;
 pub mod repo_snapshot;
 pub mod run_envelope;
+pub mod suggest_targets;
 
 use std::path::{Path, PathBuf};
 
