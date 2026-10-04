@@ -1,20 +1,31 @@
-//! #172 (K1): defter komutlarının ortak ölçüm kaynağı — baseline görünümü.
+//! #172 (K1, tur-1 P0-1 ile sıkılaştırıldı): defter komutlarının ortak ölçüm
+//! kaynağı — **revizyona bağlı** baseline görünümü.
 //!
 //! `draft-task` / `suggest-targets` temsilci ve aday doğrulamasını YALNIZ ölçümden
 //! yapar (#173 ilkesi: *ölçümden gelmeli, el beyanından değil*). İki giriş:
 //!
-//! - **`--baseline <file>`** — `osp analyze --out` artifact'ı (ölçüm kaydı).
-//!   `repository.head` canlı `git rev-parse HEAD` ile exact-match fence'e girer:
-//!   artifact ile task'ın bağlanacağı state aynı olmalıdır (drift → fail-closed).
-//!   SHA hiç elle yazılmadığı için transcription hatası sınıfı ölür.
-//! - **verilmezse** — canlı `analyze` koşar; ölçüm o an üretilir, HEAD snapshot'tan
-//!   alınır ve analiz penceresinde HEAD'in hareket etmediği fence'lenir.
+//! - **`--baseline <file>`** — `osp analyze --require-clean-snapshot --out`
+//!   artifact'ı. Üç katmanlı fence (tur-1 P0-1):
+//!   1. `repository.binding == clean_pre_post_equal` — generic analyze bilinçli
+//!      olarak `observed_worktree_unbound` üretir ve içeriği HEAD'e BAĞLAMAYABİLİR
+//!      (dirty analyzed-path ölçümü HEAD yerine worktree içeriğinden gelir);
+//!      revizyona bağlı artifact yalnız clean-bound sözleşmeden çıkar.
+//!   2. `repository.head ==` canlı `git rev-parse HEAD` (drift → fail-closed).
+//!   3. Ölçülen düğüm path'leri ŞİMDİ HEAD-tracked + clean (#155 analyzed-scope
+//!      fence'leri — artifact üretiminden bu yana ölçülen dosyalar değişmedi).
+//! - **verilmezse** — canlı `analyze` koşar; aynı fence ailesi uygulanır:
+//!   analiz penceresinde HEAD **ve tracked-set** değişmedi, ölçülen path'ler
+//!   HEAD-tracked ve clean.
+//!
+//! Böylece `MeasuredState == HEADState == Task'ın bağlandığı state` olması motorda
+//! ispatlanabilir kalır (#155/#160 state-authority çizgisi). SHA hiç elle
+//! yazılmadığı için transcription hatası sınıfı da ölür.
 //!
 //! Her iki yol da aynı `BaselineView`'ı üretir: path-keyed kenar kümesi + düğüm
 //! listesi + coupling/import-out türevleri. Görünüm YORUM içermez — ölçülmüş
 //! fact'ler ve onların tür dönüşümleri dışında hiçbir türetme yapılmaz.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use osp_analyzer::contract::AnalysisConfig;
@@ -23,7 +34,9 @@ use osp_analyzer::pipeline::analyze_repo_with_config;
 use osp_core::space::EdgeKind;
 
 use crate::commands::analyze_provenance::{CliAnalyzeNode, CliEdge, CliEdgeKind};
-use crate::commands::repo_snapshot::{GitCommitId, RepositorySnapshot};
+use crate::commands::repo_snapshot::{
+    validate_analyzed_paths_clean, validate_analyzed_paths_tracked, GitCommitId, RepositorySnapshot,
+};
 
 /// Ölçülmüş baseline kenarı — path-keyed (artifact kenarları id-keyed gelir;
 /// düğüm haritasıyla path'e çevrilir, buradan sonrası path dünyasında kalır).
@@ -72,12 +85,18 @@ fn kind_name(kind: EdgeKind) -> &'static str {
     CliEdgeKind::from(kind).wire_name()
 }
 
-/// Baseline'ı artifact'tan yükle + canlı HEAD fence'i (K1).
+/// Baseline'ı artifact'tan yükle — revizyona bağlılık fence'leriyle (K1, tur-1 P0-1).
 ///
-/// Artifact `osp analyze --out` zarfı olmak zorundadır (`schema_version: 2`).
-/// `repository.head != live_head` → fail-closed: temsilciler eski bir ölçüme
-/// karşı doğrulanamaz, task ise başka bir state'e bağlanamaz.
-pub(crate) fn load_baseline_artifact(path: &Path, live_head: &str) -> anyhow::Result<BaselineView> {
+/// Artifact `osp analyze --require-clean-snapshot --out` zarfı olmak zorundadır
+/// (`schema_version: 2` + `binding: clean_pre_post_equal`): generic analyze'ın
+/// `observed_worktree_unbound` çıktısı ölçülen içeriğin HEAD içeriği OLDUĞUNU
+/// iddia edemez. Ardından head-drift fence'i ve #155 analyzed-scope fence'leri
+/// (ölçülen path'ler bugün HEAD-tracked + clean) uygulanır.
+pub(crate) fn load_baseline_artifact(
+    path: &Path,
+    snapshot: &RepositorySnapshot,
+) -> anyhow::Result<BaselineView> {
+    let live_head = snapshot.head.as_str();
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("failed to read baseline artifact {}: {e}", path.display()))?;
     let envelope: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
@@ -92,6 +111,22 @@ pub(crate) fn load_baseline_artifact(path: &Path, live_head: &str) -> anyhow::Re
         "baseline artifact requires schema_version 2 (found {found}) — \
          regenerate with `osp analyze --out`"
     );
+    // P0-1 katman 1: yalnız clean-bound artifact revizyona bağlıdır.
+    let binding = envelope["repository"]["binding"].as_str().unwrap_or("");
+    anyhow::ensure!(
+        binding == "clean_pre_post_equal",
+        "baseline artifact is not revision-bound: repository.binding = {binding:?} — \
+         only `clean_pre_post_equal` (osp analyze --require-clean-snapshot) guarantees \
+         the measured content IS the HEAD content; an observed_worktree_unbound \
+         baseline may have measured dirty/uncommitted files under this HEAD"
+    );
+    let clean = envelope["repository"]["clean"].as_bool().unwrap_or(false);
+    anyhow::ensure!(
+        clean,
+        "baseline artifact reports a dirty repository (repository.clean = false) — \
+         regenerate with `osp analyze --require-clean-snapshot`"
+    );
+    // P0-1 katman 2: head drift.
     let artifact_head = envelope["repository"]["head"]
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("baseline artifact is missing repository.head"))?;
@@ -118,14 +153,24 @@ pub(crate) fn load_baseline_artifact(path: &Path, live_head: &str) -> anyhow::Re
             .ok_or_else(|| anyhow::anyhow!("baseline artifact is missing edges"))?,
     )
     .map_err(|e| anyhow::anyhow!("baseline artifact edges do not parse: {e}"))?;
+
+    // P0-1 katman 3: ölçülen path'ler bugün HEAD-tracked + clean (#155 fence'leri —
+    // artifact üretiminden bu yana ölçülen dosyalar değişmedi).
+    let node_paths: HashMap<u64, String> =
+        nodes.iter().map(|n| (n.node_id, n.path.clone())).collect();
+    validate_analyzed_paths_tracked(&node_paths, snapshot).map_err(|e| anyhow::anyhow!(e))?;
+    validate_analyzed_paths_clean(&node_paths, snapshot, "draft-time baseline fence")
+        .map_err(|e| anyhow::anyhow!(e))?;
+
     build_view(nodes, edges, artifact_head.to_string())
 }
 
-/// Baseline'ı canlı analyze ile üret (K1, `--baseline` verilmediğinde).
+/// Baseline'ı canlı analyze ile üret (K1, `--baseline` verilmediğinde; tur-1 P0-1).
 ///
 /// HEAD authority: analiz SONRASI snapshot (`run_analyze` zarfıyla aynı tek kaynak).
-/// Analiz penceresinde HEAD hareket ettiyse fail-closed — hareketli bir state'e
-/// task bağlanamaz.
+/// Fence ailesi: analiz penceresinde HEAD **ve tracked-set** değişmedi; ölçülen
+/// path'ler HEAD-tracked ve clean (#155 invariant'ları — hareketli veya
+/// commit'siz içeriğe task bağlanamaz).
 pub(crate) fn analyze_live(repo: &Path) -> anyhow::Result<BaselineView> {
     let snapshot_before = RepositorySnapshot::capture(repo).map_err(|e| anyhow::anyhow!(e))?;
     let registry = AdapterRegistry::default_all();
@@ -138,6 +183,15 @@ pub(crate) fn analyze_live(repo: &Path) -> anyhow::Result<BaselineView> {
         snapshot_before.head,
         snapshot_after.head
     );
+    anyhow::ensure!(
+        snapshot_before.tracked_paths == snapshot_after.tracked_paths,
+        "repository tracked-path set changed during analysis — a task cannot bind \
+         to a state whose file set is moving; retry"
+    );
+    validate_analyzed_paths_tracked(&result.node_paths, &snapshot_after)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    validate_analyzed_paths_clean(&result.node_paths, &snapshot_after, "after live analysis")
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     // run_analyze ile aynı DTO üretimi (node_id ascending deterministik sıra).
     let mut nodes: Vec<CliAnalyzeNode> = Vec::with_capacity(result.space.nodes.len());
@@ -213,26 +267,102 @@ fn build_view(
 mod tests {
     use super::*;
 
-    /// K1 fence sözleşmesi: artifact head ≠ canlı head → fail-closed (exact mesaj
-    /// kırıntılarıyla — operatör yönlendirmesi ölçümün yeniden üretilmesine).
-    #[test]
-    fn artifact_head_drift_fails_closed() {
-        let dir = tempfile::tempdir().unwrap();
-        let artifact = dir.path().join("baseline.json");
+    fn snapshot_at_head(head: &str) -> RepositorySnapshot {
+        RepositorySnapshot {
+            head: GitCommitId::try_from(head.to_string()).unwrap(),
+            tracked_paths: BTreeSet::new(),
+            dirty_paths: BTreeSet::new(),
+        }
+    }
+
+    fn write_artifact(dir: &Path, repository: serde_json::Value) -> std::path::PathBuf {
+        let artifact = dir.join("baseline.json");
         std::fs::write(
             &artifact,
             serde_json::json!({
                 "schema_version": 2,
-                "repository": {"head": "b".repeat(40)},
+                "repository": repository,
                 "nodes": [], "edges": [], "semantic_coverage": {"files_with_scip": 0}
             })
             .to_string(),
         )
         .unwrap();
-        let err = load_baseline_artifact(&artifact, &"a".repeat(40)).unwrap_err();
+        artifact
+    }
+
+    /// P0-1 katman 1: generic analyze'ın `observed_worktree_unbound` artifact'ı
+    /// revizyona bağlı DEĞİL — ölçülmüş içerik HEAD içeriği olmak zorunda değil.
+    #[test]
+    fn unbound_binding_artifact_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = write_artifact(
+            dir.path(),
+            serde_json::json!({"head": "a".repeat(40), "clean": false, "binding": "observed_worktree_unbound"}),
+        );
+        let err =
+            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("not revision-bound"), "{msg}");
+        assert!(msg.contains("--require-clean-snapshot"), "{msg}");
+    }
+
+    /// dirty-worktree'den clean-bound görünümüyle yazılmış sahte artifact → red.
+    #[test]
+    fn clean_false_artifact_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = write_artifact(
+            dir.path(),
+            serde_json::json!({"head": "a".repeat(40), "clean": false, "binding": "clean_pre_post_equal"}),
+        );
+        let err =
+            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
+        assert!(format!("{err}").contains("dirty repository"), "{err}");
+    }
+
+    /// K1 fence sözleşmesi: artifact head ≠ canlı head → fail-closed (exact mesaj
+    /// kırıntılarıyla — operatör yönlendirmesi ölçümün yeniden üretilmesine).
+    #[test]
+    fn artifact_head_drift_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = write_artifact(
+            dir.path(),
+            serde_json::json!({"head": "b".repeat(40), "clean": true, "binding": "clean_pre_post_equal"}),
+        );
+        let err =
+            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("HEAD drift"), "{msg}");
         assert!(msg.contains(&"b".repeat(40)), "{msg}");
+    }
+
+    /// P0-1 katman 3: artifact ölçümünden SONRA analyzed-path dirty'leşti →
+    /// draft-time #155 fence'i red (ölçülen içerik artık HEAD içeriği değil).
+    #[test]
+    fn dirty_analyzed_path_at_draft_time_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let artifact = write_artifact(
+            dir.path(),
+            serde_json::json!({"head": "a".repeat(40), "clean": true, "binding": "clean_pre_post_equal"}),
+        );
+        // Artifact'ı node'lu yaz (fence'e girmesi için).
+        let raw = std::fs::read_to_string(&artifact).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        v["nodes"] = serde_json::json!([{
+            "node_id": 0, "path": "src/main.cs", "kind": "module",
+            "classification": "production", "role": "runtime", "mass": 1.0,
+            "coupling": {"value": 0.0, "source": "tree_sitter", "confidence": 0.75, "coverage": 1.0},
+            "cohesion": {"value": 0.5, "source": "placeholder", "confidence": 0.0, "coverage": 0.0},
+            "instability": {"value": 0.5, "source": "tree_sitter", "confidence": 0.75, "coverage": 1.0}
+        }]);
+        std::fs::write(&artifact, v.to_string()).unwrap();
+
+        let mut snapshot = snapshot_at_head(&"a".repeat(40));
+        snapshot.tracked_paths.insert("src/main.cs".to_string());
+        snapshot.dirty_paths.insert("src/main.cs".to_string());
+        let err = load_baseline_artifact(&artifact, &snapshot).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("modified or untracked"), "{msg}");
+        assert!(msg.contains("draft-time"), "{msg}");
     }
 
     /// Yanlış şema sürümü → net red (eski v1 zarfı sessizce yorumlanamaz).
@@ -250,7 +380,8 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err = load_baseline_artifact(&artifact, &"a".repeat(40)).unwrap_err();
+        let err =
+            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
         assert!(format!("{err}").contains("schema_version 2"), "{err}");
     }
 

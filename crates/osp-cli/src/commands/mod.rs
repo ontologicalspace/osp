@@ -720,6 +720,73 @@ fn lexical_normalize(path: &std::path::Path) -> PathBuf {
     out
 }
 
+/// #172 tur-1 (P0-3/P2): girdi path'ini mutlaklaştırıp missing-tail canonicalize
+/// eder — var-olmayan çıktı dosyaları da dahil tutarlı alias karşılaştırması.
+pub(crate) fn canon_path(path: &Path) -> PathBuf {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    canonicalize_with_missing_tail(&abs)
+}
+
+/// #172 tur-1 (P0-3/P2): atomic artifact publish — unique same-dir temp
+/// (`create_new`) → write+sync → rename-replace. Düz `fs::write` truncate
+/// penceresini ve yarı-yazılmış artifact bırakma riskini kapatır
+/// (`write_attempt_out_copy` çekirdeğinin genelleştirilmiş hâli).
+pub(crate) fn atomic_write_replace(out: &Path, payload: &[u8]) -> anyhow::Result<()> {
+    use std::io::Write as _;
+    let dir = out
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("output path {} has no parent directory", out.display()))?;
+    let stem = out
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "artifact".to_string());
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+
+    let mut tmp: Option<PathBuf> = None;
+    for suffix in 0..=64u32 {
+        let name = match suffix {
+            0 => format!(".{stem}.osp-tmp-{pid}-{millis}"),
+            n => format!(".{stem}.osp-tmp-{pid}-{millis}-{n}"),
+        };
+        let candidate = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(payload).and_then(|_| file.sync_all()) {
+                    let _ = std::fs::remove_file(&candidate);
+                    anyhow::bail!("temp write failed for {}: {e}", out.display());
+                }
+                tmp = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => anyhow::bail!("temp open failed for {}: {e}", out.display()),
+        }
+    }
+    let tmp = match tmp {
+        Some(p) => p,
+        None => anyhow::bail!("temp collision budget exhausted for {}", out.display()),
+    };
+    if let Err(e) = std::fs::rename(&tmp, out) {
+        let _ = std::fs::remove_file(&tmp);
+        anyhow::bail!("rename failed for {}: {e}", out.display());
+    }
+    Ok(())
+}
+
 /// INV-T9 Step 4b: trajectory vision authority.
 ///
 /// `run_trajectory_init` ve `run_trajectory_attempt` ortak vision vector'u — mutation

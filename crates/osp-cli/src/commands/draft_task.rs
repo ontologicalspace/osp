@@ -11,6 +11,14 @@
 //! kendisi doğrulanır (K1; #173 *test green ≢ claim tested* ilkesinin defter
 //! yüzeyine uygulanması). Uyuşmazlıkta fail-closed; hatada söz konusu düğümün
 //! ölçülmüş çıkış-kenarları listelenir (elle py ayıklamanın yerine geçer).
+//!
+//! **Tur-1 P1-3 (op-matrix):** üretilen proposal'ın yapısal yüzeyinden op
+//! gereksinimleri türetilir (`new_nodes→AddNode`, `new_edges→AddEdge`,
+//! `removed Imports→RemoveImport`, `removed diğer→RemoveEdge`,
+//! `modified_entities→ModifyEntity`) ve task'ın izinli operasyonlarına karşı
+//! denetlenir — attempt'in op-matrix'inde reddedilecek çiftler generation-time
+//! ölür. Analyzer-owned observational kind'ler (`TypeImports`/`SameNsType`)
+//! proposal mutasyonunda yasaktır (#167 sonrası motor sözleşmesi).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -58,8 +66,9 @@ pub struct DraftTaskArgs {
     /// τ bar'ı — el tahminlerinden dondurulur (predicate threshold: coupling ≤ bar).
     #[arg(long)]
     pub bar: f64,
-    /// Baseline ölçüm artifact'ı (`osp analyze --out`). Verilirse HEAD exact-match
-    /// fence'e girer (drift → fail-closed); verilmezse canlı analyze koşar.
+    /// Baseline ölçüm artifact'ı — yalnız revizyona bağlı (`osp analyze
+    /// --require-clean-snapshot --out`); HEAD + #155 fence'leri uygulanır.
+    /// Verilmezse aynı fence'lerle canlı analyze koşar.
     #[arg(long)]
     pub baseline: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
@@ -90,9 +99,8 @@ pub struct DraftTaskArgs {
 
 pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
     let snapshot = RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    let live_head = snapshot.head.as_str().to_string();
     let view = match &args.baseline {
-        Some(path) => load_baseline_artifact(path, &live_head)?,
+        Some(path) => load_baseline_artifact(path, &snapshot)?,
         None => analyze_live(&args.repo)?,
     };
 
@@ -107,7 +115,17 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
         view.head
     );
 
+    // Operasyonları ÖNCE parse et (typo burada ölsün; op-matrix denetimi için gerekli).
+    let operations: Vec<OpKind> = args
+        .operations
+        .iter()
+        .map(|name| parse_op(name))
+        .collect::<Result<_, _>>()?;
+
     // Spec'i ÖNCE çevir + doğrula: geçersiz spec'te task dosyası da yazılmamalı.
+    // Tur-1 P1-3: üretilen proposal'ın op-gereksinimleri task'ın izinli
+    // operasyonlarına karşı denetlenir — attempt'te reddedilecek bir çifti
+    // generation-time yakalamak bu komutun varlık sebebi.
     let proposals = match &args.proposals_spec {
         Some(spec_path) => {
             let raw = std::fs::read_to_string(spec_path).map_err(|e| {
@@ -119,25 +137,49 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
                     spec_path.display()
                 )
             })?;
-            let (file, stats) = translate_spec(spec, &view)?;
+            let (file, stats, required_ops) = translate_spec(spec, &view)?;
+            let missing: Vec<&str> = required_ops
+                .iter()
+                .filter(|op| !operations.contains(op))
+                .map(|op| op_wire_name(*op))
+                .collect();
+            anyhow::ensure!(
+                missing.is_empty(),
+                "proposals spec requires operation(s) {} that the task does not allow \
+                 ({}) — add them via --operation or narrow the spec; a proposal the \
+                 attempt would reject in the op-matrix must not be generated",
+                missing.join(", "),
+                args.operations.join(", ")
+            );
             eprintln!(
                 "delegates verified against measured baseline at HEAD {}: {} path refs, \
-                 {} removed-edges (all measured), {} new-node links",
-                view.head, stats.path_refs, stats.removed_edges, stats.new_node_links
+                 {} removed-edges (all measured), {} new-node links; op-matrix ok \
+                 (required: {})",
+                view.head,
+                stats.path_refs,
+                stats.removed_edges,
+                stats.new_node_links,
+                required_ops
+                    .iter()
+                    .map(|op| op_wire_name(*op))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             Some(file)
         }
         None => None,
     };
 
-    let task_value = build_task_value(&args)?;
-    let envelope = serde_json::json!({
+    // Tur-1 P2: iki payload da serialize EDİLDİKTEN sonra, alias-preflight'li
+    // atomic publish ile yazılır — yarım artifact seti ve girdi-overwrite penceresi kapanır.
+    preflight_output_aliases(&args)?;
+    let task_payload = serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 2,
         "repository_head": view.head,
         "scope_bindings": [{"path": args.target}],
-        "task": task_value,
-    });
-    std::fs::write(&args.out_task, serde_json::to_string_pretty(&envelope)?)?;
+        "task": build_task_value(&args, &operations)?,
+    }))?;
+    crate::commands::atomic_write_replace(&args.out_task, task_payload.as_bytes())?;
     println!(
         "✓ task v2 written to {} (repository_head {}, target {})",
         args.out_task.display(),
@@ -150,7 +192,8 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
             .out_proposals
             .as_ref()
             .expect("clap `requires` guarantees out_proposals with proposals_spec");
-        std::fs::write(out, serde_json::to_string_pretty(&file)?)?;
+        let payload = serde_json::to_string_pretty(&file)?;
+        crate::commands::atomic_write_replace(out, payload.as_bytes())?;
         println!(
             "✓ proposals v2 written to {} (repository_head {}, {} proposals)",
             out.display(),
@@ -161,16 +204,47 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Tur-1 P2: çıktılar birbirinin ve KENDİ girdilerinin alias'ı olamaz —
+/// `--out-task x.json --out-proposals x.json` task'ı yazıp proposals ile
+/// overwrite edebilir; çıktının girdiyi (baseline/spec) ezmesi ise ref-digest
+/// tutarsızlığı üretir.
+fn preflight_output_aliases(args: &DraftTaskArgs) -> anyhow::Result<()> {
+    let out_task = crate::commands::canon_path(&args.out_task);
+    if let Some(out_proposals) = &args.out_proposals {
+        let out_proposals = crate::commands::canon_path(out_proposals);
+        anyhow::ensure!(
+            out_task != out_proposals,
+            "--out-task and --out-proposals resolve to the same file ({}) — \
+             the second write would overwrite the first",
+            args.out_task.display()
+        );
+        for (flag, input) in [
+            ("baseline", &args.baseline),
+            ("proposals-spec", &args.proposals_spec),
+        ] {
+            if let Some(input) = input {
+                let input = crate::commands::canon_path(input);
+                anyhow::ensure!(
+                    input != out_task && input != out_proposals,
+                    "output must not overwrite its own --{flag} input ({}) — \
+                     digests are computed over the consumed bytes",
+                    input.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Core `Task` kur → doğrula → v2 wire (predicate scope `{"Path": target}`).
 ///
 /// Scope placeholder'ı `Node(0)` ile kurulur, core validation o aşamada koşar,
 /// sonra scope v2 wire'ına rewrite edilir (attempt yükleyicisi `rebind_task_v2`
 /// ile ters yönü yapar — üretim/tüketim simetrik).
-fn build_task_value(args: &DraftTaskArgs) -> anyhow::Result<serde_json::Value> {
-    let mut operations = Vec::with_capacity(args.operations.len());
-    for name in &args.operations {
-        operations.push(parse_op(name)?);
-    }
+fn build_task_value(
+    args: &DraftTaskArgs,
+    operations: &[OpKind],
+) -> anyhow::Result<serde_json::Value> {
     let task = Task {
         id: args.task_id,
         milestone_id: args.milestone_id,
@@ -198,7 +272,7 @@ fn build_task_value(args: &DraftTaskArgs) -> anyhow::Result<serde_json::Value> {
             allow_progress_checkpoint: false,
             cold_start_policy: ColdStartPolicy::Disallow,
         },
-        allowed_operations: operations,
+        allowed_operations: operations.to_vec(),
         constraints: args
             .constraints
             .iter()
@@ -230,6 +304,33 @@ fn parse_op(name: &str) -> anyhow::Result<OpKind> {
              (AddNode, RemoveImport, ExtractModule, ...)"
         )
     })
+}
+
+/// OpKind → wire adı (op-matrix hata mesajları için; serde tek kaynak).
+fn op_wire_name(op: OpKind) -> &'static str {
+    match op {
+        OpKind::AddImport => "AddImport",
+        OpKind::RemoveImport => "RemoveImport",
+        OpKind::AddAbstraction => "AddAbstraction",
+        OpKind::ExtractModule => "ExtractModule",
+        OpKind::AddNode => "AddNode",
+        OpKind::RemoveNode => "RemoveNode",
+        OpKind::AddEdge => "AddEdge",
+        OpKind::RemoveEdge => "RemoveEdge",
+        OpKind::ModifyEntity => "ModifyEntity",
+    }
+}
+
+/// Tur-1 P1-3: analyzer-owned observational kind'ler (#167 `TypeImports` /
+/// `SameNsType`) proposal mutation'ında yasaktır — analiz üretir, mutasyon değil.
+fn ensure_mutation_kind(kind: EdgeKind, context: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !matches!(kind, EdgeKind::TypeImports | EdgeKind::SameNsType),
+        "{context} uses analyzer-owned observational kind {} — proposals cannot \
+         create or remove analyzer-measured edges (mutation kinds only)",
+        crate::commands::analyze_provenance::CliEdgeKind::from(kind).wire_name()
+    );
+    Ok(())
 }
 
 /// Doğrulanan temsilci sayıları (stdout özeti — yorum değil, sayım).
@@ -318,13 +419,27 @@ impl EdgeHuman {
     }
 }
 
-/// Spec → proposals v2 zarfı + temsilci doğrulaması (ölçüme karşı, fail-closed).
+/// Spec → proposals v2 zarfı + temsilci doğrulaması (ölçüme karşı, fail-closed)
+/// + op-gereksinimleri (tur-1 P1-3):
+///
+/// - `new_nodes` → `AddNode`
+/// - `new_edges` → `AddEdge`
+/// - `removed` Imports → `RemoveImport`; removed diğer kind → `RemoveEdge`
+/// - `modified_entities` → `ModifyEntity`
+///
+/// Gereksinimler task'ın izinli operasyonlarına karşı denetlenir.
 fn translate_spec(
     spec: ProposalsSpec,
     view: &BaselineView,
-) -> anyhow::Result<(CliPathKeyedProposalsFileV2, DelegateStats)> {
+) -> anyhow::Result<(CliPathKeyedProposalsFileV2, DelegateStats, Vec<OpKind>)> {
     let node_set = view.node_path_set();
     let mut stats = DelegateStats::default();
+    let mut required_ops: Vec<OpKind> = Vec::new();
+    let mut require = |op: OpKind| {
+        if !required_ops.contains(&op) {
+            required_ops.push(op);
+        }
+    };
     let mut out = Vec::with_capacity(spec.proposals.len());
 
     let ensure_node = |path: &str, context: &str| -> anyhow::Result<()> {
@@ -344,6 +459,7 @@ fn translate_spec(
             let mut connected = Vec::with_capacity(node.connected_to.len());
             for entry in node.connected_to {
                 let (path, kind) = entry.into_path_kind();
+                ensure_mutation_kind(kind, "new_nodes.connected_to")?;
                 ensure_node(&path, "new_nodes.connected_to")?;
                 stats.path_refs += 1;
                 stats.new_node_links += 1;
@@ -355,10 +471,14 @@ fn translate_spec(
                 connected_to: connected,
             });
         }
+        if !new_nodes.is_empty() {
+            require(OpKind::AddNode);
+        }
 
         let mut new_edges = Vec::with_capacity(proposal.new_edges.len());
         for edge in proposal.new_edges {
             let edge_ref = edge.into_edge_ref();
+            ensure_mutation_kind(edge_ref.kind, "new_edges")?;
             ensure_node(&edge_ref.from, "new_edges.from")?;
             ensure_node(&edge_ref.to, "new_edges.to")?;
             stats.path_refs += 2;
@@ -368,10 +488,14 @@ fn translate_spec(
                 kind: edge_ref.kind,
             });
         }
+        if !new_edges.is_empty() {
+            require(OpKind::AddEdge);
+        }
 
         let mut removed_edges = Vec::with_capacity(proposal.removed_edges.len());
         for edge in proposal.removed_edges {
             let edge_ref = edge.into_edge_ref();
+            ensure_mutation_kind(edge_ref.kind, "removed_edges")?;
             // Sıra (run-14/16 typo sınıfının debugging yardımı): `from` bilinen bir
             // ölçülmüş düğümdense, kenar-varlık kontrolü ÖNCE gelir ve hatada o
             // düğümün ölçülmüş çıkış-kenarlarını listeler — `to` ucundaki typo
@@ -395,6 +519,11 @@ fn translate_spec(
                 edge_ref.from,
                 view.measured_out_edges(&edge_ref.from).join(", ")
             );
+            require(if edge_ref.kind == EdgeKind::Imports {
+                OpKind::RemoveImport
+            } else {
+                OpKind::RemoveEdge
+            });
             stats.removed_edges += 1;
             removed_edges.push(edge_ref);
         }
@@ -427,6 +556,9 @@ fn translate_spec(
             stats.path_refs += 1;
             modified_entities.push(CliPathKeyedEntityChange { path });
         }
+        if !modified_entities.is_empty() {
+            require(OpKind::ModifyEntity);
+        }
 
         out.push(CliPathKeyedProposal {
             new_nodes,
@@ -446,6 +578,7 @@ fn translate_spec(
             proposals: out,
         },
         stats,
+        required_ops,
     ))
 }
 
@@ -503,12 +636,58 @@ mod tests {
         )
         .unwrap();
         let view = view(&[("main.rs", "a.rs"), ("main.rs", "b.rs")]);
-        let (file, stats) = translate_spec(spec, &view).unwrap();
+        let (file, stats, required_ops) = translate_spec(spec, &view).unwrap();
         assert_eq!(file.proposals.len(), 1);
         assert_eq!(file.proposals[0].removed_edges.len(), 1);
         assert_eq!(stats.removed_edges, 1);
         // affected_nodes türetildi: uçların sıralı-özgün birleşimi.
         assert_eq!(file.proposals[0].affected_nodes, vec!["a.rs", "main.rs"]);
+        // Tur-1 P1-3: removed Imports → RemoveImport gereksinimi.
+        assert!(
+            required_ops.contains(&OpKind::RemoveImport),
+            "{required_ops:?}"
+        );
+    }
+
+    #[test]
+    fn spec_op_requirements_derived_per_structural_surface() {
+        // new_nodes + new_edges + modified_entities → AddNode + AddEdge + ModifyEntity.
+        let spec: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{
+                "new_nodes": [{"kind": "Module", "initial_mass": 5.0, "connected_to": ["a.rs"]}],
+                "new_edges": [{"from": "main.rs", "to": "a.rs"}],
+                "modified_entities": ["b.rs"],
+                "reasoning": "x"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs"), ("main.rs", "b.rs")]);
+        let (_, _, required_ops) = translate_spec(spec, &view).unwrap();
+        assert!(required_ops.contains(&OpKind::AddNode), "{required_ops:?}");
+        assert!(required_ops.contains(&OpKind::AddEdge), "{required_ops:?}");
+        assert!(
+            required_ops.contains(&OpKind::ModifyEntity),
+            "{required_ops:?}"
+        );
+        assert!(
+            !required_ops.contains(&OpKind::RemoveImport),
+            "{required_ops:?}"
+        );
+    }
+
+    #[test]
+    fn spec_analyzer_owned_kind_rejected_everywhere() {
+        // Tur-1 P1-3: TypeImports/SameNsType analyzer-owned — mutasyon yüzeyinde yasak.
+        for raw in [
+            r#"{"proposals": [{"new_edges": [{"from": "main.rs", "to": "a.rs", "kind": "TypeImports"}], "reasoning": "x"}]}"#,
+            r#"{"proposals": [{"removed_edges": [{"from": "main.rs", "to": "a.rs", "kind": "SameNsType"}], "reasoning": "x"}]}"#,
+            r#"{"proposals": [{"new_nodes": [{"kind": "Module", "initial_mass": 5.0, "connected_to": [["a.rs", "TypeImports"]]}], "reasoning": "x"}]}"#,
+        ] {
+            let spec: ProposalsSpec = serde_json::from_str(raw).unwrap();
+            let view = view(&[("main.rs", "a.rs")]);
+            let err = translate_spec(spec, &view).unwrap_err();
+            let msg = format!("{err}");
+            assert!(msg.contains("analyzer-owned"), "{msg}");
+        }
     }
 
     #[test]
@@ -548,7 +727,7 @@ mod tests {
         )
         .unwrap();
         let view = view(&[("main.rs", "a.rs"), ("main.rs", "b.rs")]);
-        let (file, stats) = translate_spec(spec, &view).unwrap();
+        let (file, stats, _) = translate_spec(spec, &view).unwrap();
         let connected = &file.proposals[0].new_nodes[0].connected_to;
         assert_eq!(connected[0], ("a.rs".to_string(), EdgeKind::Imports));
         assert_eq!(connected[1], ("b.rs".to_string(), EdgeKind::Imports));

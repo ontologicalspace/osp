@@ -44,10 +44,9 @@ pub struct SuggestTargetsArgs {
 
 pub fn run_suggest_targets(args: SuggestTargetsArgs) -> anyhow::Result<()> {
     let snapshot = RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    let live_head = snapshot.head.as_str().to_string();
     let (view, source) = match &args.baseline {
         Some(path) => (
-            load_baseline_artifact(path, &live_head)?,
+            load_baseline_artifact(path, &snapshot)?,
             "baseline-artifact",
         ),
         None => (analyze_live(&args.repo)?, "live-analysis"),

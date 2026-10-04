@@ -46,6 +46,9 @@ fn p_str(p: &Path) -> &str {
 }
 
 /// Ritüel adımı 1: baseline ölçümü + ÖNERME PİNİ (ölçerek).
+///
+/// Tur-1 P0-1: baseline `--require-clean-snapshot` ile üretilir — defter
+/// komutları yalnız `clean_pre_post_equal` (revizyona bağlı) artifact kabul eder.
 /// Dönen değer: (baseline_path, ölçülen main.rs coupling'i).
 fn measured_baseline(fx: &HarnessFixture) -> (PathBuf, f64) {
     let work = fx.work_path();
@@ -57,6 +60,7 @@ fn measured_baseline(fx: &HarnessFixture) -> (PathBuf, f64) {
         .arg("json")
         .arg("--out")
         .arg(&baseline)
+        .arg("--require-clean-snapshot")
         .output()
         .expect("run osp analyze");
     assert!(
@@ -65,6 +69,10 @@ fn measured_baseline(fx: &HarnessFixture) -> (PathBuf, f64) {
         String::from_utf8_lossy(&out.stderr)
     );
     let b = read_json(&baseline);
+    assert_eq!(
+        b["repository"]["binding"], "clean_pre_post_equal",
+        "ritual baseline must be revision-bound"
+    );
     let imports: Vec<_> = b["edges"]
         .as_array()
         .expect("edges")
@@ -96,6 +104,34 @@ fn write_spec(work: &Path, from: &str, to: &str) -> PathBuf {
     )
     .unwrap();
     spec
+}
+
+/// draft-task çağrısını kur (tekrarlayan argv'yi tek yerde tutar).
+fn draft_task_cmd(
+    fx: &HarnessFixture,
+    work: &Path,
+    baseline: &Path,
+    target: &str,
+    spec: Option<&Path>,
+) -> Command {
+    let mut cmd = osp_in(work);
+    cmd.arg("draft-task")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--target")
+        .arg(target)
+        .arg("--task-id")
+        .arg("1")
+        .arg("--label")
+        .arg("test label")
+        .arg("--bar")
+        .arg("0.55")
+        .arg("--baseline")
+        .arg(baseline);
+    if let Some(spec) = spec {
+        cmd.arg("--proposals-spec").arg(spec);
+    }
+    cmd
 }
 
 #[test]
@@ -362,7 +398,7 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
     let baseline = run.join("baseline.json");
 
     // Ritüel adımı 1: baseline (ölçüm pini measured_baseline'te değil burada da
-    // gerekiyor — attempt fence'leri aynı önermeye yaslanır).
+    // gerekiyor — attempt fence'leri aynı önermeye yaslanır). P0-1: revizyona bağlı.
     let out = osp_in(&work)
         .arg("analyze")
         .arg(fx.repo_path())
@@ -370,6 +406,7 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         .arg("json")
         .arg("--out")
         .arg(&baseline)
+        .arg("--require-clean-snapshot")
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -452,6 +489,7 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         .arg("json")
         .arg("--out")
         .arg(&after)
+        .arg("--require-clean-snapshot")
         .output()
         .unwrap();
     assert!(out.status.success());
@@ -506,20 +544,12 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
     assert_eq!(row["attempt_ref"], "run/attempt.json");
     assert_eq!(row["after_ref"], "run/after.json");
     assert_eq!(row["analysis_profile"], "tier1");
-    assert_eq!(
-        row["build_verification"]["verified_state"]["repository_head"],
-        after_head
-    );
-    assert_eq!(
-        row["build_verification"]["verified_state"]["patch_digest"],
-        sha256_of(&patch)
-    );
-    assert_eq!(
-        row["build_verification"]["command"],
-        serde_json::Value::Null
-    );
+    // Tur-1 P1-1: Exists(after)+Exists(patch) ≠ Patch(S0)=S_after —
+    // build_verification motorca DOLDURULMAZ, bütünüyle null.
+    assert_eq!(row["build_verification"], serde_json::Value::Null);
 
-    // K4: yorum alanları null — motor doldurmaz.
+    // K4 (tur-1 P1-4): yorum alanları null — null = "henüz değerlendirilmedi";
+    // `[]` başka bir iddia olurdu ("değerlendirildi, friction yok").
     for field in [
         "decision",
         "patch_outcome",
@@ -527,6 +557,8 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         "counterfactual",
         "human_override",
         "notes",
+        "friction",
+        "commands",
     ] {
         assert_eq!(
             row[field],
@@ -534,7 +566,6 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
             "{field} must stay null"
         );
     }
-    assert_eq!(row["friction"], serde_json::json!([]));
 }
 
 #[test]
@@ -551,7 +582,7 @@ fn finalize_run_rejects_legacy_hand_assembled_attempt() {
             "schema_version": 2,
             "repository_head": fx.head,
             "scope_bindings": [{"path": "main.rs"}],
-            "task": {}
+            "task": {"id": 1}
         })
         .to_string(),
     )
@@ -588,7 +619,7 @@ fn finalize_run_head_fence_rejects_cross_state_row() {
             // kalıntısı) — üç-head fence yakalar.
             "repository_head": "f".repeat(40),
             "scope_bindings": [{"path": "main.rs"}],
-            "task": {}
+            "task": {"id": 1}
         })
         .to_string(),
     )
@@ -613,4 +644,430 @@ fn finalize_run_head_fence_rejects_cross_state_row() {
     assert!(!out.status.success(), "cross-state row must fail closed");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("head fence"), "{stderr}");
+}
+
+/// Tur-1 P0-1: generic analyze'ın `observed_worktree_unbound` artifact'ı
+/// revizyona bağlı değildir — draft-task kabul etmez.
+#[test]
+fn draft_task_rejects_unbound_baseline() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let baseline = work.join("baseline-unbound.json");
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        read_json(&baseline)["repository"]["binding"],
+        "observed_worktree_unbound"
+    );
+
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", None)
+        .arg("--out-task")
+        .arg(work.join("task.json"))
+        .output()
+        .expect("run osp draft-task (unbound)");
+    assert!(!out.status.success(), "unbound baseline must fail closed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not revision-bound"), "{stderr}");
+    assert!(stderr.contains("--require-clean-snapshot"), "{stderr}");
+}
+
+/// Tur-1 P0-1: artifact ölçümünden SONRA analyzed-path dirty'leşti —
+/// draft-time #155 fence'i ölçülen içeriğin artık HEAD içeriği olmadığını yakalar.
+#[test]
+fn draft_task_rejects_dirty_analyzed_path_at_draft_time() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    fs::write(
+        fx.repo_path().join("main.rs"),
+        "mod a;\nmod b;\nuse crate::a::A;\nuse crate::b::B;\npub fn main() { let _ = (A, B); } // local edit\n",
+    )
+    .unwrap();
+
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", None)
+        .arg("--out-task")
+        .arg(work.join("task.json"))
+        .output()
+        .expect("run osp draft-task (dirty analyzed path)");
+    assert!(
+        !out.status.success(),
+        "dirty analyzed path must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("modified or untracked"), "{stderr}");
+    assert!(stderr.contains("draft-time"), "{stderr}");
+}
+
+/// Tur-1 P1-3: spec'in op-gereksinimleri task'ın izinli operasyonlarında yoksa
+/// generation-time red; analyzer-owned kind'ler her yerde red.
+#[test]
+fn draft_task_op_matrix_and_analyzer_owned_kinds_fail_closed() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let task = work.join("task.json");
+    let props = work.join("proposals.json");
+
+    // (a) new_edges → AddEdge gerekir; default ops (AddNode, RemoveImport) yetersiz.
+    let spec = work.join("spec-addedge.json");
+    fs::write(
+        &spec,
+        r#"{"proposals": [{"new_edges": [{"from": "main.rs", "to": "a.rs"}],
+                          "reasoning": "needs AddEdge"}]}"#,
+    )
+    .unwrap();
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .expect("run osp draft-task (op matrix)");
+    assert!(
+        !out.status.success(),
+        "op-matrix violation must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("AddEdge"), "{stderr}");
+    assert!(stderr.contains("--operation"), "{stderr}");
+
+    // (b) analyzer-owned kind — proposal mutasyonunda yasak.
+    let spec = work.join("spec-owned.json");
+    fs::write(
+        &spec,
+        r#"{"proposals": [{"removed_edges": [{"from": "main.rs", "to": "a.rs", "kind": "TypeImports"}],
+                          "reasoning": "observational kind"}]}"#,
+    )
+    .unwrap();
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .expect("run osp draft-task (analyzer-owned kind)");
+    assert!(
+        !out.status.success(),
+        "analyzer-owned kind must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("analyzer-owned"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // (c) aynı spec --operation AddEdge ile geçer (çözüm yolunun işlediğini göster).
+    let spec = work.join("spec-addedge.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--operation")
+        .arg("AddNode")
+        .arg("--operation")
+        .arg("AddEdge")
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .expect("run osp draft-task (op matrix satisfied)");
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Tur-1 P2: çıktılar birbirinin/kendi girdilerinin alias'ı olamaz.
+#[test]
+fn draft_task_output_alias_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let same = work.join("same.json");
+
+    // (a) out-task == out-proposals.
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&same)
+        .arg("--out-proposals")
+        .arg(&same)
+        .output()
+        .expect("run osp draft-task (alias outputs)");
+    assert!(!out.status.success(), "output alias must fail closed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("same file"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // (b) out-task == girdi baseline.
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&baseline)
+        .arg("--out-proposals")
+        .arg(work.join("proposals.json"))
+        .output()
+        .expect("run osp draft-task (output overwrites input)");
+    assert!(!out.status.success(), "output-over-input must fail closed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--baseline input"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Tam-şekil #166 attempt envelope'u (negatif testler için).
+fn attempt_envelope(head: &str, task_id: u64) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "run": {
+            "task_id": task_id,
+            "execution_mode": "harness",
+            "witness_mode": "harness_auto_approve",
+            "task_source": "harness_task_file",
+            "repository_head": head
+        },
+        "execution_measurement": {
+            "subject_authority": "task_scope",
+            "provenance_authority": "engine_native_per_axis",
+            "provenance_native": true
+        },
+        "result": {"kind": "completed", "attempts": 1},
+        "evidence": []
+    })
+}
+
+/// Tur-1 P0-2: yalnız head taşıyan minimal sahte obje SIKI #166 şeklinden geçemez.
+#[test]
+fn finalize_run_minimal_attempt_object_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-minimal");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "run": {"repository_head": fx.head}
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "minimal attempt shape must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not match the #166 run envelope shape"),
+        "{stderr}"
+    );
+}
+
+/// Tur-1 P0-2: task.id ≠ attempt.run.task_id — yanlış artifact eşleşmesi tek
+/// ledger satırında birleştirilemez.
+#[test]
+fn finalize_run_task_id_mismatch_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-idmismatch");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 17}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        attempt_envelope(&fx.head, 42).to_string(),
+    )
+    .unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "task-id mismatch must fail closed");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("task-id fence"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Tur-1 P0-2: proposals yalnız v2 zarfı + doğru head ile bağlanabilir;
+/// v1 çıplak array state'e bağlanamaz.
+#[test]
+fn finalize_run_proposals_state_fence() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    // (a) farklı HEAD'ten kopyalanmış proposals v2.
+    let run = work.join("run-props-head");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        attempt_envelope(&fx.head, 1).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("proposals.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": "e".repeat(40),
+            "proposals": []
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "cross-state proposals must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("head fence: proposals.json"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // (b) v1 çıplak array — state'e bağlanamaz.
+    let run = work.join("run-props-v1");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        attempt_envelope(&fx.head, 1).to_string(),
+    )
+    .unwrap();
+    fs::write(run.join("proposals.json"), "[]").unwrap();
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "v1 bare-array proposals must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("bare JSON array"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Tur-1 P0-3: --out tüketilen artifact'ı overwrite edemez (ref↔digest ayrışır).
+#[test]
+fn finalize_run_out_alias_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-outalias");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        attempt_envelope(&fx.head, 1).to_string(),
+    )
+    .unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--out")
+        .arg(run.join("task.json"))
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "--out aliasing a consumed artifact must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("overwrite the consumed run artifact"),
+        "{stderr}"
+    );
+    // task.json overwrite EDİLMEDİ (digest girdisi korunur).
+    assert_eq!(
+        read_json(&run.join("task.json"))["task"]["id"],
+        1,
+        "consumed artifact must be untouched after the rejected run"
+    );
 }
