@@ -82,6 +82,13 @@ struct AttemptRunRead {
     witness_mode: String,
     task_source: String,
     repository_head: String,
+    /// #178: attempt anında tüketilen dosya digest'leri. Legacy v1 envelope'larda
+    /// alan yoktur → None (fence atlanır, backward-compat); `legacy_hardcoded`
+    /// task ve `--llm real` (proposals yok) producer'da da null'dur.
+    #[serde(default)]
+    task_digest: Option<String>,
+    #[serde(default)]
+    proposals_digest: Option<String>,
 }
 
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
@@ -249,6 +256,35 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
          {baseline_head} — cross-state ledger row refused",
         attempt.run.repository_head
     );
+
+    // #178 (tur-1 P0-2 tam kapanış): attempt artifact'ı tükettiği dosyaların
+    // digest'lerini taşır → finalize anında yeniden hesaplanır, mismatch red.
+    // Aynı task_id + repository_head altında dosyanın sonradan değiştirilmesi
+    // artık ispatlanabilir şekilde yakalanır (alan yoksa legacy → fence atlanır).
+    if let Some(claimed) = attempt.run.task_digest.as_ref() {
+        let actual = sha256_file(&task_path)?;
+        anyhow::ensure!(
+            claimed == &actual,
+            "task digest fence: attempt bound task.json as {claimed} but the run dir \
+             now hashes {actual} — the task file changed after the attempt; \
+             mismatched artifacts cannot share one ledger row"
+        );
+    }
+    if let Some(claimed) = attempt.run.proposals_digest.as_ref() {
+        // Run dir'de proposals.json yoksa karşılaştırma yapılamaz (#171 --llm real
+        // dürüst-boşluğu: proposal_refs null yolu zaten var) — fence yalnız iki
+        // taraf da mevcutken anlamlı.
+        let proposals_in_run_dir = args.run_dir.join("proposals.json");
+        if proposals_in_run_dir.is_file() {
+            let actual = sha256_file(&proposals_in_run_dir)?;
+            anyhow::ensure!(
+                claimed == &actual,
+                "proposals digest fence: attempt bound proposals.json as {claimed} but \
+                 the run dir now hashes {actual} — the proposals file changed after \
+                 the attempt; mismatched artifacts cannot share one ledger row"
+            );
+        }
+    }
 
     // Opsiyonel artifact'lar — varlıklarına göre alanlar dolar (yoksa null, dürüst boşluk).
     let proposals_path = args.run_dir.join("proposals.json");
@@ -486,7 +522,8 @@ fn shape_name(value: &serde_json::Value) -> &'static str {
 
 /// K3: sha256 over ham dosya baytları — `sha256:<64 hex>` (tam uzunluk; mevcut
 /// 16-hex ledger değerleri el-dönemi annotasyondur, missing≡null uyumu bozulmaz).
-fn sha256_file(path: &Path) -> anyhow::Result<String> {
+/// #178: attempt tarafı da çağırır (envelope digest alanları) → pub(crate).
+pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let bytes = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("failed to read {} for digest: {e}", path.display()))?;
     let mut hasher = Sha256::new();

@@ -129,6 +129,11 @@ pub struct CliRunEnvelopeV1 {
 /// Run metadata — execution mode, witness, task source, repository head.
 /// #166 P2-2: `task_id` doğrudan taşınır — evidence boş olsa bile artifact
 /// self-describing olur (#172 finalize-run bunu tüketecek).
+/// #178: tüketilen task/proposals dosyalarının bayt digest'leri attempt ANINDA
+/// taşınır — finalize-run bu değerleri kendi hesaplarıyla karşılaştırıp
+/// sonradan-değiştirilmiş artifact'ı reddeder (state-identity ilkesinin
+/// artifact düzeyi karşılığı, #160). `legacy_hardcoded` task ve `--llm real`
+/// (proposals yok) → `null`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CliRunMeta {
     pub task_id: u64,
@@ -137,6 +142,10 @@ pub struct CliRunMeta {
     /// "harness_task_file" veya "legacy_hardcoded" (task dosyası verilmedi).
     pub task_source: &'static str,
     pub repository_head: String,
+    /// `--task` dosyasının `sha256:<64 hex>` digest'i (attempt anı baytları).
+    pub task_digest: Option<String>,
+    /// `--proposals` dosyasının digest'i; dosya verilmediyse `null`.
+    pub proposals_digest: Option<String>,
 }
 
 /// V1 execution measurement metadata — **#96 MD-2 iki-eksen authority vocabulary**
@@ -176,6 +185,9 @@ impl CliExecutionMeasurement {
 }
 
 /// Build the V1 run envelope from navigator output + run context.
+/// #178: `task_digest`/`proposals_digest` attempt anında tüketicinin
+/// hesapladığı `sha256:<64 hex>` değerleridir (dosya yoksa None).
+#[allow(clippy::too_many_arguments)]
 pub fn build_run_envelope_v1(
     result: &NavigatorResult,
     evidence: &[TrajectoryEvidence],
@@ -184,6 +196,8 @@ pub fn build_run_envelope_v1(
     task_source: &'static str,
     repository_head: &str,
     task_id: u64,
+    task_digest: Option<String>,
+    proposals_digest: Option<String>,
 ) -> CliRunEnvelopeV1 {
     CliRunEnvelopeV1 {
         schema_version: 1,
@@ -193,6 +207,8 @@ pub fn build_run_envelope_v1(
             witness_mode: CliRunWitnessMode::from_cli(witness_mode),
             task_source,
             repository_head: repository_head.to_string(),
+            task_digest,
+            proposals_digest,
         },
         execution_measurement: CliExecutionMeasurement::engine_native_per_axis(),
         result: CliRunResult::from_navigator(result),
@@ -304,6 +320,8 @@ mod tests {
             "harness_task_file",
             "0123456789abcdef0123456789abcdef01234567",
             7,
+            Some("sha256:aa11".to_string()),
+            None,
         );
         let json = serde_json::to_string(&envelope).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -312,6 +330,9 @@ mod tests {
         assert_eq!(v["run"]["execution_mode"], "harness");
         assert_eq!(v["run"]["witness_mode"], "harness_auto_approve");
         assert_eq!(v["run"]["task_source"], "harness_task_file");
+        // #178: tüketilen dosya digest'leri wire'da; yoksa null (legacy/llm-real).
+        assert_eq!(v["run"]["task_digest"], "sha256:aa11");
+        assert!(v["run"]["proposals_digest"].is_null());
         // **#96 iki-eksen + #95-A subject cutover:** subject_authority artık
         // "task_scope" (canonical task predicate scope; pre-#95-A:
         // "affected_nodes" — tarihsel); deprecated `authority` alias yalnız

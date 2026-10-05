@@ -568,6 +568,109 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
     }
 }
 
+/// #178: attempt artifact tükettiği task/proposals dosyalarının digest'lerini
+/// taşır; finalize anında dosya değiştiyse fail-closed. Aynı task_id + aynı
+/// repository_head altında "sonradan değiştirildi" artık ispatlanabilir.
+#[test]
+fn finalize_run_rejects_task_tampered_after_attempt() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-tamper");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // Producer tarafı: envelope digest alanlarını taşır ve attempt-ani baytlarıyla
+    // eşleşir.
+    let envelope = read_json(&attempt);
+    let task_digest = envelope["run"]["task_digest"].as_str().unwrap_or_default();
+    assert_eq!(
+        task_digest,
+        sha256_of(&task),
+        "producer digest = attempt-ani bytes"
+    );
+    assert_eq!(
+        envelope["run"]["proposals_digest"]
+            .as_str()
+            .unwrap_or_default(),
+        sha256_of(&props)
+    );
+
+    // TAMPER: task.json'ı HEAD/id koruyarak değiştir (head fence'ler geçsin —
+    // yalnız digest fence'i ateşlensin).
+    let mut tampered = read_json(&task);
+    tampered["task"]["label"] = serde_json::json!("tampered after the attempt");
+    fs::write(&task, serde_json::to_string_pretty(&tampered).unwrap()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-tamper")
+        .arg("--repository")
+        .arg("testrepo")
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "tampered task.json must fail the digest fence"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task digest fence"),
+        "digest fence mesajı gelmeli (head fence değil): {stderr}"
+    );
+}
+
 #[test]
 fn finalize_run_rejects_legacy_hand_assembled_attempt() {
     let fx = HarnessFixture::new_with_use_edges();

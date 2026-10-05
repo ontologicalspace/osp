@@ -1711,6 +1711,17 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         task_source,
         snapshot.head.as_str(),
         args.task_id,
+        // #178: tüketilen dosyaların attempt-ani digest'leri — finalize-run
+        // bunları run-dir dosyalarının o anki hash'iyle karşılaştırır; dosya
+        // sonradan değiştiyse fail-closed (legacy_hardcoded → None).
+        match args.task.as_ref() {
+            Some(p) => Some(crate::commands::finalize_run::sha256_file(p)?),
+            None => None,
+        },
+        match args.proposals.as_ref() {
+            Some(p) => Some(crate::commands::finalize_run::sha256_file(p)?),
+            None => None,
+        },
     );
     let exit_code = navigator_exit_code(&result, args.task_id);
     Ok(AttemptExecution {
