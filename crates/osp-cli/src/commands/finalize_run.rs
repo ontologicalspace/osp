@@ -57,22 +57,24 @@ pub struct FinalizeRunArgs {
     pub out: Option<PathBuf>,
 }
 
-/// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2).
-///
-/// Zorunlu alanlar eksikse serde reddeder — `{schema_version:1, run:{repository_head}}`
-/// gibi şekilsiz nesneler "canonical artifact" gibi geçemez. `deny_unknown_fields`
-/// bilinçli YOK: envelope evrimi (additive alanlar) missing≡null felsefesiyle
-/// uyumlu kalsın.
+/// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2,
+/// tur-2 P0 ile tamamlanan): alan VARLIĞI yetmez — iç şekiller de TİPLİ
+/// doğrulanır (`execution_measurement` sözlük üyeliği, `result.kind/attempts`,
+/// `evidence[]` girdileri canonical `TrajectoryEvidence` alanlarıyla).
+/// `{schema_version:1, run:{…}, execution_measurement:null, result:null,
+/// evidence:[null]}` gibi presence-only sahteler reddedilir.
+/// `deny_unknown_fields` bilinçli YOK: envelope evrimi (additive alanlar)
+/// missing≡null felsefesiyle uyumlu kalsın.
 #[derive(Debug, serde::Deserialize)]
 struct AttemptEnvelopeRead {
     schema_version: u32,
     run: AttemptRunRead,
+    execution_measurement: ExecutionMeasurementRead,
+    result: AttemptResultRead,
+    /// Şekil-doğrulama amaçlı (girdiler tipli parse'dan geçmek zorunda);
+    /// değerleri finalize okumaz.
     #[allow(dead_code)]
-    execution_measurement: serde_json::Value,
-    #[allow(dead_code)]
-    result: serde_json::Value,
-    #[allow(dead_code)]
-    evidence: Vec<serde_json::Value>,
+    evidence: Vec<AttemptEvidenceRead>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -83,6 +85,80 @@ struct AttemptRunRead {
     task_source: String,
     repository_head: String,
 }
+
+/// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
+/// pinlemek değil; bilinen kanonik sözlük dışı değer red).
+#[derive(Debug, serde::Deserialize)]
+struct ExecutionMeasurementRead {
+    subject_authority: String,
+    provenance_authority: String,
+    /// Şekil-doğrulama amaçlı (bool tipi serde'de zorlanır).
+    #[allow(dead_code)]
+    provenance_native: bool,
+}
+
+/// `CliRunResult` mirror — `kind` üyeliği + `attempts` sayısı.
+#[derive(Debug, serde::Deserialize)]
+struct AttemptResultRead {
+    kind: String,
+    #[allow(dead_code)]
+    attempts: u64,
+}
+
+/// Canonical `TrajectoryEvidence` girdisi — alan varlığı + temel tipler
+/// (raw position eksenleri, kimlikler, karar string'leri, token maliyeti).
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+struct AttemptEvidenceRead {
+    trajectory_id: u64,
+    milestone_id: u64,
+    task_id: u64,
+    attempt_id: u64,
+    before: RawPositionRead,
+    after: RawPositionRead,
+    gate_decision: String,
+    predicate_completion: String,
+    mutation_decision: String,
+    token_cost: TokenCostRead,
+    duration_ms: u64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+struct RawPositionRead {
+    x: f64,
+    y: f64,
+    z: f64,
+    w: f64,
+    v: f64,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, serde::Deserialize)]
+struct TokenCostRead {
+    prompt_tokens: u64,
+    completion_tokens: u64,
+    total_tokens: u64,
+}
+
+/// `CliRunResultKind` snake_case wire kümesi (`run_envelope.rs` ile aynı üyeler).
+const RESULT_KINDS: &[&str] = &[
+    "completed",
+    "awaiting_witnesses",
+    "exceeded_maneuver_limit",
+    "requires_revision",
+    "requires_operator_approval",
+    "awaiting_cold_start_approval",
+    "task_not_found",
+    "witness_evaluation_error",
+    "pending_authorization_persistence_failure",
+    "system_failure",
+    "llm_error",
+];
+
+/// #96 MD-2 authority vocabulary (tarihsel değerler dahil — üyelik seti).
+const SUBJECT_AUTHORITIES: &[&str] = &["task_scope", "affected_nodes"];
+const PROVENANCE_AUTHORITIES: &[&str] = &["engine_native_per_axis", "legacy_projected_v1"];
 
 pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -131,14 +207,32 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     );
     let attempt: AttemptEnvelopeRead = serde_json::from_value(attempt_raw).map_err(|e| {
         anyhow::anyhow!(
-            "attempt.json does not match the #166 run envelope shape (missing \
-             required fields such as run.task_id/execution_measurement/result/evidence): {e}"
+            "attempt.json does not match the #166 run envelope shape (missing or \
+             mistyped required fields in run/execution_measurement/result/evidence[]): {e}"
         )
     })?;
     anyhow::ensure!(
         attempt.schema_version == 1,
         "attempt.json schema_version must be 1 (#166 run envelope), found {}",
         attempt.schema_version
+    );
+    anyhow::ensure!(
+        RESULT_KINDS.contains(&attempt.result.kind.as_str()),
+        "attempt.json result.kind {:?} is not a canonical CliRunResultKind wire value",
+        attempt.result.kind
+    );
+    anyhow::ensure!(
+        SUBJECT_AUTHORITIES.contains(&attempt.execution_measurement.subject_authority.as_str()),
+        "attempt.json execution_measurement.subject_authority {:?} is not in the \
+         #96 MD-2 vocabulary",
+        attempt.execution_measurement.subject_authority
+    );
+    anyhow::ensure!(
+        PROVENANCE_AUTHORITIES
+            .contains(&attempt.execution_measurement.provenance_authority.as_str()),
+        "attempt.json execution_measurement.provenance_authority {:?} is not in the \
+         #96 MD-2 vocabulary",
+        attempt.execution_measurement.provenance_authority
     );
     anyhow::ensure!(
         attempt.run.execution_mode == "harness" || attempt.run.execution_mode == "production",
@@ -176,31 +270,34 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     let after_path = args.run_dir.join("after.json");
     let neighborhood_path = args.run_dir.join("neighborhood.json");
 
-    // K2: proposals varsa v2 zarfı olmak zorunda — v1 çıplak array state'e
-    // bağlanamaz (repository_head fence'i v2'ye özgü; cross-artifact eşleşme
-    // ancak state-bağlı formatta ispatlanabilir).
+    // K2 (tur-2 P0): proposals varsa v2 zarfı TİPLİ parse ile doğrulanır —
+    // `CliPathKeyedProposalsFileV2` zaten `Deserialize + deny_unknown_fields`
+    // taşıyor; `{"schema_version":2,"repository_head":…}` gibi presence-only
+    // sahte zarflar (proposals alanı eksik / unknown alan) serde'de düşer.
+    // v1 çıplak array state'e bağlanamaz (repository_head fence'i v2'ye özgü).
     if proposals_path.is_file() {
-        let proposals = read_json(&proposals_path)?;
+        let proposals_raw = read_json(&proposals_path)?;
         anyhow::ensure!(
-            proposals.is_object(),
+            proposals_raw.is_object(),
             "proposals.json is a bare JSON array (v1, node-id keyed) — it cannot be \
              state-bound; finalize-run requires the v2 envelope whose \
              repository_head fence ties it to the baseline state"
         );
-        let version = proposals.get("schema_version").and_then(|v| v.as_u64());
+        let proposals: crate::commands::path_keyed_proposals::CliPathKeyedProposalsFileV2 =
+            serde_json::from_value(proposals_raw).map_err(|e| {
+                anyhow::anyhow!("proposals.json does not match the v2 envelope shape: {e}")
+            })?;
         anyhow::ensure!(
-            version == Some(2),
-            "proposals.json envelope requires schema_version 2 (found {version:?})"
+            proposals.schema_version == 2,
+            "proposals.json envelope requires schema_version 2 (found {})",
+            proposals.schema_version
         );
-        let proposals_head = proposals
-            .get("repository_head")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("proposals.json is missing repository_head"))?;
         anyhow::ensure!(
-            proposals_head == baseline_head,
-            "head fence: proposals.json was produced on {proposals_head} but \
-             baseline.json measured {baseline_head} — mismatched artifacts cannot \
-             share one ledger row"
+            proposals.repository_head == baseline_head,
+            "head fence: proposals.json was produced on {} but baseline.json \
+             measured {baseline_head} — mismatched artifacts cannot share one \
+             ledger row",
+            proposals.repository_head
         );
     }
 

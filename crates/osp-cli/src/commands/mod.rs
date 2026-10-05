@@ -738,6 +738,39 @@ pub(crate) fn canon_path(path: &Path) -> PathBuf {
 /// penceresini ve yarı-yazılmış artifact bırakma riskini kapatır
 /// (`write_attempt_out_copy` çekirdeğinin genelleştirilmiş hâli).
 pub(crate) fn atomic_write_replace(out: &Path, payload: &[u8]) -> anyhow::Result<()> {
+    let tmp = stage_temp(out, payload)?;
+    publish_rename(&tmp, out)
+}
+
+/// #172 tur-2 (P2): İKİ-dosya staged publish — hazırlık aşaması TÜM temp
+/// dosyalar başarıyla oluşturulup `sync_all` olana kadar hiçbir hedefi görünür
+/// yapmaz; ikinci dosyanın hazırlık hatasında (ör. eksik parent dizin) ilkinin
+/// publish'i oluşmaz, temp'ler temizlenir. `rename` aşaması dosya-başına
+/// atomiktir ve aynı-dizin temp'inden sonra fiilen infallible'dır; yine de
+/// tam iki-dosya filesystem transaction'ı DEĞİLDİR (aradaki bir rename
+/// başarısızsa öncekiler yayınlanmış kalabilir — hata mesajı bunu söyler).
+pub(crate) fn atomic_write_replace_staged(pairs: &[(&Path, &[u8])]) -> anyhow::Result<()> {
+    let mut staged: Vec<(PathBuf, &Path)> = Vec::with_capacity(pairs.len());
+    let mut prep = || -> anyhow::Result<()> {
+        for (out, payload) in pairs {
+            staged.push((stage_temp(out, payload)?, out));
+        }
+        Ok(())
+    };
+    if let Err(e) = prep() {
+        for (tmp, _) in &staged {
+            let _ = std::fs::remove_file(tmp);
+        }
+        return Err(e);
+    }
+    for (tmp, out) in staged {
+        publish_rename(&tmp, out)?;
+    }
+    Ok(())
+}
+
+/// Unique same-dir temp oluştur, payload'ı yaz, sync et — publish ETMEDEN dön.
+fn stage_temp(out: &Path, payload: &[u8]) -> anyhow::Result<PathBuf> {
     use std::io::Write as _;
     let dir = out
         .parent()
@@ -752,7 +785,6 @@ pub(crate) fn atomic_write_replace(out: &Path, payload: &[u8]) -> anyhow::Result
         .unwrap_or(0);
     let pid = std::process::id();
 
-    let mut tmp: Option<PathBuf> = None;
     for suffix in 0..=64u32 {
         let name = match suffix {
             0 => format!(".{stem}.osp-tmp-{pid}-{millis}"),
@@ -769,19 +801,19 @@ pub(crate) fn atomic_write_replace(out: &Path, payload: &[u8]) -> anyhow::Result
                     let _ = std::fs::remove_file(&candidate);
                     anyhow::bail!("temp write failed for {}: {e}", out.display());
                 }
-                tmp = Some(candidate);
-                break;
+                return Ok(candidate);
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => anyhow::bail!("temp open failed for {}: {e}", out.display()),
         }
     }
-    let tmp = match tmp {
-        Some(p) => p,
-        None => anyhow::bail!("temp collision budget exhausted for {}", out.display()),
-    };
-    if let Err(e) = std::fs::rename(&tmp, out) {
-        let _ = std::fs::remove_file(&tmp);
+    anyhow::bail!("temp collision budget exhausted for {}", out.display())
+}
+
+/// Hazır temp'i hedefe taşı (rename-replace); hata durumunda temp'i temizle.
+fn publish_rename(tmp: &Path, out: &Path) -> anyhow::Result<()> {
+    if let Err(e) = std::fs::rename(tmp, out) {
+        let _ = std::fs::remove_file(tmp);
         anyhow::bail!("rename failed for {}: {e}", out.display());
     }
     Ok(())

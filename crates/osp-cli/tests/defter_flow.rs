@@ -1071,3 +1071,217 @@ fn finalize_run_out_alias_rejected() {
         "consumed artifact must be untouched after the rejected run"
     );
 }
+
+/// Tur-2 P0: alan VARLIĞI ≠ canonical ŞEKİL — `execution_measurement: null`,
+/// `result: null`, `evidence: [null]` taşıyan presence-only sahte envelope
+/// tipli iç-shape doğrulamasından geçemez.
+#[test]
+fn finalize_run_presence_only_null_shapes_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-nullshape");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "run": {
+                "task_id": 1,
+                "execution_mode": "harness",
+                "witness_mode": "harness_auto_approve",
+                "task_source": "harness_task_file",
+                "repository_head": fx.head
+            },
+            "execution_measurement": null,
+            "result": null,
+            "evidence": [null]
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "presence-only null shapes must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not match the #166 run envelope shape"),
+        "{stderr}"
+    );
+}
+
+/// Tur-2 P0: result.kind kanonik wire kümesi dışındaysa red.
+#[test]
+fn finalize_run_unknown_result_kind_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-badkind");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let mut attempt = attempt_envelope(&fx.head, 1);
+    attempt["result"]["kind"] = serde_json::json!("vibes_ok");
+    fs::write(run.join("attempt.json"), attempt.to_string()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "unknown result.kind must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("canonical CliRunResultKind"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Tur-2 P0: proposals zarfı da TİPLİ doğrulanır — `{"schema_version":2,
+/// "repository_head": <doğru>}` presence-only minimal obje (proposals alanı
+/// yok) reddedilir.
+#[test]
+fn finalize_run_proposals_minimal_envelope_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-props-minimal");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("attempt.json"),
+        attempt_envelope(&fx.head, 1).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("proposals.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "minimal proposals envelope must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("v2 envelope shape"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Tur-2 P1 (reviewer'ın regression matrisi): baseline Some, proposals_spec
+/// None, out_proposals None, out_task == baseline → red + baseline baytları
+/// DEĞİŞMEDİ (task-only yolda alias fence eskiden hiç koşmuyordu).
+#[test]
+fn draft_task_task_only_out_task_aliasing_baseline_rejected() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let bytes_before = fs::read(&baseline).unwrap();
+
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", None)
+        .arg("--out-task")
+        .arg(&baseline)
+        .output()
+        .expect("run osp draft-task (task-only alias)");
+    assert!(
+        !out.status.success(),
+        "task-only out-task == baseline must fail closed"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--baseline input"),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read(&baseline).unwrap(),
+        bytes_before,
+        "baseline bytes must be unchanged after the rejected run"
+    );
+}
+
+/// Tur-2 P2: staged publish — ikinci çıktının HAZIRLIK hatasında (var olmayan
+/// parent dizin) ilkinin hiçbir baytı görünmez olur; yarım artifact seti kalmaz.
+#[test]
+fn draft_task_staged_publish_no_partial_set_on_second_prep_failure() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = work.join("task.json");
+    let missing_dir_props = work.join("no-such-dir").join("proposals.json");
+
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&missing_dir_props)
+        .output()
+        .expect("run osp draft-task (staged prep failure)");
+    assert!(
+        !out.status.success(),
+        "second prep failure must fail the command"
+    );
+    assert!(
+        !task.exists(),
+        "task.json must NOT be visible when the proposals prep failed — \
+         staged publish leaves no partial artifact set"
+    );
+    assert!(
+        !missing_dir_props.exists(),
+        "nothing may be created under the missing dir"
+    );
+}

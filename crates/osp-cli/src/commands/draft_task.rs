@@ -170,8 +170,11 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
         None => None,
     };
 
-    // Tur-1 P2: iki payload da serialize EDİLDİKTEN sonra, alias-preflight'li
-    // atomic publish ile yazılır — yarım artifact seti ve girdi-overwrite penceresi kapanır.
+    // Tur-1 P2 + tur-2 P2: her iki payload ÖNCE serialize edilir; iki-dosya
+    // seti STAGED publish ile yazılır — TÜM temp'ler hazırlanıp sync olana kadar
+    // hiçbir hedef görünmez (ikinci hazırlık hatası ilkinin publish'ini önler).
+    // Tam iki-dosya filesystem transaction'ı değil; rename aşaması dosya-başına
+    // atomik (atomic_write_replace_staged dokümanunda dürüstçe yazılı).
     preflight_output_aliases(&args)?;
     let task_payload = serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 2,
@@ -179,53 +182,78 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
         "scope_bindings": [{"path": args.target}],
         "task": build_task_value(&args, &operations)?,
     }))?;
-    crate::commands::atomic_write_replace(&args.out_task, task_payload.as_bytes())?;
-    println!(
-        "✓ task v2 written to {} (repository_head {}, target {})",
-        args.out_task.display(),
-        view.head,
-        args.target
-    );
 
-    if let Some(file) = proposals {
-        let out = args
-            .out_proposals
-            .as_ref()
-            .expect("clap `requires` guarantees out_proposals with proposals_spec");
-        let payload = serde_json::to_string_pretty(&file)?;
-        crate::commands::atomic_write_replace(out, payload.as_bytes())?;
-        println!(
-            "✓ proposals v2 written to {} (repository_head {}, {} proposals)",
-            out.display(),
-            view.head,
-            file.proposals.len()
-        );
+    match proposals {
+        Some(file) => {
+            let out = args
+                .out_proposals
+                .as_ref()
+                .expect("clap `requires` guarantees out_proposals with proposals_spec");
+            let proposals_payload = serde_json::to_string_pretty(&file)?;
+            crate::commands::atomic_write_replace_staged(&[
+                (&args.out_task, task_payload.as_bytes()),
+                (out, proposals_payload.as_bytes()),
+            ])?;
+            println!(
+                "✓ task v2 written to {} (repository_head {}, target {})",
+                args.out_task.display(),
+                view.head,
+                args.target
+            );
+            println!(
+                "✓ proposals v2 written to {} (repository_head {}, {} proposals)",
+                out.display(),
+                view.head,
+                file.proposals.len()
+            );
+        }
+        None => {
+            crate::commands::atomic_write_replace(&args.out_task, task_payload.as_bytes())?;
+            println!(
+                "✓ task v2 written to {} (repository_head {}, target {})",
+                args.out_task.display(),
+                view.head,
+                args.target
+            );
+        }
     }
     Ok(())
 }
 
-/// Tur-1 P2: çıktılar birbirinin ve KENDİ girdilerinin alias'ı olamaz —
-/// `--out-task x.json --out-proposals x.json` task'ı yazıp proposals ile
-/// overwrite edebilir; çıktının girdiyi (baseline/spec) ezmesi ise ref-digest
-/// tutarsızlığı üretir.
+/// Tur-1 P2 + tur-2 P1: çıktılar birbirinin ve KENDİ girdilerinin alias'ı
+/// olamaz. Girdi-karşılaştırması `out_proposals` VARLIĞINA bağlı değildir —
+/// task-only çağrıda (`--out-task == --baseline`) da aynı fence koşar; aksi
+/// halde baseline artifact'ı türetilen task JSON'uyla overwrite edilebilirdi.
 fn preflight_output_aliases(args: &DraftTaskArgs) -> anyhow::Result<()> {
     let out_task = crate::commands::canon_path(&args.out_task);
-    if let Some(out_proposals) = &args.out_proposals {
-        let out_proposals = crate::commands::canon_path(out_proposals);
+    let out_proposals = args
+        .out_proposals
+        .as_ref()
+        .map(|p| crate::commands::canon_path(p));
+    if let Some(out_proposals) = &out_proposals {
         anyhow::ensure!(
-            out_task != out_proposals,
+            out_task != *out_proposals,
             "--out-task and --out-proposals resolve to the same file ({}) — \
              the second write would overwrite the first",
             args.out_task.display()
         );
-        for (flag, input) in [
-            ("baseline", &args.baseline),
-            ("proposals-spec", &args.proposals_spec),
-        ] {
-            if let Some(input) = input {
-                let input = crate::commands::canon_path(input);
+    }
+    for (flag, input) in [
+        ("baseline", &args.baseline),
+        ("proposals-spec", &args.proposals_spec),
+    ] {
+        if let Some(input) = input {
+            let input = crate::commands::canon_path(input);
+            anyhow::ensure!(
+                input != out_task,
+                "output must not overwrite its own --{flag} input ({}) — \
+                 the measurement it was validated against would be replaced by \
+                 its derived artifact",
+                input.display()
+            );
+            if let Some(out_proposals) = &out_proposals {
                 anyhow::ensure!(
-                    input != out_task && input != out_proposals,
+                    input != *out_proposals,
                     "output must not overwrite its own --{flag} input ({}) — \
                      digests are computed over the consumed bytes",
                     input.display()
