@@ -1285,3 +1285,110 @@ fn draft_task_staged_publish_no_partial_set_on_second_prep_failure() {
         "nothing may be created under the missing dir"
     );
 }
+
+/// Tur-3 P0: canonical producer domain'i — üç adversarial case tek matriste:
+/// (a) kapalı enum dışı evidence kararları, (b) yabancı evidence task_id,
+/// (c) producer guard'ının reddettiği mode kombinasyonu (production +
+/// harness_auto_approve).
+#[test]
+fn finalize_run_adversarial_canonical_semantics_matrix() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    let canonical_evidence = |task_id: u64| {
+        serde_json::json!({
+            "trajectory_id": 1,
+            "milestone_id": 1,
+            "task_id": task_id,
+            "attempt_id": 1,
+            "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+            "after": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+            "gate_decision": "PassedAll",
+            "predicate_completion": "Completed",
+            "mutation_decision": "AcceptAsCompleted",
+            "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "duration_ms": 1
+        })
+    };
+
+    let prepare_run = |name: &str, mutate: &dyn Fn(&mut serde_json::Value)| {
+        let run = work.join(name);
+        fs::create_dir_all(&run).unwrap();
+        fs::copy(&baseline, run.join("baseline.json")).unwrap();
+        fs::write(
+            run.join("task.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "repository_head": fx.head,
+                "scope_bindings": [{"path": "main.rs"}],
+                "task": {"id": 1}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut attempt = attempt_envelope(&fx.head, 1);
+        attempt["evidence"] = serde_json::json!([canonical_evidence(1)]);
+        mutate(&mut attempt);
+        fs::write(run.join("attempt.json"), attempt.to_string()).unwrap();
+        let out = osp_in(&work)
+            .arg("finalize-run")
+            .arg(&run)
+            .output()
+            .unwrap();
+        (out, run)
+    };
+
+    // (a) kapalı enum dışı kararlar — core TrajectoryEvidence serde'sinde düşer.
+    let (out, _) = prepare_run("run-adv-enum", &|attempt: &mut serde_json::Value| {
+        let evidence = &mut attempt["evidence"][0];
+        evidence["gate_decision"] = serde_json::json!("Vibes");
+        evidence["predicate_completion"] = serde_json::json!("Maybe");
+        evidence["mutation_decision"] = serde_json::json!("ShipIt");
+    });
+    assert!(
+        !out.status.success(),
+        "non-canonical evidence enums must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not match the #166 run envelope shape"),
+        "{stderr}"
+    );
+
+    // (b) yabancı evidence task_id — run task 1, evidence task 999.
+    let (out, _) = prepare_run("run-adv-evidence-id", &|attempt: &mut serde_json::Value| {
+        attempt["evidence"][0]["task_id"] = serde_json::json!(999);
+    });
+    assert!(
+        !out.status.success(),
+        "foreign evidence task_id must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("evidence fence"), "{stderr}");
+
+    // (c) production + harness_auto_approove — producer guard'ının reddettiği
+    // kombinasyon; üyelikler ayrı ayrı geçse de canonical DEĞİL.
+    let (out, _) = prepare_run("run-adv-mode-combo", &|attempt: &mut serde_json::Value| {
+        attempt["run"]["execution_mode"] = serde_json::json!("production");
+        attempt["run"]["witness_mode"] = serde_json::json!("harness_auto_approve");
+    });
+    assert!(
+        !out.status.success(),
+        "producer-invalid mode combination must fail closed"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("not canonical"), "{stderr}");
+
+    // Kontrol: mutasyonsuz canonical envelope aynı helper'dan GEÇER.
+    let (out, run_ok) = prepare_run("run-adv-clean", &|_attempt: &mut serde_json::Value| {});
+    assert!(
+        out.status.success(),
+        "canonical envelope must be accepted. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(row["schema_version"], "live-ledger-v1");
+    assert!(run_ok.join("attempt.json").is_file());
+}

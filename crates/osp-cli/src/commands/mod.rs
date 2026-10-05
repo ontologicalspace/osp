@@ -742,13 +742,14 @@ pub(crate) fn atomic_write_replace(out: &Path, payload: &[u8]) -> anyhow::Result
     publish_rename(&tmp, out)
 }
 
-/// #172 tur-2 (P2): İKİ-dosya staged publish — hazırlık aşaması TÜM temp
-/// dosyalar başarıyla oluşturulup `sync_all` olana kadar hiçbir hedefi görünür
-/// yapmaz; ikinci dosyanın hazırlık hatasında (ör. eksik parent dizin) ilkinin
-/// publish'i oluşmaz, temp'ler temizlenir. `rename` aşaması dosya-başına
+/// #172 tur-2 (P2) + tur-3 (P2): İKİ-dosya staged publish — hazırlık aşaması
+/// TÜM temp dosyalar başarıyla oluşturulup `sync_all` olana kadar hiçbir hedefi
+/// görünür yapmaz; ikinci dosyanın hazırlık hatasında (ör. eksik parent dizin)
+/// ilkinin publish'i oluşmaz, temp'ler temizlenir. `rename` aşaması dosya-başına
 /// atomiktir ve aynı-dizin temp'inden sonra fiilen infallible'dır; yine de
-/// tam iki-dosya filesystem transaction'ı DEĞİLDİR (aradaki bir rename
-/// başarısızsa öncekiler yayınlanmış kalabilir — hata mesajı bunu söyler).
+/// tam iki-dosya filesystem transaction'ı DEĞİLDİR — aradaki bir rename
+/// başarısızsa öncekiler yayınlanmış kalabilir (hata mesajı söyler) ve
+/// **publish edilmemiş kalan temp'ler temizlenir** (tur-3: leak kapatıldı).
 pub(crate) fn atomic_write_replace_staged(pairs: &[(&Path, &[u8])]) -> anyhow::Result<()> {
     let mut staged: Vec<(PathBuf, &Path)> = Vec::with_capacity(pairs.len());
     let mut prep = || -> anyhow::Result<()> {
@@ -763,8 +764,19 @@ pub(crate) fn atomic_write_replace_staged(pairs: &[(&Path, &[u8])]) -> anyhow::R
         }
         return Err(e);
     }
-    for (tmp, out) in staged {
-        publish_rename(&tmp, out)?;
+    // Tur-3 P2: rename hatasında index'ten sonrakiler (henüz publish edilmemiş
+    // temp'ler) silinir — yalnız başarısız olanın temp'i değil.
+    for (index, (tmp, out)) in staged.iter().enumerate() {
+        if let Err(e) = std::fs::rename(tmp, out) {
+            for (remaining, _) in &staged[index..] {
+                let _ = std::fs::remove_file(remaining);
+            }
+            anyhow::bail!(
+                "rename failed for {}: {e} (earlier renames in this call may \
+                 have published)",
+                out.display()
+            );
+        }
     }
     Ok(())
 }
@@ -2457,5 +2469,38 @@ mod attempt_output_path_hardening_tests {
             .filter(|e| e.file_name().to_string_lossy().contains(".osp-tmp-"))
             .collect();
         assert!(leftovers.is_empty(), "no temp leftovers: {leftovers:?}");
+    }
+}
+
+#[cfg(test)]
+mod staged_publish_tests {
+    //! #172 tur-3 (P2): staged publish lifecycle — rename hatasında henüz
+    //! publish edilmemiş temp'ler temizlenir (yalnız başarısız olanınki değil).
+    use super::*;
+
+    #[test]
+    fn staged_publish_cleans_remaining_temps_on_rename_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("first.json");
+        // İkinci hedef: dolu bir DİZİN — rename(file → dir) her platformda başarısız.
+        let target_is_dir = dir.path().join("target-is-dir");
+        std::fs::create_dir_all(&target_is_dir).expect("mkdir");
+        std::fs::write(target_is_dir.join("occupied"), b"x").expect("occupy");
+
+        let err = atomic_write_replace_staged(&[(&first, b"first"), (&target_is_dir, b"second")])
+            .expect_err("rename onto a directory must fail");
+        assert!(format!("{err}").contains("rename failed"), "{err}");
+        // Dokümante edilen davranış: önceki rename yayınlanmış kalabilir.
+        assert_eq!(std::fs::read(&first).unwrap(), b"first");
+        // Tur-3 P2: hiçbir staged temp artığı kalmaz.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".osp-tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "no staged temp leftovers: {leftovers:?}"
+        );
     }
 }

@@ -57,24 +57,22 @@ pub struct FinalizeRunArgs {
     pub out: Option<PathBuf>,
 }
 
-/// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2,
-/// tur-2 P0 ile tamamlanan): alan VARLIĞI yetmez — iç şekiller de TİPLİ
-/// doğrulanır (`execution_measurement` sözlük üyeliği, `result.kind/attempts`,
-/// `evidence[]` girdileri canonical `TrajectoryEvidence` alanlarıyla).
-/// `{schema_version:1, run:{…}, execution_measurement:null, result:null,
-/// evidence:[null]}` gibi presence-only sahteler reddedilir.
-/// `deny_unknown_fields` bilinçli YOK: envelope evrimi (additive alanlar)
-/// missing≡null felsefesiyle uyumlu kalsın.
+/// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2;
+/// tur-2 presence-şekil + tur-3 canonical-semantik): alan VARLIĞI yetmez —
+/// iç şekiller TİPLİ, karar alanları CORE TİPLERİNDEN doğrulanır. `evidence[]`
+/// doğrudan `osp_core::trajectory::TrajectoryEvidence` olarak deserialize
+/// edilir (tur-3 P0): `GateDecision`/`PredicateCompletion`/`MutationDecision`
+/// KAPALI enum'lardır ve üyelik serde tarafından TEK truth source'tan
+/// doğrulanır — "Vibes"/"Maybe"/"ShipIt" gibi canonical producer'ın
+/// üretemeyeceği değerler burada düşer. `deny_unknown_fields` bilinçli YOK:
+/// envelope evrimi (additive alanlar) missing≡null felsefesiyle uyumlu kalsın.
 #[derive(Debug, serde::Deserialize)]
 struct AttemptEnvelopeRead {
     schema_version: u32,
     run: AttemptRunRead,
     execution_measurement: ExecutionMeasurementRead,
     result: AttemptResultRead,
-    /// Şekil-doğrulama amaçlı (girdiler tipli parse'dan geçmek zorunda);
-    /// değerleri finalize okumaz.
-    #[allow(dead_code)]
-    evidence: Vec<AttemptEvidenceRead>,
+    evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -103,42 +101,6 @@ struct AttemptResultRead {
     kind: String,
     #[allow(dead_code)]
     attempts: u64,
-}
-
-/// Canonical `TrajectoryEvidence` girdisi — alan varlığı + temel tipler
-/// (raw position eksenleri, kimlikler, karar string'leri, token maliyeti).
-#[allow(dead_code)]
-#[derive(Debug, serde::Deserialize)]
-struct AttemptEvidenceRead {
-    trajectory_id: u64,
-    milestone_id: u64,
-    task_id: u64,
-    attempt_id: u64,
-    before: RawPositionRead,
-    after: RawPositionRead,
-    gate_decision: String,
-    predicate_completion: String,
-    mutation_decision: String,
-    token_cost: TokenCostRead,
-    duration_ms: u64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, serde::Deserialize)]
-struct RawPositionRead {
-    x: f64,
-    y: f64,
-    z: f64,
-    w: f64,
-    v: f64,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, serde::Deserialize)]
-struct TokenCostRead {
-    prompt_tokens: u64,
-    completion_tokens: u64,
-    total_tokens: u64,
 }
 
 /// `CliRunResultKind` snake_case wire kümesi (`run_envelope.rs` ile aynı üyeler).
@@ -245,6 +207,16 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         "attempt.json run.witness_mode has an unknown value {:?}",
         attempt.run.witness_mode
     );
+    // Tur-3 P0: producer'ın kendi guard'ı mirror'lanır (validate_execution_
+    // witness_combination) — üyelikler ayrı ayrı geçse bile production +
+    // harness_auto_approve kombinasyonu canonical producer tarafından üretilmez.
+    anyhow::ensure!(
+        !(attempt.run.witness_mode == "harness_auto_approve"
+            && attempt.run.execution_mode != "harness"),
+        "attempt.json run mode combination is not canonical: witness \
+         harness_auto_approve requires execution harness (Paper 2 scoped \
+         relaxation — the producer guard rejects this combination at emit time)"
+    );
     anyhow::ensure!(
         attempt.run.task_source == "harness_task_file",
         "attempt.json run.task_source = {:?} — finalize-run consumes the \
@@ -257,6 +229,18 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
          task_id {} — mismatched artifacts cannot share one ledger row",
         attempt.run.task_id
     );
+    // Tur-3 P0: run envelope'un KENDİ evidence'ı run task'ına bağlanır —
+    // task.json↔run bağını geçen bir artifact, içine yabancı task'ın
+    // evidence'ını taşıyabilir.
+    for evidence in &attempt.evidence {
+        anyhow::ensure!(
+            evidence.task_id == attempt.run.task_id,
+            "evidence fence: evidence entry carries task_id {} but the run is \
+             task_id {} — foreign evidence cannot share this envelope",
+            evidence.task_id,
+            attempt.run.task_id
+        );
+    }
     anyhow::ensure!(
         attempt.run.repository_head == baseline_head,
         "head fence: attempt.json ran on {} but baseline.json measured \
