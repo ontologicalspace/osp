@@ -27,7 +27,7 @@ fn demo_compute_raw(
         hypothetical.insert_node(node.clone());
     }
     for edge in delta_edges {
-        hypothetical.insert_edge(*edge);
+        hypothetical.insert_edge(edge.clone());
     }
     let positions: Vec<(f64, osp_core::coords::RawPosition)> = delta_nodes
         .iter()
@@ -633,7 +633,7 @@ pub fn cmd_compute_whatif(repo_path: &str, scenario: &str) -> Result<WhatIfResul
         hypothetical_space.insert_node(n.clone());
     }
     for e in &delta_edges {
-        hypothetical_space.insert_edge(*e);
+        hypothetical_space.insert_edge(e.clone());
     }
 
     let impacted: Vec<ImpactNodeJson> = current_thetas
