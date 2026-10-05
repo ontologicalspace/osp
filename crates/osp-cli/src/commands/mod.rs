@@ -332,8 +332,10 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
 
     // P0: harness-bound mode rejects --out inside analyzed repo (would dirty next snapshot step).
-    if args.require_clean_snapshot {
-        if let Some(out) = args.out.as_ref() {
+    // #182: parent-dizin preflight her iki binding modunda (generic mod da analizi kaybeder).
+    if let Some(out) = args.out.as_ref() {
+        preflight_out_parent(out, "--out")?;
+        if args.require_clean_snapshot {
             reject_output_inside_repo(&args.repo, out)?;
         }
     }
@@ -543,6 +545,25 @@ fn reject_output_inside_repo(repo: &Path, out: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// #182: `--out` parent-dizin preflight — yazım hatası en pahalı adımdan SONRA
+/// çıkmasın (run-17 sürtünmesi: `analyze --out <yok-dizin>` tam analizden sonra
+/// `os error 3` ile patladı, ~76 s kayıp). Paylaşımlı yardımcı; analyze /
+/// trajectory attempt / draft-task / finalize-run taşıyıcıları uygular.
+/// Preflight-red tercih edildi (mkdir -p sessiz yan-etki yaratırdı); hata
+/// mesajı mkdir önerisi taşır.
+pub(crate) fn preflight_out_parent(out: &Path, flag: &str) -> anyhow::Result<()> {
+    if let Some(parent) = out.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            anyhow::bail!(
+                "{flag} parent directory does not exist: {} — create it first \
+                 (e.g. mkdir -p); refusing before expensive work",
+                parent.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Resolve runtime state directory for pending-authorizations (review B-3 P0).
 ///
 /// **#152 R1 P1-2:** state-dir (default CWD, explicit dahil) analyzed repo
@@ -615,6 +636,9 @@ fn validate_attempt_output_path(
     state_dir: &std::path::Path,
     out: &std::path::Path,
 ) -> anyhow::Result<()> {
+    // #182: navigator ÇALIŞMADAN önce parent-dizin preflight (en pahalı adım öncesi).
+    preflight_out_parent(out, "--out")?;
+
     // #166 review tur-3 (P2): CWD çözülemiyorsa fail-closed — relative path fence
     // doğrulaması bilinmeyen bir tabana düşmemeli (resolve_state_dir ile tutarlı).
     let cwd = |what: &str| -> anyhow::Result<PathBuf> {
@@ -2347,7 +2371,9 @@ mod attempt_artifact_persistence_tests {
         std::fs::create_dir_all(state.path().join(".osp")).expect("mkdir .osp");
         std::fs::create_dir_all(state.path().join("attempts")).expect("mkdir attempts");
 
-        // Repo içi → red.
+        // Repo içi → red. (#182 sonrası parent-dizin preflight'i önce koştuğu için
+        // bu fence'in kendisini görmek istiyoruz — fixture parent'ı önceden yaratır.)
+        std::fs::create_dir_all(repo.path().join("src")).expect("mkdir repo/src");
         let err = validate_attempt_output_path(
             repo.path(),
             state.path(),
@@ -2403,6 +2429,25 @@ mod attempt_output_path_hardening_tests {
         {
             std::os::windows::fs::symlink_dir(src, dst)
         }
+    }
+
+    #[test]
+    fn validate_attempt_output_path_missing_parent_rejects_early() {
+        // #182: navigator ÇALIŞMADAN önce parent-dizin preflight — canonicalizasyon
+        // (symlink vb.) çalışmadan hızlı red; attempt'in pahalı adımı boşa girmez.
+        let base = tempfile::tempdir().expect("base tempdir");
+        let state = base.path().join("state");
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&state).expect("mkdir state");
+        std::fs::create_dir_all(&repo).expect("mkdir repo");
+
+        let out = base.path().join("missing-dir").join("attempt-out.json");
+        let err = validate_attempt_output_path(&repo, &state, &out)
+            .expect_err("missing --out parent must reject early");
+        assert!(
+            err.to_string().contains("parent directory does not exist"),
+            "message: {err}"
+        );
     }
 
     #[test]
@@ -2501,6 +2546,29 @@ mod staged_publish_tests {
         assert!(
             leftovers.is_empty(),
             "no staged temp leftovers: {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn staged_publish_no_partial_set_on_second_prep_failure() {
+        // #172 tur-2 (P2) garantiyi unit düzeyine taşır (#182 sonrası CLI'dan yok-dizin
+        // PREP hatasına preflight'te red edilinerek erişilemez): İKİNCİ hedefin
+        // HAZIRLIK hatasında ilkinin HİÇBİR baytı görünmez olur — publish aşamasına
+        // hiç girilmez.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = dir.path().join("task.json");
+        let missing_parent = dir.path().join("no-such-dir").join("proposals.json");
+
+        let err = atomic_write_replace_staged(&[(&first, b"task"), (&missing_parent, b"props")])
+            .expect_err("second prep (temp create in missing parent) must fail");
+        assert!(
+            format!("{err}").contains("no-such-dir") || format!("{err}").contains("os error"),
+            "prep hatası yol bilgisi taşımalı: {err}"
+        );
+        assert!(
+            !first.exists(),
+            "first output must NOT be visible when the second prep failed — \
+             staged publish leaves no partial artifact set"
         );
     }
 }
