@@ -363,6 +363,9 @@ fn analyze_generic_accepts_dirty_worktree() {
 }
 
 /// `--require-clean-snapshot` + dirty worktree → rejected before output (review P0).
+/// #181: red, analizden ÖNCE gelir — mesajdaki "(rejected before analysis …)" işareti
+/// sıralamanın dışarıdan gözlemlenebilir kanıtıdır (önceden red, ~67 s'lik tam
+/// analizden SONRA geliyordu — run-17 sürtünmesi).
 #[test]
 fn analyze_require_clean_rejects_dirty_worktree() {
     let dir = fixture_repo();
@@ -382,6 +385,15 @@ fn analyze_require_clean_rejects_dirty_worktree() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.trim().is_empty(), "rejected → no stdout JSON");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dirty or untracked working tree"),
+        "eligibility mesajı gelmeli: {stderr}"
+    );
+    assert!(
+        stderr.contains("rejected before analysis"),
+        "#181 erken-red işareti gelmeli (sıralama kanıtı): {stderr}"
+    );
 }
 
 /// #182: `--out` parent dizini yokken analiz ÇALIŞMADAN hızlı red
