@@ -229,6 +229,14 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
 /// task-only çağrıda (`--out-task == --baseline`) da aynı fence koşar; aksi
 /// halde baseline artifact'ı türetilen task JSON'uyla overwrite edilebilirdi.
 fn preflight_output_aliases(args: &DraftTaskArgs) -> anyhow::Result<()> {
+    // #182: parent-dizin preflight — ölçüm/doğrulama çalışmadan önce hızlı red
+    // (staged publish zaten yazım anındaki hatayı kapsıyor; buradaki amaç hiç
+    // başlamamak).
+    crate::commands::preflight_out_parent(&args.out_task, "--out-task")?;
+    if let Some(out_proposals) = &args.out_proposals {
+        crate::commands::preflight_out_parent(out_proposals, "--out-proposals")?;
+    }
+
     let out_task = crate::commands::canon_path(&args.out_task);
     let out_proposals = args
         .out_proposals

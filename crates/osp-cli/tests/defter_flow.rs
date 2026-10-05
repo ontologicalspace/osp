@@ -1255,35 +1255,37 @@ fn draft_task_task_only_out_task_aliasing_baseline_rejected() {
 
 /// Tur-2 P2: staged publish — ikinci çıktının HAZIRLIK hatasında (var olmayan
 /// parent dizin) ilkinin hiçbir baytı görünmez olur; yarım artifact seti kalmaz.
+/// #182: `--out-task` parent dizini yokken ölçüm/doğrulama ÇALIŞMADAN hızlı red
+/// (run-17 sürtünmesi: pahalı adımdan sonra yazım hatası).
+/// Not: tur-2 P2'nin "staged publish ikinci PREP hatasında yarım set bırakmaz"
+/// garantisi artık CLI'dan erişilemez (yok-dizin preflight'te red) — kapsam,
+/// `staged_publish_tests::staged_publish_no_partial_set_on_second_prep_failure`
+/// unit testine taşındı (fonksiyon doğrudan çağrılır).
 #[test]
-fn draft_task_staged_publish_no_partial_set_on_second_prep_failure() {
+fn draft_task_out_task_missing_parent_rejected_before_work() {
     let fx = HarnessFixture::new_with_use_edges();
     let work = fx.work_path().to_path_buf();
     let (baseline, _) = measured_baseline(&fx);
     let spec = write_spec(&work, "main.rs", "a.rs");
-    let task = work.join("task.json");
-    let missing_dir_props = work.join("no-such-dir").join("proposals.json");
+    let task = work.join("no-such-dir").join("task.json");
 
     let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
         .arg("--out-task")
         .arg(&task)
         .arg("--out-proposals")
-        .arg(&missing_dir_props)
+        .arg(work.join("proposals.json"))
         .output()
-        .expect("run osp draft-task (staged prep failure)");
+        .expect("run osp draft-task (missing --out-task parent)");
     assert!(
         !out.status.success(),
-        "second prep failure must fail the command"
+        "missing --out-task parent must reject"
     );
+    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        !task.exists(),
-        "task.json must NOT be visible when the proposals prep failed — \
-         staged publish leaves no partial artifact set"
+        stderr.contains("parent directory does not exist") && stderr.contains("--out-task"),
+        "message: {stderr}"
     );
-    assert!(
-        !missing_dir_props.exists(),
-        "nothing may be created under the missing dir"
-    );
+    assert!(!task.exists(), "rejected → no output file");
 }
 
 /// #183: proposals v2 ÇIKTISINDAN kopyalanan output-only alan (position_hints)

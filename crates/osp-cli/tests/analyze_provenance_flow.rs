@@ -384,6 +384,31 @@ fn analyze_require_clean_rejects_dirty_worktree() {
     assert!(stdout.trim().is_empty(), "rejected → no stdout JSON");
 }
 
+/// #182: `--out` parent dizini yokken analiz ÇALIŞMADAN hızlı red
+/// (run-17 sürtünmesi: tam analizden sonra `os error 3`).
+#[test]
+fn analyze_out_missing_parent_rejects_fast() {
+    let dir = fixture_repo();
+    let out = dir.path().join("no-such-dir").join("baseline.json");
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .arg("analyze")
+        .arg(dir.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .expect("run osp analyze");
+    assert!(!output.status.success(), "missing --out parent must reject");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("parent directory does not exist"),
+        "message: {stderr}"
+    );
+    assert!(!out.exists(), "rejected → no output file");
+}
+
 /// `--require-clean-snapshot` + clean worktree → clean_pre_post_equal binding (review P0).
 #[test]
 fn analyze_require_clean_clean_worktree_binds() {

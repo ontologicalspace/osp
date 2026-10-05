@@ -143,7 +143,9 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     }
 
     // P0-3: --out, tüketilen artifact'lardan birinin alias'ı olamaz.
+    // #182: parent-dizin preflight — artifact'lar okunmadan hızlı red.
     if let Some(out) = &args.out {
+        crate::commands::preflight_out_parent(out, "--out")?;
         reject_out_aliasing_consumed_artifacts(out, &args.run_dir)?;
     }
 
