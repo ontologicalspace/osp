@@ -553,10 +553,23 @@ fn reject_output_inside_repo(repo: &Path, out: &Path) -> anyhow::Result<()> {
 /// mesajı mkdir önerisi taşır.
 pub(crate) fn preflight_out_parent(out: &Path, flag: &str) -> anyhow::Result<()> {
     if let Some(parent) = out.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
+        if parent.as_os_str().is_empty() {
+            return Ok(());
+        }
+        if !parent.exists() {
             anyhow::bail!(
                 "{flag} parent directory does not exist: {} — create it first \
                  (e.g. mkdir -p); refusing before expensive work",
+                parent.display()
+            );
+        }
+        // Review P2 (#185): parent VAR ama normal dosya ise exists() geçer, pahalı iş
+        // sonrasında "Not a directory" sınıfı hata gelir — burada erken red.
+        // is_dir hedefi izler: symlink→dizin GEÇER, symlink→dosya REDDEDİLİR.
+        if !parent.is_dir() {
+            anyhow::bail!(
+                "{flag} parent path exists but is not a directory: {} — choose a \
+                 directory parent for the output",
                 parent.display()
             );
         }
@@ -2448,6 +2461,26 @@ mod attempt_output_path_hardening_tests {
             err.to_string().contains("parent directory does not exist"),
             "message: {err}"
         );
+    }
+
+    #[test]
+    fn preflight_out_parent_rejects_file_as_parent() {
+        // Review P2 (#185): parent VAR ama normal dosya — exists() geçerdi, pahalı iş
+        // sonrası "Not a directory" gelirdi; erken red.
+        let base = tempfile::tempdir().expect("tempdir");
+        let parent_as_file = base.path().join("parent-is-a-file");
+        std::fs::write(&parent_as_file, b"not a directory").expect("file");
+
+        let out = parent_as_file.join("result.json");
+        let err = preflight_out_parent(&out, "--out").expect_err("file-as-parent must reject");
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "message: {err}"
+        );
+
+        // Negatif kontrol: gerçek dizin parent geçer.
+        preflight_out_parent(&base.path().join("ok.json"), "--out")
+            .expect("directory parent passes");
     }
 
     #[test]
