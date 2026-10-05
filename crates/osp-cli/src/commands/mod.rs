@@ -338,12 +338,17 @@ pub fn run_analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
         if args.require_clean_snapshot {
             reject_output_inside_repo(&args.repo, out)?;
         }
-        // #181: eligibility pre-check — dirty worktree'de TAM analizi boşa koşturma
-        // (run-17 sürtünmesi: red, ~67 s'lik analizden sonra geliyordu). Post-analyze
-        // kontrolü aşağıda TOCTOU drift-fence olarak aynen kalır (analiz SIRASINDA
-        // kirlenen temiz ağaç yakalanmaya devam eder); bu erken kontrol onun yerini
-        // almaz, önden eklenir. Mesajdaki "(rejected before analysis …)" işareti,
-        // redin analizden önce geldiğinin dışarıdan gözlemlenebilir kanıtıdır.
+    }
+
+    // #181: eligibility pre-check — dirty worktree'de TAM analizi boşa koşturma
+    // (run-17 sürtünmesi: red, ~67 s'lik analizden sonra geliyordu). Post-analyze
+    // kontrolü aşağıda TOCTOU drift-fence olarak aynen kalır (analiz SIRASINDA
+    // kirlenen temiz ağaç yakalanmaya devam eder); bu erken kontrol onun yerini
+    // almaz, önden eklenir. Mesajdaki "(rejected before analysis …)" işareti,
+    // redin analizden önce geldiğinin dışarıdan gözlemlenebilir kanıtıdır.
+    // (Rebase notu: yalnız `--require-clean-snapshot` modunda — generic mod dirty
+    // ağacı TASARIM gereği kabul eder; ve --out VERİLMEMİŞSE de koşmalıdır.)
+    if args.require_clean_snapshot {
         if let Err(e) = repo_snapshot::ensure_snapshot_eligible(&snapshot_before) {
             anyhow::bail!("{e} (rejected before analysis — eligibility pre-check, #181)");
         }
