@@ -362,7 +362,38 @@ fn analyze_generic_accepts_dirty_worktree() {
     );
 }
 
+/// #181 rebase pin: eligibility pre-check yalnız `--require-clean-snapshot` modunda
+/// koşar — generic mod dirty ağacı TASARIM gereği kabul eder, `--out` verilse bile.
+/// (Metinsel-temiz/semantik-bozuk rebase sınıfını yakalar: pre-check yanlışlıkla
+/// `if let Some(out)` içine düşerse bu test kırmızı olur.)
+#[test]
+fn analyze_generic_dirty_with_out_still_succeeds() {
+    let dir = fixture_repo();
+    let out = dir.path().join("envelope.json");
+    fs::write(dir.path().join("a.rs"), "pub fn a() -> u32 { 1 }\n").expect("modify a.rs");
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .arg("analyze")
+        .arg(dir.path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&out)
+        .output()
+        .expect("run osp analyze");
+    assert!(
+        output.status.success(),
+        "generic + dirty + --out must succeed (eligibility pre-check is \
+         require-clean-snapshot-only): {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(out.is_file(), "--out written in generic mode");
+}
+
 /// `--require-clean-snapshot` + dirty worktree → rejected before output (review P0).
+/// #181: red, analizden ÖNCE gelir — mesajdaki "(rejected before analysis …)" işareti
+/// sıralamanın dışarıdan gözlemlenebilir kanıtıdır (önceden red, ~67 s'lik tam
+/// analizden SONRA geliyordu — run-17 sürtünmesi).
 #[test]
 fn analyze_require_clean_rejects_dirty_worktree() {
     let dir = fixture_repo();
@@ -382,6 +413,15 @@ fn analyze_require_clean_rejects_dirty_worktree() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.trim().is_empty(), "rejected → no stdout JSON");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("dirty or untracked working tree"),
+        "eligibility mesajı gelmeli: {stderr}"
+    );
+    assert!(
+        stderr.contains("rejected before analysis"),
+        "#181 erken-red işareti gelmeli (sıralama kanıtı): {stderr}"
+    );
 }
 
 /// #182: `--out` parent dizini yokken analiz ÇALIŞMADAN hızlı red
