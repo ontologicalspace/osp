@@ -2013,6 +2013,11 @@ fn attempt_out_targeting_canonical_store_rejected_preflight() {
     let env = task_envelope(&fx.head, 2);
     let task_path = fx.write_task(&env);
     let proposals_path = fx.write_proposals(2, 1);
+    // #182: parent-dizin preflight'i önce koştuğu için canonical-store fence'inin
+    // KENDİSİNİ görmek istiyoruz — reserved parent'ları önceden yarat (gerçek
+    // attempt akışında canonical store bu dizinleri zaten yaratır).
+    std::fs::create_dir_all(fx.work_path().join("attempts")).expect("mkdir attempts");
+    std::fs::create_dir_all(fx.work_path().join(".osp")).expect("mkdir .osp");
     for reserved in ["attempts/task-7-999.json", ".osp/space-identity"] {
         let output = run_attempt_with_out(
             &fx,
