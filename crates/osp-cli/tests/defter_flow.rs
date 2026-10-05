@@ -1391,6 +1391,209 @@ fn draft_task_out_task_missing_parent_rejected_before_work() {
     assert!(!task.exists(), "rejected → no output file");
 }
 
+/// #178 review P0-2: digest alanı VARLIK BEYANIDIR — presence-aware fence matrisi:
+/// (a) proposals_digest=NULL + run-dir'de proposals.json VAR → RED (attempt'in
+///     tüketmediği artifact provenance'a sızamaz),
+/// (b) task_digest=NULL + task_source=harness_task_file → RED (kanonik producer
+///     bu şekli asla üretmez — task tüketildiyse hash'i vardır),
+/// (c) proposals_digest=NULL + proposals.json YOK → GEÇER (#171 --llm real
+///     dürüst-boşluk yolu; proposal_refs null ile ledger satırı üretilir).
+#[test]
+fn finalize_run_digest_presence_matrix() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    let canonical_evidence = serde_json::json!([{
+        "trajectory_id": 1,
+        "milestone_id": 1,
+        "task_id": 1,
+        "attempt_id": 1,
+        "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "after": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "gate_decision": "PassedAll",
+        "predicate_completion": "Completed",
+        "mutation_decision": "AcceptAsCompleted",
+        "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "duration_ms": 1
+    }]);
+
+    let prepare = |name: &str| {
+        let run = work.join(name);
+        fs::create_dir_all(&run).unwrap();
+        fs::copy(&baseline, run.join("baseline.json")).unwrap();
+        fs::write(
+            run.join("task.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "repository_head": fx.head,
+                "scope_bindings": [{"path": "main.rs"}],
+                "task": {"id": 1}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        run
+    };
+    let envelope_with = |task_digest: serde_json::Value, proposals_digest: serde_json::Value| {
+        let mut env = attempt_envelope(&fx.head, 1);
+        env["evidence"] = canonical_evidence.clone();
+        env["run"]["task_digest"] = task_digest;
+        env["run"]["proposals_digest"] = proposals_digest;
+        env
+    };
+    let finalize = |run: &Path| {
+        osp_in(&work)
+            .arg("finalize-run")
+            .arg(run)
+            .output()
+            .expect("run osp finalize-run")
+    };
+
+    // (a) null beyanı + var olan dosya → red.
+    let run = prepare("run-null-props-present");
+    fs::write(
+        run.join("attempt.json"),
+        envelope_with(
+            serde_json::json!(sha256_of(&run.join("task.json"))),
+            serde_json::Value::Null,
+        )
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(run.join("proposals.json"), "{}").unwrap();
+    let out = finalize(&run);
+    assert!(!out.status.success(), "(a) null + present must reject");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("declares NO proposals consumed"),
+        "(a) message: {stderr}"
+    );
+
+    // (b) harness_task_file + null task_digest → red (kanonik olmayan şekil).
+    let run = prepare("run-null-task");
+    fs::write(
+        run.join("attempt.json"),
+        envelope_with(serde_json::Value::Null, serde_json::Value::Null).to_string(),
+    )
+    .unwrap();
+    let out = finalize(&run);
+    assert!(!out.status.success(), "(b) null task_digest must reject");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a canonical producer shape"),
+        "(b) message: {stderr}"
+    );
+
+    // (c) null + yok → GEÇER (#171 dürüst-boşluk).
+    let run = prepare("run-null-props-absent");
+    fs::write(
+        run.join("attempt.json"),
+        envelope_with(
+            serde_json::json!(sha256_of(&run.join("task.json"))),
+            serde_json::Value::Null,
+        )
+        .to_string(),
+    )
+    .unwrap();
+    let out = finalize(&run);
+    assert!(
+        out.status.success(),
+        "(c) null + absent must pass (#171 honest gap): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(row["proposal_refs"], serde_json::Value::Null);
+    assert_eq!(row["proposal_digest"], serde_json::Value::Null);
+}
+
+/// #178 review P0-2 (fail-open kapanışı): attempt proposals TÜKETTİYSE (zarf
+/// digest taşıyorsa) dosyanın attempt sonrası SİLİNMESİ red üretir — Some(digest)
+/// dosyanın zorunlu varlık kanıtıdır.
+#[test]
+fn finalize_run_rejects_proposals_deleted_after_attempt() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-props-deleted");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // Producer: zarf proposals digest'i TAŞIYOR (mock kol tüketti).
+    let envelope = read_json(&attempt);
+    assert!(
+        envelope["run"]["proposals_digest"].is_string(),
+        "mock attempt must carry proposals_digest"
+    );
+
+    // SİLME: attempt'in tüketildiği kanıtın üstünden dosyayı çek.
+    fs::remove_file(&props).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-props-deleted")
+        .output()
+        .expect("run osp finalize-run");
+    assert!(!out.status.success(), "deleted proposals must fail closed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no longer carries proposals.json"),
+        "message: {stderr}"
+    );
+}
+
 /// #183: proposals v2 ÇIKTISINDAN kopyalanan output-only alan (position_hints)
 /// girdi spec'ine girerse unknown-field reddi tek adımda yönlendirir
 /// (run-17 sürtünmesi 3: çıktı doğal şablon alınıyor).

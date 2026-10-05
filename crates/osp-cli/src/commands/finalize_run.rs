@@ -82,13 +82,22 @@ struct AttemptRunRead {
     witness_mode: String,
     task_source: String,
     repository_head: String,
-    /// #178: attempt anında tüketilen dosya digest'leri. Legacy v1 envelope'larda
-    /// alan yoktur → None (fence atlanır, backward-compat); `legacy_hardcoded`
-    /// task ve `--llm real` (proposals yok) producer'da da null'dur.
-    #[serde(default)]
-    task_digest: Option<String>,
-    #[serde(default)]
-    proposals_digest: Option<String>,
+    /// #178 review P0-2: presence-aware — alan YOK (legacy zarf → fence atlanır,
+    /// backward-compat) ≠ alan NULL (yeni producer'ın "bu artifact TÜKETİLMEDİ"
+    /// beyanı) ≠ değer ("bu baytlar tüketildi" beyanı — dosya zorunlu + hash eşit).
+    /// `Option<Option<String>>` + double_option bu üçü serde'de ayırır.
+    #[serde(default, deserialize_with = "double_option")]
+    task_digest: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    proposals_digest: Option<Option<String>>,
+}
+
+/// double_option: missing → None, present-null → Some(None), value → Some(Some(v)).
+fn double_option<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
 }
 
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
@@ -257,28 +266,60 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         attempt.run.repository_head
     );
 
-    // #178 (tur-1 P0-2 tam kapanış): attempt artifact'ı tükettiği dosyaların
-    // digest'lerini taşır → finalize anında yeniden hesaplanır, mismatch red.
-    // Aynı task_id + repository_head altında dosyanın sonradan değiştirilmesi
-    // artık ispatlanabilir şekilde yakalanır (alan yoksa legacy → fence atlanır).
-    if let Some(claimed) = attempt.run.task_digest.as_ref() {
-        let actual = sha256_file(&task_path)?;
-        anyhow::ensure!(
-            claimed == &actual,
-            "task digest fence: attempt bound task.json as {claimed} but the run dir \
-             now hashes {actual} — the task file changed after the attempt; \
-             mismatched artifacts cannot share one ledger row"
-        );
+    // #178 (tur-1 P0-2 tam kapanış + review P0-2 presence-aware): digest alanı
+    // bir VARLIK BEYANIDIR — "alan yok" (legacy zarf → fence atlanır) ≠ "null"
+    // (yeni producer: bu artifact TÜKETİLMEDİ → run-dir'de de OLMAMALI) ≠ değer
+    // (BU baytlar tüketildi → dosya ZORUNLU + hash eşit). Fail-open kapatıldı:
+    // Some(digest) + dosya silinmesi artık RED.
+    let proposals_in_run_dir = args.run_dir.join("proposals.json");
+    match attempt.run.task_digest {
+        None => { /* legacy zarf — alan yok, fence atlanır (backward-compat) */ }
+        Some(None) => {
+            // task_source=harness_task_file'ın kanonik producer'ı asla null
+            // task_digest üretmez (task HER ZAMAN okunur); legacy_hardcoded
+            // yukarıda reddedildi → tutarsız şekil.
+            anyhow::bail!(
+                "task digest fence: attempt.json carries task_source=harness_task_file \
+                 with null task_digest — not a canonical producer shape (the task file \
+                 is always read and hashed when a task file is consumed)"
+            );
+        }
+        Some(Some(claimed)) => {
+            let actual = sha256_file(&task_path)?;
+            anyhow::ensure!(
+                claimed == actual,
+                "task digest fence: attempt bound task.json as {claimed} but the run dir \
+                 now hashes {actual} — the task file changed after the attempt; \
+                 mismatched artifacts cannot share one ledger row"
+            );
+        }
     }
-    if let Some(claimed) = attempt.run.proposals_digest.as_ref() {
-        // Run dir'de proposals.json yoksa karşılaştırma yapılamaz (#171 --llm real
-        // dürüst-boşluğu: proposal_refs null yolu zaten var) — fence yalnız iki
-        // taraf da mevcutken anlamlı.
-        let proposals_in_run_dir = args.run_dir.join("proposals.json");
-        if proposals_in_run_dir.is_file() {
+    match attempt.run.proposals_digest {
+        None => { /* legacy zarf — fence atlanır (backward-compat) */ }
+        Some(None) => {
+            // #171 --llm real dürüst-boşluğu: attempt proposals TÜKETMEDİ beyanı →
+            // run-dir'de proposals.json VARSA attempt'in tüketmediği artifact
+            // provenance'a sızıyor.
+            anyhow::ensure!(
+                !proposals_in_run_dir.is_file(),
+                "proposals digest fence: attempt declares NO proposals consumed \
+                 (proposals_digest null) but the run dir carries proposals.json — \
+                 an artifact the attempt never consumed cannot enter this ledger row"
+            );
+        }
+        Some(Some(claimed)) => {
+            // Beyan: BU baytlar tüketildi → dosya ZORUNLU (silinmek fail-closed) ve
+            // hash eşit. task.json'dan farklı olarak proposals opsiyonel artifact'tır;
+            // varlık kanıtı zarfın kendisidir.
+            anyhow::ensure!(
+                proposals_in_run_dir.is_file(),
+                "proposals digest fence: attempt consumed proposals (bound {claimed}) \
+                 but the run dir no longer carries proposals.json — deleting it after \
+                 the attempt cannot un-consume the bytes the decision was made on"
+            );
             let actual = sha256_file(&proposals_in_run_dir)?;
             anyhow::ensure!(
-                claimed == &actual,
+                claimed == actual,
                 "proposals digest fence: attempt bound proposals.json as {claimed} but \
                  the run dir now hashes {actual} — the proposals file changed after \
                  the attempt; mismatched artifacts cannot share one ledger row"
@@ -520,15 +561,21 @@ fn shape_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// K3: sha256 over ham dosya baytları — `sha256:<64 hex>` (tam uzunluk; mevcut
+/// K3: sha256 over ham baytlar — `sha256:<64 hex>` (tam uzunluk; mevcut
 /// 16-hex ledger değerleri el-dönemi annotasyondur, missing≡null uyumu bozulmaz).
-/// #178: attempt tarafı da çağırır (envelope digest alanları) → pub(crate).
-pub(crate) fn sha256_file(path: &Path) -> anyhow::Result<String> {
+/// #178 P0-1: bayt-temelli çekirdek — attempt tarafı TEK okumadan aldığı tamponu
+/// digest'ler (parse ile AYNI baytlar; producer-side TOCTOU kapalı).
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// K3: dosya-yolu varyantı — finalize fence'leri run-dir dosyalarını hash'ler.
+fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let bytes = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("failed to read {} for digest: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    Ok(sha256_bytes(&bytes))
 }
 
 /// Ledger ref'i: run-dir KULLANILDIĞI GİBİ (ritüelde OSP kökünden göreli) +

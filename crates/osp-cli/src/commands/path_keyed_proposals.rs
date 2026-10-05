@@ -138,7 +138,18 @@ pub fn load_proposals_file(
         path: path.display().to_string(),
         source,
     })?;
-    let value: serde_json::Value = serde_json::from_str(&raw)?;
+    load_proposals_str(&raw, snapshot_head, node_paths)
+}
+
+/// #178 review P0-1 (read-once): bayt-temelli çekirdek — çağıran dosyayı TEK
+/// okumayla alır; digest ve parse AYNI tampondan (navigator sırasında diskteki
+/// dosya değişse bile zarf iddiası doğru kalır).
+pub fn load_proposals_str(
+    raw: &str,
+    snapshot_head: &str,
+    node_paths: &HashMap<NodeId, String>,
+) -> Result<Vec<DeltaProposal>, PathKeyedProposalError> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
     match &value {
         serde_json::Value::Array(_) => Ok(serde_json::from_value(value)?),
         serde_json::Value::Object(_) => {
