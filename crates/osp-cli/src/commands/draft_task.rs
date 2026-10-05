@@ -74,6 +74,9 @@ pub struct DraftTaskArgs {
     #[arg(long, default_value_t = 1)]
     pub milestone_id: u64,
     /// İnsan şekil tanımı (yüz kümeleri + removed/moved kenar niyetleri) → proposals v2.
+    /// Kabul edilen alanlar (deny_unknown_fields): new_nodes, new_edges, removed_edges,
+    /// affected_nodes, modified_entities, reasoning — proposals v2 ÇIKTI zarfının
+    /// schema_version/repository_head/position_hints alanları GİRDİDE YOKTUR (#183).
     /// Verilirse --out-proposals zorunlu.
     #[arg(long, requires = "out_proposals")]
     pub proposals_spec: Option<PathBuf>,
@@ -133,8 +136,9 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
             })?;
             let spec: ProposalsSpec = serde_json::from_str(&raw).map_err(|e| {
                 anyhow::anyhow!(
-                    "failed to parse proposals spec {}: {e}",
-                    spec_path.display()
+                    "failed to parse proposals spec {}: {}",
+                    spec_path.display(),
+                    annotate_output_only_field(&e)
                 )
             })?;
             let (file, stats, required_ops) = translate_spec(spec, &view)?;
@@ -377,6 +381,28 @@ struct DelegateStats {
 ///
 /// Bilinçli sadeleştirme (K5): `repository_head` YOK (motor doldurur), kenar
 /// `kind` default `Imports`, `connected_to` çıplak path veya `[path, kind]`.
+/// #183: proposals v2 ÇIKTI dosyasında bulunan ama girdi spec'inde bulunmayan
+/// alanlar. Çıktıyı şablon olarak kopyalayan kullanıcı (run-17 sürtünmesi 3)
+/// unknown-field reddini tek adımda anlaşılır kılmak ister — `deny_unknown_fields`
+/// mizacı bozulmaz, yalnızca mesaj zenginleşir.
+const PROPOSALS_OUTPUT_ONLY_FIELDS: &[&str] =
+    &["schema_version", "repository_head", "position_hints"];
+
+/// Serde unknown-field hatası bir ÇIKTI-only alansa, mesaja "drop it from the
+/// input spec" yönlendirmesi eklenir (geri kalan hatalar aynen taşınır).
+fn annotate_output_only_field(err: &serde_json::Error) -> String {
+    let msg = err.to_string();
+    for field in PROPOSALS_OUTPUT_ONLY_FIELDS {
+        if msg.contains(&format!("unknown field `{field}`")) {
+            return format!(
+                "{msg} — `{field}` is an output-only field of the proposals v2 file; \
+                 drop it from the input spec"
+            );
+        }
+    }
+    msg
+}
+
 /// `deny_unknown_fields` — typo parse'te yakalanır (tırnak hatası sınıfı motor
 /// assert'ine değil parse'a taşınır).
 #[derive(Debug, serde::Deserialize)]

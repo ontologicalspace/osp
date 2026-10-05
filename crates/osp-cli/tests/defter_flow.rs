@@ -1286,6 +1286,45 @@ fn draft_task_staged_publish_no_partial_set_on_second_prep_failure() {
     );
 }
 
+/// #183: proposals v2 ÇIKTISINDAN kopyalanan output-only alan (position_hints)
+/// girdi spec'ine girerse unknown-field reddi tek adımda yönlendirir
+/// (run-17 sürtünmesi 3: çıktı doğal şablon alınıyor).
+#[test]
+fn draft_task_spec_output_only_field_message_guides_to_drop() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    // Aksi takdirde geçerli bir spec; yalnız çıktı-only `position_hints` fazla.
+    let spec = work.join("spec-output-only.json");
+    fs::write(
+        &spec,
+        r#"{"proposals": [{"removed_edges": [{"from": "main.rs", "to": "a.rs"}],
+            "position_hints": [], "reasoning": "output copied as template"}]}"#,
+    )
+    .expect("write spec");
+
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(work.join("task.json"))
+        .arg("--out-proposals")
+        .arg(work.join("proposals.json"))
+        .output()
+        .expect("run osp draft-task (output-only field)");
+    assert!(
+        !out.status.success(),
+        "output-only field in spec must reject (deny_unknown_fields unchanged)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unknown field `position_hints`"),
+        "serde red mesajı korunmalı: {stderr}"
+    );
+    assert!(
+        stderr.contains("output-only field") && stderr.contains("drop it from the input spec"),
+        "yönlendirme eklenmeli: {stderr}"
+    );
+}
+
 /// Tur-3 P0: canonical producer domain'i — üç adversarial case tek matriste:
 /// (a) kapalı enum dışı evidence kararları, (b) yabancı evidence task_id,
 /// (c) producer guard'ının reddettiği mode kombinasyonu (production +
