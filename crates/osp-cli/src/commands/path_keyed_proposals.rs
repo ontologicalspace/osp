@@ -28,7 +28,7 @@ use crate::commands::path_bindings::{build_path_to_id, resolve_path, PathBinding
 /// load sırasında capture edilen snapshot ile exact match doğrulanır —
 /// re-bind'ten ÖNCE (R1 P1-1: proposal intent, üretim state'ine bağlıdır;
 /// aynı path çifti farklı revision'da farklı structural fact olabilir).
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliPathKeyedProposalsFileV2 {
     pub schema_version: u32,
@@ -42,7 +42,7 @@ pub struct CliPathKeyedProposalsFileV2 {
 /// structural alan (`removed_edge` gibi) sessizce yutulmak yerine parse error
 /// üretir; hata Q4'ten ÖNCE kaybolamaz. v1 `DeltaProposal` serde gevşekliği
 /// backward-compat için korunur (çıplak array yolu).
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CliPathKeyedProposal {
     pub new_nodes: Vec<CliPathKeyedNewNodeSpec>,
@@ -54,7 +54,7 @@ pub struct CliPathKeyedProposal {
     pub reasoning: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliPathKeyedNewNodeSpec {
     pub kind: osp_core::space::NodeKind,
@@ -62,7 +62,7 @@ pub struct CliPathKeyedNewNodeSpec {
     pub connected_to: Vec<(String, EdgeKind)>,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliPathKeyedEdgeSpec {
     pub from: String,
@@ -70,7 +70,7 @@ pub struct CliPathKeyedEdgeSpec {
     pub kind: EdgeKind,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliPathKeyedEdgeRef {
     pub from: String,
@@ -78,13 +78,13 @@ pub struct CliPathKeyedEdgeRef {
     pub kind: EdgeKind,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliPathKeyedEntityChange {
     pub path: String,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CliPathKeyedPositionHint {
     pub path: String,

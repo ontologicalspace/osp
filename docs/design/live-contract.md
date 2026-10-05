@@ -260,6 +260,60 @@ alanlaşmış hâlidir (#151): "OSP yüzünden başka implementasyon seçtim"
 (`verified-bad`). İlk gerçekleşmeler ayrıca `notes.md`'de olay olarak
 kaydedilir.
 
+### Defter araçları — `draft-task` / `suggest-targets` / `finalize-run` (#172)
+
+Defter tutma ve doğrulama motora taşınmıştır (karar-kaydı: issue #172 yorumu,
+K1–K7 + tur-1 düzeltmeleri). Üç komut da **YORUM ÜRETMEZ** — bar, şekil seçimi,
+tercih insanda kalır; ritüelin ölçüm-doğrulama kısmı motor, epistemik içeriği
+insan. Invariant: *motorun yazdığı her ledger alanı = motorun gerçekten
+kanıtlayabildiği şey*.
+
+- **`osp draft-task --repo R --target <path> --task-id N --label … --bar τ
+  [--baseline <run>/baseline.json] [--proposals-spec <file>] --out-task …
+  [--out-proposals …]`** — task v2 (+ spec verilirse proposals v2) üretir.
+  `repository_head`'i `git rev-parse`'ten alır (SHA transcription sınıfı ölür).
+  **Baseline revizyona bağlı olmak zorunda (tur-1 P0-1):** artifact yalnız
+  `clean_pre_post_equal` binding ile kabul edilir (`osp analyze
+  --require-clean-snapshot --out` — generic `observed_worktree_unbound` ölçülen
+  içeriğin HEAD içeriği olduğunu iddia edemez), HEAD exact-match fence + ölçülen
+  path'lerin bugün HEAD-tracked/clean olması (#155 fence'leri) uygulanır;
+  `--baseline` verilmezse aynı fence ailesiyle canlı analyze koşar.
+  `--proposals-spec` insan şekil niyetini (yüz kümeleri + removed/moved kenarlar;
+  `repository_head` YOK, kenar `kind` default `Imports`) tam v2 şemaya çevirir ve
+  TÜM temsilcileri ölçülmüş baseline kenar listesine karşı doğrular; uyuşmayan
+  kenar hatasında düğümün ölçülmüş çıkış-kenarları listelenir. **Op-matrix
+  (tur-1 P1-3):** spec'in yapısal yüzeyinden op gereksinimleri türetilir
+  (`new_nodes→AddNode`, `new_edges→AddEdge`, `removed Imports→RemoveImport`,
+  `modified_entities→ModifyEntity`) ve task'ın izinli operasyonlarına karşı
+  denetlenir; analyzer-owned kind'ler (`type_imports`/`same_ns_type`) proposal
+  mutasyonunda reddedilir. Çıktılar atomic publish ile yazılır ve birbirinin /
+  girdilerin alias'ı olamaz (P2).
+- **`osp suggest-targets --repo R [--baseline …] [--min-coupling x]
+  [--exclude-past dogfood/ledger.jsonl] [--limit N] [--format json]`** —
+  ölçülmüş c değerinden sıralı aday tablosu; `--exclude-past` ledger
+  `task_ref`'lerinden geçmiş hedefleri otomatik düşer (v1+v2 task zarflarının
+  ikisi de okunur; task_ref'ler CWD-göreli — OSP kökünden çalıştır). Baseline
+  kabulü draft-task ile aynı revizyona-bağlılık fence'lerindendir.
+- **`osp finalize-run <run-dir> [--run-id …] [--repository …] [--out …]`** —
+  run dizininden `live-ledger-v1` satır **taslağı**: ref'ler + digest'ler
+  (sha256, ham bayt, tam 64-hex) + çapraz-artifact kimlik fence'leri. **K2
+  (tur-1 P0-2):** `attempt.json` SIKI #166 run-envelope şekliyle parse edilir
+  (zorunlu `run.task_id`/`execution_mode`/`witness_mode`/`task_source`/
+  `repository_head` + `execution_measurement`/`result`/`evidence`); assert
+  zinciri `task.id == attempt.run.task_id`, `task.head == baseline.head ==
+  attempt.head`, `task_source == harness_task_file`, `proposals` varsa v2 zarfı
+  ve `proposals.head == baseline.head` (v1 çıplak array state'e bağlanamaz →
+  reddedilir). `--out` tüketilen artifact'lardan herhangi birinin alias'ı
+  olamaz ve yazım atomic'tir (P0-3). `osp_revision` build-time gömülür.
+  **Yorum alanları null kalır** (tur-1 P1-4: null = "henüz değerlendirilmedi";
+  `[]` = "değerlendirildi, friction yok" — başka iddia): `decision`,
+  `patch_outcome`, `decision_utility`, `counterfactual`, `human_override`,
+  `friction`, `notes`, `commands`, `scip_index_digest` ve **`build_verification`
+  bütünüyle** (tur-1 P1-1: `Exists(after) ∧ Exists(patch)`'den
+  `Patch(S₀)=S_after` çıkmaz — motor yalnız `after_ref` + `patch_digest`
+  taşır; verified_state ancak gerçek yama-doğrulamayla dolabilir) — insan
+  doldurup ledger'a APPEND eder.
+
 ## 5. İlk görev adayı — Nexus (Faz 1 başlangıç taslağı)
 
 Tip: **refactoring — gereksiz/doğrudan bir bağımlılığı kaldırarak coupling'i düşürme**
