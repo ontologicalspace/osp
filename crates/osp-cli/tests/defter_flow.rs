@@ -502,6 +502,8 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         .arg("run")
         .arg("--repository")
         .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
         .output()
         .expect("run osp finalize-run");
     assert!(
@@ -542,6 +544,12 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
 
     assert_eq!(row["task_ref"], "run/task.json");
     assert_eq!(row["attempt_ref"], "run/attempt.json");
+    // #178 tur-3/P2: anchor'lu satırda downgrade alanı YOKTUR (missing ≠ false
+    // ≠ null-beyan; anahtar yalnız --allow-unanchored-legacy kullanımında eklenir).
+    assert!(
+        !row.as_object().unwrap().contains_key("unanchored_legacy"),
+        "anchored row must not carry the downgrade key"
+    );
     assert_eq!(row["after_ref"], "run/after.json");
     assert_eq!(row["analysis_profile"], "tier1");
     // Tur-1 P1-1: Exists(after)+Exists(patch) ≠ Patch(S0)=S_after —
@@ -566,6 +574,111 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
             "{field} must stay null"
         );
     }
+}
+
+/// #178: attempt artifact tükettiği task/proposals dosyalarının digest'lerini
+/// taşır; finalize anında dosya değiştiyse fail-closed. Aynı task_id + aynı
+/// repository_head altında "sonradan değiştirildi" artık ispatlanabilir.
+#[test]
+fn finalize_run_rejects_task_tampered_after_attempt() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-tamper");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // Producer tarafı: envelope digest alanlarını taşır ve attempt-ani baytlarıyla
+    // eşleşir.
+    let envelope = read_json(&attempt);
+    let task_digest = envelope["run"]["task_digest"].as_str().unwrap_or_default();
+    assert_eq!(
+        task_digest,
+        sha256_of(&task),
+        "producer digest = attempt-ani bytes"
+    );
+    assert_eq!(
+        envelope["run"]["proposals_digest"]
+            .as_str()
+            .unwrap_or_default(),
+        sha256_of(&props)
+    );
+
+    // TAMPER: task.json'ı HEAD/id koruyarak değiştir (head fence'ler geçsin —
+    // yalnız digest fence'i ateşlensin).
+    let mut tampered = read_json(&task);
+    tampered["task"]["label"] = serde_json::json!("tampered after the attempt");
+    fs::write(&task, serde_json::to_string_pretty(&tampered).unwrap()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-tamper")
+        .arg("--repository")
+        .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "tampered task.json must fail the digest fence"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("task digest fence"),
+        "digest fence mesajı gelmeli (head fence değil): {stderr}"
+    );
 }
 
 #[test]
@@ -879,6 +992,7 @@ fn finalize_run_minimal_attempt_object_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -922,6 +1036,7 @@ fn finalize_run_task_id_mismatch_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(!out.status.success(), "task-id mismatch must fail closed");
@@ -973,6 +1088,7 @@ fn finalize_run_proposals_state_fence() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1009,6 +1125,7 @@ fn finalize_run_proposals_state_fence() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1116,6 +1233,7 @@ fn finalize_run_presence_only_null_shapes_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1156,6 +1274,7 @@ fn finalize_run_unknown_result_kind_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1209,6 +1328,7 @@ fn finalize_run_proposals_minimal_envelope_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1286,6 +1406,591 @@ fn draft_task_out_task_missing_parent_rejected_before_work() {
         "message: {stderr}"
     );
     assert!(!task.exists(), "rejected → no output file");
+}
+
+/// #178 review P0-2: digest alanı VARLIK BEYANIDIR — presence-aware fence matrisi:
+/// (a) proposals_digest=NULL + run-dir'de proposals.json VAR → RED (attempt'in
+///     tüketmediği artifact provenance'a sızamaz),
+/// (b) task_digest=NULL + task_source=harness_task_file → RED (kanonik producer
+///     bu şekli asla üretmez — task tüketildiyse hash'i vardır),
+/// (c) proposals_digest=NULL + proposals.json YOK → GEÇER (#171 --llm real
+///     dürüst-boşluk yolu; proposal_refs null ile ledger satırı üretilir).
+#[test]
+fn finalize_run_digest_presence_matrix() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    let canonical_evidence = serde_json::json!([{
+        "trajectory_id": 1,
+        "milestone_id": 1,
+        "task_id": 1,
+        "attempt_id": 1,
+        "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "after": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "gate_decision": "PassedAll",
+        "predicate_completion": "Completed",
+        "mutation_decision": "AcceptAsCompleted",
+        "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "duration_ms": 1
+    }]);
+
+    let prepare = |name: &str| {
+        let run = work.join(name);
+        fs::create_dir_all(&run).unwrap();
+        fs::copy(&baseline, run.join("baseline.json")).unwrap();
+        fs::write(
+            run.join("task.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "repository_head": fx.head,
+                "scope_bindings": [{"path": "main.rs"}],
+                "task": {"id": 1}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        run
+    };
+    let envelope_with = |task_digest: serde_json::Value, proposals_digest: serde_json::Value| {
+        let mut env = attempt_envelope(&fx.head, 1);
+        env["evidence"] = canonical_evidence.clone();
+        env["run"]["task_digest"] = task_digest;
+        env["run"]["proposals_digest"] = proposals_digest;
+        env
+    };
+    // #178 tur-2 P0: el-yapımı yeni-şekil zarflar digest alanları taşıdığı için
+    // canonical trust-anchor fence'i de geçmeli — zarfın AYNI baytları no-clobber
+    // mağazaya da yazılır (gerçek attempt'ın persist adımının el ile taklidi) ve
+    // finalize --state-dir alır.
+    let write_with_canonical = |run: &Path, env: &serde_json::Value| {
+        let bytes = env.to_string();
+        fs::write(run.join("attempt.json"), &bytes).unwrap();
+        let attempts = fx.work_path().join("attempts");
+        fs::create_dir_all(&attempts).unwrap();
+        fs::write(attempts.join("task-1-990001-1.json"), bytes).unwrap();
+    };
+    let finalize = |run: &Path| {
+        osp_in(&work)
+            .arg("finalize-run")
+            .arg(run)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .output()
+            .expect("run osp finalize-run")
+    };
+
+    // (a) null beyanı + var olan dosya → red.
+    let run = prepare("run-null-props-present");
+    write_with_canonical(
+        &run,
+        &envelope_with(
+            serde_json::json!(sha256_of(&run.join("task.json"))),
+            serde_json::Value::Null,
+        ),
+    );
+    fs::write(run.join("proposals.json"), "{}").unwrap();
+    let out = finalize(&run);
+    assert!(!out.status.success(), "(a) null + present must reject");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("declares NO proposals consumed"),
+        "(a) message: {stderr}"
+    );
+
+    // (b) harness_task_file + null task_digest → red (kanonik olmayan şekil).
+    let run = prepare("run-null-task");
+    write_with_canonical(
+        &run,
+        &envelope_with(serde_json::Value::Null, serde_json::Value::Null),
+    );
+    let out = finalize(&run);
+    assert!(!out.status.success(), "(b) null task_digest must reject");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not a canonical producer shape"),
+        "(b) message: {stderr}"
+    );
+
+    // (c) null + yok → GEÇER (#171 dürüst-boşluk).
+    let run = prepare("run-null-props-absent");
+    write_with_canonical(
+        &run,
+        &envelope_with(
+            serde_json::json!(sha256_of(&run.join("task.json"))),
+            serde_json::Value::Null,
+        ),
+    );
+    let out = finalize(&run);
+    assert!(
+        out.status.success(),
+        "(c) null + absent must pass (#171 honest gap): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(row["proposal_refs"], serde_json::Value::Null);
+    assert_eq!(row["proposal_digest"], serde_json::Value::Null);
+}
+
+/// #178 review P0-2 (fail-open kapanışı): attempt proposals TÜKETTİYSE (zarf
+/// digest taşıyorsa) dosyanın attempt sonrası SİLİNMESİ red üretir — Some(digest)
+/// dosyanın zorunlu varlık kanıtıdır.
+#[test]
+fn finalize_run_rejects_proposals_deleted_after_attempt() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-props-deleted");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // Producer: zarf proposals digest'i TAŞIYOR (mock kol tüketti).
+    let envelope = read_json(&attempt);
+    assert!(
+        envelope["run"]["proposals_digest"].is_string(),
+        "mock attempt must carry proposals_digest"
+    );
+
+    // SİLME: attempt'in tüketildiği kanıtın üstünden dosyayı çek.
+    fs::remove_file(&props).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-props-deleted")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(!out.status.success(), "deleted proposals must fail closed");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no longer carries proposals.json"),
+        "message: {stderr}"
+    );
+}
+
+/// #178 tur-2 P0 (trust anchor): TUTARLI tamper — task.json DEĞİŞTİRİLİR ve
+/// attempt.json'un task_digest'i yeni hash'e GÜNCELLENİR (digest fence'lerin
+/// hepsi geçer). Yakalayan şey canonical fence'tir: run-dir kopyası artık
+/// makinenin no-clobber store'undaki artifact ile bayt-özdeş DEĞİLDİR.
+#[test]
+fn finalize_run_rejects_coherent_tamper_via_canonical_fence() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-coherent-tamper");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // TUTARLI saldırı: task.json'i değiştir + zarfdaki task_digest'i YENİ hash'e
+    // güncelle (head/id/evidence aynen — tüm digest fence'ler geçecek şekilde).
+    let mut tampered_task = read_json(&task);
+    tampered_task["task"]["label"] = serde_json::json!("coherently forged");
+    fs::write(&task, serde_json::to_string_pretty(&tampered_task).unwrap()).unwrap();
+    let mut forged = read_json(&attempt);
+    forged["run"]["task_digest"] = serde_json::json!(sha256_of(&task));
+    fs::write(&attempt, serde_json::to_string_pretty(&forged).unwrap()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-coherent-tamper")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "coherent tamper must fail the canonical fence (digest fences alone pass it)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not byte-match any canonical artifact"),
+        "message: {stderr}"
+    );
+}
+
+/// #178 tur-2 P0 (bypass #2): digest alanlarını zarfdan TAMAMEN SİLMEK —
+/// "legacy missing" gibi görünür ve digest fence'leri atlatırdı. Canonical
+/// fence: mağazada bu task'ın artifact'ı VAR → kopya bayt-özdeş olmalı → silinmiş
+/// kopya RED.
+#[test]
+fn finalize_run_rejects_stripped_digest_fields() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-stripped");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // ALAN SİLME: digest alanlarını kaldır → "legacy" gibi görün.
+    let mut stripped = read_json(&attempt);
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("task_digest");
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("proposals_digest");
+    fs::write(&attempt, serde_json::to_string_pretty(&stripped).unwrap()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-stripped")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "stripped digest fields must fail the canonical fence (legacy-look bypass)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not byte-match any canonical artifact"),
+        "message: {stderr}"
+    );
+}
+
+/// #178 tur-3 P0 kabul testi (review senaryosu birebir): yeni attempt üret →
+/// run dizinini default probe'un bulamayacağı yere TAŞI → digest alanlarını SİL →
+/// task label değiştir (head/id koru) → `--state-dir`'siz finalize → RED.
+/// Otomatik legacy kabul kaldırıldı: anchor yok + legacy görünüm = fail-closed.
+#[test]
+fn finalize_run_rejects_relocated_run_with_stripped_fields() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-relocate");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // TAŞIMA: run dizinini probe'un (<run>/../../state) bulamayacağı bir yere kopyala.
+    let outside = tempfile::tempdir().expect("relocated base");
+    let relocated = outside.path().join("run-relocate");
+    fs_extra_like_copy_dir(&run, &relocated);
+
+    // ALAN SİLME + TUTARLI TAMPER: digest alanlarını kaldır + task label değiştir
+    // (repository_head + task_id aynen — head/id fence'leri geçsin).
+    let relocated_task = relocated.join("task.json");
+    let mut tampered = read_json(&relocated_task);
+    tampered["task"]["label"] = serde_json::json!("tampered in the relocated dir");
+    fs::write(
+        &relocated_task,
+        serde_json::to_string_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+    let mut stripped = read_json(&relocated.join("attempt.json"));
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("task_digest");
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("proposals_digest");
+    fs::write(
+        relocated.join("attempt.json"),
+        serde_json::to_string_pretty(&stripped).unwrap(),
+    )
+    .unwrap();
+
+    let out = osp_in(outside.path())
+        .arg("finalize-run")
+        .arg(&relocated)
+        .output()
+        .expect("run osp finalize-run (relocated, no --state-dir)");
+    assert!(
+        !out.status.success(),
+        "relocated run + stripped fields + no anchor must fail closed (no silent legacy)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--allow-unanchored-legacy"),
+        "RED açık downgrade'i işaret etmeli: {stderr}"
+    );
+}
+
+/// #178 tur-3 P0 kabul testi (ikinci yarısı): gerçek historical legacy zarf +
+/// canonical store yok + AÇIK `--allow-unanchored-legacy` → GEÇER; ledger satırı
+/// `unanchored_legacy: true` taşır (epistemik zayıflama kayıtlı).
+#[test]
+fn finalize_run_unanchored_legacy_with_explicit_flag_passes() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-historical-legacy");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Legacy-şekil zarf (digest alanları YOK — pre-#178 producer) + kanonik evidence.
+    let mut env = attempt_envelope(&fx.head, 1);
+    env["evidence"] = serde_json::json!([{
+        "trajectory_id": 1, "milestone_id": 1, "task_id": 1, "attempt_id": 1,
+        "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "after": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "gate_decision": "PassedAll", "predicate_completion": "Completed",
+        "mutation_decision": "AcceptAsCompleted",
+        "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "duration_ms": 1
+    }]);
+    fs::write(run.join("attempt.json"), env.to_string()).unwrap();
+
+    // Store yok + flag YOK → RED (fail-closed default).
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "unanchored legacy without the explicit flag must fail closed"
+    );
+
+    // Flag İLE → GEÇER + downgrade ledger'da görünür.
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--allow-unanchored-legacy")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "explicit --allow-unanchored-legacy must pass: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(row["unanchored_legacy"], serde_json::json!(true));
+}
+
+/// Basit özyinelemeli dizin kopyası (std-only; test yardımcısı).
+fn fs_extra_like_copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("mkdir dst");
+    for entry in fs::read_dir(src).expect("read src").filter_map(|e| e.ok()) {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            fs_extra_like_copy_dir(&from, &to);
+        } else {
+            fs::copy(&from, &to).expect("copy file");
+        }
+    }
 }
 
 /// #183: proposals v2 ÇIKTISINDAN kopyalanan output-only alan (position_hints)
@@ -1375,6 +2080,9 @@ fn finalize_run_adversarial_canonical_semantics_matrix() {
         let out = osp_in(&work)
             .arg("finalize-run")
             .arg(&run)
+            // El-yapımı legacy-şekil zarflar (digest alansız) + store yok → semantik
+            // fence'leri hedefleyen bu matris AÇIK downgrade ile koşar (#178 tur-3).
+            .arg("--allow-unanchored-legacy")
             .output()
             .unwrap();
         (out, run)

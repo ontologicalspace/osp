@@ -1016,7 +1016,31 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     } else {
         "legacy_hardcoded"
     };
-    let task = resolve_task(&args, &snapshot_before, &result.node_paths)?;
+
+    // #178 review P0-1 (read-once): task dosyası TEK okuma — digest ve parse AYNI
+    // bayt tamponundan. Navigator çalışırken diskteki dosya değişse bile envelope'un
+    // "attempt anında tüketilen baytlar" iddiası bu tampon üzerinden doğru kalır
+    // (producer-side TOCTOU kapanır; run_navigator dosyaları TEKRAR OKUMAZ).
+    let task_input: Option<(String, String)> = match args.task.as_ref() {
+        Some(task_path) => {
+            let bytes = std::fs::read(task_path).map_err(|e| {
+                anyhow::anyhow!("failed to read task file {}: {e}", task_path.display())
+            })?;
+            let digest = crate::commands::finalize_run::sha256_bytes(&bytes);
+            let raw = String::from_utf8(bytes).map_err(|e| {
+                anyhow::anyhow!("task file {} is not valid UTF-8: {e}", task_path.display())
+            })?;
+            Some((raw, digest))
+        }
+        None => None,
+    };
+    let task_digest = task_input.as_ref().map(|(_, d)| d.clone());
+    let task = resolve_task(
+        &args,
+        task_input.as_ref().map(|(raw, _)| raw.as_str()),
+        &snapshot_before,
+        &result.node_paths,
+    )?;
 
     // 4. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
     // #166 P1-1: navigator YAYIM YAPMAZ — AttemptExecution döndürür; fence +
@@ -1025,6 +1049,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         "real" => {
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
+            // Real kol proposals DOSYASI tüketmez (#171) → digest null (dürüst boşluk).
             run_navigator(
                 &llm,
                 &mut engine,
@@ -1033,6 +1058,8 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 &state_dir,
                 &snapshot_before,
                 task_source,
+                task_digest,
+                None,
             )?
         }
         _ => {
@@ -1043,9 +1070,20 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 .ok_or_else(|| anyhow::anyhow!("--proposals required for --llm mock"))?;
             // #161 (B5): v1 çıplak array (id-keyed) veya v2 object envelope
             // (path-keyed — HEAD fence + attempt anindeki baseline'a karşı re-bind).
+            // #178 P0-1: read-once — digest ve parse AYNI baytlardan.
+            let proposals_bytes = std::fs::read(proposals_path).map_err(|e| {
+                anyhow::anyhow!("failed to read proposals {}: {e}", proposals_path.display())
+            })?;
+            let proposals_digest = crate::commands::finalize_run::sha256_bytes(&proposals_bytes);
+            let proposals_raw = String::from_utf8(proposals_bytes).map_err(|e| {
+                anyhow::anyhow!(
+                    "proposals file {} is not valid UTF-8: {e}",
+                    proposals_path.display()
+                )
+            })?;
             let proposals: Vec<osp_core::agent::DeltaProposal> =
-                path_keyed_proposals::load_proposals_file(
-                    proposals_path,
+                path_keyed_proposals::load_proposals_str(
+                    &proposals_raw,
                     snapshot_before.head.as_str(),
                     &result.node_paths,
                 )
@@ -1059,6 +1097,8 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 &state_dir,
                 &snapshot_before,
                 task_source,
+                task_digest,
+                Some(proposals_digest),
             )?
         }
     };
@@ -1456,8 +1496,13 @@ fn hold_reason_detail(reason: &osp_core::witness::WitnessHoldReason) -> String {
 ///   tüm harness garantilerini bypass eder.
 /// - `(Production, Some)`    → snapshot-bound task, witness policy Production (trusted operator)
 /// - `(Production, None)`    → legacy hardcoded coupling ≤ 0.55 (D1 backward-compat)
+///
+/// #178 P0-1: `task_raw` — dosyadan TEK okumayla alınan baytların UTF-8 hali
+/// (digest aynı tampondan üretildi; burada yalnız parse edilir). `None` =
+/// `--task` verilmedi (harness'ta red, production'da legacy fallback).
 fn resolve_task(
     args: &TrajectoryAttemptArgs,
+    task_raw: Option<&str>,
     snapshot: &repo_snapshot::RepositorySnapshot,
     node_paths: &std::collections::HashMap<u64, String>,
 ) -> anyhow::Result<osp_core::trajectory::Task> {
@@ -1465,17 +1510,15 @@ fn resolve_task(
         ComparisonOp, MetricPredicate, OpKind, PredicateAxis, PredicateFailurePolicy,
         PredicateMode, PredicateScope, PredicateSet, TaskPolicy, TaskStatus, WeightedPredicate,
     };
-    let task = match (args.execution_mode, args.task.as_ref()) {
-        (CliExecutionMode::Harness, Some(task_path)) => {
-            harness_task::load_and_validate_harness_task(
-                task_path,
-                args.task_id,
-                snapshot,
-                node_paths,
-                args.maneuver_limit,
-            )
-            .map_err(|e| anyhow::anyhow!(e))?
-        }
+    let task = match (args.execution_mode, task_raw) {
+        (CliExecutionMode::Harness, Some(raw)) => harness_task::load_and_validate_harness_task_str(
+            raw,
+            args.task_id,
+            snapshot,
+            node_paths,
+            args.maneuver_limit,
+        )
+        .map_err(|e| anyhow::anyhow!(e))?,
         (CliExecutionMode::Harness, None) => {
             // P0-2: harness REQUIRES snapshot-bound task file — legacy fallback bypass edemez.
             anyhow::bail!(
@@ -1483,10 +1526,10 @@ fn resolve_task(
                  legacy fallback disables all harness guarantees (Paper 2 scoped relaxation)"
             );
         }
-        (CliExecutionMode::Production, Some(task_path)) => {
+        (CliExecutionMode::Production, Some(raw)) => {
             // Production + task file: snapshot-bound task, witness Production (trusted operator).
-            harness_task::load_and_validate_harness_task(
-                task_path,
+            harness_task::load_and_validate_harness_task_str(
+                raw,
                 args.task_id,
                 snapshot,
                 node_paths,
@@ -1627,6 +1670,7 @@ fn validate_attempt_measurement_authority(task: &osp_core::trajectory::Task) -> 
 }
 
 /// Navigator çalıştır (generic LlmClient — mock veya real).
+#[allow(clippy::too_many_arguments)]
 fn run_navigator<L: osp_core::navigator::LlmClient>(
     llm: &L,
     engine: &mut osp_core::engine::SpaceEngine,
@@ -1635,6 +1679,10 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     state_dir: &PathBuf,
     snapshot: &repo_snapshot::RepositorySnapshot,
     task_source: &'static str,
+    // #178 P0-1: read-once bağlama — çağıranın TEK okumadan ürettiği digest'ler;
+    // run_navigator dosyaları TEKRAR OKUMAZ (producer-side TOCTOU kapalı).
+    task_digest: Option<String>,
+    proposals_digest: Option<String>,
 ) -> anyhow::Result<AttemptExecution> {
     use osp_core::navigator::AgentNavigator;
     use osp_core::trajectory::{
@@ -1711,6 +1759,11 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
         task_source,
         snapshot.head.as_str(),
         args.task_id,
+        // #178 P0-1: digest'ler ÇAĞIRANDAN gelir (read-once — parse edilen tamponun
+        // kendisinden üretildi); burada dosya TEKRAR OKUNMAZ. Navigator sırasında
+        // diskteki dosya değişse bile zarf "tüketilen baytlar" iddiasını taşır.
+        task_digest,
+        proposals_digest,
     );
     let exit_code = navigator_exit_code(&result, args.task_id);
     Ok(AttemptExecution {
@@ -2086,8 +2139,13 @@ mod mode_matrix_tests {
     fn harness_without_task_file_is_rejected() {
         let snap = snapshot_fixture();
         let node_paths = HashMap::new();
-        let err = resolve_task(&args(CliExecutionMode::Harness, None), &snap, &node_paths)
-            .expect_err("harness without --task must be rejected");
+        let err = resolve_task(
+            &args(CliExecutionMode::Harness, None),
+            None,
+            &snap,
+            &node_paths,
+        )
+        .expect_err("harness without --task must be rejected");
         let msg = format!("{err}");
         assert!(
             msg.contains("--execution-mode harness requires --task"),
@@ -2101,6 +2159,7 @@ mod mode_matrix_tests {
         let node_paths = HashMap::new();
         let task = resolve_task(
             &args(CliExecutionMode::Production, None),
+            None,
             &snap,
             &node_paths,
         )

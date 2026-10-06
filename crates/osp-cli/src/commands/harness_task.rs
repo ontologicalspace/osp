@@ -179,10 +179,30 @@ pub fn load_and_validate_harness_task(
         path: path.display().to_string(),
         source,
     })?;
-    let file = match peek_schema_version(&raw)? {
-        1 => serde_json::from_str::<CliHarnessTaskFileV1>(&raw)?,
+    load_and_validate_harness_task_str(
+        &raw,
+        positional_task_id,
+        snapshot,
+        node_paths,
+        maneuver_override,
+    )
+}
+
+/// #178 review P0-1 (read-once): bayt-temelli çekirdek — çağıran dosyayı TEK
+/// okumayla alır, AYNI tampondan hem digest üretir hem burada parse/validate
+/// eder. Navigator çalışırken diskteki dosya değişse bile zarfın "attempt
+/// anında tüketilen baytlar" iddiası bu tampon üzerinden doğru kalır.
+pub fn load_and_validate_harness_task_str(
+    raw: &str,
+    positional_task_id: TaskId,
+    snapshot: &RepositorySnapshot,
+    node_paths: &HashMap<NodeId, String>,
+    maneuver_override: Option<u32>,
+) -> Result<Task, HarnessTaskError> {
+    let file = match peek_schema_version(raw)? {
+        1 => serde_json::from_str::<CliHarnessTaskFileV1>(raw)?,
         2 => {
-            let v2: CliHarnessTaskFileV2 = serde_json::from_str(&raw)?;
+            let v2: CliHarnessTaskFileV2 = serde_json::from_str(raw)?;
             // 3a. HEAD fence v2 re-bind'inden ÖNCE — path çözümlemesi yanlış bir
             //     baseline'a karşı yapılmış olmasın (guard sırası: schema → HEAD → resolve).
             if v2.repository_head != snapshot.head.as_str() {

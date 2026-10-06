@@ -55,6 +55,20 @@ pub struct FinalizeRunArgs {
     /// kendisi olamaz (alias fence — P0-3).
     #[arg(long)]
     pub out: Option<PathBuf>,
+    /// #178 tur-2 P0 (trust anchor): digest fence'lerin güven kökü run-dir
+    /// kopyası DEĞİL, no-clobber canonical mağazadır (`<state-dir>/attempts/`).
+    /// Verilmezse ritüel düzeni denenir: `<run_dir>/../../state`.
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
+    /// #178 tur-3 P0: canonical kayıt ERİŞİLEMEZLİĞİNDE otomatik legacy kabulü
+    /// kaldırıldı — "gerçekten eski artifact" ile "alanları silinmiş yeni
+    /// artifact + taşınmış run-dizini" dış bilgi olmadan ayırt edilemez
+    /// (fail-open). Bu flag AÇIK trust downgrade'idür: yalnız legacy-şekil
+    /// (digest alansız) zarflar için, mağaza bulunamadığında RED yerine eski
+    /// epistemik garantiyle finalize eder. Ledger satırı `unanchored_legacy: true`
+    /// taşır. Digest alanlı (yeni-şekil) zarfları KURTARMAZ — anchor zorunludur.
+    #[arg(long)]
+    pub allow_unanchored_legacy: bool,
 }
 
 /// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2;
@@ -82,6 +96,130 @@ struct AttemptRunRead {
     witness_mode: String,
     task_source: String,
     repository_head: String,
+    /// #178 review P0-2: presence-aware — alan YOK (legacy zarf → fence atlanır,
+    /// backward-compat) ≠ alan NULL (yeni producer'ın "bu artifact TÜKETİLMEDİ"
+    /// beyanı) ≠ değer ("bu baytlar tüketildi" beyanı — dosya zorunlu + hash eşit).
+    /// `Option<Option<String>>` + double_option bu üçü serde'de ayırır.
+    #[serde(default, deserialize_with = "double_option")]
+    task_digest: Option<Option<String>>,
+    #[serde(default, deserialize_with = "double_option")]
+    proposals_digest: Option<Option<String>>,
+}
+
+/// double_option: missing → None, present-null → Some(None), value → Some(Some(v)).
+fn double_option<'de, D>(de: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    serde::Deserialize::deserialize(de).map(Some)
+}
+
+/// #178 tur-2/tur-3 P0 — **canonical trust anchor**: digest'ler yalnızca kendilerini
+/// taşıyan zarf güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned,
+/// overwrite edilebilir bir KOYADIR. Makinenin kaydı no-clobber canonical
+/// mağazadır (`<state-dir>/attempts/task-<id>-*.json`; `--out` kopyası tanım
+/// gereği aynı baytlar). Politika:
+///
+/// - Mağazada bu task için ≥1 canonical artifact VARSA → kopya bunlardan biriyle
+///   **bayt-özdeş** olmak zorundadır (tutarlı-tamper VE digest-alan-silme
+///   bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil → RED;
+///   `--allow-unanchored-legacy` görünür bir MISMATCH'i asla ezmez).
+/// - Anchor erişilemez/boşsa (mağaza yok, taşınmış run-dizini, task kaydı yok):
+///   yeni-şekil zarf (digest alanlı) **her koşulda RED** — anchor zorunludur;
+///   legacy-şekil zarf RED, yalnız `--allow-unanchored-legacy` (tur-3 P0:
+///   otomatik legacy kabul fail-open'dı — "gerçekten eski artifact" ile
+///   "alanları silinmiş yeni artifact + taşınmış run-dir" dış bilgi olmadan
+///   ayırt edilemez) AÇIK downgrade'iyle GEÇER; dönen `true` ledger satırına
+///   `unanchored_legacy: true` olarak işlenir.
+fn verify_attempt_against_canonical_store(
+    run_dir: &Path,
+    attempt_bytes: &[u8],
+    task_id: u64,
+    explicit_state_dir: Option<&Path>,
+    envelope_has_digest_fields: bool,
+    allow_unanchored_legacy: bool,
+) -> anyhow::Result<bool> {
+    // Ritüel düzeni varsayımı: dogfood/runs/<id> ↔ dogfood/state.
+    let probed = run_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("state"));
+    let state_dir: Option<PathBuf> = match explicit_state_dir {
+        Some(p) => Some(p.to_path_buf()),
+        None => probed.filter(|p| p.is_dir()),
+    };
+    let attempts_dir = state_dir.as_ref().map(|s| s.join("attempts"));
+
+    let candidates: Vec<PathBuf> = match attempts_dir.as_ref().filter(|d| d.is_dir()) {
+        Some(dir) => {
+            let prefix = format!("task-{task_id}-");
+            std::fs::read_dir(dir)
+                .map_err(|e| {
+                    anyhow::anyhow!("cannot read canonical attempt store {}: {e}", dir.display())
+                })?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().map(|x| x == "json").unwrap_or(false)
+                        && p.file_name()
+                            .map(|n| n.to_string_lossy().starts_with(&prefix))
+                            .unwrap_or(false)
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    if attempts_dir.as_ref().filter(|d| d.is_dir()).is_some() && !candidates.is_empty() {
+        // #178 tur-4 P0: karşılaştırma PARSE EDİLEN tamponla yapılır (path yeniden
+        // okunmaz) — canonical fence'in doğruladığı baytlar karar mantığının
+        // tükettiği baytlardır.
+        let matched = candidates.iter().any(|p| {
+            std::fs::read(p)
+                .map(|b| b == attempt_bytes)
+                .unwrap_or(false)
+        });
+        anyhow::ensure!(
+            matched,
+            "canonical attempt fence: attempt.json does not byte-match any canonical \
+             artifact for task {task_id} in {} — the run-dir copy was modified after \
+             the canonical publish; digest claims are evidence only when the envelope \
+             carrying them is the machine-published one",
+            attempts_dir.expect("checked above").display()
+        );
+        return Ok(false);
+    }
+
+    // Anchor YOK (mağaza erişilemez ya da bu task için kayıt yok).
+    if envelope_has_digest_fields {
+        anyhow::bail!(
+            "canonical attempt fence: the envelope carries digest fields (new producer \
+             shape) but no canonical attempt artifact for task {task_id} is reachable{} \
+             — the anchor is REQUIRED for new-shape envelopes (restore --state-dir or \
+             re-run the attempt); --allow-unanchored-legacy covers only legacy-shaped \
+             pre-#178 artifacts",
+            attempts_dir
+                .as_ref()
+                .map(|d| format!(" (searched {})", d.display()))
+                .unwrap_or_default()
+        );
+    }
+    if !allow_unanchored_legacy {
+        anyhow::bail!(
+            "canonical attempt fence: no canonical attempt artifact for task {task_id} \
+             is reachable{} and the envelope is legacy-shaped (no digest fields) — a \
+             relocated run-dir with stripped digest fields is indistinguishable from a \
+             genuine pre-#178 artifact without external information; pass \
+             --allow-unanchored-legacy for an EXPLICIT trust downgrade if (and only if) \
+             this is a historical artifact",
+            attempts_dir
+                .as_ref()
+                .map(|d| format!(" (searched {})", d.display()))
+                .unwrap_or_default()
+        );
+    }
+    // Açık downgrade — ledger satırına işlenir (unanchored_legacy: true).
+    Ok(true)
 }
 
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
@@ -151,8 +289,26 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
 
     let (baseline_head, files_with_scip) = read_baseline(&baseline_path)?;
 
+    // #178 tur-4 P0 (read-once, tüketici tarafı): her artifact TEK okuma —
+    // parse eden, doğrulayan ve ledger'a yazan baytlar AYNI tampondan gelir;
+    // path asla ikinci kez okunmaz (parse/fence/ledger ayrı okumaları, producer
+    // tarafında kapatılan TOCTOU'nun simetriğiydi).
+    let task_bytes = read_artifact_bytes(&task_path)?;
+    let proposals_in_run_dir = args.run_dir.join("proposals.json");
+    let proposals_bytes = if proposals_in_run_dir.is_file() {
+        Some(read_artifact_bytes(&proposals_in_run_dir)?)
+    } else {
+        None
+    };
+    let patch_path = args.run_dir.join("applied.patch");
+    let patch_bytes = if patch_path.is_file() {
+        Some(read_artifact_bytes(&patch_path)?)
+    } else {
+        None
+    };
+
     // K2: task zarfı (v1/v2) — head + id çıkar; başkasının task'ı geçemez.
-    let (task_head, task_id) = read_task(&task_path)?;
+    let (task_head, task_id) = read_task_bytes(&task_bytes, &task_path)?;
     anyhow::ensure!(
         task_head == baseline_head,
         "head fence: task.json binds {task_head} but baseline.json measured {baseline_head} — \
@@ -160,7 +316,9 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     );
 
     // K2: attempt — yalnız #166 run envelope, SIKI şekil.
-    let attempt_raw = read_json(&attempt_path)?;
+    let attempt_bytes = read_artifact_bytes(&attempt_path)?;
+    let attempt_raw: serde_json::Value = serde_json::from_slice(&attempt_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", attempt_path.display()))?;
     anyhow::ensure!(
         attempt_raw.is_object(),
         "attempt.json must be the #166 run envelope (`--out` copy of the canonical \
@@ -250,9 +408,81 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         attempt.run.repository_head
     );
 
+    // #178 tur-2/tur-3 P0 — canonical trust anchor: digest fence'lerden ÖNCE, zarfın
+    // KENDİSİ makine kaydıyla doğrulanır (kopya-tamper + alan-silme + taşınmış-run
+    // bypass'ları). Dönen bool: açık legacy downgrade kullanıldı → ledger'a işlenir.
+    let unanchored_legacy = verify_attempt_against_canonical_store(
+        &args.run_dir,
+        &attempt_bytes,
+        attempt.run.task_id,
+        args.state_dir.as_deref(),
+        attempt.run.task_digest.is_some() || attempt.run.proposals_digest.is_some(),
+        args.allow_unanchored_legacy,
+    )?;
+
+    // #178 (tur-1 P0-2 tam kapanış + review P0-2 presence-aware): digest alanı
+    // bir VARLIK BEYANIDIR — "alan yok" (legacy zarf → fence atlanır) ≠ "null"
+    // (yeni producer: bu artifact TÜKETİLMEDİ → run-dir'de de OLMAMALI) ≠ değer
+    // (BU baytlar tüketildi → dosya ZORUNLU + hash eşit). Fail-open kapatıldı:
+    // Some(digest) + dosya silinmesi artık RED. Hash'ler read-once tamponlardan.
+    match attempt.run.task_digest {
+        None => { /* legacy zarf — alan yok, fence atlanır (backward-compat) */ }
+        Some(None) => {
+            // task_source=harness_task_file'ın kanonik producer'ı asla null
+            // task_digest üretmez (task HER ZAMAN okunur); legacy_hardcoded
+            // yukarıda reddedildi → tutarsız şekil.
+            anyhow::bail!(
+                "task digest fence: attempt.json carries task_source=harness_task_file \
+                 with null task_digest — not a canonical producer shape (the task file \
+                 is always read and hashed when a task file is consumed)"
+            );
+        }
+        Some(Some(claimed)) => {
+            let actual = sha256_bytes(&task_bytes);
+            anyhow::ensure!(
+                claimed == actual,
+                "task digest fence: attempt bound task.json as {claimed} but the run dir \
+                 now hashes {actual} — the task file changed after the attempt; \
+                 mismatched artifacts cannot share one ledger row"
+            );
+        }
+    }
+    match attempt.run.proposals_digest {
+        None => { /* legacy zarf — fence atlanır (backward-compat) */ }
+        Some(None) => {
+            // #171 --llm real dürüst-boşluğu: attempt proposals TÜKETMEDİ beyanı →
+            // run-dir'de proposals.json VARSA attempt'in tüketmediği artifact
+            // provenance'a sızıyor.
+            anyhow::ensure!(
+                proposals_bytes.is_none(),
+                "proposals digest fence: attempt declares NO proposals consumed \
+                 (proposals_digest null) but the run dir carries proposals.json — \
+                 an artifact the attempt never consumed cannot enter this ledger row"
+            );
+        }
+        Some(Some(claimed)) => {
+            // Beyan: BU baytlar tüketildi → dosya ZORUNLU (silinmek fail-closed) ve
+            // hash eşit. task.json'dan farklı olarak proposals opsiyonel artifact'tır;
+            // varlık kanıtı zarfın kendisidir.
+            let proposals_bytes = proposals_bytes.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "proposals digest fence: attempt consumed proposals (bound {claimed}) \
+                     but the run dir no longer carries proposals.json — deleting it after \
+                     the attempt cannot un-consume the bytes the decision was made on"
+                )
+            })?;
+            let actual = sha256_bytes(proposals_bytes);
+            anyhow::ensure!(
+                claimed == actual,
+                "proposals digest fence: attempt bound proposals.json as {claimed} but \
+                 the run dir now hashes {actual} — the proposals file changed after \
+                 the attempt; mismatched artifacts cannot share one ledger row"
+            );
+        }
+    }
+
     // Opsiyonel artifact'lar — varlıklarına göre alanlar dolar (yoksa null, dürüst boşluk).
-    let proposals_path = args.run_dir.join("proposals.json");
-    let patch_path = args.run_dir.join("applied.patch");
+    let proposals_path = proposals_in_run_dir;
     let after_path = args.run_dir.join("after.json");
     let neighborhood_path = args.run_dir.join("neighborhood.json");
 
@@ -261,8 +491,10 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     // taşıyor; `{"schema_version":2,"repository_head":…}` gibi presence-only
     // sahte zarflar (proposals alanı eksik / unknown alan) serde'de düşer.
     // v1 çıplak array state'e bağlanamaz (repository_head fence'i v2'ye özgü).
-    if proposals_path.is_file() {
-        let proposals_raw = read_json(&proposals_path)?;
+    // #178 tur-4: parse read-once tampondan (path yeniden okunmaz).
+    if let Some(props_bytes) = proposals_bytes.as_ref() {
+        let proposals_raw: serde_json::Value = serde_json::from_slice(props_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", proposals_path.display()))?;
         anyhow::ensure!(
             proposals_raw.is_object(),
             "proposals.json is a bare JSON array (v1, node-id keyed) — it cannot be \
@@ -287,17 +519,12 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         );
     }
 
-    let task_digest = sha256_file(&task_path)?;
-    let proposal_digest = if proposals_path.is_file() {
-        Some(sha256_file(&proposals_path)?)
-    } else {
-        None
-    };
-    let patch_digest = if patch_path.is_file() {
-        Some(sha256_file(&patch_path)?)
-    } else {
-        None
-    };
+    // #178 tur-4 P0: ledger digest'leri FENCE'İN doğruladığı read-once
+    // tamponlardan — fence ile ledger arasında dosya değişse bile satır attempt'in
+    // tüketilen artifact'ına bağlı kalır (fence-değerlerin reuse'u).
+    let task_digest = sha256_bytes(&task_bytes);
+    let proposal_digest = proposals_bytes.as_ref().map(|bytes| sha256_bytes(bytes));
+    let patch_digest = patch_bytes.as_ref().map(|bytes| sha256_bytes(bytes));
     // P1-1: after yalnızca şekil-validasyonuyla taşınır (after_ref) — head'inden
     // "verified" türetmesi YOK.
     if after_path.is_file() {
@@ -361,6 +588,11 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     });
     if neighborhood_path.is_file() {
         row["neighborhood_ref"] = serde_json::json!(make_ref(&args.run_dir, "neighborhood.json"));
+    }
+    // #178 tur-3/P2: downgrade kaydı — anahtar YALNIZ açık downgrade kullanıldığında
+    // eklenir; anchor'lu satırlarda alan YOKTUR (missing ≠ false ≠ null-beyan).
+    if unanchored_legacy {
+        row["unanchored_legacy"] = serde_json::json!(true);
     }
 
     let json = serde_json::to_string_pretty(&row)?;
@@ -441,10 +673,18 @@ fn read_baseline(path: &Path) -> anyhow::Result<(String, u64)> {
     Ok((head, files_with_scip))
 }
 
+/// #178 tur-4 P0: artifact baytlarını TEK okuma — bu tampon üzerinden parse,
+/// fence ve ledger digest'i üretilir; path bir daha okunmaz.
+fn read_artifact_bytes(path: &Path) -> anyhow::Result<Vec<u8>> {
+    std::fs::read(path).map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))
+}
+
 /// Task zarfı → (repository_head, task.id). v1 ve v2 zarfının ikisinde de
 /// `repository_head` üst-düzey, `task.id` gövdede taşınır (P0-2).
-fn read_task(path: &Path) -> anyhow::Result<(String, u64)> {
-    let value = read_json(path)?;
+/// #178 tur-4: read-once tampondan parse (path variantı kalktı).
+fn read_task_bytes(bytes: &[u8], path: &Path) -> anyhow::Result<(String, u64)> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", path.display()))?;
     let version = value.get("schema_version").and_then(|v| v.as_u64());
     anyhow::ensure!(
         version == Some(1) || version == Some(2),
@@ -484,14 +724,23 @@ fn shape_name(value: &serde_json::Value) -> &'static str {
     }
 }
 
-/// K3: sha256 over ham dosya baytları — `sha256:<64 hex>` (tam uzunluk; mevcut
+/// K3: sha256 over ham baytlar — `sha256:<64 hex>` (tam uzunluk; mevcut
 /// 16-hex ledger değerleri el-dönemi annotasyondur, missing≡null uyumu bozulmaz).
+/// #178 P0-1: bayt-temelli çekirdek — attempt tarafı TEK okumadan aldığı tamponu
+/// digest'ler (parse ile AYNI baytlar; producer-side TOCTOU kapalı).
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+/// K3: dosya-yolu varyantı — #178 tur-4 read-once sonrası kullanılmıyor
+/// (finalize tamponlardan hash'ler); bilinen-vektör pini sha256_bytes'a taşındı.
+#[cfg(test)]
 fn sha256_file(path: &Path) -> anyhow::Result<String> {
     let bytes = std::fs::read(path)
         .map_err(|e| anyhow::anyhow!("failed to read {} for digest: {e}", path.display()))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    Ok(format!("sha256:{}", hex::encode(hasher.finalize())))
+    Ok(sha256_bytes(&bytes))
 }
 
 /// Ledger ref'i: run-dir KULLANILDIĞI GİBİ (ritüelde OSP kökünden göreli) +
@@ -586,7 +835,10 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert_eq!(read_task(&ok).unwrap(), ("a".repeat(40), 16));
+        assert_eq!(
+            read_task_bytes(&std::fs::read(&ok).unwrap(), &ok).unwrap(),
+            ("a".repeat(40), 16)
+        );
 
         let no_id = dir.path().join("t_no_id.json");
         std::fs::write(
@@ -599,7 +851,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert!(read_task(&no_id).is_err());
+        assert!(read_task_bytes(&std::fs::read(&no_id).unwrap(), &no_id).is_err());
     }
 
     /// P0-3: --out alias fence — tüketilen artifact üstüne yazım reddi.

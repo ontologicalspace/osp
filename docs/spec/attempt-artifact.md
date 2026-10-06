@@ -54,7 +54,9 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
     "execution_mode": "harness",           // production | harness
     "witness_mode": "harness_auto_approve", // production | harness_auto_approve
     "task_source": "harness_task_file",    // harness_task_file | legacy_hardcoded
-    "repository_head": "<40-hex SHA>"
+    "repository_head": "<40-hex SHA>",
+    "task_digest": "sha256:<64-hex>",      // #178: --task baytları (read-once tampon)
+    "proposals_digest": "sha256:<64-hex> | null" // #178: --proposals baytları; null = tüketilmedi (#171)
   },
   "execution_measurement": {
     "subject_authority": "task_scope",               // #95-A MD-1
@@ -70,6 +72,37 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
 requires_revision | requires_operator_approval | awaiting_cold_start_approval |
 task_not_found | witness_evaluation_error |
 pending_authorization_persistence_failure | system_failure | llm_error`.
+
+### #178 — tüketilen-girdi digest'leri ve güven kökü
+
+`run.task_digest` / `run.proposals_digest`, attempt'in **karar verdiği exact girdi
+baytlarının** `sha256:<64-hex>` özetleridir: dosya TEK okumayla alınır, digest ve
+parse AYNI tampondan üretilir (`load_and_validate_harness_task_str` /
+`load_proposals_str`); navigator sırasında diskteki dosya değişse bile zarfın
+beyanı tükettiği tampona bağlı kalır. `--llm real` proposals dosyası tüketmez →
+`proposals_digest: null` (#171 dürüst boşluğu).
+
+**Güven kökü hiyerarşisi (#178 tur-2/tur-3):** digest'ler yalnızca onları taşıyan
+zarf güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned, overwrite
+edilebilir bir **kopyadır**. `osp finalize-run` bu yüzden (a) digest
+fence'lerinden ÖNCE kopyayı no-clobber canonical mağazayla (`--state-dir`;
+default probe `<run_dir>/../../state`) **bayt-özdeşliğe** göre doğrular:
+mağazada task için artifact VARSA eşleşmeyen kopya RED (tutarlı-tamper ve
+alan-silme bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil);
+(b) **anchor bulunamadığında (mağaza yok / taşınmış run-dir / task kaydı yok)
+otomatik legacy kabul YOKTUR** — digest alanlı (yeni-şekil) zarf her koşulda
+RED (anchor zorunlu; attempt yeniden koşulmalı ya da `--state-dir`
+geri getirilmeli); legacy-şekil (digest alansız) zarf da RED, yalnız
+`--allow-unanchored-legacy` **açık trust downgrade**'iyle geçer — bu bayrak
+yalnızca pre-#178 historical artifact'lar için anlamlıdır ("gerçekten eski
+artifact" ile "alanları silinmiş yeni artifact + taşınmış run-dir" dış bilgi
+olmadan ayırt edilemez; sessiz `trusted→untrusted` geçişi epistemik olarak
+kabul edilemez) ve kullanımı ledger satırına `unanchored_legacy: true` olarak
+yazılır (anahtar YALNIZ downgrade'de eklenir — anchor'lu satırlarda alan
+yoktur; missing ≠ false ≠ null-beyan). Presence semantiği: alan YOK =
+legacy-şekil ≠ `null` = "tüketilmedi"
+(run-dir'de proposals.json varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu +
+hash eşit; silinmek RED).
 
 ## Geriye uyumluluk notu
 
