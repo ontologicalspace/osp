@@ -20,12 +20,16 @@
 use osp_core::agent::{DeltaProposal, OspPrompt};
 
 mod adapter;
+mod artifacts;
 mod error;
 mod prompt;
 mod response;
 mod runtime;
 
-pub use adapter::RuntimeLlmClient;
+pub use adapter::{bar_elicitation_system_prompt, BarElicitationReport, RuntimeLlmClient};
+pub use artifacts::{
+    completion_identity_digest, parse_elicited_bar, ElicitedBar, InvE1Manifest, PredictedEffect,
+};
 pub use error::LlmError;
 pub use prompt::{osp_system_prompt, osp_user_prompt, raw_dump_user_prompt, raw_system_prompt};
 pub use response::{RawCompletion, TokenUsage};

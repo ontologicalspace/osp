@@ -19,6 +19,7 @@ mod errors;
 mod evidence_projection;
 mod graph_seed_builder;
 mod identity_bridge;
+mod llm_author;
 mod metric_projection;
 mod mock_llm;
 mod review_session;

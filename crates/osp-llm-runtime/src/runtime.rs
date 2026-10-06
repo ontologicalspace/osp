@@ -49,6 +49,50 @@ impl RuntimeConfig {
         self.api_key = key;
         Ok(self)
     }
+
+    /// #171 D3: key + model/endpoint env overrides in one pass.
+    ///
+    /// - `OPENAI_API_KEY` — required (empty ⇒ [`LlmError::MissingApiKey`]).
+    /// - `OSP_LLM_MODEL` — optional; empty/whitespace ⇒ default (`gpt-4o-mini`).
+    /// - `OSP_LLM_ENDPOINT` — optional; empty/whitespace ⇒ default (OpenAI).
+    ///
+    /// Gerekçe (tasarım notu D3): deney satırlarında `model` alanı dolu olmalı ve
+    /// Faz-2 model-karşılaştırması aynı protokolle veri biriktirir. v1 deneyi tek
+    /// modelle koşar; override KOŞULMAZ, yalnız yapılandırılabilir.
+    pub fn from_env() -> Result<Self, LlmError> {
+        Self::from_env_lookup(|name| std::env::var(name).ok())
+    }
+
+    /// Testable core — CI offline: env lookups injected, `std::env` never touched.
+    fn from_env_lookup(lookup: impl Fn(&str) -> Option<String>) -> Result<Self, LlmError> {
+        let mut config = Self::default().with_env_api_key_from(|| lookup("OPENAI_API_KEY"))?;
+        if let Some(model) = lookup("OSP_LLM_MODEL") {
+            let model = model.trim();
+            if !model.is_empty() {
+                config.model = model.to_string();
+            }
+        }
+        if let Some(endpoint) = lookup("OSP_LLM_ENDPOINT") {
+            let endpoint = endpoint.trim();
+            if !endpoint.is_empty() {
+                config.endpoint = endpoint.to_string();
+            }
+        }
+        Ok(config)
+    }
+
+    /// `with_env_api_key`'in testable çekirdeği (lookup enjekte edilir).
+    fn with_env_api_key_from(
+        mut self,
+        lookup: impl FnOnce() -> Option<String>,
+    ) -> Result<Self, LlmError> {
+        let key = lookup().ok_or(LlmError::MissingApiKey)?;
+        if key.trim().is_empty() {
+            return Err(LlmError::MissingApiKey);
+        }
+        self.api_key = key;
+        Ok(self)
+    }
 }
 
 /// One chat message in the request payload.
@@ -109,9 +153,10 @@ impl Runtime {
         Ok(Self { config, client })
     }
 
-    /// Convenience: default config + `OPENAI_API_KEY` from env.
+    /// Convenience: env-derived config (`OPENAI_API_KEY` + #171 D3
+    /// `OSP_LLM_MODEL`/`OSP_LLM_ENDPOINT` overrides).
     pub fn from_env() -> Result<Self, LlmError> {
-        Self::new(RuntimeConfig::default().with_env_api_key()?)
+        Self::new(RuntimeConfig::from_env()?)
     }
 
     pub fn config(&self) -> &RuntimeConfig {
@@ -212,6 +257,65 @@ mod tests {
         std::env::remove_var("OPENAI_API_KEY");
         assert!(matches!(
             RuntimeConfig::default().with_env_api_key(),
+            Err(LlmError::MissingApiKey)
+        ));
+    }
+
+    // ── #171 D3: OSP_LLM_MODEL / OSP_LLM_ENDPOINT override (CI offline — lookup inject) ──
+
+    fn envmap<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn config_from_env_applies_model_and_endpoint_overrides() {
+        let cfg = RuntimeConfig::from_env_lookup(envmap(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OSP_LLM_MODEL", "gpt-4.1-mini"),
+            (
+                "OSP_LLM_ENDPOINT",
+                "http://localhost:9999/v1/chat/completions",
+            ),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.model, "gpt-4.1-mini");
+        assert_eq!(cfg.endpoint, "http://localhost:9999/v1/chat/completions");
+        assert_eq!(cfg.api_key, "sk-test");
+    }
+
+    #[test]
+    fn config_from_env_defaults_when_overrides_absent() {
+        let cfg = RuntimeConfig::from_env_lookup(envmap(&[("OPENAI_API_KEY", "sk-test")])).unwrap();
+        assert_eq!(cfg.model, "gpt-4o-mini");
+        assert_eq!(cfg.endpoint, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn config_from_env_empty_override_falls_back_to_default() {
+        // Boş/whitespace override = unset (sessiz boş model kimliği tuzağı).
+        let cfg = RuntimeConfig::from_env_lookup(envmap(&[
+            ("OPENAI_API_KEY", "sk-test"),
+            ("OSP_LLM_MODEL", "   "),
+            ("OSP_LLM_ENDPOINT", ""),
+        ]))
+        .unwrap();
+        assert_eq!(cfg.model, "gpt-4o-mini");
+        assert_eq!(cfg.endpoint, "https://api.openai.com/v1/chat/completions");
+    }
+
+    #[test]
+    fn config_from_env_missing_key_errors() {
+        assert!(matches!(
+            RuntimeConfig::from_env_lookup(envmap(&[("OSP_LLM_MODEL", "x")])),
+            Err(LlmError::MissingApiKey)
+        ));
+        assert!(matches!(
+            RuntimeConfig::from_env_lookup(envmap(&[("OPENAI_API_KEY", "  ")])),
             Err(LlmError::MissingApiKey)
         ));
     }

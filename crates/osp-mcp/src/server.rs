@@ -637,6 +637,7 @@ impl OspMcpServer {
                     osp_core::authorization::FilesystemPendingAuthorizationStore::new("."),
                 ),
                 clock: Box::new(osp_core::authorization::SystemClock),
+                parse_failure_policy: osp_core::navigator::ParseFailurePolicy::FeedbackRetry,
             };
             let result = nav.run_task(task_id, 1);
             // Evidence'ı store'a kaydet (RQ6 verisi).

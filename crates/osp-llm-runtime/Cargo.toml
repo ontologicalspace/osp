@@ -16,12 +16,16 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 tracing = { workspace = true }
+# #171: donmuş prompt digest'i (llm-prompt.json / llm-bar.json pre-registration).
+sha2 = "0.10"
+hex = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 osp-analyzer = { path = "../osp-analyzer" }
+tempfile = "3"
 
 [[example]]
 name = "token_bench"
