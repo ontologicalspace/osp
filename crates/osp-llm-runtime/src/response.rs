@@ -83,7 +83,7 @@ pub(super) fn parse_raw(body: &str) -> Result<RawCompletion, LlmError> {
 }
 
 /// Remove a leading/trailing ``` or ```json fence if present.
-fn strip_code_fence(s: &str) -> String {
+pub(crate) fn strip_code_fence(s: &str) -> String {
     let s = s.trim();
     if let Some(rest) = s.strip_prefix("```") {
         // skip optional language tag on the opening fence line

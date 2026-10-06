@@ -2467,11 +2467,14 @@ name = "osp-llm-runtime"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "hex",
  "osp-analyzer",
  "osp-core",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
