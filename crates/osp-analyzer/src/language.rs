@@ -148,7 +148,11 @@ impl AdapterRegistry {
 
     /// Bir `LanguageId`'ye kayıtlı adapter var mı — katalog üzerinden (bir dilin
     /// birden çok uzantısı olabilir; ilk eşleşen uzantı yeterli, çünkü bir dilin
-    /// tüm uzantıları aynı adapter'a gider).
+    /// tüm uzantıları aynı adapter'a gider — bu exact-equality varsayımı
+    /// `catalog_extensions_match_builtin_adapters_exactly` testiyle korunur).
+    /// Keşif hattı bunu DEĞİL, dosya-bazlı `adapter_for_extension` kullanır
+    /// (review R1 P1: per-dil ANY-eşleşmesi uzantı-drift senaryolarında yanıltıcı
+    /// olabilir; dosyanın gerçek uzantısı üzerinden sorgulamak daha sağlamdır).
     pub fn adapter_for_language(&self, language: LanguageId) -> Option<&dyn LanguageAdapter> {
         let known = LanguageCatalog::known_all()
             .iter()
@@ -269,21 +273,21 @@ impl LanguageCatalog {
 }
 
 /// A path guaranteed to be repository-relative with `/` separators, regardless
-/// of platform. Constructed only via [`RepoRelativePath::from_absolute`], which
-/// mirrors the `strip_prefix(&repo)` + `\`→`/` normalization already used
-/// elsewhere in the pipeline (e.g. `pipeline.rs` `node_paths` construction) —
-/// centralized here as a type so a completeness reason can never carry a raw
-/// absolute machine path into a report or snapshot.
+/// of platform — the guarantee is enforced at construction (review R1 P1): a
+/// path outside `repo_root` is REJECTED by [`RepoRelativePath::from_absolute`],
+/// never stored as an absolute fallback, so a completeness reason can never
+/// carry a raw absolute machine path into a report or snapshot. Callers fail
+/// closed on `None`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RepoRelativePath(String);
 
 impl RepoRelativePath {
-    pub fn from_absolute(repo_root: &Path, absolute: &Path) -> Self {
-        let rel = absolute
-            .strip_prefix(repo_root)
-            .map(|r| r.to_string_lossy().replace('\\', "/"))
-            .unwrap_or_else(|_| absolute.to_string_lossy().replace('\\', "/"));
-        Self(rel)
+    /// `None` when `absolute` is not under `repo_root` — an out-of-scope path
+    /// is an invariant violation for a completeness reason, not a fallback to
+    /// the absolute machine path.
+    pub fn from_absolute(repo_root: &Path, absolute: &Path) -> Option<Self> {
+        let rel = absolute.strip_prefix(repo_root).ok()?;
+        Some(Self(rel.to_string_lossy().replace('\\', "/")))
     }
 
     pub fn as_str(&self) -> &str {
@@ -425,10 +429,12 @@ mod tests {
     }
 
     #[test]
-    fn catalog_known_all_has_six_languages_with_matching_adapter_extensions() {
-        // Cross-check against each adapter's actual extensions() output (verified
-        // 2026-07-29; CSharp at the 2026-10-06 refresh) so the catalog can never
-        // silently drift from the adapters.
+    fn catalog_known_all_has_six_languages() {
+        // Literal self-check of the catalog table. The adapter cross-check it
+        // used to imply by name lives in
+        // `catalog_extensions_match_builtin_adapters_exactly` (review R1 P1:
+        // a test named "matching_adapter_extensions" must actually call the
+        // adapters, not restate the literals).
         let known = LanguageCatalog::known_all();
         assert_eq!(known.len(), 6);
         let py = known.iter().find(|k| k.id == LanguageId::Python).unwrap();
@@ -451,25 +457,70 @@ mod tests {
         assert_eq!(cs.extensions, &[".cs"]);
     }
 
+    #[test]
+    fn catalog_extensions_match_builtin_adapters_exactly() {
+        // Review R1 P1: REAL cross-check — instantiate the built-in adapters
+        // and compare their actual `extensions()` output with the catalog, per
+        // language, exact slice equality. If an adapter gains/loses an
+        // extension (e.g. ".csx") without the catalog following — or the
+        // catalog claims one no adapter serves — this goes red. The
+        // exact-equality assumption behind bit-identical discovery is thereby
+        // test-enforced, not comment-enforced.
+        use crate::adapters::csharp::CSharpAdapter;
+        use crate::adapters::go::GoAdapter;
+        use crate::adapters::javascript::JavaScriptAdapter;
+        use crate::adapters::python::PythonAdapter;
+        use crate::adapters::rust::RustAdapter;
+        use crate::adapters::typescript::TypeScriptAdapter;
+
+        let builtin: &[(LanguageId, &[&'static str])] = &[
+            (LanguageId::Python, PythonAdapter.extensions()),
+            (LanguageId::TypeScript, TypeScriptAdapter.extensions()),
+            (LanguageId::JavaScript, JavaScriptAdapter.extensions()),
+            (LanguageId::Rust, RustAdapter.extensions()),
+            (LanguageId::Go, GoAdapter.extensions()),
+            (LanguageId::CSharp, CSharpAdapter.extensions()),
+        ];
+        assert_eq!(
+            builtin.len(),
+            LanguageCatalog::known_all().len(),
+            "every catalog language must have a built-in adapter cross-check row"
+        );
+        for (id, adapter_exts) in builtin {
+            let known = LanguageCatalog::known_all()
+                .iter()
+                .find(|k| k.id == *id)
+                .unwrap_or_else(|| panic!("no catalog entry for {id:?}"));
+            assert_eq!(
+                known.extensions, *adapter_exts,
+                "catalog/adapter extension drift for {}",
+                known.display_name
+            );
+        }
+    }
+
     // ── RepoRelativePath ─────────────────────────────────────────────────────
 
     #[test]
     fn repo_relative_path_strips_prefix_and_normalizes_separators() {
         let repo = Path::new("/repo");
         let abs = Path::new("/repo/src/models/user.py");
-        let rel = RepoRelativePath::from_absolute(repo, abs);
+        let rel = RepoRelativePath::from_absolute(repo, abs).expect("path is under repo root");
         assert_eq!(rel.as_str(), "src/models/user.py");
     }
 
     #[test]
-    fn repo_relative_path_falls_back_to_full_path_if_not_under_root() {
-        // Defensive: strip_prefix fails if abs isn't under repo_root. Falls back
-        // to the (normalized) full path rather than panicking — mirrors the
-        // existing unwrap_or_else pattern in pipeline.rs node_paths construction.
+    fn repo_relative_path_rejects_path_outside_root() {
+        // Review R1 P1: the "guaranteed repository-relative" claim must be real.
+        // A path outside repo_root is rejected — never stored as an absolute
+        // machine-path fallback that could leak into reports/snapshots.
         let repo = Path::new("/repo");
-        let abs = Path::new("/elsewhere/main.py");
-        let rel = RepoRelativePath::from_absolute(repo, abs);
-        assert_eq!(rel.as_str(), "/elsewhere/main.py");
+        let outside = Path::new("/elsewhere/main.py");
+        assert!(RepoRelativePath::from_absolute(repo, outside).is_none());
+        // Under-root paths still normalize separators to `/`.
+        let inside = RepoRelativePath::from_absolute(repo, Path::new("/repo/src/a.py"))
+            .expect("under-root path must construct");
+        assert_eq!(inside.as_str(), "src/a.py");
     }
 
     // ── AdapterRegistry::adapter_for_language ───────────────────────────────
@@ -493,7 +544,8 @@ mod tests {
     fn completeness_nonempty_reasons_is_partial() {
         let reasons = vec![IncompleteReason::AdapterUnavailable {
             language: LanguageId::Python,
-            path: RepoRelativePath::from_absolute(Path::new("/repo"), Path::new("/repo/a.py")),
+            path: RepoRelativePath::from_absolute(Path::new("/repo"), Path::new("/repo/a.py"))
+                .expect("path is under repo root"),
         }];
         let c = AnalysisCompleteness::from_reasons(reasons.clone());
         assert_eq!(c, AnalysisCompleteness::Partial { reasons });

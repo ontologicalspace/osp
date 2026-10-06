@@ -594,24 +594,58 @@ fn role_refinement_degrees(
     (in_degree, out_degree)
 }
 
-/// Discover source files, split into two phases so a catalog-known file that
-/// lacks a registered adapter is *observed* (`IncompleteReason::AdapterUnavailable`)
-/// rather than silently dropped like a non-source file. Phase 1 (catalog
-/// membership) and phase 2 (registry availability) are independent: a `.rb` or
-/// `.md` file that matches no `KnownLanguage` never reaches phase 2 and is never
-/// recorded as incomplete — it is simply out of scope. Bit-identical for the
-/// current `default_all()` full registry: every `KnownLanguage` extension set is
-/// an exact match to its adapter's `extensions()` (verified 2026-07-29), so the
-/// `files` list this produces is identical to the pre-PR-B single-phase check.
+/// Discover source files in three stages so catalog membership, analysis
+/// scope, and registry availability each see the SAME file set (review R1
+/// P1 — scope asymmetry): (1) collect catalog-known candidates; (2) apply the
+/// analysis-scope filter (`filter_gitignored`, #157 HEAD-semantics) to those
+/// candidates; (3) partition by registry availability, checked per file
+/// through the file's ACTUAL extension (`adapter_for_extension`). An ignored
+/// `generated.py` under a partial registry is therefore NOT recorded as
+/// `AdapterUnavailable` — it is out of analysis scope, exactly as it would be
+/// silently dropped under a full registry; both arms of the partition pass
+/// through the same scope function. A `.rb` or `.md` file that matches no
+/// `KnownLanguage` never reaches stage 3 and is never recorded as incomplete —
+/// it is simply out of catalog scope. Bit-identical for the current
+/// `default_all()` full registry: every `KnownLanguage` extension set is an
+/// exact match to its adapter's `extensions()` (enforced by
+/// `catalog_extensions_match_builtin_adapters_exactly`), so the `files` list
+/// is identical to the pre-PR-B single-phase check.
 fn collect_source_files(
     repo: &Path,
     registry: &AdapterRegistry,
 ) -> anyhow::Result<(Vec<PathBuf>, Vec<crate::language::IncompleteReason>)> {
+    use crate::language::{IncompleteReason, LanguageCatalog, RepoRelativePath};
+
+    let mut candidates = Vec::new();
+    walk_dir(repo, &mut candidates)?;
+    candidates.sort();
+    filter_gitignored(repo, &mut candidates);
+
     let mut files = Vec::new();
     let mut incomplete = Vec::new();
-    walk_dir(repo, repo, &mut files, &mut incomplete, registry)?;
-    files.sort();
-    filter_gitignored(repo, &mut files);
+    for path in candidates {
+        let language = LanguageCatalog::language_for_path(&path)
+            .expect("candidate is catalog-known by construction (walk_dir)");
+        let dotted = format!(
+            ".{}",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        );
+        match registry.adapter_for_extension(&dotted) {
+            Some(_) => files.push(path),
+            None => {
+                let rel = RepoRelativePath::from_absolute(repo, &path).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "catalog-known candidate outside repo root: {}",
+                        path.display()
+                    )
+                })?;
+                incomplete.push(IncompleteReason::AdapterUnavailable {
+                    language,
+                    path: rel,
+                });
+            }
+        }
+    }
     Ok((files, incomplete))
 }
 
@@ -871,14 +905,13 @@ fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
     scopes
 }
 
-fn walk_dir(
-    repo_root: &Path,
-    dir: &Path,
-    files: &mut Vec<PathBuf>,
-    incomplete: &mut Vec<crate::language::IncompleteReason>,
-    registry: &AdapterRegistry,
-) -> anyhow::Result<()> {
-    use crate::language::{IncompleteReason, LanguageCatalog, RepoRelativePath};
+/// Stage 1 — walk collecting catalog-known candidate source files (membership
+/// only). A non-source extension (`.md/.json/.png/...`) or one OSP's catalog
+/// simply doesn't know is out of scope — no record, exactly like before PR B.
+/// Scope filtering and registry availability are applied by the caller, so the
+/// candidate pool feeds the SAME scope function the analyzed files go through.
+fn walk_dir(dir: &Path, candidates: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+    use crate::language::LanguageCatalog;
 
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
@@ -909,25 +942,9 @@ fn walk_dir(
             {
                 continue;
             }
-            walk_dir(repo_root, &path, files, incomplete, registry)?;
-        } else if path.is_file() {
-            // Phase 1: is this a catalog-known source file at all? A non-source
-            // extension (.md/.json/.png/...) or one OSP's catalog simply doesn't
-            // know is out of scope — no record, exactly like before PR B.
-            if let Some(language) = LanguageCatalog::language_for_path(&path) {
-                // Phase 2: does THIS registry have an adapter for it? A catalog-known
-                // language can still be missing here — the registry passed to
-                // `analyze_repo_with`/`analyze_repo_with_config` is public and may be
-                // partial (e.g. `AdapterRegistry::new().with(RustAdapter)`), independent
-                // of any Cargo feature system.
-                match registry.adapter_for_language(language) {
-                    Some(_) => files.push(path),
-                    None => incomplete.push(IncompleteReason::AdapterUnavailable {
-                        language,
-                        path: RepoRelativePath::from_absolute(repo_root, &path),
-                    }),
-                }
-            }
+            walk_dir(&path, candidates)?;
+        } else if path.is_file() && LanguageCatalog::language_for_path(&path).is_some() {
+            candidates.push(path);
         }
     }
     Ok(())
@@ -1984,6 +2001,45 @@ mod gitignore_discovery_tests {
             names,
             vec!["main.rs".to_string()],
             "ignored content must be excluded"
+        );
+    }
+
+    /// Review R1 P1 (PR #109): kapsam asimetrisi — ignore'lu catalog-known
+    /// dosya + kısmi registry → completeness ETKİLENMEMELİ. Eski akış
+    /// `incomplete`'i walk sırasında doldurup yalnız `files`'ı scope-filtreden
+    /// geçiriyordu: ignore'lu `generated.py`, registry'de Python adapter'ı
+    /// yokken AdapterUnavailable üretirken, dolu registry'de sessizce düşerdi —
+    /// aynı dosya, adapter varlığına göre farklı epistemik sonuca dönüşüyordu.
+    /// Yeni akış: catalog-known adaylar → kapsam filtresi → registry partition;
+    /// partition'un her iki kolu da AYNI kapsam fonksiyonundan geçer.
+    #[test]
+    fn gitignored_catalog_known_file_partial_registry_completeness_unaffected() {
+        use crate::adapters::rust::RustAdapter;
+        use crate::language::AdapterRegistry;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "generated.py\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+        git_cmd(repo, &["add", "-A"]);
+        git_cmd(repo, &["commit", "-qm", "init"]);
+        // Ignore'lu içerik SONRADAN düşer (HEAD'te yok) — kapsam filtresi onu
+        // aday havuzundan çıkarır; kısmi registry (yalnızca Rust) Python
+        // adapter'ı taşımaz ama bu, out-of-scope dosya için reason ÜRETMEMELİ.
+        std::fs::write(repo.join("generated.py"), "x = 1\n").unwrap();
+
+        let rust_only = AdapterRegistry::new().with(RustAdapter);
+        let result = analyze_repo_with(repo, &rust_only).expect("analyze succeeded");
+        assert_eq!(
+            result.space.node_count(),
+            1,
+            "only the in-scope main.rs is analyzed"
+        );
+        assert!(
+            result.completeness.is_complete(),
+            "ignored catalog-known file must not produce AdapterUnavailable under a partial registry, got {:?}",
+            result.completeness
         );
     }
 
