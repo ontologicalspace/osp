@@ -3,7 +3,7 @@
 # Floating stable (dtolnay/rust-toolchain@stable), dependency/compiler drift'inde
 # snapshot'ları sessizce kırar. Bu pin trybuild snapshot compiler'ını sabitler.
 #
-# rust-version (workspace Cargo.toml MSRV=1.75) desteklenen minimum sürümdür — ayrı kavram.
+# rust-version (workspace Cargo.toml MSRV=1.88, #110) desteklenen minimum sürümdür — ayrı kavram.
 # Bu pin günlük geliştirme + trybuild snapshot compiler'ıdır; MSRV iddiasından bağımsızdır.
 #
 # Toolchain bump artık bilinçli bir bakım commit'idir:

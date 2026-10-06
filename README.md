@@ -24,7 +24,7 @@
 
 ### Prerequisites
 
-- **Rust** 1.75+ ([rustup.rs](https://rustup.rs))
+- **Rust** 1.88+ ([rustup.rs](https://rustup.rs))
 - **Git** 2.40+
 - **Docker** (optional — for Python/Rust/Go SCIP indices via `scip-python`/`scip-rust`/`scip-go`)
 - **Node.js** 16+ (optional — for TypeScript/JavaScript SCIP indices via `scip-typescript`)
