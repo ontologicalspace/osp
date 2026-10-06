@@ -146,22 +146,11 @@ impl AdapterRegistry {
             .map(|a| a.as_ref())
     }
 
-    /// Bir `LanguageId`'ye kayıtlı adapter var mı — katalog üzerinden (bir dilin
-    /// birden çok uzantısı olabilir; ilk eşleşen uzantı yeterli, çünkü bir dilin
-    /// tüm uzantıları aynı adapter'a gider — bu exact-equality varsayımı
-    /// `catalog_extensions_match_builtin_adapters_exactly` testiyle korunur).
-    /// Keşif hattı bunu DEĞİL, dosya-bazlı `adapter_for_extension` kullanır
-    /// (review R1 P1: per-dil ANY-eşleşmesi uzantı-drift senaryolarında yanıltıcı
-    /// olabilir; dosyanın gerçek uzantısı üzerinden sorgulamak daha sağlamdır).
-    pub fn adapter_for_language(&self, language: LanguageId) -> Option<&dyn LanguageAdapter> {
-        let known = LanguageCatalog::known_all()
-            .iter()
-            .find(|k| k.id == language)?;
-        known
-            .extensions
-            .iter()
-            .find_map(|ext| self.adapter_for_extension(ext))
-    }
+    // `adapter_for_language` (review R2 P2'de kaldırıldı): per-dil ANY-uzantı
+    // eşleşmesi custom adapter'larda exact-equality invariant'ı olmadığı için
+    // yanıltıcıydı; keşif hattı dosya-bazlı `adapter_for_extension` kullanır.
+    // İleride gerçek language-level capability gerekirse semantiği açık bir
+    // API (ör. `supports_language_fully`) tasarlanır.
 }
 
 impl Default for AdapterRegistry {
@@ -521,14 +510,6 @@ mod tests {
         let inside = RepoRelativePath::from_absolute(repo, Path::new("/repo/src/a.py"))
             .expect("under-root path must construct");
         assert_eq!(inside.as_str(), "src/a.py");
-    }
-
-    // ── AdapterRegistry::adapter_for_language ───────────────────────────────
-
-    #[test]
-    fn adapter_for_language_none_on_empty_registry() {
-        let reg = AdapterRegistry::new();
-        assert!(reg.adapter_for_language(LanguageId::Python).is_none());
     }
 
     // ── AnalysisCompleteness ─────────────────────────────────────────────────

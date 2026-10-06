@@ -594,22 +594,32 @@ fn role_refinement_degrees(
     (in_degree, out_degree)
 }
 
-/// Discover source files in three stages so catalog membership, analysis
-/// scope, and registry availability each see the SAME file set (review R1
-/// P1 — scope asymmetry): (1) collect catalog-known candidates; (2) apply the
-/// analysis-scope filter (`filter_gitignored`, #157 HEAD-semantics) to those
-/// candidates; (3) partition by registry availability, checked per file
-/// through the file's ACTUAL extension (`adapter_for_extension`). An ignored
-/// `generated.py` under a partial registry is therefore NOT recorded as
-/// `AdapterUnavailable` — it is out of analysis scope, exactly as it would be
-/// silently dropped under a full registry; both arms of the partition pass
-/// through the same scope function. A `.rb` or `.md` file that matches no
-/// `KnownLanguage` never reaches stage 3 and is never recorded as incomplete —
-/// it is simply out of catalog scope. Bit-identical for the current
-/// `default_all()` full registry: every `KnownLanguage` extension set is an
-/// exact match to its adapter's `extensions()` (enforced by
-/// `catalog_extensions_match_builtin_adapters_exactly`), so the `files` list
-/// is identical to the pre-PR-B single-phase check.
+/// Discover source files in three stages so candidate membership, analysis
+/// scope, and registry availability each see the SAME file set (review R1 P1
+/// — scope asymmetry; R2 P1 — custom-adapter compatibility): (1) collect
+/// candidates recognized by the static catalog **OR by THIS registry** — the
+/// union keeps the pre-PR-B public extensibility contract
+/// (`LanguageAdapter` + `AdapterRegistry::new().with(..)` +
+/// `analyze_repo_with` are public, so a custom `MyRubyAdapter` analyzing
+/// `.rb` must keep working even though Ruby is not a `KnownLanguage`);
+/// (2) apply the analysis-scope filter (`filter_gitignored`, #157
+/// HEAD-semantics) to those candidates; (3) partition by registry
+/// availability, checked per file through the file's ACTUAL extension
+/// (`adapter_for_extension`): registry-known → analyzed; catalog-known but
+/// registry-missing → observable `AdapterUnavailable`; neither (custom
+/// extension whose adapter was removed between stages) → unreachable by
+/// construction. An ignored `generated.py` under a partial registry is
+/// therefore NOT recorded as `AdapterUnavailable` — it is out of analysis
+/// scope, exactly as it would be silently dropped under a full registry; both
+/// arms of the partition pass through the same scope function. A `.md` file
+/// that matches no `KnownLanguage` and no registered adapter never reaches
+/// stage 3 and is never recorded as incomplete — it is simply out of scope.
+/// Bit-identical for the current `default_all()` full registry: every
+/// `KnownLanguage` extension set is an exact match to its adapter's
+/// `extensions()` (enforced by
+/// `catalog_extensions_match_builtin_adapters_exactly`), so the union adds
+/// nothing and the `files` list is identical to the pre-PR-B single-phase
+/// check.
 fn collect_source_files(
     repo: &Path,
     registry: &AdapterRegistry,
@@ -617,34 +627,37 @@ fn collect_source_files(
     use crate::language::{IncompleteReason, LanguageCatalog, RepoRelativePath};
 
     let mut candidates = Vec::new();
-    walk_dir(repo, &mut candidates)?;
+    walk_dir(repo, &mut candidates, registry)?;
     candidates.sort();
     filter_gitignored(repo, &mut candidates);
 
     let mut files = Vec::new();
     let mut incomplete = Vec::new();
     for path in candidates {
-        let language = LanguageCatalog::language_for_path(&path)
-            .expect("candidate is catalog-known by construction (walk_dir)");
         let dotted = format!(
             ".{}",
             path.extension().and_then(|e| e.to_str()).unwrap_or("")
         );
-        match registry.adapter_for_extension(&dotted) {
-            Some(_) => files.push(path),
-            None => {
-                let rel = RepoRelativePath::from_absolute(repo, &path).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "catalog-known candidate outside repo root: {}",
-                        path.display()
-                    )
-                })?;
-                incomplete.push(IncompleteReason::AdapterUnavailable {
-                    language,
-                    path: rel,
-                });
-            }
+        if registry.adapter_for_extension(&dotted).is_some() {
+            files.push(path);
+            continue;
         }
+        // Registry can't analyze it. If the static catalog knows the language,
+        // that gap is observable; a registry-known custom extension never
+        // reaches this branch (it went to `files` above).
+        let language = LanguageCatalog::language_for_path(&path).unwrap_or_else(|| {
+            unreachable!("candidate is catalog- or registry-known by construction")
+        });
+        let rel = RepoRelativePath::from_absolute(repo, &path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "catalog-known candidate outside repo root: {}",
+                path.display()
+            )
+        })?;
+        incomplete.push(IncompleteReason::AdapterUnavailable {
+            language,
+            path: rel,
+        });
     }
     Ok((files, incomplete))
 }
@@ -905,14 +918,35 @@ fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
     scopes
 }
 
-/// Stage 1 — walk collecting catalog-known candidate source files (membership
-/// only). A non-source extension (`.md/.json/.png/...`) or one OSP's catalog
-/// simply doesn't know is out of scope — no record, exactly like before PR B.
-/// Scope filtering and registry availability are applied by the caller, so the
-/// candidate pool feeds the SAME scope function the analyzed files go through.
-fn walk_dir(dir: &Path, candidates: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+/// Stage-1 membership (review R2 P1): a file is a candidate when the static
+/// catalog recognizes its extension **OR this registry does** — neither the
+/// catalog nor the registry limits the other's existence set. The catalog
+/// provides epistemic observability; the registry provides execution
+/// capability; the union preserves the pre-PR-B public custom-adapter
+/// contract (`.rb` via `MyRubyAdapter` keeps being analyzed even though Ruby
+/// is not a `KnownLanguage`).
+fn is_discovery_candidate(path: &Path, registry: &AdapterRegistry) -> bool {
     use crate::language::LanguageCatalog;
 
+    if LanguageCatalog::language_for_path(path).is_some() {
+        return true;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let dotted = format!(".{ext}");
+    registry.adapter_for_extension(&dotted).is_some()
+}
+
+/// Stage 1 — walk collecting candidate source files (membership only, per
+/// `is_discovery_candidate`). A non-source extension (`.md/.json/.png/...`)
+/// that no `KnownLanguage` maps AND no registered adapter serves is out of
+/// scope — no record, exactly like before PR B. Scope filtering and registry
+/// availability are applied by the caller, so the candidate pool feeds the
+/// SAME scope function the analyzed files go through.
+fn walk_dir(
+    dir: &Path,
+    candidates: &mut Vec<PathBuf>,
+    registry: &AdapterRegistry,
+) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
@@ -942,8 +976,8 @@ fn walk_dir(dir: &Path, candidates: &mut Vec<PathBuf>) -> anyhow::Result<()> {
             {
                 continue;
             }
-            walk_dir(&path, candidates)?;
-        } else if path.is_file() && LanguageCatalog::language_for_path(&path).is_some() {
+            walk_dir(&path, candidates, registry)?;
+        } else if path.is_file() && is_discovery_candidate(&path, registry) {
             candidates.push(path);
         }
     }
@@ -1100,6 +1134,64 @@ mod tests {
             }
             other => panic!("expected Partial, got {other:?}"),
         }
+    }
+
+    /// Review R2 P1 (PR #109): public custom-adapter desteği. `LanguageAdapter`,
+    /// `AdapterRegistry::new().with(..)` ve `analyze_repo_with` public olduğu
+    /// sürece consumer kendi adapter'ını getirip katalog-dışı bir uzantıyı
+    /// (ör. ".foo") analiz edebilmeli — pre-PR-B public API davranışı. Statik
+    /// katalog üyeliği discovery'nin TEK gate'i olsaydı bu dosya sessizce
+    /// düşer ve sistem kendi custom registry'sinde ".foo" desteği VARKEN
+    /// `Complete` dönerdi. Aday üyeliği = catalog-known ∪ registry-known.
+    #[test]
+    fn custom_adapter_extension_not_in_catalog_is_still_analyzed() {
+        use crate::contract::{ClassDef, ImportStatement, ResolvedImport};
+        use crate::language::{AdapterRegistry, LanguageAdapter, LanguageCatalog, RepoContext};
+
+        struct FooAdapter;
+        impl LanguageAdapter for FooAdapter {
+            fn name(&self) -> &str {
+                "foo"
+            }
+            fn extensions(&self) -> &[&str] {
+                &[".foo"]
+            }
+            fn extract_imports(&self, _source: &str) -> Vec<ImportStatement> {
+                Vec::new()
+            }
+            fn resolve_import(
+                &self,
+                _import: &ImportStatement,
+                _from_file: &std::path::Path,
+                _repo: &RepoContext,
+            ) -> Option<ResolvedImport> {
+                None
+            }
+            fn extract_class_defs(&self, _source: &str) -> Vec<ClassDef> {
+                Vec::new()
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("a.foo"), "whatever\n").unwrap();
+        // ".foo" katalogda YOK — sadece custom registry'de.
+        assert!(
+            LanguageCatalog::language_for_path(std::path::Path::new("a.foo")).is_none(),
+            "precondition: .foo must not be a catalog-known extension"
+        );
+
+        let reg = AdapterRegistry::new().with(FooAdapter);
+        let result = analyze_repo_with(tmp.path(), &reg).expect("analyze succeeded");
+        assert_eq!(
+            result.space.node_count(),
+            1,
+            "custom registry-known .foo must be analyzed (pre-PR-B public API behavior)"
+        );
+        assert!(
+            result.completeness.is_complete(),
+            "fully-served custom extension must be Complete, got {:?}",
+            result.completeness
+        );
     }
 
     #[test]
