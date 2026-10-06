@@ -82,17 +82,25 @@ parse AYNI tampondan üretilir (`load_and_validate_harness_task_str` /
 beyanı tükettiği tampona bağlı kalır. `--llm real` proposals dosyası tüketmez →
 `proposals_digest: null` (#171 dürüst boşluğu).
 
-**Güven kökü hiyerarşisi (#178 tur-2):** digest'ler yalnızca onları taşıyan zarf
-güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned, overwrite
+**Güven kökü hiyerarşisi (#178 tur-2/tur-3):** digest'ler yalnızca onları taşıyan
+zarf güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned, overwrite
 edilebilir bir **kopyadır**. `osp finalize-run` bu yüzden (a) digest
 fence'lerinden ÖNCE kopyayı no-clobber canonical mağazayla (`--state-dir`;
 default probe `<run_dir>/../../state`) **bayt-özdeşliğe** göre doğrular:
 mağazada task için artifact VARSA eşleşmeyen kopya RED (tutarlı-tamper ve
 alan-silme bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil);
-(b) digest alanı taşıyan zarf için kayıt bulunamazsa RED; (c) alan taşımayan
-legacy zarf + kayıt yok → fence atlanır (store-öncesi dönem). Presence
-semantiği: alan YOK = legacy ≠ `null` = "tüketilmedi" (run-dir'de proposals.json
-varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu + hash eşit; silinmek RED).
+(b) **anchor bulunamadığında (mağaza yok / taşınmış run-dir / task kaydı yok)
+otomatik legacy kabul YOKTUR** — digest alanlı (yeni-şekil) zarf her koşulda
+RED (anchor zorunlu; attempt yeniden koşulmalı ya da `--state-dir`
+geri getirilmeli); legacy-şekil (digest alansız) zarf da RED, yalnız
+`--allow-unanchored-legacy` **açık trust downgrade**'iyle geçer — bu bayrak
+yalnızca pre-#178 historical artifact'lar için anlamlıdır ("gerçekten eski
+artifact" ile "alanları silinmiş yeni artifact + taşınmış run-dir" dış bilgi
+olmadan ayırt edilemez; sessiz `trusted→untrusted` geçişi epistemik olarak
+kabul edilemez) ve kullanımı ledger satırına `unanchored_legacy: true` olarak
+yazılır. Presence semantiği: alan YOK = legacy-şekil ≠ `null` = "tüketilmedi"
+(run-dir'de proposals.json varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu +
+hash eşit; silinmek RED).
 
 ## Geriye uyumluluk notu
 

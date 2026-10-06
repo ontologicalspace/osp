@@ -60,6 +60,15 @@ pub struct FinalizeRunArgs {
     /// Verilmezse ritüel düzeni denenir: `<run_dir>/../../state`.
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
+    /// #178 tur-3 P0: canonical kayıt ERİŞİLEMEZLİĞİNDE otomatik legacy kabulü
+    /// kaldırıldı — "gerçekten eski artifact" ile "alanları silinmiş yeni
+    /// artifact + taşınmış run-dizini" dış bilgi olmadan ayırt edilemez
+    /// (fail-open). Bu flag AÇIK trust downgrade'idür: yalnız legacy-şekil
+    /// (digest alansız) zarflar için, mağaza bulunamadığında RED yerine eski
+    /// epistemik garantiyle finalize eder. Ledger satırı `unanchored_legacy: true`
+    /// taşır. Digest alanlı (yeni-şekil) zarfları KURTARMAZ — anchor zorunludur.
+    #[arg(long)]
+    pub allow_unanchored_legacy: bool,
 }
 
 /// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2;
@@ -105,7 +114,7 @@ where
     serde::Deserialize::deserialize(de).map(Some)
 }
 
-/// #178 tur-2 P0 — **canonical trust anchor**: digest'ler yalnızca kendilerini
+/// #178 tur-2/tur-3 P0 — **canonical trust anchor**: digest'ler yalnızca kendilerini
 /// taşıyan zarf güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned,
 /// overwrite edilebilir bir KOYADIR. Makinenin kaydı no-clobber canonical
 /// mağazadır (`<state-dir>/attempts/task-<id>-*.json`; `--out` kopyası tanım
@@ -113,20 +122,23 @@ where
 ///
 /// - Mağazada bu task için ≥1 canonical artifact VARSA → kopya bunlardan biriyle
 ///   **bayt-özdeş** olmak zorundadır (tutarlı-tamper VE digest-alan-silme
-///   bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil → RED).
-/// - Mağaza erişilebilir ama bu task için artifact YOKSA → yeni-şekil zarf
-///   (digest alanları mevcut) RED ("kanonik kayıt yok"); legacy-şekil zarf GEÇER
-///   (store-öncesi dönemin gerçek artifact'ı).
-/// - Mağaza çözümlenemezse → yeni-şekil RED (`--state-dir` iste); legacy-şekil
-///   atlar (backward-compat: run-17 gibi store'suz eski run'lar yeniden
-///   finalize edilebilir).
+///   bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil → RED;
+///   `--allow-unanchored-legacy` görünür bir MISMATCH'i asla ezmez).
+/// - Anchor erişilemez/boşsa (mağaza yok, taşınmış run-dizini, task kaydı yok):
+///   yeni-şekil zarf (digest alanlı) **her koşulda RED** — anchor zorunludur;
+///   legacy-şekil zarf RED, yalnız `--allow-unanchored-legacy` (tur-3 P0:
+///   otomatik legacy kabul fail-open'dı — "gerçekten eski artifact" ile
+///   "alanları silinmiş yeni artifact + taşınmış run-dir" dış bilgi olmadan
+///   ayırt edilemez) AÇIK downgrade'iyle GEÇER; dönen `true` ledger satırına
+///   `unanchored_legacy: true` olarak işlenir.
 fn verify_attempt_against_canonical_store(
     run_dir: &Path,
     attempt_path: &Path,
     task_id: u64,
     explicit_state_dir: Option<&Path>,
     envelope_has_digest_fields: bool,
-) -> anyhow::Result<()> {
+    allow_unanchored_legacy: bool,
+) -> anyhow::Result<bool> {
     // Ritüel düzeni varsayımı: dogfood/runs/<id> ↔ dogfood/state.
     let probed = run_dir
         .parent()
@@ -172,24 +184,39 @@ fn verify_attempt_against_canonical_store(
              carrying them is the machine-published one",
             attempts_dir.expect("checked above").display()
         );
-        return Ok(());
+        return Ok(false);
     }
 
-    // Mağaza bu task için boş ya da erişilemez.
+    // Anchor YOK (mağaza erişilemez ya da bu task için kayıt yok).
     if envelope_has_digest_fields {
         anyhow::bail!(
             "canonical attempt fence: the envelope carries digest fields (new producer \
              shape) but no canonical attempt artifact for task {task_id} is reachable{} \
-             — pass --state-dir; the trust root for digest fences is the no-clobber \
-             canonical store, not the run-dir copy",
+             — the anchor is REQUIRED for new-shape envelopes (restore --state-dir or \
+             re-run the attempt); --allow-unanchored-legacy covers only legacy-shaped \
+             pre-#178 artifacts",
             attempts_dir
                 .as_ref()
                 .map(|d| format!(" (searched {})", d.display()))
                 .unwrap_or_default()
         );
     }
-    // Legacy-şekil zarf + kayıt yok → store-öncesi dönem: fence atlanır.
-    Ok(())
+    if !allow_unanchored_legacy {
+        anyhow::bail!(
+            "canonical attempt fence: no canonical attempt artifact for task {task_id} \
+             is reachable{} and the envelope is legacy-shaped (no digest fields) — a \
+             relocated run-dir with stripped digest fields is indistinguishable from a \
+             genuine pre-#178 artifact without external information; pass \
+             --allow-unanchored-legacy for an EXPLICIT trust downgrade if (and only if) \
+             this is a historical artifact",
+            attempts_dir
+                .as_ref()
+                .map(|d| format!(" (searched {})", d.display()))
+                .unwrap_or_default()
+        );
+    }
+    // Açık downgrade — ledger satırına işlenir (unanchored_legacy: true).
+    Ok(true)
 }
 
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
@@ -358,14 +385,16 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         attempt.run.repository_head
     );
 
-    // #178 tur-2 P0 — canonical trust anchor: digest fence'lerden ÖNCE, zarfın
-    // KENDİSİ makine kaydıyla doğrulanır (kopya-tamper + alan-silme bypass'ları).
-    verify_attempt_against_canonical_store(
+    // #178 tur-2/tur-3 P0 — canonical trust anchor: digest fence'lerden ÖNCE, zarfın
+    // KENDİSİ makine kaydıyla doğrulanır (kopya-tamper + alan-silme + taşınmış-run
+    // bypass'ları). Dönen bool: açık legacy downgrade kullanıldı → ledger'a işlenir.
+    let unanchored_legacy = verify_attempt_against_canonical_store(
         &args.run_dir,
         &attempt_path,
         attempt.run.task_id,
         args.state_dir.as_deref(),
         attempt.run.task_digest.is_some() || attempt.run.proposals_digest.is_some(),
+        args.allow_unanchored_legacy,
     )?;
 
     // #178 (tur-1 P0-2 tam kapanış + review P0-2 presence-aware): digest alanı
@@ -516,6 +545,13 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         },
         "proposal_digest": proposal_digest,
         "attempt_ref": make_ref(&args.run_dir, "attempt.json"),
+        // #178 tur-3: açık trust downgrade kaydı — yalnız --allow-unanchored-legacy
+        // kullanıldığında görünür (anchor'lu satırlarda alan yoktur; missing≠false).
+        "unanchored_legacy": if unanchored_legacy {
+            serde_json::json!(true)
+        } else {
+            serde_json::Value::Null
+        },
         "decision": null,
         "patch_outcome": null,
         "patch_ref": if patch_path.is_file() {

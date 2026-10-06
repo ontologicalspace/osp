@@ -986,6 +986,7 @@ fn finalize_run_minimal_attempt_object_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1029,6 +1030,7 @@ fn finalize_run_task_id_mismatch_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(!out.status.success(), "task-id mismatch must fail closed");
@@ -1080,6 +1082,7 @@ fn finalize_run_proposals_state_fence() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1116,6 +1119,7 @@ fn finalize_run_proposals_state_fence() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1223,6 +1227,7 @@ fn finalize_run_presence_only_null_shapes_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1263,6 +1268,7 @@ fn finalize_run_unknown_result_kind_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1316,6 +1322,7 @@ fn finalize_run_proposals_minimal_envelope_rejected() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
+        .arg("--allow-unanchored-legacy")
         .output()
         .unwrap();
     assert!(
@@ -1793,6 +1800,193 @@ fn finalize_run_rejects_stripped_digest_fields() {
     );
 }
 
+/// #178 tur-3 P0 kabul testi (review senaryosu birebir): yeni attempt üret →
+/// run dizinini default probe'un bulamayacağı yere TAŞI → digest alanlarını SİL →
+/// task label değiştir (head/id koru) → `--state-dir`'siz finalize → RED.
+/// Otomatik legacy kabul kaldırıldı: anchor yok + legacy görünüm = fail-closed.
+#[test]
+fn finalize_run_rejects_relocated_run_with_stripped_fields() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-relocate");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // TAŞIMA: run dizinini probe'un (<run>/../../state) bulamayacağı bir yere kopyala.
+    let outside = tempfile::tempdir().expect("relocated base");
+    let relocated = outside.path().join("run-relocate");
+    fs_extra_like_copy_dir(&run, &relocated);
+
+    // ALAN SİLME + TUTARLI TAMPER: digest alanlarını kaldır + task label değiştir
+    // (repository_head + task_id aynen — head/id fence'leri geçsin).
+    let relocated_task = relocated.join("task.json");
+    let mut tampered = read_json(&relocated_task);
+    tampered["task"]["label"] = serde_json::json!("tampered in the relocated dir");
+    fs::write(
+        &relocated_task,
+        serde_json::to_string_pretty(&tampered).unwrap(),
+    )
+    .unwrap();
+    let mut stripped = read_json(&relocated.join("attempt.json"));
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("task_digest");
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("proposals_digest");
+    fs::write(
+        relocated.join("attempt.json"),
+        serde_json::to_string_pretty(&stripped).unwrap(),
+    )
+    .unwrap();
+
+    let out = osp_in(outside.path())
+        .arg("finalize-run")
+        .arg(&relocated)
+        .output()
+        .expect("run osp finalize-run (relocated, no --state-dir)");
+    assert!(
+        !out.status.success(),
+        "relocated run + stripped fields + no anchor must fail closed (no silent legacy)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--allow-unanchored-legacy"),
+        "RED açık downgrade'i işaret etmeli: {stderr}"
+    );
+}
+
+/// #178 tur-3 P0 kabul testi (ikinci yarısı): gerçek historical legacy zarf +
+/// canonical store yok + AÇIK `--allow-unanchored-legacy` → GEÇER; ledger satırı
+/// `unanchored_legacy: true` taşır (epistemik zayıflama kayıtlı).
+#[test]
+fn finalize_run_unanchored_legacy_with_explicit_flag_passes() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-historical-legacy");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Legacy-şekil zarf (digest alanları YOK — pre-#178 producer) + kanonik evidence.
+    let mut env = attempt_envelope(&fx.head, 1);
+    env["evidence"] = serde_json::json!([{
+        "trajectory_id": 1, "milestone_id": 1, "task_id": 1, "attempt_id": 1,
+        "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "after": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "gate_decision": "PassedAll", "predicate_completion": "Completed",
+        "mutation_decision": "AcceptAsCompleted",
+        "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "duration_ms": 1
+    }]);
+    fs::write(run.join("attempt.json"), env.to_string()).unwrap();
+
+    // Store yok + flag YOK → RED (fail-closed default).
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "unanchored legacy without the explicit flag must fail closed"
+    );
+
+    // Flag İLE → GEÇER + downgrade ledger'da görünür.
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--allow-unanchored-legacy")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "explicit --allow-unanchored-legacy must pass: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(row["unanchored_legacy"], serde_json::json!(true));
+}
+
+/// Basit özyinelemeli dizin kopyası (std-only; test yardımcısı).
+fn fs_extra_like_copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).expect("mkdir dst");
+    for entry in fs::read_dir(src).expect("read src").filter_map(|e| e.ok()) {
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            fs_extra_like_copy_dir(&from, &to);
+        } else {
+            fs::copy(&from, &to).expect("copy file");
+        }
+    }
+}
+
 /// #183: proposals v2 ÇIKTISINDAN kopyalanan output-only alan (position_hints)
 /// girdi spec'ine girerse unknown-field reddi tek adımda yönlendirir
 /// (run-17 sürtünmesi 3: çıktı doğal şablon alınıyor).
@@ -1880,6 +2074,9 @@ fn finalize_run_adversarial_canonical_semantics_matrix() {
         let out = osp_in(&work)
             .arg("finalize-run")
             .arg(&run)
+            // El-yapımı legacy-şekil zarflar (digest alansız) + store yok → semantik
+            // fence'leri hedefleyen bu matris AÇIK downgrade ile koşar (#178 tur-3).
+            .arg("--allow-unanchored-legacy")
             .output()
             .unwrap();
         (out, run)
