@@ -16,7 +16,11 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+# MSRV (#110): dependency-beyanlı taban baskındır — serde_with/time/plist ≥1.88,
+# idna_adapter ≥1.86 (edition2024 transitive'ler ≥1.85); kaynak tarafı `reason=`
+# attribute'ları 1.81. Empirik doğrulama: `cargo +1.88 check --workspace
+# --all-targets` yeşil; +1.85 dependency çözümlemede RED (2026-10-07, #110 PR).
+rust-version = "1.88"
 license = "Apache-2.0"
 authors = ["OSP Authors"]
 repository = "https://github.com/ontologicalspace/osp"

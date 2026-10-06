@@ -469,10 +469,9 @@ impl HallucinationType {
                     support: 0.0,
                     threshold: 1.5,
                 })
-                .map(|h| {
+                .inspect(|_| {
                     // msg'yi detail'e göm — evidence debug için.
                     let _ = msg;
-                    h
                 })
             }
             _ => None, // PermissionDenied, NoPersistence, Persistence, Internal,

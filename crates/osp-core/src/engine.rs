@@ -2029,6 +2029,15 @@ impl SpaceEngine {
         }
 
         // Phase 4: MILESTONE (periyodik)
+        // #191 review P1: `%` bilinçli korundu — is_multiple_of(0) false döndürür
+        // ve milestone persistence SESSİZ kapanır; % 0 panic üretir (loud).
+        // milestone_interval=0 config'ten ulaşılabilir (validation yok) ve bu PR
+        // (MSRV düzeltmesi) failure semantics DEĞİŞTİRMEZ — düzgün kapanış
+        // (config-boundary validation / NonZeroU64) takip issue'sunda.
+        #[allow(
+            clippy::manual_is_multiple_of,
+            reason = "is_multiple_of(0)=false milestone'u sessiz kapatır; % 0 loud panic — mevcut semantics korunur (#191 review P1)"
+        )]
         if self.t_c % self.config.milestone_interval == 0 {
             if let Some(store) = &self.snapshot_store {
                 let snapshot = SpaceSnapshot {
