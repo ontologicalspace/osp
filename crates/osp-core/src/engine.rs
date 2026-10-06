@@ -2029,7 +2029,7 @@ impl SpaceEngine {
         }
 
         // Phase 4: MILESTONE (periyodik)
-        if self.t_c % self.config.milestone_interval == 0 {
+        if self.t_c.is_multiple_of(self.config.milestone_interval) {
             if let Some(store) = &self.snapshot_store {
                 let snapshot = SpaceSnapshot {
                     version: SNAPSHOT_FORMAT_VERSION,
