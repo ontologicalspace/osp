@@ -27,7 +27,9 @@ mod response;
 mod runtime;
 
 pub use adapter::{bar_elicitation_system_prompt, BarElicitationReport, RuntimeLlmClient};
-pub use artifacts::{parse_elicited_bar, ElicitedBar, PredictedEffect};
+pub use artifacts::{
+    completion_identity_digest, parse_elicited_bar, ElicitedBar, InvE1Manifest, PredictedEffect,
+};
 pub use error::LlmError;
 pub use prompt::{osp_system_prompt, osp_user_prompt, raw_dump_user_prompt, raw_system_prompt};
 pub use response::{RawCompletion, TokenUsage};

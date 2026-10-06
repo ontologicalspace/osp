@@ -17,10 +17,10 @@ use osp_core::agent::DeltaProposal;
 use osp_core::navigator::{LlmClient, LlmError as NavLlmError};
 use osp_core::trajectory::{AgentTaskView, TokenCost};
 
-use crate::artifacts::{self, ElicitedBar};
+use crate::artifacts::{self, ElicitedBar, InvE1Manifest};
 use crate::error::LlmError as RtLlmError;
 use crate::prompt::{delta_proposal_output_format_snippet, osp_system_prompt};
-use crate::response::TokenUsage;
+use crate::response::{RawCompletion, TokenUsage};
 use crate::{CompletionRequest, Runtime};
 
 /// D3 - Runtime -> navigator::LlmClient adapter. Gerçek GPT-4o-mini (veya OpenAI-compatible).
@@ -29,13 +29,18 @@ use crate::{CompletionRequest, Runtime};
 /// `complete_raw`'ı custom CompletionRequest ile çağırır - OspPrompt'u bypass eder.
 /// `system` = osp_system_prompt + trajectory task context, `user` = AgentTaskView JSON.
 ///
-/// #171: `with_artifacts(dir)` ile ilk gerçek completion'ın (prompt, ham yanıt, parse
-/// sonucu) donmuş kanıt üçlüsü `dir`'e yazılır (INV-E1 freeze; bkz. `artifacts` modülü).
+/// #171 preregistered mod: `with_artifacts(dir, manifest)` kanıt kaydını VE D6
+/// strict retry semantiğini birlikte açar — parse ihlali terminal (navigator
+/// `ParseFailurePolicy::TerminalNoRepair` ile koşar), ağ hatasında AYNI
+/// `CompletionRequest` ile en fazla bir retry (bkz. [`strict_d6_call`]).
+/// Kayıtsız mod mevcut davranışı korur (kayıt yok, iç retry yok).
 pub struct RuntimeLlmClient {
     runtime: Runtime,
     last_usage: Mutex<TokenUsage>,
-    /// #171 §5 — kanıt dizini (None: kayıt yok — mevcut davranış).
+    /// #171 §5 — kanıt dizini (None: kayıt yok, generic davranış — mevcut hâl).
     artifacts_dir: Option<PathBuf>,
+    /// INV-E1 provenance manifest'i (donmuş anchor'a yazılır; with_artifacts ile birlikte).
+    inv_e1: Option<InvE1Manifest>,
     /// İlk completion'ın kör view'ı (D4 bar elicitation aynı view'ı kullanır).
     first_view: Mutex<Option<AgentTaskView>>,
 }
@@ -47,14 +52,18 @@ impl RuntimeLlmClient {
             runtime,
             last_usage: Mutex::new(TokenUsage::default()),
             artifacts_dir: None,
+            inv_e1: None,
             first_view: Mutex::new(None),
         }
     }
 
-    /// #171 §5: llm-real kanıt artifact'larını `dir`'e yaz (llm-prompt.json ·
-    /// llm-raw-response.txt · llm-proposals.json; elicit_bar ile llm-bar.json).
-    pub fn with_artifacts(mut self, dir: impl Into<PathBuf>) -> Self {
+    /// #171 §5 + INV-E1: llm-real kanıt artifact'larını `dir`'e yaz — donmuş
+    /// prompt anchor'ları (llm-prompt.json / llm-bar-prompt.json), ham yanıt,
+    /// D6 durum kayıtları. Bu builder AYNI ANDA D6 strict retry semantiğini
+    /// açar: kayıt protokolü ile tamir döngüsü bir arada var olamaz (review P0).
+    pub fn with_artifacts(mut self, dir: impl Into<PathBuf>, inv_e1: InvE1Manifest) -> Self {
         self.artifacts_dir = Some(dir.into());
+        self.inv_e1 = Some(inv_e1);
         self
     }
 
@@ -68,18 +77,29 @@ impl RuntimeLlmClient {
         self.first_view.lock().expect("first_view poisoned").clone()
     }
 
+    /// Kayıt gerekçesi — iki alan birlikte set edilir (with_artifacts) veya hiçbiri.
+    fn recording<'a>(
+        dir: &'a Option<PathBuf>,
+        manifest: &'a Option<InvE1Manifest>,
+    ) -> Option<(&'a PathBuf, &'a InvE1Manifest)> {
+        match (dir, manifest) {
+            (Some(d), Some(m)) => Some((d, m)),
+            _ => None,
+        }
+    }
+
     /// #171 D4 — bar elicitation: aynı kör view ile İKİNCİ completion.
     ///
     /// "kabul barın olarak öngörülen değişim-sonrası coupling değerini bildir ve
-    /// önerilerini öngörülen etkiye göre sırala". Elicitation prompt'u da donar +
-    /// digest kayda geçer (INV-E1 disiplini); yanıt `llm-bar.json`'a yazılır.
-    /// Transport/parse ihlali DÜRÜST boşluk olarak dosyaya işlenir (D6) — yalnız
-    /// disk hatası Err döner. None = hiç completion olmadı (kayda değer view yok).
+    /// önerilerini öngörülen etkiye göre sırala". Elicitation prompt'u da donar
+    /// (`llm-bar-prompt.json` + digest'ler); yanıt `llm-bar-response.json`'a
+    /// yazılır. Ağ hatasında aynı-prompt tek retry (D6); transport/parse ihlali
+    /// DÜRÜST boşluk olarak dosyaya işlenir — yalnız disk/protokol hatası Err
+    /// döner. None = hiç completion olmadı (kayda değer view yok).
     pub fn elicit_bar(&self) -> anyhow::Result<Option<BarElicitationReport>> {
-        let dir = self
-            .artifacts_dir
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("bar elicitation requires an artifacts directory"))?;
+        let Some((dir, manifest)) = Self::recording(&self.artifacts_dir, &self.inv_e1) else {
+            anyhow::bail!("bar elicitation requires the artifacts protocol (with_artifacts)");
+        };
         let Some(view) = self.first_task_view() else {
             return Ok(None);
         };
@@ -89,8 +109,8 @@ impl RuntimeLlmClient {
                 .map_err(|e| anyhow::anyhow!("AgentTaskView serialize: {e}"))?,
         };
         let cfg = self.runtime.config();
-        match self.runtime.complete_raw(&req) {
-            Ok(raw) => {
+        match strict_d6_call(|r| self.runtime.complete_raw(r), &req) {
+            StrictD6Outcome::Response { raw, .. } => {
                 let parsed = artifacts::parse_elicited_bar(&raw.content);
                 let (elicited, parse_error) = match parsed {
                     Ok(bar) => (Some(bar), None),
@@ -98,13 +118,13 @@ impl RuntimeLlmClient {
                 };
                 artifacts::record_bar_elicitation(
                     dir,
-                    &cfg.model,
-                    &cfg.endpoint,
+                    cfg,
                     &req,
                     Some(&raw),
                     elicited.as_ref(),
                     parse_error.as_deref(),
                     None,
+                    manifest,
                 )?;
                 Ok(Some(BarElicitationReport {
                     elicited,
@@ -113,22 +133,24 @@ impl RuntimeLlmClient {
                     prompt_digest: artifacts::completion_prompt_digest(&req),
                 }))
             }
-            Err(e) => {
-                // Transport hatası — llm-bar.json yine de dürüst boşlukla yazılır.
+            StrictD6Outcome::TransportExhausted { first, second } => {
+                // İki ağ denemesi de tükenmiş — llm-bar-response.json dürüst
+                // boşlukla yazılır (bu durum aynı-prompt retry'a açık kalır).
+                let msg = format!("attempt 1: {first}; attempt 2: {second}");
                 artifacts::record_bar_elicitation(
                     dir,
-                    &cfg.model,
-                    &cfg.endpoint,
+                    cfg,
                     &req,
                     None,
                     None,
                     None,
-                    Some(&format!("{e}")),
+                    Some(&msg),
+                    manifest,
                 )?;
                 Ok(Some(BarElicitationReport {
                     elicited: None,
                     parse_error: None,
-                    transport_error: Some(format!("{e}")),
+                    transport_error: Some(msg),
                     prompt_digest: artifacts::completion_prompt_digest(&req),
                 }))
             }
@@ -136,7 +158,48 @@ impl RuntimeLlmClient {
     }
 }
 
-/// #171 D4 — elicit_bar sonucunun özeti (CLI çıktısı için; kanıt `llm-bar.json`).
+/// **D6 strict ağ-retry çekirdeği** (review P0): geçici ağ hatasında AYNI
+/// `CompletionRequest` ile EN FAZLA bir retry; ikinci hata terminal.
+/// Parse ihlaline retry YOKTUR (tamir döngüsü yasak — navigator
+/// `ParseFailurePolicy::TerminalNoRepair` + artifacts mührü bunu kapatar).
+///
+/// Aynı `req` nesnesi iki denemede de değişmeden geçirilir — system/user
+/// bayt-özdeşliği yapısal garanti, deneysel iddia değildir.
+#[derive(Debug)]
+pub(crate) enum StrictD6Outcome {
+    /// Yanıt alındı (retry sayısıyla).
+    Response {
+        raw: RawCompletion,
+        network_retries: u32,
+    },
+    /// İki ağ denemesi de yanıt alamadı — terminal transport hatası.
+    TransportExhausted {
+        first: RtLlmError,
+        second: RtLlmError,
+    },
+}
+
+pub(crate) fn strict_d6_call(
+    mut call: impl FnMut(&CompletionRequest) -> Result<RawCompletion, RtLlmError>,
+    req: &CompletionRequest,
+) -> StrictD6Outcome {
+    match call(req) {
+        Ok(raw) => StrictD6Outcome::Response {
+            raw,
+            network_retries: 0,
+        },
+        Err(first) => match call(req) {
+            Ok(raw) => StrictD6Outcome::Response {
+                raw,
+                network_retries: 1,
+            },
+            Err(second) => StrictD6Outcome::TransportExhausted { first, second },
+        },
+    }
+}
+
+/// #171 D4 — elicit_bar sonucunun özeti (CLI çıktısı için; kanıt
+/// `llm-bar-prompt.json` + `llm-bar-response.json`).
 #[derive(Debug, Clone)]
 pub struct BarElicitationReport {
     pub elicited: Option<ElicitedBar>,
@@ -155,16 +218,51 @@ impl LlmClient for RuntimeLlmClient {
             })?,
         };
         // #171: ilk view'ı yakala — kayıt (first-freeze) ve D4 elicitation bu
-        // view üzerinden işler. first_view'in None olması = bu ilk completion.
-        let is_first = self
-            .first_view
-            .lock()
-            .expect("first_view poisoned")
-            .is_none();
-        if is_first {
-            *self.first_view.lock().expect("first_view poisoned") = Some(view.clone());
-        }
-        let raw = self.runtime.complete_raw(&req).map_err(map_runtime_error)?;
+        // view üzerinden işler. Check+set TEK lock acquisition (atomik — iki
+        // concurrent caller da kendini "first" göremez; review P2).
+        let is_first = {
+            let mut guard = self.first_view.lock().expect("first_view poisoned");
+            if guard.is_none() {
+                *guard = Some(view.clone());
+                true
+            } else {
+                false
+            }
+        };
+
+        let cfg = self.runtime.config();
+        let recording = Self::recording(&self.artifacts_dir, &self.inv_e1);
+        // D6 strict (yalnız preregistered/kayıtlı mod): ağ hatasında AYNI
+        // prompt'la bir retry; kayıtsız mod mevcut davranış (tek deneme).
+        let (raw, network_retries) = match recording {
+            Some((dir, manifest)) => match strict_d6_call(|r| self.runtime.complete_raw(r), &req) {
+                StrictD6Outcome::Response {
+                    raw,
+                    network_retries,
+                } => (raw, network_retries),
+                StrictD6Outcome::TransportExhausted { first, second } => {
+                    // İki ağ denemesi de tükenmiş: transport-null kaydı (D6'ın
+                    // TEK retry'a açık durumu) + terminal ağ hatası.
+                    let msg = format!("attempt 1: {first}; attempt 2: {second}");
+                    artifacts::record_transport_failure(dir, cfg, &req, &msg, 1, manifest)
+                        .map_err(|e| {
+                            NavLlmError::Network(format!(
+                                "llm artifact persist failed ({}): {e:#}",
+                                dir.display()
+                            ))
+                        })?;
+                    return Err(NavLlmError::Network(format!(
+                        "D6: both network attempts failed for this prompt ({msg}); \
+                         same-prompt retry is exhausted — terminal"
+                    )));
+                }
+            },
+            None => (
+                self.runtime.complete_raw(&req).map_err(map_runtime_error)?,
+                0,
+            ),
+        };
+
         // G2c-4 (review 10 #5): usage'ı parse error'da DA koru — token harcandı.
         let usage = raw.usage;
         *self.last_usage.lock().expect("last_usage poisoned") = raw.usage;
@@ -173,26 +271,20 @@ impl LlmClient for RuntimeLlmClient {
             completion_tokens: usage.completion_tokens,
             total_tokens: usage.total_tokens,
         });
-        let parse_result = raw.clone().into_proposal();
+
         // #171 §5 (yalnız ilk completion — INV-E1 freeze): kanıt persist'i
         // protokolün parçası; disk hatası çağrıyı terminal hatayla bitirir.
+        // record_proposal_completion parse'ı KENDİSİ yapar ve D6 mührünü
+        // uygular (parse-null / success sonrası dizin mühürlü).
         if is_first {
-            if let Some(dir) = &self.artifacts_dir {
-                let (proposal, parse_error) = match &parse_result {
-                    Ok((p, _)) => (Some(p), None),
-                    // Ham yanıt llm-raw-response.txt'te ayrıca durur (D6) —
-                    // parse_error yalnız hitalet sebebidir.
-                    Err((_raw_text, e)) => (None, Some(format!("{e}"))),
-                };
-                let cfg = self.runtime.config();
+            if let Some((dir, manifest)) = recording {
                 artifacts::record_proposal_completion(
                     dir,
-                    &cfg.model,
-                    &cfg.endpoint,
+                    cfg,
                     &req,
                     &raw,
-                    proposal,
-                    parse_error.as_deref(),
+                    network_retries,
+                    manifest,
                 )
                 .map_err(|e| {
                     NavLlmError::Network(format!(
@@ -202,6 +294,7 @@ impl LlmClient for RuntimeLlmClient {
                 })?;
             }
         }
+        let parse_result = raw.into_proposal();
         let (proposal, _) =
             parse_result.map_err(|(raw_text, parse_err)| NavLlmError::ProposalParse {
                 message: format!("LLM response parse failed: {parse_err}\nRaw: {raw_text}"),
@@ -453,6 +546,107 @@ mod tests {
         };
         let client = RuntimeLlmClient::new(Runtime::new(cfg).unwrap());
         assert!(client.first_task_view().is_none());
+    }
+
+    // ── #171 D6 (review P0): strict ağ-retry çekirdeği ────────────────────────
+
+    fn ok_raw() -> RawCompletion {
+        RawCompletion {
+            usage: TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 2,
+                total_tokens: 7,
+            },
+            content: "{}".to_string(),
+        }
+    }
+
+    #[test]
+    fn strict_d6_first_try_success_no_retry() {
+        let mut calls = 0;
+        let outcome = strict_d6_call(
+            |_req| {
+                calls += 1;
+                Ok(ok_raw())
+            },
+            &CompletionRequest {
+                system: "s".into(),
+                user: "u".into(),
+            },
+        );
+        assert!(matches!(
+            outcome,
+            StrictD6Outcome::Response {
+                network_retries: 0,
+                ..
+            }
+        ));
+        assert_eq!(calls, 1, "başarıda retry yok");
+    }
+
+    #[test]
+    fn strict_d6_transient_network_failure_retries_once_byte_identical() {
+        // Review P0 test #2'nin çekirdeği: ilk ağ hatası → AYNI
+        // CompletionRequest ile tam bir retry; closure iki çağrıda da
+        // system/user BAYT-özdeşliğini doğrular.
+        let first_req_digest = std::cell::RefCell::new(Vec::new());
+        let mut calls = 0;
+        let outcome = strict_d6_call(
+            |req| {
+                calls += 1;
+                first_req_digest
+                    .borrow_mut()
+                    .push(artifacts::completion_prompt_digest(req));
+                if calls == 1 {
+                    Err(RtLlmError::Status {
+                        code: 503,
+                        body: "transient reset".into(),
+                    })
+                } else {
+                    Ok(ok_raw())
+                }
+            },
+            &CompletionRequest {
+                system: "sys".into(),
+                user: "user".into(),
+            },
+        );
+        match outcome {
+            StrictD6Outcome::Response {
+                network_retries, ..
+            } => assert_eq!(network_retries, 1),
+            other => panic!("retry sonrası yanıt beklenirdi: {other:?}"),
+        }
+        assert_eq!(calls, 2, "en fazla bir retry");
+        let digests = first_req_digest.into_inner();
+        assert_eq!(digests.len(), 2);
+        assert_eq!(
+            digests[0], digests[1],
+            "iki deneme aynı prompt (byte-identical system+user)"
+        );
+    }
+
+    #[test]
+    fn strict_d6_second_network_failure_is_terminal() {
+        let mut calls = 0;
+        let outcome = strict_d6_call(
+            |_req| {
+                calls += 1;
+                Err(RtLlmError::Status {
+                    code: 502,
+                    body: "down".into(),
+                })
+            },
+            &CompletionRequest {
+                system: "s".into(),
+                user: "u".into(),
+            },
+        );
+        assert!(matches!(
+            outcome,
+            StrictD6Outcome::TransportExhausted { .. }
+        ));
+        assert_eq!(calls, 2, "bir retry sonrası terminal — üçüncü deneme yok");
     }
 
     // 3. error_mapping_runtime_to_navigator
