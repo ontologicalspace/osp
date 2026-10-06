@@ -897,6 +897,7 @@ mod tests {
                 stale: false,
             },
             diagnostics: vec![],
+            completeness: osp_analyzer::language::AnalysisCompleteness::Complete,
         };
         result
             .space

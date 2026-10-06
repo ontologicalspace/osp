@@ -145,11 +145,197 @@ impl AdapterRegistry {
             .find(|a| a.extensions().iter().any(|&e| e == normalized))
             .map(|a| a.as_ref())
     }
+
+    // `adapter_for_language` (review R2 P2'de kaldırıldı): per-dil ANY-uzantı
+    // eşleşmesi custom adapter'larda exact-equality invariant'ı olmadığı için
+    // yanıltıcıydı; keşif hattı dosya-bazlı `adapter_for_extension` kullanır.
+    // İleride gerçek language-level capability gerekirse semantiği açık bir
+    // API (ör. `supports_language_fully`) tasarlanır.
 }
 
 impl Default for AdapterRegistry {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// LanguageId + LanguageCatalog (PR B — declaration policy for known languages)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Identity of a language OSP knows about (independent of whether a compiled
+/// adapter for it exists in a given `AdapterRegistry`).
+///
+/// A new variant is added only together with the corresponding
+/// `KnownLanguage` catalog entry, in the PR that introduces the adapter.
+/// `CSharp` + its catalog entry arrive together in the PR B refresh because
+/// `CSharpAdapter` (#137) landed on main while PR B was pending — the pair
+/// still lands as one change so the catalog never claims to know a language
+/// before OSP actually recognizes its source files.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LanguageId {
+    Python,
+    TypeScript,
+    JavaScript,
+    Rust,
+    Go,
+    CSharp,
+}
+
+/// One language OSP's catalog recognizes, independent of compiled/registered
+/// adapter availability. `extensions` must match the corresponding adapter's
+/// `LanguageAdapter::extensions()` output exactly (verified against each
+/// adapter 2026-07-29; CSharp added and re-verified at the 2026-10-06
+/// refresh): Python `[".py"]`, TypeScript `[".ts",".tsx"]`, JavaScript
+/// `[".js",".jsx"]`, Rust `[".rs"]`, Go `[".go"]`, CSharp `[".cs"]`.
+#[derive(Debug, Clone, Copy)]
+pub struct KnownLanguage {
+    pub id: LanguageId,
+    pub display_name: &'static str,
+    pub extensions: &'static [&'static str],
+}
+
+/// The catalog of languages OSP's `osp-analyzer` knows about. This is
+/// deliberately independent of `AdapterRegistry` — a registry may hold a
+/// subset of these (e.g. `AdapterRegistry::new().with(RustAdapter)`), and the
+/// catalog is what lets that gap be *observed* rather than silently dropped.
+///
+/// NOT used to classify arbitrary non-source files (`.md`, `.json`, `.png`,
+/// ...) as "unsupported languages" — an extension absent from this catalog is
+/// simply out of scope, not a claim that OSP knows of and doesn't support that
+/// language. Only extensions actually mapped to a `KnownLanguage` participate
+/// in `AnalysisCompleteness`.
+pub struct LanguageCatalog;
+
+impl LanguageCatalog {
+    pub const KNOWN_LANGUAGES: &'static [KnownLanguage] = &[
+        KnownLanguage {
+            id: LanguageId::Python,
+            display_name: "Python",
+            extensions: &[".py"],
+        },
+        KnownLanguage {
+            id: LanguageId::TypeScript,
+            display_name: "TypeScript",
+            extensions: &[".ts", ".tsx"],
+        },
+        KnownLanguage {
+            id: LanguageId::JavaScript,
+            display_name: "JavaScript",
+            extensions: &[".js", ".jsx"],
+        },
+        KnownLanguage {
+            id: LanguageId::Rust,
+            display_name: "Rust",
+            extensions: &[".rs"],
+        },
+        KnownLanguage {
+            id: LanguageId::Go,
+            display_name: "Go",
+            extensions: &[".go"],
+        },
+        KnownLanguage {
+            id: LanguageId::CSharp,
+            display_name: "C#",
+            extensions: &[".cs"],
+        },
+    ];
+
+    /// All languages OSP's catalog knows about (not necessarily compiled/registered).
+    pub fn known_all() -> &'static [KnownLanguage] {
+        Self::KNOWN_LANGUAGES
+    }
+
+    /// Resolve a file path to a catalog-known language by extension, if any.
+    /// Returns `None` for files with no extension, an unrecognized extension, or
+    /// a non-source extension (`.md`, `.json`, `.png`, ...) — these are simply
+    /// out of the catalog's scope, not "unsupported languages".
+    pub fn language_for_path(path: &Path) -> Option<LanguageId> {
+        let ext = path.extension().and_then(|e| e.to_str())?;
+        let dotted = format!(".{ext}");
+        Self::KNOWN_LANGUAGES
+            .iter()
+            .find(|k| k.extensions.contains(&dotted.as_str()))
+            .map(|k| k.id)
+    }
+}
+
+/// A path guaranteed to be repository-relative with `/` separators, regardless
+/// of platform — the guarantee is enforced at construction (review R1 P1): a
+/// path outside `repo_root` is REJECTED by [`RepoRelativePath::from_absolute`],
+/// never stored as an absolute fallback, so a completeness reason can never
+/// carry a raw absolute machine path into a report or snapshot. Callers fail
+/// closed on `None`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct RepoRelativePath(String);
+
+impl RepoRelativePath {
+    /// `None` when `absolute` is not under `repo_root` — an out-of-scope path
+    /// is an invariant violation for a completeness reason, not a fallback to
+    /// the absolute machine path.
+    pub fn from_absolute(repo_root: &Path, absolute: &Path) -> Option<Self> {
+        let rel = absolute.strip_prefix(repo_root).ok()?;
+        Some(Self(rel.to_string_lossy().replace('\\', "/")))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for RepoRelativePath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Why a catalog-known source file was not analyzed.
+///
+/// `#[non_exhaustive]`: more reasons are added in later PRs, each in the PR that
+/// actually produces it (e.g. `AdapterNotCompiled` once Cargo feature-gating
+/// exists) — never added speculatively ahead of the code path that creates it.
+/// `AdapterUnavailable` is the one reason PR B can produce today: the registry
+/// passed to `analyze_repo_with`/`analyze_repo_with_config` is public and can be
+/// partial (`AdapterRegistry::new().with(RustAdapter)`), so a catalog-known file
+/// (e.g. `.py`) can already lack a registered adapter — independent of any
+/// Cargo feature system.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IncompleteReason {
+    AdapterUnavailable {
+        language: LanguageId,
+        path: RepoRelativePath,
+    },
+}
+
+/// Whether an `AnalysisResult` covers every catalog-known source file the
+/// registry could see, or is missing some due to `IncompleteReason`s.
+///
+/// `#[non_exhaustive]`: `Partial`'s meaning may gain new reason variants
+/// without becoming a breaking change for exhaustive-matching downstream code.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum AnalysisCompleteness {
+    #[default]
+    Complete,
+    Partial {
+        reasons: Vec<IncompleteReason>,
+    },
+}
+
+impl AnalysisCompleteness {
+    pub fn is_complete(&self) -> bool {
+        matches!(self, AnalysisCompleteness::Complete)
+    }
+
+    /// Build from a collected list of reasons: empty → `Complete`.
+    pub fn from_reasons(reasons: Vec<IncompleteReason>) -> Self {
+        if reasons.is_empty() {
+            AnalysisCompleteness::Complete
+        } else {
+            AnalysisCompleteness::Partial { reasons }
+        }
     }
 }
 
@@ -172,5 +358,186 @@ mod tests {
         );
         assert_eq!(ctx.repo_root, std::path::PathBuf::from("/repo"));
         assert_eq!(ctx.all_files.len(), 1);
+    }
+
+    // ── LanguageCatalog ──────────────────────────────────────────────────────
+
+    #[test]
+    fn catalog_resolves_known_extensions() {
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("main.py")),
+            Some(LanguageId::Python)
+        );
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("x.tsx")),
+            Some(LanguageId::TypeScript)
+        );
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("x.jsx")),
+            Some(LanguageId::JavaScript)
+        );
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("main.rs")),
+            Some(LanguageId::Rust)
+        );
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("main.go")),
+            Some(LanguageId::Go)
+        );
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("CustomerAppService.cs")),
+            Some(LanguageId::CSharp)
+        );
+    }
+
+    #[test]
+    fn catalog_returns_none_for_non_source_extensions() {
+        // These are NOT "unsupported languages" — they're simply out of scope.
+        // The catalog must never claim knowledge of a file type it doesn't map.
+        for name in [
+            "README.md",
+            "config.json",
+            "logo.png",
+            "script.sh",
+            "data.csv",
+        ] {
+            assert_eq!(
+                LanguageCatalog::language_for_path(Path::new(name)),
+                None,
+                "{name} must not resolve to any LanguageId"
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_returns_none_for_no_extension() {
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("Makefile")),
+            None
+        );
+    }
+
+    #[test]
+    fn catalog_known_all_has_six_languages() {
+        // Literal self-check of the catalog table. The adapter cross-check it
+        // used to imply by name lives in
+        // `catalog_extensions_match_builtin_adapters_exactly` (review R1 P1:
+        // a test named "matching_adapter_extensions" must actually call the
+        // adapters, not restate the literals).
+        let known = LanguageCatalog::known_all();
+        assert_eq!(known.len(), 6);
+        let py = known.iter().find(|k| k.id == LanguageId::Python).unwrap();
+        assert_eq!(py.extensions, &[".py"]);
+        let ts = known
+            .iter()
+            .find(|k| k.id == LanguageId::TypeScript)
+            .unwrap();
+        assert_eq!(ts.extensions, &[".ts", ".tsx"]);
+        let js = known
+            .iter()
+            .find(|k| k.id == LanguageId::JavaScript)
+            .unwrap();
+        assert_eq!(js.extensions, &[".js", ".jsx"]);
+        let rs = known.iter().find(|k| k.id == LanguageId::Rust).unwrap();
+        assert_eq!(rs.extensions, &[".rs"]);
+        let go = known.iter().find(|k| k.id == LanguageId::Go).unwrap();
+        assert_eq!(go.extensions, &[".go"]);
+        let cs = known.iter().find(|k| k.id == LanguageId::CSharp).unwrap();
+        assert_eq!(cs.extensions, &[".cs"]);
+    }
+
+    #[test]
+    fn catalog_extensions_match_builtin_adapters_exactly() {
+        // Review R1 P1: REAL cross-check — instantiate the built-in adapters
+        // and compare their actual `extensions()` output with the catalog, per
+        // language, exact slice equality. If an adapter gains/loses an
+        // extension (e.g. ".csx") without the catalog following — or the
+        // catalog claims one no adapter serves — this goes red. The
+        // exact-equality assumption behind bit-identical discovery is thereby
+        // test-enforced, not comment-enforced.
+        use crate::adapters::csharp::CSharpAdapter;
+        use crate::adapters::go::GoAdapter;
+        use crate::adapters::javascript::JavaScriptAdapter;
+        use crate::adapters::python::PythonAdapter;
+        use crate::adapters::rust::RustAdapter;
+        use crate::adapters::typescript::TypeScriptAdapter;
+
+        let builtin: &[(LanguageId, &[&'static str])] = &[
+            (LanguageId::Python, PythonAdapter.extensions()),
+            (LanguageId::TypeScript, TypeScriptAdapter.extensions()),
+            (LanguageId::JavaScript, JavaScriptAdapter.extensions()),
+            (LanguageId::Rust, RustAdapter.extensions()),
+            (LanguageId::Go, GoAdapter.extensions()),
+            (LanguageId::CSharp, CSharpAdapter.extensions()),
+        ];
+        assert_eq!(
+            builtin.len(),
+            LanguageCatalog::known_all().len(),
+            "every catalog language must have a built-in adapter cross-check row"
+        );
+        for (id, adapter_exts) in builtin {
+            let known = LanguageCatalog::known_all()
+                .iter()
+                .find(|k| k.id == *id)
+                .unwrap_or_else(|| panic!("no catalog entry for {id:?}"));
+            assert_eq!(
+                known.extensions, *adapter_exts,
+                "catalog/adapter extension drift for {}",
+                known.display_name
+            );
+        }
+    }
+
+    // ── RepoRelativePath ─────────────────────────────────────────────────────
+
+    #[test]
+    fn repo_relative_path_strips_prefix_and_normalizes_separators() {
+        let repo = Path::new("/repo");
+        let abs = Path::new("/repo/src/models/user.py");
+        let rel = RepoRelativePath::from_absolute(repo, abs).expect("path is under repo root");
+        assert_eq!(rel.as_str(), "src/models/user.py");
+    }
+
+    #[test]
+    fn repo_relative_path_rejects_path_outside_root() {
+        // Review R1 P1: the "guaranteed repository-relative" claim must be real.
+        // A path outside repo_root is rejected — never stored as an absolute
+        // machine-path fallback that could leak into reports/snapshots.
+        let repo = Path::new("/repo");
+        let outside = Path::new("/elsewhere/main.py");
+        assert!(RepoRelativePath::from_absolute(repo, outside).is_none());
+        // Under-root paths still normalize separators to `/`.
+        let inside = RepoRelativePath::from_absolute(repo, Path::new("/repo/src/a.py"))
+            .expect("under-root path must construct");
+        assert_eq!(inside.as_str(), "src/a.py");
+    }
+
+    // ── AnalysisCompleteness ─────────────────────────────────────────────────
+
+    #[test]
+    fn completeness_empty_reasons_is_complete() {
+        let c = AnalysisCompleteness::from_reasons(vec![]);
+        assert_eq!(c, AnalysisCompleteness::Complete);
+        assert!(c.is_complete());
+    }
+
+    #[test]
+    fn completeness_nonempty_reasons_is_partial() {
+        let reasons = vec![IncompleteReason::AdapterUnavailable {
+            language: LanguageId::Python,
+            path: RepoRelativePath::from_absolute(Path::new("/repo"), Path::new("/repo/a.py"))
+                .expect("path is under repo root"),
+        }];
+        let c = AnalysisCompleteness::from_reasons(reasons.clone());
+        assert_eq!(c, AnalysisCompleteness::Partial { reasons });
+        assert!(!c.is_complete());
+    }
+
+    #[test]
+    fn completeness_default_is_complete() {
+        assert_eq!(
+            AnalysisCompleteness::default(),
+            AnalysisCompleteness::Complete
+        );
     }
 }

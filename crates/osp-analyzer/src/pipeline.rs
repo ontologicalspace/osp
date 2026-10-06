@@ -41,8 +41,9 @@ pub fn analyze_repo_with_config(
 ) -> anyhow::Result<AnalysisResult> {
     let repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
 
-    // 1. Collect source files
-    let files = collect_source_files(&repo, registry)?;
+    // 1. Collect source files (split: catalog-known + registry-available vs
+    //    catalog-known + no adapter registered — see IncompleteReason)
+    let (files, incomplete_reasons) = collect_source_files(&repo, registry)?;
     tracing::info!(files = files.len(), repo = ?repo, "kaynak dosya bulundu");
 
     // 2. Phase 1: extract per-file data (isolated scope — registry borrow ends here)
@@ -445,6 +446,7 @@ pub fn analyze_repo_with_config(
         },
         semantic_coverage: build_semantic_coverage(&semantic_index, files.len(), repo_head),
         diagnostics,
+        completeness: crate::language::AnalysisCompleteness::from_reasons(incomplete_reasons),
     })
 }
 
@@ -592,12 +594,72 @@ fn role_refinement_degrees(
     (in_degree, out_degree)
 }
 
-fn collect_source_files(repo: &Path, registry: &AdapterRegistry) -> anyhow::Result<Vec<PathBuf>> {
+/// Discover source files in three stages so candidate membership, analysis
+/// scope, and registry availability each see the SAME file set (review R1 P1
+/// — scope asymmetry; R2 P1 — custom-adapter compatibility): (1) collect
+/// candidates recognized by the static catalog **OR by THIS registry** — the
+/// union keeps the pre-PR-B public extensibility contract
+/// (`LanguageAdapter` + `AdapterRegistry::new().with(..)` +
+/// `analyze_repo_with` are public, so a custom `MyRubyAdapter` analyzing
+/// `.rb` must keep working even though Ruby is not a `KnownLanguage`);
+/// (2) apply the analysis-scope filter (`filter_gitignored`, #157
+/// HEAD-semantics) to those candidates; (3) partition by registry
+/// availability, checked per file through the file's ACTUAL extension
+/// (`adapter_for_extension`): registry-known → analyzed; catalog-known but
+/// registry-missing → observable `AdapterUnavailable`; neither (custom
+/// extension whose adapter was removed between stages) → unreachable by
+/// construction. An ignored `generated.py` under a partial registry is
+/// therefore NOT recorded as `AdapterUnavailable` — it is out of analysis
+/// scope, exactly as it would be silently dropped under a full registry; both
+/// arms of the partition pass through the same scope function. A `.md` file
+/// that matches no `KnownLanguage` and no registered adapter never reaches
+/// stage 3 and is never recorded as incomplete — it is simply out of scope.
+/// Bit-identical for the current `default_all()` full registry: every
+/// `KnownLanguage` extension set is an exact match to its adapter's
+/// `extensions()` (enforced by
+/// `catalog_extensions_match_builtin_adapters_exactly`), so the union adds
+/// nothing and the `files` list is identical to the pre-PR-B single-phase
+/// check.
+fn collect_source_files(
+    repo: &Path,
+    registry: &AdapterRegistry,
+) -> anyhow::Result<(Vec<PathBuf>, Vec<crate::language::IncompleteReason>)> {
+    use crate::language::{IncompleteReason, LanguageCatalog, RepoRelativePath};
+
+    let mut candidates = Vec::new();
+    walk_dir(repo, &mut candidates, registry)?;
+    candidates.sort();
+    filter_gitignored(repo, &mut candidates);
+
     let mut files = Vec::new();
-    walk_dir(repo, &mut files, registry)?;
-    files.sort();
-    filter_gitignored(repo, &mut files);
-    Ok(files)
+    let mut incomplete = Vec::new();
+    for path in candidates {
+        let dotted = format!(
+            ".{}",
+            path.extension().and_then(|e| e.to_str()).unwrap_or("")
+        );
+        if registry.adapter_for_extension(&dotted).is_some() {
+            files.push(path);
+            continue;
+        }
+        // Registry can't analyze it. If the static catalog knows the language,
+        // that gap is observable; a registry-known custom extension never
+        // reaches this branch (it went to `files` above).
+        let language = LanguageCatalog::language_for_path(&path).unwrap_or_else(|| {
+            unreachable!("candidate is catalog- or registry-known by construction")
+        });
+        let rel = RepoRelativePath::from_absolute(repo, &path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "catalog-known candidate outside repo root: {}",
+                path.display()
+            )
+        })?;
+        incomplete.push(IncompleteReason::AdapterUnavailable {
+            language,
+            path: rel,
+        });
+    }
+    Ok((files, incomplete))
 }
 
 /// #157 (PR #158 R1, HEAD-semantics): bir repo kapsamı — kök repo ya da
@@ -856,9 +918,33 @@ fn initialized_submodule_scopes(repo: &Path) -> Vec<IgnoreScope> {
     scopes
 }
 
+/// Stage-1 membership (review R2 P1): a file is a candidate when the static
+/// catalog recognizes its extension **OR this registry does** — neither the
+/// catalog nor the registry limits the other's existence set. The catalog
+/// provides epistemic observability; the registry provides execution
+/// capability; the union preserves the pre-PR-B public custom-adapter
+/// contract (`.rb` via `MyRubyAdapter` keeps being analyzed even though Ruby
+/// is not a `KnownLanguage`).
+fn is_discovery_candidate(path: &Path, registry: &AdapterRegistry) -> bool {
+    use crate::language::LanguageCatalog;
+
+    if LanguageCatalog::language_for_path(path).is_some() {
+        return true;
+    }
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let dotted = format!(".{ext}");
+    registry.adapter_for_extension(&dotted).is_some()
+}
+
+/// Stage 1 — walk collecting candidate source files (membership only, per
+/// `is_discovery_candidate`). A non-source extension (`.md/.json/.png/...`)
+/// that no `KnownLanguage` maps AND no registered adapter serves is out of
+/// scope — no record, exactly like before PR B. Scope filtering and registry
+/// availability are applied by the caller, so the candidate pool feeds the
+/// SAME scope function the analyzed files go through.
 fn walk_dir(
     dir: &Path,
-    files: &mut Vec<PathBuf>,
+    candidates: &mut Vec<PathBuf>,
     registry: &AdapterRegistry,
 ) -> anyhow::Result<()> {
     for entry in std::fs::read_dir(dir)? {
@@ -890,14 +976,9 @@ fn walk_dir(
             {
                 continue;
             }
-            walk_dir(&path, files, registry)?;
-        } else if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let dotted = format!(".{ext}");
-                if registry.adapter_for_extension(&dotted).is_some() {
-                    files.push(path);
-                }
-            }
+            walk_dir(&path, candidates, registry)?;
+        } else if path.is_file() && is_discovery_candidate(&path, registry) {
+            candidates.push(path);
         }
     }
     Ok(())
@@ -994,6 +1075,123 @@ mod tests {
             .edges
             .iter()
             .all(|e| e.kind == EdgeKind::Imports));
+    }
+
+    #[test]
+    fn analyze_repo_full_registry_is_complete() {
+        // default_all() covers every catalog-known extension in the fixture (.py) —
+        // completeness must be Complete, not Partial. readme.md is out of catalog
+        // scope entirely (not a "language"), so it must not appear as a reason.
+        let dir = make_fixture();
+        let result = analyze_repo(dir.path()).expect("analyze succeeded");
+        assert!(
+            result.completeness.is_complete(),
+            "full registry + catalog-known-only fixture must be Complete, got {:?}",
+            result.completeness
+        );
+    }
+
+    #[test]
+    fn analyze_repo_partial_registry_reports_adapter_unavailable() {
+        // Cargo-independent scenario (verified against reviewer feedback 2026-07-29):
+        // AdapterRegistry::new().with(...) and analyze_repo_with are both public
+        // today, so a caller can already build a registry missing a catalog-known
+        // language's adapter — no feature-gating required. This must surface as
+        // IncompleteReason::AdapterUnavailable, not a silently dropped file.
+        use crate::adapters::rust::RustAdapter;
+        use crate::language::{
+            AdapterRegistry, AnalysisCompleteness, IncompleteReason, LanguageId,
+        };
+
+        let dir = make_fixture(); // 3 .py files + readme.md
+        fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let rust_only = AdapterRegistry::new().with(RustAdapter);
+        let result = analyze_repo_with(dir.path(), &rust_only).expect("analyze succeeded");
+
+        // Only the .rs file was analyzed — the 3 .py files are catalog-known but
+        // have no adapter in this registry, so they're excluded from the graph
+        // (same as before PR B: silently not pushed to `files`) but NOW recorded.
+        assert_eq!(result.space.node_count(), 1, "only main.rs analyzed");
+
+        match &result.completeness {
+            AnalysisCompleteness::Partial { reasons } => {
+                assert_eq!(reasons.len(), 3, "one reason per unanalyzed .py file");
+                assert!(reasons.iter().all(|r| matches!(
+                    r,
+                    IncompleteReason::AdapterUnavailable { language, .. }
+                        if *language == LanguageId::Python
+                )));
+                // Paths must be repo-relative, never carry the tempdir's absolute prefix.
+                for r in reasons {
+                    let IncompleteReason::AdapterUnavailable { path, .. } = r;
+                    assert!(
+                        !path.as_str().contains(dir.path().to_str().unwrap()),
+                        "path must be repo-relative, got: {path}"
+                    );
+                    assert!(path.as_str().ends_with(".py"));
+                }
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
+    }
+
+    /// Review R2 P1 (PR #109): public custom-adapter desteği. `LanguageAdapter`,
+    /// `AdapterRegistry::new().with(..)` ve `analyze_repo_with` public olduğu
+    /// sürece consumer kendi adapter'ını getirip katalog-dışı bir uzantıyı
+    /// (ör. ".foo") analiz edebilmeli — pre-PR-B public API davranışı. Statik
+    /// katalog üyeliği discovery'nin TEK gate'i olsaydı bu dosya sessizce
+    /// düşer ve sistem kendi custom registry'sinde ".foo" desteği VARKEN
+    /// `Complete` dönerdi. Aday üyeliği = catalog-known ∪ registry-known.
+    #[test]
+    fn custom_adapter_extension_not_in_catalog_is_still_analyzed() {
+        use crate::contract::{ClassDef, ImportStatement, ResolvedImport};
+        use crate::language::{AdapterRegistry, LanguageAdapter, LanguageCatalog, RepoContext};
+
+        struct FooAdapter;
+        impl LanguageAdapter for FooAdapter {
+            fn name(&self) -> &str {
+                "foo"
+            }
+            fn extensions(&self) -> &[&str] {
+                &[".foo"]
+            }
+            fn extract_imports(&self, _source: &str) -> Vec<ImportStatement> {
+                Vec::new()
+            }
+            fn resolve_import(
+                &self,
+                _import: &ImportStatement,
+                _from_file: &std::path::Path,
+                _repo: &RepoContext,
+            ) -> Option<ResolvedImport> {
+                None
+            }
+            fn extract_class_defs(&self, _source: &str) -> Vec<ClassDef> {
+                Vec::new()
+            }
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("a.foo"), "whatever\n").unwrap();
+        // ".foo" katalogda YOK — sadece custom registry'de.
+        assert!(
+            LanguageCatalog::language_for_path(std::path::Path::new("a.foo")).is_none(),
+            "precondition: .foo must not be a catalog-known extension"
+        );
+
+        let reg = AdapterRegistry::new().with(FooAdapter);
+        let result = analyze_repo_with(tmp.path(), &reg).expect("analyze succeeded");
+        assert_eq!(
+            result.space.node_count(),
+            1,
+            "custom registry-known .foo must be analyzed (pre-PR-B public API behavior)"
+        );
+        assert!(
+            result.completeness.is_complete(),
+            "fully-served custom extension must be Complete, got {:?}",
+            result.completeness
+        );
     }
 
     #[test]
@@ -1886,7 +2084,7 @@ mod gitignore_discovery_tests {
         std::fs::create_dir_all(repo.join("ignoredir")).unwrap();
         std::fs::write(repo.join("ignoredir/x.rs"), "fn a() {}\n").unwrap();
         std::fs::write(repo.join("legacy.rs"), "fn b() {}\n").unwrap();
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -1895,6 +2093,45 @@ mod gitignore_discovery_tests {
             names,
             vec!["main.rs".to_string()],
             "ignored content must be excluded"
+        );
+    }
+
+    /// Review R1 P1 (PR #109): kapsam asimetrisi — ignore'lu catalog-known
+    /// dosya + kısmi registry → completeness ETKİLENMEMELİ. Eski akış
+    /// `incomplete`'i walk sırasında doldurup yalnız `files`'ı scope-filtreden
+    /// geçiriyordu: ignore'lu `generated.py`, registry'de Python adapter'ı
+    /// yokken AdapterUnavailable üretirken, dolu registry'de sessizce düşerdi —
+    /// aynı dosya, adapter varlığına göre farklı epistemik sonuca dönüşüyordu.
+    /// Yeni akış: catalog-known adaylar → kapsam filtresi → registry partition;
+    /// partition'un her iki kolu da AYNI kapsam fonksiyonundan geçer.
+    #[test]
+    fn gitignored_catalog_known_file_partial_registry_completeness_unaffected() {
+        use crate::adapters::rust::RustAdapter;
+        use crate::language::AdapterRegistry;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        git_init(repo);
+        std::fs::write(repo.join(".gitignore"), "generated.py\n").unwrap();
+        std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+        git_cmd(repo, &["add", "-A"]);
+        git_cmd(repo, &["commit", "-qm", "init"]);
+        // Ignore'lu içerik SONRADAN düşer (HEAD'te yok) — kapsam filtresi onu
+        // aday havuzundan çıkarır; kısmi registry (yalnızca Rust) Python
+        // adapter'ı taşımaz ama bu, out-of-scope dosya için reason ÜRETMEMELİ.
+        std::fs::write(repo.join("generated.py"), "x = 1\n").unwrap();
+
+        let rust_only = AdapterRegistry::new().with(RustAdapter);
+        let result = analyze_repo_with(repo, &rust_only).expect("analyze succeeded");
+        assert_eq!(
+            result.space.node_count(),
+            1,
+            "only the in-scope main.rs is analyzed"
+        );
+        assert!(
+            result.completeness.is_complete(),
+            "ignored catalog-known file must not produce AdapterUnavailable under a partial registry, got {:?}",
+            result.completeness
         );
     }
 
@@ -1915,7 +2152,7 @@ mod gitignore_discovery_tests {
         git_cmd(repo, &["add", "-f", "kept.gen.rs"]); // pattern'e rağmen HEAD'e girmeli
         git_cmd(repo, &["commit", "-qm", "init"]);
         git_cmd(repo, &["rm", "--cached", "-q", "kept.gen.rs"]); // staged delete; dosya diskte
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -1939,7 +2176,7 @@ mod gitignore_discovery_tests {
         git_cmd(repo, &["commit", "-qm", "init"]);
         std::fs::write(repo.join("sneaky.gen.rs"), "fn a() {}\n").unwrap();
         git_cmd(repo, &["add", "-f", "sneaky.gen.rs"]); // staged new; HEAD'de yok
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -1962,7 +2199,7 @@ mod gitignore_discovery_tests {
         std::fs::write(repo.join("kept.gen.rs"), "fn a() {}\n").unwrap();
         git_cmd(repo, &["add", "-f", "kept.gen.rs"]);
         git_cmd(repo, &["commit", "-qm", "init"]);
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         assert!(
             files
                 .iter()
@@ -2027,7 +2264,8 @@ mod gitignore_discovery_tests {
 ",
         )
         .unwrap();
-        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let (files, _incomplete) =
+            collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2094,7 +2332,8 @@ mod gitignore_discovery_tests {
         assert!(st.success(), "submodule add failed");
         git_cmd(parent.path(), &["add", "-A"]);
         git_cmd(parent.path(), &["commit", "-qm", "add submodule"]);
-        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let (files, _incomplete) =
+            collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2212,7 +2451,8 @@ mod gitignore_discovery_tests {
                 .expect("git in submodule");
             assert!(st.success(), "git {args:?} in submodule failed");
         }
-        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let (files, _incomplete) =
+            collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2246,7 +2486,7 @@ mod gitignore_discovery_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
         std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         assert_eq!(files.len(), 1);
     }
 }
