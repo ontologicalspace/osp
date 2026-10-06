@@ -614,7 +614,6 @@ fn collect_source_files(
     filter_gitignored(repo, &mut files);
     Ok((files, incomplete))
 }
-}
 
 /// #157 (PR #158 R1, HEAD-semantics): bir repo kapsamı — kök repo ya da
 /// initialized bir submodule (dosyalar önekli relative).
@@ -1976,7 +1975,7 @@ mod gitignore_discovery_tests {
         std::fs::create_dir_all(repo.join("ignoredir")).unwrap();
         std::fs::write(repo.join("ignoredir/x.rs"), "fn a() {}\n").unwrap();
         std::fs::write(repo.join("legacy.rs"), "fn b() {}\n").unwrap();
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2005,7 +2004,7 @@ mod gitignore_discovery_tests {
         git_cmd(repo, &["add", "-f", "kept.gen.rs"]); // pattern'e rağmen HEAD'e girmeli
         git_cmd(repo, &["commit", "-qm", "init"]);
         git_cmd(repo, &["rm", "--cached", "-q", "kept.gen.rs"]); // staged delete; dosya diskte
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2029,7 +2028,7 @@ mod gitignore_discovery_tests {
         git_cmd(repo, &["commit", "-qm", "init"]);
         std::fs::write(repo.join("sneaky.gen.rs"), "fn a() {}\n").unwrap();
         git_cmd(repo, &["add", "-f", "sneaky.gen.rs"]); // staged new; HEAD'de yok
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2052,7 +2051,7 @@ mod gitignore_discovery_tests {
         std::fs::write(repo.join("kept.gen.rs"), "fn a() {}\n").unwrap();
         git_cmd(repo, &["add", "-f", "kept.gen.rs"]);
         git_cmd(repo, &["commit", "-qm", "init"]);
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         assert!(
             files
                 .iter()
@@ -2117,7 +2116,8 @@ mod gitignore_discovery_tests {
 ",
         )
         .unwrap();
-        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let (files, _incomplete) =
+            collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2184,7 +2184,8 @@ mod gitignore_discovery_tests {
         assert!(st.success(), "submodule add failed");
         git_cmd(parent.path(), &["add", "-A"]);
         git_cmd(parent.path(), &["commit", "-qm", "add submodule"]);
-        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let (files, _incomplete) =
+            collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2302,7 +2303,8 @@ mod gitignore_discovery_tests {
                 .expect("git in submodule");
             assert!(st.success(), "git {args:?} in submodule failed");
         }
-        let files = collect_source_files(parent.path(), &registry_rs()).expect("collect");
+        let (files, _incomplete) =
+            collect_source_files(parent.path(), &registry_rs()).expect("collect");
         let names: Vec<String> = files
             .iter()
             .map(|f| f.file_name().unwrap().to_string_lossy().into_owned())
@@ -2336,7 +2338,7 @@ mod gitignore_discovery_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let repo = tmp.path();
         std::fs::write(repo.join("main.rs"), "fn c() {}\n").unwrap();
-        let files = collect_source_files(repo, &registry_rs()).expect("collect");
+        let (files, _incomplete) = collect_source_files(repo, &registry_rs()).expect("collect");
         assert_eq!(files.len(), 1);
     }
 }

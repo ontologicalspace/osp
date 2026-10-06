@@ -173,11 +173,12 @@ impl Default for AdapterRegistry {
 /// Identity of a language OSP knows about (independent of whether a compiled
 /// adapter for it exists in a given `AdapterRegistry`).
 ///
-/// PR B ships the five languages that already have adapters. A new variant is
-/// added only in the PR that also adds the corresponding `KnownLanguage` catalog
-/// entry — e.g. `CSharp` is added in the PR that introduces `CSharpAdapter`, not
-/// before, so the catalog never claims to know a language before OSP actually
-/// recognizes its source files.
+/// A new variant is added only together with the corresponding
+/// `KnownLanguage` catalog entry, in the PR that introduces the adapter.
+/// `CSharp` + its catalog entry arrive together in the PR B refresh because
+/// `CSharpAdapter` (#137) landed on main while PR B was pending — the pair
+/// still lands as one change so the catalog never claims to know a language
+/// before OSP actually recognizes its source files.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LanguageId {
@@ -186,13 +187,15 @@ pub enum LanguageId {
     JavaScript,
     Rust,
     Go,
+    CSharp,
 }
 
 /// One language OSP's catalog recognizes, independent of compiled/registered
 /// adapter availability. `extensions` must match the corresponding adapter's
 /// `LanguageAdapter::extensions()` output exactly (verified against each
-/// adapter 2026-07-29): Python `[".py"]`, TypeScript `[".ts",".tsx"]`,
-/// JavaScript `[".js",".jsx"]`, Rust `[".rs"]`, Go `[".go"]`.
+/// adapter 2026-07-29; CSharp added and re-verified at the 2026-10-06
+/// refresh): Python `[".py"]`, TypeScript `[".ts",".tsx"]`, JavaScript
+/// `[".js",".jsx"]`, Rust `[".rs"]`, Go `[".go"]`, CSharp `[".cs"]`.
 #[derive(Debug, Clone, Copy)]
 pub struct KnownLanguage {
     pub id: LanguageId,
@@ -238,6 +241,11 @@ impl LanguageCatalog {
             id: LanguageId::Go,
             display_name: "Go",
             extensions: &[".go"],
+        },
+        KnownLanguage {
+            id: LanguageId::CSharp,
+            display_name: "C#",
+            extensions: &[".cs"],
         },
     ];
 
@@ -383,6 +391,10 @@ mod tests {
             LanguageCatalog::language_for_path(Path::new("main.go")),
             Some(LanguageId::Go)
         );
+        assert_eq!(
+            LanguageCatalog::language_for_path(Path::new("CustomerAppService.cs")),
+            Some(LanguageId::CSharp)
+        );
     }
 
     #[test]
@@ -413,11 +425,12 @@ mod tests {
     }
 
     #[test]
-    fn catalog_known_all_has_five_languages_with_matching_adapter_extensions() {
+    fn catalog_known_all_has_six_languages_with_matching_adapter_extensions() {
         // Cross-check against each adapter's actual extensions() output (verified
-        // 2026-07-29) so the catalog can never silently drift from the adapters.
+        // 2026-07-29; CSharp at the 2026-10-06 refresh) so the catalog can never
+        // silently drift from the adapters.
         let known = LanguageCatalog::known_all();
-        assert_eq!(known.len(), 5);
+        assert_eq!(known.len(), 6);
         let py = known.iter().find(|k| k.id == LanguageId::Python).unwrap();
         assert_eq!(py.extensions, &[".py"]);
         let ts = known
@@ -434,6 +447,8 @@ mod tests {
         assert_eq!(rs.extensions, &[".rs"]);
         let go = known.iter().find(|k| k.id == LanguageId::Go).unwrap();
         assert_eq!(go.extensions, &[".go"]);
+        let cs = known.iter().find(|k| k.id == LanguageId::CSharp).unwrap();
+        assert_eq!(cs.extensions, &[".cs"]);
     }
 
     // ── RepoRelativePath ─────────────────────────────────────────────────────
