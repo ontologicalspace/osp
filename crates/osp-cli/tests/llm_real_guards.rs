@@ -153,22 +153,41 @@ enum EndpointStep {
 }
 
 /// Tek-atımlık loopback endpoint: her bağlantıda script'teki sıradaki adım.
+/// `watch` verilirse İLK istek geldiğinde o path'in diskte VAR olup olmadığını
+/// rapor eder (P0 "freeze önce kanıtı" wire pin'i).
 struct FakeEndpoint {
     port: u16,
     requests: mpsc::Receiver<Vec<u8>>,
+    watch_first_request: Option<mpsc::Receiver<bool>>,
 }
 
 impl FakeEndpoint {
     fn start(steps: Vec<EndpointStep>) -> Self {
+        Self::start_inner(steps, None)
+    }
+
+    fn start_watching(steps: Vec<EndpointStep>, watch: std::path::PathBuf) -> Self {
+        Self::start_inner(steps, Some(watch))
+    }
+
+    fn start_inner(steps: Vec<EndpointStep>, watch: Option<std::path::PathBuf>) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let port = listener.local_addr().unwrap().port();
         let (tx, rx) = mpsc::channel();
+        let (wtx, wrx) = mpsc::channel();
+        let watch_channel = watch.is_some().then_some(wrx);
         thread::spawn(move || {
-            for step in steps {
+            for (i, step) in steps.into_iter().enumerate() {
                 let (mut stream, _) = match listener.accept() {
                     Ok(s) => s,
                     Err(_) => return,
                 };
+                if i == 0 {
+                    if let Some(path) = &watch {
+                        // İstek SIRASINDA dosya var mı? (P0: çağrı-öncesi freeze)
+                        let _ = wtx.send(path.exists());
+                    }
+                }
                 // Bir HTTP isteği oku: başlıklar + Content-Length gövdesi.
                 let mut buf = Vec::new();
                 let mut chunk = [0u8; 4096];
@@ -229,7 +248,11 @@ impl FakeEndpoint {
                 }
             }
         });
-        Self { port, requests: rx }
+        Self {
+            port,
+            requests: rx,
+            watch_first_request: watch_channel,
+        }
     }
 }
 
@@ -445,4 +468,40 @@ fn d6_sealed_line_blocks_second_process_before_any_http_call() {
         proposals_after["network_retry_count"], 1,
         "bütçe sıfırlanmadı — kayıt değişmedi"
     );
+}
+
+#[test]
+fn pre_call_frozen_anchor_exists_when_first_request_arrives() {
+    // Review R3 P0 wire pin'i: llm-prompt.json + line claim, İLK HTTP isteği
+    // geldiği AN diskte durmak zorunda — "freeze önce kanıtı" sıralaması
+    // (anchor çağrı-sonrası evidence DEĞİL, çağrı-öncesi anchor'dur).
+    let fx = HarnessFixture::new();
+    let artifacts = external_artifacts_dir(&fx);
+    let watch = std::path::Path::new(&artifacts).join("llm-prompt.json");
+    let endpoint =
+        FakeEndpoint::start_watching(vec![EndpointStep::Respond(openai_body("not json"))], watch);
+
+    let output = attempt_real_dir(&fx, endpoint.port, &artifacts);
+    assert_eq!(
+        output.status.code(),
+        Some(90),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let anchor_existed_at_request = endpoint
+        .watch_first_request
+        .expect("watch channel")
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("server reported watch result");
+    assert!(
+        anchor_existed_at_request,
+        "llm-prompt.json İSTEK ANINDA diskte olmalı (pre-call freeze; P0)"
+    );
+
+    // Claim dosyası da isteğe kadar yazılmış olmalı (single-writer sahiplenme).
+    let requests: Vec<Vec<u8>> = endpoint.requests.try_iter().collect();
+    assert_eq!(requests.len(), 1);
+    let claim = read_artifact_json(&artifacts, "llm-line-claim.json");
+    assert_eq!(claim["kind"], "proposal-line-claim");
 }
