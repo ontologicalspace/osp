@@ -226,18 +226,22 @@ pub struct TrajectoryAttemptArgs {
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
     /// #171 §5: `--llm real` kanıt dizini (run dir). İlk gerçek completion'ın
-    /// donmuş prompt'u (`llm-prompt.json` + digest), ham yanıtı
-    /// (`llm-raw-response.txt`), parse edilmiş önerisi (`llm-proposals.json`)
-    /// ve `--bar-elicitation` yanıtına (`llm-bar.json`) buraya yazılır.
+    /// donmuş prompt anchor'u (`llm-prompt.json` + prompt/completion-identity
+    /// digest'leri + INV-E1 provenance), ham yanıtı (`llm-raw-response.txt`),
+    /// D6 durum kaydı (`llm-proposals.json`) ve `--bar-elicitation` kanalı
+    /// (`llm-bar-prompt.json` + `llm-bar-response.json`) buraya yazılır.
     /// `--llm real` ile ZORUNLU (unpersisted gerçek çağrı = yeniden üretilemez
     /// kanıt); analyzed repo ve canonical state mağazaları dışında olmalı
-    /// (preflight fence, `--out` disipliniyle aynı). Mock yolu DEĞİŞMEZ.
+    /// (preflight fence, `--out` disipliniyle aynı). Bu bayrak AYNI ANDA D6
+    /// strict retry semantiğini açar (parse terminal; ağ hatasında aynı
+    /// prompt'la tek retry). Mock yolu DEĞİŞMEZ.
     #[arg(long)]
     pub llm_artifacts: Option<PathBuf>,
     /// #171 D4: bar elicitation — aynı kör `AgentTaskView` ile ikinci completion
     /// ("kabul barın olarak öngörülen değişim-sonrası coupling'i bildir ve
-    /// önerilerini öngörülen etkiye göre sırala"); yanıt `llm-bar.json`'a
-    /// donar + digest. Yalnız `--llm real` ile (scripted mock bar elicite edilemez).
+    /// önerilerini öngörülen etkiye göre sırala"); prompt donar
+    /// (`llm-bar-prompt.json`) + yanıt kaydı (`llm-bar-response.json`).
+    /// Yalnız `--llm real` ile (scripted mock bar elicite edilemez).
     #[arg(long, default_value_t = false)]
     pub bar_elicitation: bool,
 }
@@ -1168,10 +1172,21 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
             let artifacts_dir = llm_artifacts_dir
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("--llm real requires --llm-artifacts <dir>"))?;
+            // INV-E1 provenance manifest: donmuş anchor "bu prompt yalnızca şu
+            // girdilerden üretildi" iddiasını denetlenebilir kılar. `files_read`
+            // boş — motorun prompt'u YALNIZCA engine state'inden (AgentTaskView)
+            // üretir, analist artifact'ı OKUMAZ (procedural blindness kaydı).
+            let inv_e1 = osp_llm_runtime::InvE1Manifest {
+                task_digest: task_digest.clone(),
+                baseline_digest: snapshot_before.head.as_str().to_string(),
+                osp_revision: env!("OSP_GIT_REVISION").to_string(),
+                files_read: vec![],
+            };
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
                 .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?
-                .with_artifacts(artifacts_dir);
-            // Real kol proposals DOSYASI tüketmez (#171) → digest null (dürüst boşluk).
+                .with_artifacts(artifacts_dir, inv_e1);
+            // #171 D6 preregistered mod: parse ihlali terminal (tamir döngüsü
+            // yok); ağ retry'sı client içinde aynı prompt'la bir kez.
             let execution = run_navigator(
                 &llm,
                 &mut engine,
@@ -1182,10 +1197,12 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 task_source,
                 task_digest,
                 None,
+                osp_core::navigator::ParseFailurePolicy::TerminalNoRepair,
             )?;
             // #171 D4: bar elicitation — İKİNCİ completion, ilk kör view'la.
             // Navigator sonucundan BAĞIMSIZ kanal: hatası attempt'i bozmaz (D6
-            // dürüst boşluk llm-bar.json'a işlenir; yalnız disk hatası uyarıya düşer).
+            // dürüst boşluk llm-bar-response.json'a işlenir; yalnız disk hatası
+            // uyarıya düşer).
             if args.bar_elicitation {
                 emit_bar_elicitation_result(&llm);
             }
@@ -1228,6 +1245,8 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 task_source,
                 task_digest,
                 Some(proposals_digest),
+                // Mock yolu değişmez: genel navigator davranışı (parse → feedback).
+                osp_core::navigator::ParseFailurePolicy::FeedbackRetry,
             )?
         }
     };
@@ -1812,6 +1831,9 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
     // run_navigator dosyaları TEKRAR OKUMAZ (producer-side TOCTOU kapalı).
     task_digest: Option<String>,
     proposals_digest: Option<String>,
+    // #171 D6 (review P0): parse ihlali politikası — mock = FeedbackRetry (mevcut
+    // davranış), --llm real = TerminalNoRepair (preregistered: tamir döngüsü yok).
+    parse_failure_policy: osp_core::navigator::ParseFailurePolicy,
 ) -> anyhow::Result<AttemptExecution> {
     use osp_core::navigator::AgentNavigator;
     use osp_core::trajectory::{
@@ -1874,6 +1896,7 @@ fn run_navigator<L: osp_core::navigator::LlmClient>(
             osp_core::authorization::FilesystemPendingAuthorizationStore::new(state_dir),
         ),
         clock: Box::new(osp_core::authorization::SystemClock),
+        parse_failure_policy,
     };
     let result = nav.run_task(args.task_id, 1);
     drop(nav); // evidence'ın mutable ödünç alanı (nav field'ı) biter — taşınabilir.
@@ -2064,31 +2087,36 @@ fn publish_no_clobber_attempt_artifact(
     Ok(canonical)
 }
 
-/// #171 D4: bar elicitation sonucunu INSAN okur özetle (kanıt zaten `llm-bar.json`;
-/// stdout/evidence kanalına GİRMEZ — attempt envelope'u bu üretici kanalı taşımaz).
+/// #171 D4: bar elicitation sonucunu INSAN okur özetle (kanıt zaten
+/// `llm-bar-prompt.json` + `llm-bar-response.json`; stdout/evidence kanalına
+/// GİRMEZ — attempt envelope'u bu üretici kanalı taşımaz).
 fn emit_bar_elicitation_result(llm: &osp_llm_runtime::RuntimeLlmClient) {
     match llm.elicit_bar() {
         Ok(Some(report)) => match (&report.elicited, &report.transport_error) {
             (Some(bar), _) => eprintln!(
-                "llm-bar.json: bar_value={} · {} öngörü (τ sırası) · prompt {}",
+                "llm-bar-response.json: bar_value={} · {} öngörü (τ sırası) · prompt {}",
                 bar.bar_value,
                 bar.predicted.len(),
                 report.prompt_digest
             ),
             (None, Some(err)) => {
-                eprintln!("llm-bar.json: transport hatası dürüst boşlukla kaydedildi: {err}")
+                eprintln!(
+                    "llm-bar-response.json: transport hatası dürüst boşlukla kaydedildi: {err}"
+                )
             }
             (None, None) => eprintln!(
-                "llm-bar.json: parse ihlali dürüst boşlukla kaydedildi (D6): {:?}",
+                "llm-bar-response.json: parse ihlali dürüst boşlukla kaydedildi (D6): {:?}",
                 report.parse_error
             ),
         },
         Ok(None) => {
-            eprintln!("llm-bar.json: ATLANDI — navigator hiç LLM çağrısı yapmadı (kör view yok)")
+            eprintln!(
+                "llm-bar-response.json: ATLANDI — navigator hiç LLM çağrısı yapmadı (kör view yok)"
+            )
         }
         Err(e) => eprintln!(
-            "llm-bar.json: YAZILAMADI (disk hatası — attempt sonucu geçerli, bar kanıtı \
-             eksik): {e:#}"
+            "llm-bar-response.json: YAZILAMADI (disk/protokol hatası — attempt sonucu \
+             geçerli, bar kanıtı eksik): {e:#}"
         ),
     }
 }
