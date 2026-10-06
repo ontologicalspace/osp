@@ -575,6 +575,7 @@ fn run_one_experiment(
                 osp_core::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(osp_core::authorization::FixedClock(1700000000)),
+            parse_failure_policy: osp_core::navigator::ParseFailurePolicy::FeedbackRetry,
         };
         nav.run_task(task_id, 1)
     };
@@ -890,6 +891,7 @@ fn run_synthetic_rq9(
                 osp_core::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(osp_core::authorization::FixedClock(1700000000)),
+            parse_failure_policy: osp_core::navigator::ParseFailurePolicy::FeedbackRetry,
         };
         nav.run_task(task_id, 1)
     };

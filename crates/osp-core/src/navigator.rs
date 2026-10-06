@@ -325,6 +325,11 @@ pub struct AgentNavigator<'a, L: LlmClient + ?Sized, R: TaskResolver> {
     pub pending_authorization_store: Box<dyn crate::authorization::PendingAuthorizationStore>,
     /// **INV-T9:** Clock — pending authorization `created_at` için.
     pub clock: Box<dyn crate::authorization::Clock>,
+    /// **#171 D6 (strict/preregistered mod):** parse ihlaline karşı tutum.
+    /// Default = `FeedbackRetry` (mevcut genel navigator davranışı — G2c-4 review 10 #5).
+    /// `TerminalNoRepair` = #171 preregistration sözleşmesi: parse/schema ihlalinde
+    /// tamir döngüsü YOK — ilk ihlal terminal (`NavigatorResult::LlmError`).
+    pub parse_failure_policy: ParseFailurePolicy,
 }
 
 /// **G2c-3b (arkadaş review 9):** Navigator witness gate policy.
@@ -347,6 +352,29 @@ pub enum NavigatorWitnessPolicy {
     /// Harness/test: tek-agent auto-approve (min_approvers=0, quorum=0.0).
     /// SADECE controlled experiment için — production navigator asla bu modda çalışmaz.
     HarnessAutoApprove,
+}
+
+/// **#171 D6:** Parse ihlali politikası — navigator'ın `LlmError::ProposalParse`
+/// tutumu. Ağ hatası politikası DEĞİLDİR (ağ retry'sı #171 modunda LLM client'ın
+/// içinde, aynı prompt'la bir kez — `osp-llm-runtime` strict mod; navigator ağ
+/// hatasını her zaman terminal sayar).
+///
+/// - **FeedbackRetry (default):** genel navigator davranışı — parse hatası
+///   feedback üretir, navigator prompt'u değiştirerek retry eder (G2c-4 #5).
+/// - **TerminalNoRepair:** #171 preregistration sözleşmesi (D6): "parse/schema
+///   ihlali → tamir döngüsü YOK". İlk ihlal terminal; honest-null kaydı LLM
+///   client'ın kanıt artifact'ına yazılır (`llm-proposals.json: proposal=null`).
+///   Değiştirilmiş-prompt'la ikinci completion D6 tarafından YASAKTIR —
+///   "artifact truth == executed proposal truth" bu politikayla korunur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default)]
+pub enum ParseFailurePolicy {
+    /// Genel davranış (G2c-4 review 10 #5): parse → feedback retry.
+    #[default]
+    FeedbackRetry,
+    /// #171 D6 preregistered mod: parse → terminal, tamir yok.
+    TerminalNoRepair,
 }
 
 /// **INV-T9 #72 closure (P1-4):** Rejected yolunun tek production mapper'ı.
@@ -593,6 +621,9 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
             // 2. LLM call → DeltaProposal.
             // G2c-4 (review 10 #5): ProposalParse terminal DEĞİL — feedback retry.
             // Network/NoMoreProposals terminal (navigator loop'a güvenilmez).
+            // **#171 D6:** `ParseFailurePolicy::TerminalNoRepair` bu kolu terminale
+            // çevirir (preregistered mod — tamir döngüsü yok; honest-null client
+            // kanıtına yazılır). Default davranış (FeedbackRetry) değişmez.
             let proposal = match self.llm.complete(&agent_view) {
                 Ok(p) => p,
                 Err(LlmError::ProposalParse {
@@ -618,19 +649,31 @@ impl<'a, L: LlmClient + ?Sized, R: TaskResolver> AgentNavigator<'a, L, R> {
                         token_cost: tc,
                         duration_ms: 0,
                     });
-                    feedback_history.push(format!(
-                        "Attempt {attempt_num}: Your previous response was not valid \
-                         DeltaProposal JSON. Parse error: {message}. Output ONLY a JSON object \
-                         with fields: new_nodes, new_edges, removed_edges, affected_nodes, \
-                         modified_entities, position_hints, reasoning. No markdown fences."
-                    ));
-                    last_outcome = Some(AttemptOutcome {
-                        gate_decision: GateDecision::RejectedBySyntax,
-                        predicate_completion: PredicateCompletion::NotCompleted,
-                        mutation_decision: MutationDecision::Reject,
-                        witness_status: None,
-                    });
-                    continue;
+                    match self.parse_failure_policy {
+                        ParseFailurePolicy::FeedbackRetry => {
+                            feedback_history.push(format!(
+                                "Attempt {attempt_num}: Your previous response was not valid \
+                                 DeltaProposal JSON. Parse error: {message}. Output ONLY a JSON object \
+                                 with fields: new_nodes, new_edges, removed_edges, affected_nodes, \
+                                 modified_entities, position_hints, reasoning. No markdown fences."
+                            ));
+                            last_outcome = Some(AttemptOutcome {
+                                gate_decision: GateDecision::RejectedBySyntax,
+                                predicate_completion: PredicateCompletion::NotCompleted,
+                                mutation_decision: MutationDecision::Reject,
+                                witness_status: None,
+                            });
+                            continue;
+                        }
+                        ParseFailurePolicy::TerminalNoRepair => {
+                            // #171 D6: tamir döngüsü YOK — değiştirilmiş prompt'la
+                            // ikinci completion yasak; run terminal biter.
+                            return NavigatorResult::LlmError(LlmError::ProposalParse {
+                                message,
+                                token_cost: Some(tc),
+                            });
+                        }
+                    }
                 }
                 Err(e) => return NavigatorResult::LlmError(e),
             };
@@ -1413,9 +1456,124 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let result = nav.run_task(999, 7);
         assert_eq!(result, NavigatorResult::TaskNotFound);
+    }
+
+    /// #171 D6 (review P0): parse ihlali preregistered modda TERMINAL —
+    /// değiştirilmiş prompt'la ikinci completion (tamir döngüsü) YOK.
+    /// "artifact truth == executed proposal truth" navigator düzeyinde bu
+    /// politikayla korunur; honest-null kaydı LLM client kanıtına yazılır.
+    struct AlwaysParseFailLlm {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl AlwaysParseFailLlm {
+        fn new() -> Self {
+            Self {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl LlmClient for AlwaysParseFailLlm {
+        fn complete(&self, _view: &AgentTaskView) -> Result<DeltaProposal, LlmError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(LlmError::ProposalParse {
+                message: "invalid JSON".into(),
+                token_cost: None,
+            })
+        }
+
+        fn last_token_cost(&self) -> TokenCost {
+            TokenCost::default()
+        }
+    }
+
+    #[test]
+    fn navigator_parse_failure_terminal_no_repair_policy() {
+        let task = coupling_task(1, 0.55, TaskPolicy::default());
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        let mock = AlwaysParseFailLlm::new();
+        let mut engine = make_engine_with_node1();
+        let mut evidence = vec![];
+        let mut nav = AgentNavigator {
+            llm: &mock,
+            resolver: &resolver,
+            engine: &mut engine,
+            evidence: &mut evidence,
+            trajectory_id: 1,
+            milestone_id: 1,
+            target_vector: RawPosition {
+                x: 0.55,
+                y: 0.6,
+                z: 0.4,
+                w: 0.5,
+                v: 0.3,
+            },
+            current_measured: measured_pos(0.82),
+            output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
+            clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::TerminalNoRepair,
+        };
+        let result = nav.run_task(1, 7);
+        match &result {
+            NavigatorResult::LlmError(LlmError::ProposalParse { .. }) => {}
+            other => panic!("expected terminal LlmError(ProposalParse), got {other:?}"),
+        }
+        assert_eq!(
+            mock.calls(),
+            1,
+            "D6 strict: tam olarak BİR LLM çağrısı — tamir döngüsü yok"
+        );
+
+        // Karşıt pin (aynı mock, default policy): feedback retry ÇALIŞIR — ikinci
+        // (değiştirilmiş prompt) çağrı yapılır. Preregistered modun farkı budur.
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(coupling_task(1, 0.55, TaskPolicy::default()));
+        let mock_default = AlwaysParseFailLlm::new();
+        let mut engine = make_engine_with_node1();
+        let mut evidence = vec![];
+        let mut nav = AgentNavigator {
+            llm: &mock_default,
+            resolver: &resolver,
+            engine: &mut engine,
+            evidence: &mut evidence,
+            trajectory_id: 1,
+            milestone_id: 1,
+            target_vector: RawPosition {
+                x: 0.55,
+                y: 0.6,
+                z: 0.4,
+                w: 0.5,
+                v: 0.3,
+            },
+            current_measured: measured_pos(0.82),
+            output_contract: OutputContract::strict(),
+            witness_policy: NavigatorWitnessPolicy::default(),
+            pending_authorization_store: Box::new(
+                crate::authorization::NullPendingAuthorizationStore,
+            ),
+            clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
+        };
+        let _ = nav.run_task(1, 7);
+        assert!(
+            mock_default.calls() >= 2,
+            "default policy feedback retry yapar ({} çağrı) — davranış değişmedi",
+            mock_default.calls()
+        );
     }
 
     // 3. navigator_exceeds_maneuver_limit (INV-T7)
@@ -1458,6 +1616,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let result = nav.run_task(1, 7);
         // D1: mock engine satisfied döndüğü için Completed; D2'de gerçek measure ile
@@ -1516,6 +1675,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let _ = nav.run_task(1, 7);
         // En az 1 evidence (reject'ler de kaydeder). Maneuver limit dolana kadar.
@@ -1572,6 +1732,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let result = nav.run_task(1, 7);
         // Loop çalıştı, evidence kaydedildi (progress veya complete veya maneuver).
@@ -1628,6 +1789,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let result = nav.run_task(1, 7);
         if let NavigatorResult::ExceededManeuverLimit { .. } = result {
@@ -2429,6 +2591,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let result = nav.run_task(1, 7);
         // Empty proposals → ExceededManeuverLimit (2 attempt evidence push edildi).
@@ -2484,6 +2647,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let _ = nav.run_task(1, 7);
         // Evidence boş DEĞİL ve gate_decision Unknown DEĞİL (gerçek gate set edildi).
@@ -2529,6 +2693,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let _ = nav.run_task(1, 7);
         let e = &evidence[0];
@@ -2672,6 +2837,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let _ = nav.run_task(1, 7);
         // Policy violation → RejectedByRule evidence.
@@ -2736,6 +2902,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
         let _ = nav.run_task(1, 7);
         assert!(!evidence.is_empty());
@@ -2807,6 +2974,7 @@ mod tests {
                     crate::authorization::NullPendingAuthorizationStore,
                 ),
                 clock: Box::new(crate::authorization::FixedClock(1700000000)),
+                parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
             };
             let _ = nav.run_task(1, 7);
             assert!(
@@ -3024,6 +3192,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         }
     }
 
@@ -3162,6 +3331,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -3252,6 +3422,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -3314,6 +3485,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -3384,6 +3556,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -3525,6 +3698,7 @@ mod tests {
             // Faz 2: ProcessLocalFilesystemTestStore — gerçek filesystem persist, ProcessLocal durability.
             pending_authorization_store: Box::new(ProcessLocalFilesystemTestStore::new(&temp_path)),
             clock: Box::new(FixedClock(1_700_000_000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -3801,6 +3975,7 @@ mod tests {
                 &temp_path,
             )),
             clock: Box::new(crate::authorization::FixedClock(1_700_000_000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -4087,6 +4262,7 @@ mod tests {
                 crate::authorization::NullPendingAuthorizationStore,
             ),
             clock: Box::new(crate::authorization::FixedClock(1700000000)),
+            parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
         };
 
         let result = nav.run_task(1, 7);
@@ -4462,6 +4638,7 @@ mod tests {
                     crate::authorization::NullPendingAuthorizationStore,
                 ),
                 clock: Box::new(crate::authorization::FixedClock(1700000000)),
+                parse_failure_policy: ParseFailurePolicy::FeedbackRetry,
             };
             nav.run_task(1, 7)
         };
