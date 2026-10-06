@@ -36,9 +36,13 @@
 //! anında bayt-eşleştiği canonical artifact'ın kimliğini de taşır:
 //! `attempt_digest` (read-once `attempt_bytes` tamponunun sha256'ı — canonical
 //! byte-match'in doğruladığı AYNI baytlar; tur-4 invariant) + `canonical_attempt_ref`
-//! (eşleşen `<state-dir>` dosyası, state-dir'e göre ileri-slash). Böylece run-dir
-//! kopyası (caller-owned) sonradan değişse bile `ledger row → exact canonical
-//! attempt artifact` bağı offline audit'te satırın kendisinden okunur.
+//! (eşleşen `<state-dir>` dosyası, state-dir'e göre ileri-slash). İçerik bağı
+//! (digest) satırın kendisindedir; artifact KİMLİĞİ bağı satır + ilgili
+//! state-dir bağlamıyla denetlenir (ref state-dir'e görelidir — tek başına
+//! fiziksel store'u adlandırmaz; #190 review P2). Birden fazla byte-özdeş
+//! canonical artifact hangi invocation'a ait olduğunu belirsizleştirir → RED,
+//! fail-closed (#190 review P1: content identity ≠ artifact identity — digest
+//! bir şeyin NE olduğunu kanıtlar, HANGİ olayda üretildiğini değil).
 //! `--allow-unanchored-legacy` satırında iki alan da YOKTUR (missing ≡ downgrade
 //! tutarlılığı — zayıflama `unanchored_legacy: true` ile kayıtlı).
 
@@ -128,9 +132,12 @@ where
 /// artifact'ın ledger'a taşınan kimliği; açık legacy downgrade'i ise
 /// `UnanchoredLegacy` (satır `unanchored_legacy: true` taşır, #188 alanları YOK).
 enum AttemptAnchor {
-    /// Eşleşen canonical artifact — `--state-dir`'e göre ileri-slash ref
-    /// (`attempts/task-<id>-<millis>-<pid>.json`); state-dir'in mutlak/göreli
-    /// yazımına göre değişmez (adaylar her zaman `<state-dir>/attempts/` altında).
+    /// Eşleşen canonical artifact — TEK byte-özdeş eşleşme (#190 review P1:
+    /// çoğul eşleşme artifact identity'sini belirsizleştirir → RED; sıralı
+    /// seçim deterministik ama truthful olmazdı); `--state-dir`'e göre ileri-
+    /// slash ref (`attempts/task-<id>-<millis>-<pid>.json`), state-dir'in
+    /// mutlak/göreli yazımına göre değişmez (adaylar her zaman
+    /// `<state-dir>/attempts/` altında).
     Canonical { canonical_ref: String },
     /// `--allow-unanchored-legacy` açık downgrade'i.
     UnanchoredLegacy,
@@ -157,7 +164,9 @@ enum AttemptAnchor {
 /// #188: anchored geçiş eşleşen canonical dosyanın kimliğini DÖNDÜRÜR (satır
 /// `attempt_digest` + `canonical_attempt_ref` taşır) — digest'i üreten tampon
 /// buraya gelen read-once `attempt_bytes`'tır; fonksiyon dosyayı ikinci kez
-/// okumaz, yalnızca eşleşen adayın yolunu döndürür.
+/// okumaz, yalnızca eşleşen adayın yolunu döndürür. Eşleşme TEKLİ olmalıdır
+/// (#190 review P1): birden fazla byte-özdeş artifact, hangi invocation'ın
+/// ürettiğini belirsizleştirir → RED (content identity ≠ artifact identity).
 fn verify_attempt_against_canonical_store(
     run_dir: &Path,
     attempt_bytes: &[u8],
@@ -200,33 +209,49 @@ fn verify_attempt_against_canonical_store(
     if attempts_dir.as_ref().filter(|d| d.is_dir()).is_some() && !candidates.is_empty() {
         // #178 tur-4 P0: karşılaştırma PARSE EDİLEN tamponla yapılır (path yeniden
         // okunmaz) — canonical fence'in doğruladığı baytlar karar mantığının
-        // tükettiği baytlardır. Adaylar sıralanır: birden çok byte-özdeş kayıt
-        // (dejenere durum) olsa bile döndürülen ref deterministiktir.
-        let mut candidates = candidates;
-        candidates.sort();
-        let matched = candidates.iter().find(|p| {
-            std::fs::read(p)
-                .map(|b| b == attempt_bytes)
-                .unwrap_or(false)
-        });
-        let matched = matched.ok_or_else(|| {
-            anyhow::anyhow!(
+        // tükettiği baytlardır.
+        // #190 review P1 (content identity ≠ artifact identity): birden fazla
+        // byte-özdeş canonical artifact, satırın adlandırmaya çalıştığı şeyi
+        // belirsizleştirir — baytlar HANGİ invocation'ın ürettiğini taşımaz
+        // (retry senaryosu: A publish + --out FAIL; B publish + --out OK; A≡B).
+        // Sıralı seçim deterministik olurdu ama truthful olmazdı → ambiguity'de
+        // fail-closed.
+        let matches: Vec<&PathBuf> = candidates
+            .iter()
+            .filter(|p| {
+                std::fs::read(p)
+                    .map(|b| b == attempt_bytes)
+                    .unwrap_or(false)
+            })
+            .collect();
+        return match matches.as_slice() {
+            [matched] => {
+                // #188: ref, state-dir'e göre ileri-slash (mutlak/göreli yazımdan
+                // bağımsız); strip edilemezse (dejenere kök) yol-olduğu-gibi — dürüst locator.
+                let state_dir = state_dir.as_deref().expect("candidates imply a state dir");
+                let canonical_ref = matched
+                    .strip_prefix(state_dir)
+                    .unwrap_or(matched.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Ok(AttemptAnchor::Canonical { canonical_ref })
+            }
+            [] => Err(anyhow::anyhow!(
                 "canonical attempt fence: attempt.json does not byte-match any canonical \
                  artifact for task {task_id} in {} — the run-dir copy was modified after \
                  the canonical publish; digest claims are evidence only when the envelope \
                  carrying them is the machine-published one",
                 attempts_dir.expect("checked above").display()
-            )
-        })?;
-        // #188: ref, state-dir'e göre ileri-slash (mutlak/göreli yazımdan bağımsız);
-        // strip edilemezse (dejenere kök) yol-olduğu-gibi — dürüst locator.
-        let state_dir = state_dir.as_deref().expect("candidates imply a state dir");
-        let canonical_ref = matched
-            .strip_prefix(state_dir)
-            .unwrap_or(matched.as_path())
-            .to_string_lossy()
-            .replace('\\', "/");
-        return Ok(AttemptAnchor::Canonical { canonical_ref });
+            )),
+            _ => Err(anyhow::anyhow!(
+                "canonical attempt identity is ambiguous: {} byte-identical canonical \
+                 artifacts for task {task_id} in {} — the digest proves content, not which \
+                 invocation produced it; a unique artifact is required to name \
+                 canonical_attempt_ref",
+                matches.len(),
+                attempts_dir.expect("checked above").display()
+            )),
+        };
     }
 
     // Anchor YOK (mağaza erişilemez ya da bu task için kayıt yok).

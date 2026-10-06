@@ -316,9 +316,13 @@ kanıtlayabildiği şey*.
   `attempt_digest` (read-once `attempt_bytes` tamponunun sha256'ı — canonical
   byte-match'in doğruladığı aynı baytlar) + `canonical_attempt_ref`
   (`attempts/task-<id>-<millis>-<pid>.json`, state-dir'e göre ileri-slash).
-  Böylece run-dir kopyası sonradan değişse bile `ledger row → exact canonical
-  attempt artifact` bağı offline audit'te satırın kendisinden okunur; legacy
-  downgrade satırında iki alan da yoktur (missing ≡ downgrade tutarlılığı).
+  İçerik bağı (digest) satırın kendisindedir; artifact kimliği bağı satır + ilgili
+  state-dir bağlamıyla denetlenir — ref state-dir'e görelidir, tek başına fiziksel
+  store'u adlandırmaz. Birden fazla byte-özdeş canonical artifact hangi
+  invocation'a ait olduğunu belirsizleştirir → RED (content identity ≠ artifact
+  identity; digest bir şeyin ne olduğunu kanıtlar, hangi olayda üretildiğini
+  değil). Legacy downgrade satırında iki alan da yoktur (missing ≡ downgrade
+  tutarlılığı).
   **Yorum alanları null kalır** (tur-1 P1-4: null = "henüz değerlendirilmedi";
   `[]` = "değerlendirildi, friction yok" — başka iddia): `decision`,
   `patch_outcome`, `decision_utility`, `counterfactual`, `human_override`,

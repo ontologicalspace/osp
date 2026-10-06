@@ -1941,6 +1941,75 @@ fn finalize_run_rejects_relocated_run_with_stripped_fields() {
     );
 }
 
+/// #190 review P1 (content identity ≠ artifact identity): aynı task için İKİ
+/// byte-özdeş canonical artifact, satırın adlandırabileceği artifact'ı
+/// belirsizleştirir (retry senaryosu: A publish + --out FAIL; B publish +
+/// --out OK; envelope baytları özdeş — digest içerik kanıtlar, HANGİ invocation
+/// ürettiğini değil). finalize kesinleştirilmiş bir seçim yapamaz → ambiguity
+/// RED'i (deterministik sıralı seçim truthful olmazdı).
+#[test]
+fn finalize_run_rejects_ambiguous_byte_identical_canonical_artifacts() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    let run = work.join("run-ambiguous");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 1}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    // Yeni-şekil zarf (task_digest beyanlı) + kanonik evidence; AYNI baytlar iki
+    // canonical dosyaya yazılır (iki invocation'ın persist adımının taklidi).
+    let mut env = attempt_envelope(&fx.head, 1);
+    env["run"]["task_digest"] = serde_json::json!(sha256_of(&run.join("task.json")));
+    env["run"]["proposals_digest"] = serde_json::Value::Null;
+    env["evidence"] = serde_json::json!([{
+        "trajectory_id": 1, "milestone_id": 1, "task_id": 1, "attempt_id": 1,
+        "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "after": {"x": 0.5, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+        "gate_decision": "PassedAll", "predicate_completion": "Completed",
+        "mutation_decision": "AcceptAsCompleted",
+        "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "duration_ms": 1
+    }]);
+    let bytes = env.to_string();
+    fs::write(run.join("attempt.json"), &bytes).unwrap();
+    let attempts = fx.work_path().join("attempts");
+    fs::create_dir_all(&attempts).unwrap();
+    fs::write(attempts.join("task-1-990001-1.json"), &bytes).unwrap();
+    fs::write(attempts.join("task-1-990002-1.json"), &bytes).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "two byte-identical canonical artifacts must fail closed — no arbitrary selection"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("ambiguous"),
+        "ambiguity error expected: {stderr}"
+    );
+    assert!(
+        stderr.contains("the digest proves content, not which invocation"),
+        "content-vs-artifact rationale in message: {stderr}"
+    );
+}
+
 /// #178 tur-3 P0 kabul testi (ikinci yarısı): gerçek historical legacy zarf +
 /// canonical store yok + AÇIK `--allow-unanchored-legacy` → GEÇER; ledger satırı
 /// `unanchored_legacy: true` taşır (epistemik zayıflama kayıtlı).
