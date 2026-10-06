@@ -348,41 +348,179 @@ fn proposals_seal_message(existing: &ProposalsDoc) -> String {
     )
 }
 
-/// **Çağrı-ÖNCESİ seal preflight** (review R2 P1): experiment-line bütçesi wire
-/// düzeyinde kapanır — sealed bir kayıt varsa hiç HTTP çağrısı yapılmadan RED.
-/// Kayıt fonksiyonlarındaki seal kontrolü (çift katman) korunur.
-pub fn ensure_proposals_line_open(dir: &Path) -> anyhow::Result<()> {
+// ── experiment-line claim (P0 sıralama + P1 tek-yazıcı sahipliği) ─────────────
+
+/// No-clobber line-claim kaydı: çağrıdan ÖNCE atomik olarak alınır; outcome
+/// kaydı claim'i gerektirir. Bir kez alındığında asla geri bırakılmaz —
+/// outcome'suz claim (crash penceresi) "unknown realization" olarak satırı
+/// yakar: model örnekleme yapmış OLABİLİR, yeniden koşu = ek örnekleme.
+#[derive(Serialize, Deserialize, Debug)]
+struct LineClaimDoc {
+    schema_version: u32,
+    kind: String,
+    prompt_digest: String,
+    completion_identity_digest: String,
+    claimed_at_unix_millis: u128,
+    pid: u32,
+}
+
+fn claim_doc(kind: &str, doc: &PromptDoc) -> LineClaimDoc {
+    LineClaimDoc {
+        schema_version: 1,
+        kind: kind.to_string(),
+        prompt_digest: doc.prompt_digest.clone(),
+        completion_identity_digest: doc.completion_identity_digest.clone(),
+        claimed_at_unix_millis: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0),
+        pid: std::process::id(),
+    }
+}
+
+fn claim_path(dir: &Path, file_name: &str) -> std::path::PathBuf {
+    dir.join(file_name)
+}
+
+/// Claim'in varlığı RED mesajı — iki olası anlam: (i) başka bir süreç hattı
+/// SAHİPLENMİŞ durumda (concurrent writer; P1), (ii) claim alan süreç outcome
+/// yazamadan öldü (crash; unknown realization — P0 penceresi).
+fn claimed_message(path: &std::path::Path) -> String {
+    format!(
+        "experiment line is CLAIMED ({}): the line was claimed before an LLM call — \
+         either another process owns it right now (single-writer invariant) or the \
+         claiming process died before recording an outcome (the model MAY have \
+         sampled; rerunning would add an extra realization). Either way this \
+         directory is burned for further calls — use a fresh --llm-artifacts \
+         directory.",
+        path.display()
+    )
+}
+
+/// **PRE-CALL (review R3 P0+P1):** proposal completion'ından ÖNCE —
+/// (1) outcome kaydı var mı (SEALED → RED); (2) donmuş prompt anchor'U
+/// **çağrı öncesi** doğrula-veya-dondur (llm-prompt.json; üç digest kapısı:
+/// prompt, completion identity, inv_e1 — farklı prompt/config/provenance en
+/// spesifik hata ile RED'lenir); (3) claim var mı (RED — sahipli ya da
+/// unknown realization); (4) `llm-line-claim.json`'ı **no-clobber** yayınla —
+/// atomik sahiplenme (yarışan ikinci süreç AlreadyExists alır → RED).
+///
+/// Sıra sözleşmesi: bu fonksiyon dönmeden HTTP çağrısı YAPILMAZ; outcome
+/// kayıtları claim'in varlığını YAPISAL olarak gerektirir.
+pub fn freeze_and_claim_proposal_line(
+    dir: &Path,
+    cfg: &RuntimeConfig,
+    req: &CompletionRequest,
+    manifest: &InvE1Manifest,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
     if let Some(existing) = existing_proposals(dir)? {
         if existing.is_sealed() {
             anyhow::bail!("{}", proposals_seal_message(&existing));
         }
     }
-    Ok(())
+    let doc = prompt_doc("llm-proposal-prompt", cfg, req, manifest);
+    freeze_prompt(dir, "llm-prompt.json", &doc)?;
+    let claim_file = claim_path(dir, "llm-line-claim.json");
+    if claim_file.exists() {
+        anyhow::bail!("{}", claimed_message(&claim_file));
+    }
+    let claim = claim_doc("proposal-line-claim", &doc);
+    match no_clobber_publish(&claim_file, &serde_json::to_vec_pretty(&claim)?) {
+        Ok(()) => Ok(()),
+        // Yarış: karşı süreç claim'i bizden önce aldı — single-writer kazandı.
+        Err(e) if format!("{e:#}").contains("concurrently") => {
+            anyhow::bail!("{}", claimed_message(&claim_file))
+        }
+        Err(e) => Err(e),
+    }
 }
 
-/// Bar kanalının çağrı-öncesi seal preflight'i — `ensure_proposals_line_open`
-/// ile aynı ilke (yeniden elicitation = yeniden örnekleme).
-pub fn ensure_bar_line_open(dir: &Path) -> anyhow::Result<()> {
+/// Bar kanalının PRE-CALL claim'i — aynı sıra sözleşmesi (llm-bar-prompt.json
+/// + llm-bar-line-claim.json). Outcome'suz bar claim'i = unknown realization.
+pub fn freeze_and_claim_bar_line(
+    dir: &Path,
+    cfg: &RuntimeConfig,
+    req: &CompletionRequest,
+    manifest: &InvE1Manifest,
+) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
     let response_path = dir.join("llm-bar-response.json");
-    if !response_path.exists() {
-        return Ok(());
+    if response_path.exists() {
+        let raw = std::fs::read_to_string(&response_path)?;
+        let existing: BarResponseDoc = serde_json::from_str(&raw).map_err(|e| {
+            anyhow::anyhow!(
+                "llm-bar-response.json exists but is unreadable: {e} — resolve manually"
+            )
+        })?;
+        if existing.is_sealed() {
+            anyhow::bail!("{}", bar_seal_message(&existing));
+        }
     }
-    let raw = std::fs::read_to_string(&response_path)?;
-    let existing: BarResponseDoc = serde_json::from_str(&raw).map_err(|e| {
-        anyhow::anyhow!("llm-bar-response.json exists but is unreadable: {e} — resolve manually")
+    let doc = prompt_doc("llm-bar-elicitation-prompt", cfg, req, manifest);
+    freeze_prompt(dir, "llm-bar-prompt.json", &doc)?;
+    let claim_file = claim_path(dir, "llm-bar-line-claim.json");
+    if claim_file.exists() {
+        anyhow::bail!("{}", claimed_message(&claim_file));
+    }
+    let claim = claim_doc("bar-line-claim", &doc);
+    match no_clobber_publish(&claim_file, &serde_json::to_vec_pretty(&claim)?) {
+        Ok(()) => Ok(()),
+        Err(e) if format!("{e:#}").contains("concurrently") => {
+            anyhow::bail!("{}", claimed_message(&claim_file))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Outcome kaydının claim şartı (YAPISAL P0 sıralaması): claim yoksa outcome
+/// YAZILAMAZ — "çağrı öncesi donmuştu" iddiası olmayan kanıt üretilmez.
+/// Claim'in digest'leri bu completion'ın digest'leriyle eşleşmelidir.
+fn require_claim(dir: &Path, claim_file: &str, doc: &PromptDoc) -> anyhow::Result<()> {
+    let path = claim_path(dir, claim_file);
+    let raw = std::fs::read_to_string(&path).map_err(|_| {
+        anyhow::anyhow!(
+            "outcome record requires a PRE-CALL line claim ({}): none found — the \
+             freeze→claim→HTTP→outcome ordering is structural (#171 review R3 P0); \
+             refusing to write post-hoc evidence",
+            path.display()
+        )
     })?;
-    if existing.is_sealed() {
-        anyhow::bail!("{}", bar_seal_message(&existing));
+    let claim: LineClaimDoc = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("line claim {} is unreadable: {e}", path.display()))?;
+    if claim.prompt_digest != doc.prompt_digest
+        || claim.completion_identity_digest != doc.completion_identity_digest
+    {
+        anyhow::bail!(
+            "line claim digest mismatch ({}): claimed prompt {}, this completion {} — \
+             outcome belongs to a different claim",
+            path.display(),
+            claim.prompt_digest,
+            doc.prompt_digest
+        );
     }
     Ok(())
 }
 
-/// İlk llm-real proposal completion'ını kaydet (first-freeze; §5 + D6).
-///
-/// HER sonuç kaydı terminaldir (review R2): parse-null, success VE
-/// transport-exhausted mühürler. Disk hatası çağıranı hatayla bırakır —
-/// kanıt persist'i protokolün parçasıdır, sessiz unpersisted çağrı olmaz.
-pub fn record_proposal_completion(
+/// Outcome yazarı için anchor doğrulaması — VERIFY-ONLY (create YOK): P0
+/// sıralamasının record tarafı. Anchor çağrı-öncesi claim tarafından
+/// dondurulmuş OLMALIYDI; burada yoksa bu protokol ihlalidir.
+fn verify_frozen_anchor(dir: &Path, file_name: &str, doc: &PromptDoc) -> anyhow::Result<()> {
+    let path = dir.join(file_name);
+    if !path.exists() {
+        anyhow::bail!(
+            "{file_name} must be frozen BEFORE the call (by freeze_and_claim_*): found \
+             none at outcome time — post-hoc anchor creation is forbidden (#171 R3 P0)"
+        );
+    }
+    freeze_prompt(dir, file_name, doc) // var olan anchor ile üç-digest doğrulama
+}
+
+/// Outcome kaydı: yanıt ALINMIŞ proposal completion'ı (first-freeze; §5+D6).
+/// HER sonuç terminaldir (parse-null / success / transport-exhausted mühürler).
+/// Pre-call claim + donmuş anchor şart (P0); disk hatası sessiz unpersisted
+/// çağrıya izin vermez.
+pub fn record_proposal_outcome(
     dir: &Path,
     cfg: &RuntimeConfig,
     req: &CompletionRequest,
@@ -392,7 +530,8 @@ pub fn record_proposal_completion(
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     let doc = prompt_doc("llm-proposal-prompt", cfg, req, manifest);
-    freeze_prompt(dir, "llm-prompt.json", &doc)?;
+    require_claim(dir, "llm-line-claim.json", &doc)?;
+    verify_frozen_anchor(dir, "llm-prompt.json", &doc)?;
 
     if let Some(existing) = existing_proposals(dir)? {
         if existing.is_sealed() {
@@ -420,12 +559,10 @@ pub fn record_proposal_completion(
     Ok(())
 }
 
-/// Yanıtsız terminal çağrı hatası kaydı — iki yol buraya gelir (review R2):
-/// (i) retryable sınıfındayken iki ağ denemesi de tükendi (transport-
-/// exhausted; `network_retry_count` = 1); (ii) sınıflandırıcı hatayı
-/// non-retryable buldu (ör. 401/400; retry YAPILMADI, `network_retry_count`
-/// = 0). Her iki durumda da kayıt SEAL edilir: "bir retry" bütçesi
-/// experiment-line bütçesidir — aynı dizinde üçüncü çağrı RED.
+/// Yanıtsız terminal çağrı hatası outcome'u — iki yol (review R2):
+/// (i) retryable iken iki deneme de tükendi (`network_retry_count` = 1);
+/// (ii) sınıflandırıcı non-retryable buldu (401/400…; retry YAPILMADI, = 0).
+/// Her iki durum da kaydı mühürler. Pre-call claim şart (P0).
 pub fn record_call_failure(
     dir: &Path,
     cfg: &RuntimeConfig,
@@ -436,7 +573,8 @@ pub fn record_call_failure(
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     let doc = prompt_doc("llm-proposal-prompt", cfg, req, manifest);
-    freeze_prompt(dir, "llm-prompt.json", &doc)?;
+    require_claim(dir, "llm-line-claim.json", &doc)?;
+    verify_frozen_anchor(dir, "llm-prompt.json", &doc)?;
     if let Some(existing) = existing_proposals(dir)? {
         if existing.is_sealed() {
             anyhow::bail!("{}", proposals_seal_message(&existing));
@@ -476,10 +614,10 @@ fn bar_seal_message(existing: &BarResponseDoc) -> String {
     )
 }
 
-/// D4 bar elicitation kaydı — iki dosya: donmuş anchor
-/// (`llm-bar-prompt.json`) + yanıt kaydı (`llm-bar-response.json`).
-/// Transport hatası ve parse ihlali de DÜRÜST boşluk olarak yazılır; HER sonuç
-/// (parse-null, elicited-success, transport-exhausted) mühürler (review R2).
+/// D4 bar elicitation outcome'u — donmuş anchor (`llm-bar-prompt.json`,
+/// pre-call) + yanıt kaydı (`llm-bar-response.json`). Transport hatası ve
+/// parse ihlali de DÜRÜST boşluk olarak yazılır; HER sonuç mühürler.
+/// Pre-call bar claim şart (P0).
 #[allow(clippy::too_many_arguments)]
 pub fn record_bar_elicitation(
     dir: &Path,
@@ -494,7 +632,8 @@ pub fn record_bar_elicitation(
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
     let doc = prompt_doc("llm-bar-elicitation-prompt", cfg, req, manifest);
-    freeze_prompt(dir, "llm-bar-prompt.json", &doc)?;
+    require_claim(dir, "llm-bar-line-claim.json", &doc)?;
+    verify_frozen_anchor(dir, "llm-bar-prompt.json", &doc)?;
 
     let response_path = dir.join("llm-bar-response.json");
     if response_path.exists() {
@@ -649,6 +788,17 @@ mod tests {
         serde_json::from_str(&std::fs::read_to_string(dir.join(name)).unwrap()).unwrap()
     }
 
+    /// Üretim akışının test içi birebiri: PRE-CALL claim (anchor + sahiplenme).
+    fn claim_proposal(dir: &Path, model: &str, request: &CompletionRequest) {
+        freeze_and_claim_proposal_line(dir, &cfg(model), request, &manifest())
+            .expect("pre-call claim");
+    }
+
+    fn claim_bar(dir: &Path, model: &str, request: &CompletionRequest) {
+        freeze_and_claim_bar_line(dir, &cfg(model), request, &manifest())
+            .expect("pre-call bar claim");
+    }
+
     // ── digest'ler ────────────────────────────────────────────────────────────
 
     #[test]
@@ -727,15 +877,15 @@ mod tests {
         assert_eq!(d.osp_revision, "test-rev");
     }
 
-    // ── record_proposal_completion ────────────────────────────────────────────
+    // ── PRE-CALL: freeze + claim (review R3 P0+P1) ─────────────────────────────
 
     #[test]
-    fn record_first_completion_freezes_anchor_and_evidence() {
+    fn pre_call_claim_writes_anchor_and_claim_before_any_outcome() {
+        // R3 P0 pin: anchor + claim, outcome'tan ÖNCE (burada hiç outcome yok)
+        // diskte durur — "freeze önce kanıtı" sıralamasının birim karşılığı.
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
-        let response = raw(&valid_proposal_json());
-        record_proposal_completion(dir.path(), &cfg("m"), &request, &response, 0, &manifest())
-            .unwrap();
+        claim_proposal(dir.path(), "m", &request);
 
         let prompt = read_json(dir.path(), "llm-prompt.json");
         assert_eq!(prompt["kind"], "llm-proposal-prompt");
@@ -756,6 +906,104 @@ mod tests {
             Some(0)
         );
 
+        let claim = read_json(dir.path(), "llm-line-claim.json");
+        assert_eq!(claim["kind"], "proposal-line-claim");
+        assert_eq!(
+            claim["prompt_digest"],
+            completion_prompt_digest(&request).as_str()
+        );
+
+        // Outcome henüz YOK — satır claim'li ama kanıt boş (crash penceresi
+        // artık görünürdür: outcome'suz claim dizini yakar, aşağıda).
+        assert!(!dir.path().join("llm-proposals.json").exists());
+    }
+
+    #[test]
+    fn claim_without_outcome_burns_line_unknown_realization() {
+        // R3 P0 crash penceresi: claim alındı, süreç outcome yazamadan öldü.
+        // Model örnekleme yapmış OLABİLİR → satır yeniden koşulamaz (yeniden
+        // koşu = ekstrealizasyon; iz artık claim dosyasında durur).
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        claim_proposal(dir.path(), "m", &request);
+
+        let err = freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &request, &manifest())
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("CLAIMED") && msg.contains("MAY have sampled"),
+            "claim'li satır RED: {msg}"
+        );
+    }
+
+    #[test]
+    fn second_concurrent_claim_is_refused_single_writer() {
+        // R3 P1: aynı anda iki süreç aynı hattı sahiplenemez — no-clobber
+        // publish atomiktir; ikinci claim AlreadyExists ile RED (sıralı iki
+        // çağrı yarışı deterministik çözümler).
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        claim_proposal(dir.path(), "m", &request);
+        let err = freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &request, &manifest())
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("CLAIMED"),
+            "single-writer: {err:#}"
+        );
+    }
+
+    #[test]
+    fn outcome_without_pre_call_claim_is_refused() {
+        // R3 P0 yapısal sıralama: claim'siz outcome YAZILAMAZ — çağrı-sonrası
+        // "frozen" kanıt üretimi engellenir.
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        let err = record_proposal_outcome(
+            dir.path(),
+            &cfg("m"),
+            &request,
+            &raw(&valid_proposal_json()),
+            0,
+            &manifest(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PRE-CALL line claim"),
+            "claim şartı: {err:#}"
+        );
+        let err =
+            record_call_failure(dir.path(), &cfg("m"), &request, "x", 0, &manifest()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("PRE-CALL line claim"),
+            "failure kaydı da claim ister: {err:#}"
+        );
+        // Bar tarafı aynı şekilde.
+        let err = record_bar_elicitation(
+            dir.path(),
+            &cfg("m"),
+            &req("sys-bar", "user-view"),
+            None,
+            None,
+            None,
+            Some("x"),
+            0,
+            &manifest(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("PRE-CALL line claim"));
+    }
+
+    // ── outcome kayıtları (claim'li akış) ─────────────────────────────────────
+
+    #[test]
+    fn record_first_outcome_freezes_anchor_and_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        let response = raw(&valid_proposal_json());
+        claim_proposal(dir.path(), "m", &request);
+        record_proposal_outcome(dir.path(), &cfg("m"), &request, &response, 0, &manifest())
+            .unwrap();
+
         let raw_text = std::fs::read_to_string(dir.path().join("llm-raw-response.txt")).unwrap();
         assert_eq!(raw_text, valid_proposal_json());
 
@@ -769,7 +1017,8 @@ mod tests {
     fn record_parse_failure_is_honest_null_and_seals_directory() {
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
-        record_proposal_completion(
+        claim_proposal(dir.path(), "m", &request);
+        record_proposal_outcome(
             dir.path(),
             &cfg("m"),
             &request,
@@ -789,9 +1038,9 @@ mod tests {
             "not json at all"
         );
 
-        // D6 (review P0): parse ihlali TERMINAL — aynı dizinde sonra gelen
-        // (başarılı bile olsa) kayıt REDDEDİLİR: artifact truth == executed truth.
-        let err = record_proposal_completion(
+        // D6: parse ihlali TERMINAL — aynı dizinde sonra gelen (başarılı bile
+        // olsa) outcome REDDEDİLİR: artifact truth == executed truth.
+        let err = record_proposal_outcome(
             dir.path(),
             &cfg("m"),
             &request,
@@ -804,7 +1053,6 @@ mod tests {
             format!("{err:#}").contains("SEALED"),
             "parse sonrası mühür: {err:#}"
         );
-        // Kayıt değişmedi:
         let proposals = read_json(dir.path(), "llm-proposals.json");
         assert!(proposals["proposal"].is_null());
     }
@@ -814,7 +1062,8 @@ mod tests {
         // Başarı da mühürlüdür: aynı prompt'la yeniden koşu kanıtı ezemez.
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
-        record_proposal_completion(
+        claim_proposal(dir.path(), "m", &request);
+        record_proposal_outcome(
             dir.path(),
             &cfg("m"),
             &request,
@@ -823,30 +1072,25 @@ mod tests {
             &manifest(),
         )
         .unwrap();
-        let err = record_proposal_completion(
-            dir.path(),
-            &cfg("m"),
-            &request,
-            &raw(&valid_proposal_json()),
-            0,
-            &manifest(),
-        )
-        .unwrap_err();
+        // Yeniden koşuş önce CLAIM aşamasında RED (sealed outcome kontrolü).
+        let err = freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &request, &manifest())
+            .unwrap_err();
         assert!(format!("{err:#}").contains("SEALED"));
     }
 
     #[test]
     fn transport_exhausted_seals_experiment_line() {
-        // Review R2 P1: "bir retry" EXPERIMENT-LINE bütçesidir — iki retryable
-        // deneme de tükendiyse kayıt MÜHÜRLÜ; aynı dizinde üçüncü çağrı (yeni
+        // R2 P1: "bir retry" EXPERIMENT-LINE bütçesidir — iki retryable deneme
+        // de tükendiyse kayıt MÜHÜRLÜ; aynı dizinde üçüncü çağrı (yeni
         // process'ten bile) RED. Process-restart ile bütçe sıfırlanamaz.
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
+        claim_proposal(dir.path(), "m", &request);
         record_call_failure(
             dir.path(),
             &cfg("m"),
             &request,
-            "attempt 1: connect timeout; attempt 2: connection reset",
+            "attempt 1 (retryable): timeout; attempt 2 (retryable): reset",
             1,
             &manifest(),
         )
@@ -857,15 +1101,15 @@ mod tests {
         assert_eq!(proposals["network_retry_count"], 1);
         assert!(proposals["transport_error"].is_string());
 
-        // Preflight (çağrı-ÖNCESİ) sealed line'da RED — HTTP çağrısı yapılmaz.
-        let err = ensure_proposals_line_open(dir.path()).unwrap_err();
+        // Yeniden koşuş claim aşamasında RED — HTTP çağrısı yapılmaz.
+        let err = freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &request, &manifest())
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("SEALED"),
-            "preflight sealed hatası: {err:#}"
+            "sealed line: {err:#}"
         );
-
-        // record_proposal_completion da (çift katman) RED — kayıt değişmedi.
-        let err = record_proposal_completion(
+        // Outcome yazarı da (çift katman) RED — kayıt değişmedi.
+        let err = record_proposal_outcome(
             dir.path(),
             &cfg("m"),
             &request,
@@ -888,6 +1132,7 @@ mod tests {
         // sonuç yine terminal — kayıt mühürlenir.
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
+        claim_proposal(dir.path(), "m", &request);
         record_call_failure(
             dir.path(),
             &cfg("m"),
@@ -902,40 +1147,22 @@ mod tests {
         assert!(proposals["transport_error"].is_string());
         assert!(proposals["proposal"].is_null());
         assert!(
-            ensure_proposals_line_open(dir.path()).is_err(),
+            freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &request, &manifest()).is_err(),
             "401 sonrası da satır mühürlü"
         );
     }
 
     #[test]
-    fn preflight_open_line_passes_when_no_record() {
-        // Kayıt yok (crash penceresi: freeze yazıldı, çağrı kayda ulaşmadı) →
-        // satır AÇIK: yeni süreç kendi retry bütçesiyle başlayabilir (kayıtsız
-        // çağrı denetlenemez; bütçe KAYITLI sonuçları korur).
+    fn record_different_prompt_refused_by_freeze_at_claim() {
+        // Farklı prompt aynı dizinde: CLAIM aşamasında (çağrıdan ÖNCE, outcome
+        // daha yokken) RED — donmuş anchor kapısı en spesifik hatayı verir.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path()).unwrap();
-        ensure_proposals_line_open(dir.path()).expect("no record = open line");
-        ensure_bar_line_open(dir.path()).expect("no bar record = open line");
-    }
-
-    #[test]
-    fn record_different_prompt_refused_by_freeze() {
-        let dir = tempfile::tempdir().unwrap();
-        record_proposal_completion(
-            dir.path(),
-            &cfg("m"),
-            &req("sys", "user"),
-            &raw("first"),
-            0,
-            &manifest(),
-        )
-        .unwrap();
-        let err = record_proposal_completion(
+        let request = req("sys", "user");
+        claim_proposal(dir.path(), "m", &request);
+        let err = freeze_and_claim_proposal_line(
             dir.path(),
             &cfg("m"),
             &req("sys", "DIFFERENT"),
-            &raw("second"),
-            0,
             &manifest(),
         )
         .unwrap_err();
@@ -947,25 +1174,15 @@ mod tests {
     }
 
     #[test]
-    fn record_same_prompt_different_model_refused_by_identity_freeze() {
-        // Review P1: prompt aynı, model farklı → treatment değişimi → RED.
+    fn same_prompt_different_model_refused_by_identity_freeze_at_claim() {
+        // R1 P1: prompt aynı, model farklı → treatment değişimi → RED (claim'de).
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
-        record_proposal_completion(
-            dir.path(),
-            &cfg("gpt-4o-mini"),
-            &request,
-            &raw(&valid_proposal_json()),
-            0,
-            &manifest(),
-        )
-        .unwrap();
-        let err = record_proposal_completion(
+        claim_proposal(dir.path(), "gpt-4o-mini", &request);
+        let err = freeze_and_claim_proposal_line(
             dir.path(),
             &cfg("different-model"),
             &request,
-            &raw(&valid_proposal_json()),
-            0,
             &manifest(),
         )
         .unwrap_err();
@@ -977,19 +1194,44 @@ mod tests {
     }
 
     #[test]
-    fn record_corrupt_frozen_prompt_surfaces_read_error() {
+    fn claim_refuses_different_inv_e1_provenance() {
+        // R2 P1: aynı prompt + aynı completion identity + FARKLI girdi bağlamı
+        // → RED (claim'de, çağrıdan önce — donmuş anchor KİMİN girdilerinden
+        // üretildiğini taşır).
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        claim_proposal(dir.path(), "m", &request);
+
+        let mut other_baseline = manifest();
+        other_baseline.baseline_digest = "f".repeat(40);
+        let mut other_task = manifest();
+        other_task.task_digest = None;
+        let mut other_revision = manifest();
+        other_revision.osp_revision = "different-rev".into();
+
+        for (label, m) in [
+            ("baseline", other_baseline),
+            ("task_digest", other_task),
+            ("osp_revision", other_revision),
+        ] {
+            let err =
+                freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &request, &m).unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("INV-E1 provenance"),
+                "{label} uyuşmazlığı RED: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_surfaces_corrupt_frozen_anchor() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path()).unwrap();
         std::fs::write(dir.path().join("llm-prompt.json"), "not json").unwrap();
-        let err = record_proposal_completion(
-            dir.path(),
-            &cfg("m"),
-            &req("sys", "user"),
-            &raw("r"),
-            0,
-            &manifest(),
-        )
-        .unwrap_err();
+        let err =
+            freeze_and_claim_proposal_line(dir.path(), &cfg("m"), &req("sys", "user"), &manifest())
+                .unwrap_err();
         assert!(
             format!("{err:#}").contains("unreadable"),
             "corrupt freeze anchor is a loud error"
@@ -1017,6 +1259,13 @@ mod tests {
         let request = req("sys-bar", "user-view");
         let response = raw(r#"{"bar_value":0.6,"predicted":[]}"#);
         let elicited = parse_elicited_bar(&response.content).unwrap();
+        claim_bar(dir.path(), "m", &request);
+
+        // R3 P0 bar pin: anchor claim ile ÇAĞRIDAN ÖNCE donar (outcome henüz yok).
+        let prompt = read_json(dir.path(), "llm-bar-prompt.json");
+        assert_eq!(prompt["kind"], "llm-bar-elicitation-prompt");
+        assert!(dir.path().join("llm-bar-line-claim.json").exists());
+
         record_bar_elicitation(
             dir.path(),
             &cfg("m"),
@@ -1029,9 +1278,6 @@ mod tests {
             &manifest(),
         )
         .unwrap();
-
-        let prompt = read_json(dir.path(), "llm-bar-prompt.json");
-        assert_eq!(prompt["kind"], "llm-bar-elicitation-prompt");
         let bar = read_json(dir.path(), "llm-bar-response.json");
         assert_eq!(bar["kind"], "llm-bar-elicitation");
         assert_eq!(bar["elicited"]["bar_value"], 0.6);
@@ -1040,7 +1286,7 @@ mod tests {
             completion_prompt_digest(&request).as_str()
         );
 
-        // Review P1 regression: elicited kaydı sonrası yeniden örnekleme RED.
+        // R1 P1 regression: elicited kaydı sonrası yeniden örnekleme RED.
         let err = record_bar_elicitation(
             dir.path(),
             &cfg("m"),
@@ -1061,11 +1307,12 @@ mod tests {
 
     #[test]
     fn bar_transport_exhausted_seals_and_retry_count_persists() {
-        // Review R2: bar tarafı da experiment-line bütçesiyle çalışır —
-        // transport tükenmesi MÜHÜRLÜ; retry kaydı (network_retry_count) bar
-        // completion'ı için de persists ("retry kayda geçer").
+        // R2: bar tarafı da experiment-line bütçesiyle çalışır — transport
+        // tükenmesi MÜHÜRLÜ; retry kaydı (network_retry_count) bar completion'ı
+        // için de persists ("retry kayda geçer").
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys-bar", "user-view");
+        claim_bar(dir.path(), "m", &request);
         record_bar_elicitation(
             dir.path(),
             &cfg("m"),
@@ -1073,7 +1320,7 @@ mod tests {
             None,
             None,
             None,
-            Some("attempt 1: reset; attempt 2: timeout"),
+            Some("attempt 1 (retryable): reset; attempt 2 (retryable): timeout"),
             1,
             &manifest(),
         )
@@ -1081,13 +1328,13 @@ mod tests {
         let bar = read_json(dir.path(), "llm-bar-response.json");
         assert_eq!(
             bar["transport_error"],
-            "attempt 1: reset; attempt 2: timeout"
+            "attempt 1 (retryable): reset; attempt 2 (retryable): timeout"
         );
         assert_eq!(bar["network_retry_count"], 1, "D6: retry kayda geçer");
         assert!(bar["elicited"].is_null());
 
-        // Preflight: sealed bar hattında çağrı-öncesi RED.
-        assert!(ensure_bar_line_open(dir.path()).is_err());
+        // Yeniden bar claim'i RED (sealed outcome) — çağrı öncesi.
+        assert!(freeze_and_claim_bar_line(dir.path(), &cfg("m"), &request, &manifest()).is_err());
         // Yeniden elicitation (aynı prompt'la bile) = yeniden örnekleme → RED.
         let response = raw(r#"{"bar_value":0.7,"predicted":[]}"#);
         let elicited = parse_elicited_bar(&response.content).unwrap();
@@ -1110,75 +1357,15 @@ mod tests {
     }
 
     #[test]
-    fn freeze_refuses_different_inv_e1_provenance() {
-        // Review R2 P1: aynı prompt + aynı completion identity + FARKLI girdi
-        // bağlamı → RED (donmuş anchor KİMİN girdilerinden üretildiğini taşır).
+    fn bar_different_prompt_refused_by_freeze_at_claim() {
+        // Farklı bar prompt'u: claim aşamasında (outcome yokken) FROZEN RED.
         let dir = tempfile::tempdir().unwrap();
-        let request = req("sys", "user");
-        record_proposal_completion(
-            dir.path(),
-            &cfg("m"),
-            &request,
-            &raw(&valid_proposal_json()),
-            0,
-            &manifest(),
-        )
-        .unwrap();
-
-        // Tablo: baseline / task_digest / osp_revision değişimi → RED.
-        let mut other_baseline = manifest();
-        other_baseline.baseline_digest = "f".repeat(40);
-        let mut other_task = manifest();
-        other_task.task_digest = None;
-        let mut other_revision = manifest();
-        other_revision.osp_revision = "different-rev".into();
-
-        for (label, m) in [
-            ("baseline", other_baseline),
-            ("task_digest", other_task),
-            ("osp_revision", other_revision),
-        ] {
-            let err = record_proposal_completion(
-                dir.path(),
-                &cfg("m"),
-                &request,
-                &raw(&valid_proposal_json()),
-                0,
-                &m,
-            )
-            .unwrap_err();
-            let msg = format!("{err:#}");
-            assert!(
-                msg.contains("INV-E1 provenance"),
-                "{label} uyuşmazlığı RED: {msg}"
-            );
-        }
-    }
-
-    #[test]
-    fn bar_different_prompt_refused_by_freeze() {
-        let dir = tempfile::tempdir().unwrap();
-        record_bar_elicitation(
-            dir.path(),
-            &cfg("m"),
-            &req("sys-bar", "user-view"),
-            None,
-            None,
-            None,
-            Some("x"),
-            0,
-            &manifest(),
-        )
-        .unwrap();
-        let err = record_bar_elicitation(
+        let request = req("sys-bar", "user-view");
+        claim_bar(dir.path(), "m", &request);
+        let err = freeze_and_claim_bar_line(
             dir.path(),
             &cfg("m"),
             &req("sys-bar-DIFFERENT", "user-view"),
-            None,
-            None,
-            None,
-            Some("x"),
-            0,
             &manifest(),
         )
         .unwrap_err();

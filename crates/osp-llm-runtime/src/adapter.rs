@@ -90,19 +90,14 @@ impl RuntimeLlmClient {
 
     /// #171 D4 — bar elicitation: aynı kör view ile İKİNCİ completion.
     ///
-    /// "kabul barın olarak öngörülen değişim-sonrası coupling değerini bildir ve
-    /// önerilerini öngörülen etkiye göre sırala". Elicitation prompt'u da donar
-    /// (`llm-bar-prompt.json` + digest'ler); yanıt `llm-bar-response.json`'a
-    /// yazılır. Retryable hatada aynı-prompt tek retry (D6); her terminal sonuç
-    /// (parse-null, elicited, transport-exhausted) kaydı MÜHÜRLER. None = hiç
-    /// completion olmadı (kayda değer view yok).
+    /// Sıra sözleşmesi (review R3 P0): request kur → **freeze_and_claim**
+    /// (anchor + no-clobber claim, HTTP'ten ÖNCE) → strict_d6_call → outcome
+    /// kaydı (claim şartı yapısal). Retryable hatada aynı-prompt tek retry;
+    /// her terminal sonuç mühürler. None = hiç completion olmadı.
     pub fn elicit_bar(&self) -> anyhow::Result<Option<BarElicitationReport>> {
         let Some((dir, manifest)) = Self::recording(&self.artifacts_dir, &self.inv_e1) else {
             anyhow::bail!("bar elicitation requires the artifacts protocol (with_artifacts)");
         };
-        // Çağrı-öncesi seal preflight (review R2): sealed line'da HTTP çağrısı
-        // bile yapılmaz — yeniden elicitation = yeniden örnekleme.
-        artifacts::ensure_bar_line_open(dir)?;
         let Some(view) = self.first_task_view() else {
             return Ok(None);
         };
@@ -112,6 +107,9 @@ impl RuntimeLlmClient {
                 .map_err(|e| anyhow::anyhow!("AgentTaskView serialize: {e}"))?,
         };
         let cfg = self.runtime.config();
+        // PRE-CALL: anchor'u dondur + hattı atomik sahiplen (P0+P1). Sealed
+        // veya claimed hatlarda HTTP çağrısı yapılmaz.
+        artifacts::freeze_and_claim_bar_line(dir, cfg, &req, manifest)?;
         match strict_d6_call(|r| self.runtime.complete_raw(r), &req) {
             StrictD6Outcome::Response {
                 raw,
@@ -140,10 +138,11 @@ impl RuntimeLlmClient {
                     prompt_digest: artifacts::completion_prompt_digest(&req),
                 }))
             }
-            StrictD6Outcome::TransportExhausted { first, second } => {
-                // İki retryable deneme de tükenmiş — dürüst boşluk kaydı + MÜHÜR
-                // (experiment-line bütçesi tükendi; review R2).
-                let msg = format!("attempt 1: {first}; attempt 2: {second}");
+            StrictD6Outcome::RetryExhausted { first, second } => {
+                // Retryable ilk hatanın retry'ı da hata verdi — dürüst boşluk
+                // kaydı + MÜHÜR (bütçe tükendi; ikinci hata non-retryable
+                // olabilir — sınıfı etiketle).
+                let msg = retry_exhausted_message(&first, &second);
                 artifacts::record_bar_elicitation(
                     dir,
                     cfg,
@@ -188,6 +187,18 @@ impl RuntimeLlmClient {
     }
 }
 
+/// RetryExhausted durumunun dürüst kayıt mesajı: ilk hata retryable'dı (bu
+/// yüzden retry edildi), ikinci hata İSE başka bir sınıfta olabilir (review
+/// R3 P2) — sınıf etiketi kayda geçer, üçüncü deneme her durumda yapılmaz.
+fn retry_exhausted_message(first: &RtLlmError, second: &RtLlmError) -> String {
+    let second_class = if is_d6_retryable(second) {
+        "retryable"
+    } else {
+        "non-retryable"
+    };
+    format!("attempt 1 (retryable): {first}; attempt 2 ({second_class}): {second}")
+}
+
 /// **D6 retryable sınıflandırıcısı (review R2 P1; preregistered küme):**
 /// "yalnız GEÇİCİ ağ hatasında retry" kuralı error TÜRÜNE göre işler —
 /// generic Err-retry DEĞİL.
@@ -210,11 +221,11 @@ pub fn is_d6_retryable(e: &RtLlmError) -> bool {
     }
 }
 
-/// **D6 strict retry çekirdeği** (R1 P0 + R2 P1): retryable hatada AYNI
-/// `CompletionRequest` ile EN FAZLA bir retry; non-retryable hata retry'sız
-/// terminal; ikinci retryable hata terminal. Parse ihlaline retry YOKTUR
-/// (tamir döngüsü yasak — navigator `ParseFailurePolicy::TerminalNoRepair` +
-/// artifacts mührü kapatır).
+/// **D6 strict retry çekirdeği** (R1 P0 + R2 P1 + R3 P2): retryable hatada
+/// AYNI `CompletionRequest` ile EN FAZLA bir retry; non-retryable hata
+/// retry'sız terminal; retry bütçesi tükenince terminal. Parse ihlaline retry
+/// YOKTUR (tamir döngüsü yasak — navigator `ParseFailurePolicy::
+/// TerminalNoRepair` + artifacts mührü kapatır).
 ///
 /// Aynı `req` nesnesi iki denemede de değişmeden geçirilir — system/user
 /// bayt-özdeşliği yapısal garanti, deneysel iddia değildir.
@@ -227,8 +238,10 @@ pub(crate) enum StrictD6Outcome {
     },
     /// İlk hata sınıflandırıcıda non-retryable çıktı — retry yapıLMADI.
     NonRetryable { error: RtLlmError },
-    /// İki retryable deneme de yanıt alamadı — terminal transport hatası.
-    TransportExhausted {
+    /// Retryable ilk hatanın retry'ı da hata verdi — retry bütçesi tükendi
+    /// (ikinci hata kendi sınıfında olabilir: `retry_exhausted_message`
+    /// sınıfı kaydeder; review R3 P2). Üçüncü deneme yapılmaz.
+    RetryExhausted {
         first: RtLlmError,
         second: RtLlmError,
     },
@@ -249,7 +262,7 @@ pub(crate) fn strict_d6_call(
                 raw,
                 network_retries: 1,
             },
-            Err(second) => StrictD6Outcome::TransportExhausted { first, second },
+            Err(second) => StrictD6Outcome::RetryExhausted { first, second },
         },
     }
 }
@@ -288,16 +301,19 @@ impl LlmClient for RuntimeLlmClient {
 
         let cfg = self.runtime.config();
         let recording = Self::recording(&self.artifacts_dir, &self.inv_e1);
-        // Çağrı-öncesi seal preflight (review R2): experiment-line "bir retry"
-        // bütçesi wire düzeyinde kapanır — sealed dizinde HTTP çağrısı YAPILMAZ.
+        // **PRE-CALL (review R3 P0+P1):** ilk completion'da donmuş prompt
+        // anchor'u + atomik line-claim HTTP'ten ÖNCE yazılır ("freeze önce
+        // kanıtı", çağrı-sonrası değil). Sealed/claimed hatlarda HTTP YAPILMAZ.
         if is_first {
-            if let Some((dir, _)) = recording {
-                artifacts::ensure_proposals_line_open(dir).map_err(|e| {
-                    NavLlmError::Network(format!(
-                        "llm experiment line is sealed ({}): {e:#}",
-                        dir.display()
-                    ))
-                })?;
+            if let Some((dir, manifest)) = recording {
+                artifacts::freeze_and_claim_proposal_line(dir, cfg, &req, manifest).map_err(
+                    |e| {
+                        NavLlmError::Network(format!(
+                            "llm experiment line is not open ({}): {e:#}",
+                            dir.display()
+                        ))
+                    },
+                )?;
             }
         }
         // D6 strict (yalnız preregistered/kayıtlı mod): retryable hatada AYNI
@@ -326,11 +342,11 @@ impl LlmClient for RuntimeLlmClient {
                          — the experiment line is sealed with this outcome"
                     )));
                 }
-                StrictD6Outcome::TransportExhausted { first, second } => {
-                    // İki retryable deneme de tükenmiş: transport-exhausted kaydı
-                    // MÜHÜRLÜ (experiment-line bütçesi tükendi; review R2) +
-                    // terminal ağ hatası.
-                    let msg = format!("attempt 1: {first}; attempt 2: {second}");
+                StrictD6Outcome::RetryExhausted { first, second } => {
+                    // Retryable ilk hatanın retry'ı da hata verdi: kayıt MÜHÜRLÜ
+                    // (experiment-line bütçesi tükendi) + terminal (ikinci hata
+                    // non-retryable olabilir — sınıf etiketi kayıtta).
+                    let msg = retry_exhausted_message(&first, &second);
                     artifacts::record_call_failure(dir, cfg, &req, &msg, 1, manifest).map_err(
                         |e| {
                             NavLlmError::Network(format!(
@@ -340,7 +356,7 @@ impl LlmClient for RuntimeLlmClient {
                         },
                     )?;
                     return Err(NavLlmError::Network(format!(
-                        "D6: both retryable attempts failed for this prompt ({msg}); \
+                        "D6: both attempts failed for this prompt ({msg}); \
                          the one-retry budget is exhausted and the experiment line is \
                          sealed — terminal"
                     )));
@@ -361,26 +377,18 @@ impl LlmClient for RuntimeLlmClient {
             total_tokens: usage.total_tokens,
         });
 
-        // #171 §5 (yalnız ilk completion — INV-E1 freeze): kanıt persist'i
-        // protokolün parçası; disk hatası çağrıyı terminal hatayla bitirir.
-        // record_proposal_completion parse'ı KENDİSİ yapar ve D6 mührünü
-        // uygular (parse-null / success sonrası dizin mühürlü).
+        // #171 §5 OUTCOME (yalnız ilk completion): pre-call claim + donmuş
+        // anchor şartı yapısal; record_proposal_outcome parse'ı KENDİSİ yapar
+        // ve D6 mührünü uygular (parse-null / success sonrası dizin mühürlü).
         if is_first {
             if let Some((dir, manifest)) = recording {
-                artifacts::record_proposal_completion(
-                    dir,
-                    cfg,
-                    &req,
-                    &raw,
-                    network_retries,
-                    manifest,
-                )
-                .map_err(|e| {
-                    NavLlmError::Network(format!(
-                        "llm artifact persist failed ({}): {e:#}",
-                        dir.display()
-                    ))
-                })?;
+                artifacts::record_proposal_outcome(dir, cfg, &req, &raw, network_retries, manifest)
+                    .map_err(|e| {
+                        NavLlmError::Network(format!(
+                            "llm artifact persist failed ({}): {e:#}",
+                            dir.display()
+                        ))
+                    })?;
             }
         }
         let parse_result = raw.into_proposal();
@@ -731,10 +739,7 @@ mod tests {
                 user: "u".into(),
             },
         );
-        assert!(matches!(
-            outcome,
-            StrictD6Outcome::TransportExhausted { .. }
-        ));
+        assert!(matches!(outcome, StrictD6Outcome::RetryExhausted { .. }));
         assert_eq!(calls, 2, "bir retry sonrası terminal — üçüncü deneme yok");
     }
 
