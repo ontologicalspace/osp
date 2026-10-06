@@ -209,7 +209,7 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "proposal_digest": "sha256:… | null",
   "attempt_ref": "…/attempt.json",
   "attempt_digest": "sha256:… (anchored) — alan yok: legacy downgrade",
-  "canonical_attempt_ref": "attempts/task-<id>-<millis>-<pid>.json (state-dir'e göre) — alan yok: legacy downgrade",
+  "canonical_attempt_ref": "attempts/task-<id>-<millis>-<pid>[-N].json (state-dir'e göre) — alan yok: legacy downgrade",
   "decision": "accept | reject | defer",
   "patch_outcome": "applied | build-failed-reverted | null (henüz uygulanmadı / reddedildi)",
   "patch_ref": "…/applied.patch | null",
@@ -315,7 +315,8 @@ kanıtlayabildiği şey*.
   anchor'lu satır, eşleştiği canonical artifact'ın kimliğini de taşır:
   `attempt_digest` (read-once `attempt_bytes` tamponunun sha256'ı — canonical
   byte-match'in doğruladığı aynı baytlar) + `canonical_attempt_ref`
-  (`attempts/task-<id>-<millis>-<pid>.json`, state-dir'e göre ileri-slash).
+  (`attempts/task-<id>-<millis>-<pid>[-N].json`, state-dir'e göre ileri-slash;
+  `[-N]` = no-clobber collision soneki).
   İçerik bağı (digest) satırın kendisindedir; artifact kimliği bağı satır + ilgili
   state-dir bağlamıyla denetlenir — ref state-dir'e görelidir, tek başına fiziksel
   store'u adlandırmaz. Birden fazla byte-özdeş canonical artifact hangi

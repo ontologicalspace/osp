@@ -135,9 +135,9 @@ enum AttemptAnchor {
     /// Eşleşen canonical artifact — TEK byte-özdeş eşleşme (#190 review P1:
     /// çoğul eşleşme artifact identity'sini belirsizleştirir → RED; sıralı
     /// seçim deterministik ama truthful olmazdı); `--state-dir`'e göre ileri-
-    /// slash ref (`attempts/task-<id>-<millis>-<pid>.json`), state-dir'in
-    /// mutlak/göreli yazımına göre değişmez (adaylar her zaman
-    /// `<state-dir>/attempts/` altında).
+    /// slash ref (`attempts/task-<id>-<millis>-<pid>[-N].json` — `[-N]` no-clobber
+    /// collision soneki), state-dir'in mutlak/göreli yazımına göre değişmez
+    /// (adaylar her zaman `<state-dir>/attempts/` altında).
     Canonical { canonical_ref: String },
     /// `--allow-unanchored-legacy` açık downgrade'i.
     UnanchoredLegacy,
