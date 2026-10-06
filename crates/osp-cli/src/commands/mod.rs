@@ -225,6 +225,21 @@ pub struct TrajectoryAttemptArgs {
     /// path'ler dahil her durumda çözümlenir ve fence uygulanır.
     #[arg(long)]
     pub state_dir: Option<PathBuf>,
+    /// #171 §5: `--llm real` kanıt dizini (run dir). İlk gerçek completion'ın
+    /// donmuş prompt'u (`llm-prompt.json` + digest), ham yanıtı
+    /// (`llm-raw-response.txt`), parse edilmiş önerisi (`llm-proposals.json`)
+    /// ve `--bar-elicitation` yanıtına (`llm-bar.json`) buraya yazılır.
+    /// `--llm real` ile ZORUNLU (unpersisted gerçek çağrı = yeniden üretilemez
+    /// kanıt); analyzed repo ve canonical state mağazaları dışında olmalı
+    /// (preflight fence, `--out` disipliniyle aynı). Mock yolu DEĞİŞMEZ.
+    #[arg(long)]
+    pub llm_artifacts: Option<PathBuf>,
+    /// #171 D4: bar elicitation — aynı kör `AgentTaskView` ile ikinci completion
+    /// ("kabul barın olarak öngörülen değişim-sonrası coupling'i bildir ve
+    /// önerilerini öngörülen etkiye göre sırala"); yanıt `llm-bar.json`'a
+    /// donar + digest. Yalnız `--llm real` ile (scripted mock bar elicite edilemez).
+    #[arg(long, default_value_t = false)]
+    pub bar_elicitation: bool,
 }
 
 /// **#164 R2 P0:** Kanıt güven sınırı modu — resume'un kanıt kaynağına dair AÇIK
@@ -718,6 +733,106 @@ fn validate_attempt_output_path(
     Ok(())
 }
 
+/// #171: `--llm-artifacts`/`--bar-elicitation` bayrak guard'ları + kanıt dizini
+/// fence'i — TÜMÜ navigator ÇALIŞMADAN önce (en pahalı adım öncesi red).
+///
+/// Dönen `Some(dir)` yalnızca `--llm real` geçerli kanıt dizinliyken oluşur;
+/// dizin bu noktada yaratılır (izin hatası da erken yüzeye çıkar).
+fn validate_llm_real_guards(
+    args: &TrajectoryAttemptArgs,
+    state_dir: &Path,
+) -> anyhow::Result<Option<PathBuf>> {
+    let is_real = args.llm.as_str() == "real";
+    if args.bar_elicitation && !is_real {
+        anyhow::bail!(
+            "--bar-elicitation requires --llm real: a scripted mock cannot elicit a bar \
+             (D4 elicitation is a real second completion over the same blinded view)"
+        );
+    }
+    let dir = match (is_real, args.llm_artifacts.as_ref()) {
+        (true, None) => anyhow::bail!(
+            "--llm real requires --llm-artifacts <dir>: the #171 pre-registration protocol \
+             persists the frozen prompt (llm-prompt.json + digest), the raw response \
+             (llm-raw-response.txt) and the parsed proposals (llm-proposals.json) to the \
+             run directory — an unpersisted real call is not reproducible evidence"
+        ),
+        (false, Some(_)) => anyhow::bail!(
+            "--llm-artifacts is only used with --llm real (mock proposals come from \
+             --proposals; there is no real LLM call to persist)"
+        ),
+        (false, None) => return Ok(None),
+        (true, Some(dir)) => dir.clone(),
+    };
+    validate_llm_artifacts_dir(&args.repo, state_dir, &dir)?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot create --llm-artifacts directory {}: {e}",
+            dir.display()
+        )
+    })?;
+    Ok(Some(dir))
+}
+
+/// #171: `--llm-artifacts` hedef dizini fence'i — `--out` disipliniyle aynı
+/// iki bütünlük koruması, dizin hedefine uyarlanmış:
+///
+/// 1. **Analyzed repo dışı:** llm-real kanıtları repoya yazılırsa final snapshot
+///    fence'inden SONRA analyzed source kirlenir (fence'ten kaçış — --out gerekçesi
+///    aynen) ve git status kirlenir.
+/// 2. **Canonical state mağazaları dokunulmaz:** `<state-dir>/.osp/**` ve
+///    `<state-dir>/attempts/**` no-clobber evidence alanıdır; llm kanıt dosyaları
+///    orayı hedefleyemez. State-dir kökü ve dışarıdaki path'ler serbest.
+fn validate_llm_artifacts_dir(repo: &Path, state_dir: &Path, dir: &Path) -> anyhow::Result<()> {
+    // #182 disiplini: dizinin PARENT'I var olmalı (dizin kendisi guard'da yaratılır).
+    preflight_out_parent(dir, "--llm-artifacts")?;
+
+    let cwd = |what: &str| -> anyhow::Result<PathBuf> {
+        std::env::current_dir().map_err(|e| {
+            anyhow::anyhow!(
+                "cannot resolve relative {what} {}: current dir unavailable: {e}",
+                dir.display()
+            )
+        })
+    };
+    let abs_dir = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        cwd("--llm-artifacts")?.join(dir)
+    };
+    let canon_dir = canonicalize_with_missing_tail(&abs_dir);
+
+    let canon_repo = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    if canon_dir.starts_with(&canon_repo) {
+        anyhow::bail!(
+            "--llm-artifacts {} resolves inside the analyzed repository; llm-real evidence \
+             must live outside the repo (writing it during the attempt would dirty analyzed \
+             source and escape the final snapshot fence). Set --llm-artifacts to an external \
+             directory (e.g. the dogfood run directory).",
+            dir.display()
+        );
+    }
+
+    let abs_state = if state_dir.is_absolute() {
+        state_dir.to_path_buf()
+    } else {
+        cwd("--state-dir")?.join(state_dir)
+    };
+    let canon_state = canonicalize_with_missing_tail(&abs_state);
+    for reserved in [".osp", "attempts"] {
+        let reserved_root = canonicalize_with_missing_tail(&canon_state.join(reserved));
+        if canon_dir.starts_with(&reserved_root) {
+            anyhow::bail!(
+                "--llm-artifacts {} resolves inside the canonical state store ({}/); the \
+                 no-clobber evidence store and space identity are immutable — llm evidence \
+                 artifacts cannot target them. Choose a caller-owned directory.",
+                dir.display(),
+                reserved
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Mutlak path'i, var olmayan kuyruk bileşenlerini KORUYARAK canonicalize et.
 ///
 /// En derin VAR OLAN atayı `canonicalize` eder (symlink/UNC çözümü), var olmayan
@@ -953,6 +1068,9 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         validate_attempt_output_path(&args.repo, &state_dir, out)?;
     }
 
+    // #171: llm-real kanıt dizini + bayrak kombinasyonları — analyze'den ÖNCE.
+    let llm_artifacts_dir = validate_llm_real_guards(&args, &state_dir)?;
+
     // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
     // Pre-capture repository snapshot (HEAD + tracked paths + dirty-path set).
     // #155 (analyzed-scope clean semantics): global clean-worktree pre-fence KALDIRILDI —
@@ -1047,10 +1165,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // canonical persist + emit + exit aşağıda, TÜM navigator sonuçları için.
     let execution = match args.llm.as_str() {
         "real" => {
+            let artifacts_dir = llm_artifacts_dir
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("--llm real requires --llm-artifacts <dir>"))?;
             let llm = osp_llm_runtime::RuntimeLlmClient::from_env()
-                .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?;
+                .map_err(|e| anyhow::anyhow!("LLM runtime (OPENAI_API_KEY?): {e}"))?
+                .with_artifacts(artifacts_dir);
             // Real kol proposals DOSYASI tüketmez (#171) → digest null (dürüst boşluk).
-            run_navigator(
+            let execution = run_navigator(
                 &llm,
                 &mut engine,
                 &args,
@@ -1060,7 +1182,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 task_source,
                 task_digest,
                 None,
-            )?
+            )?;
+            // #171 D4: bar elicitation — İKİNCİ completion, ilk kör view'la.
+            // Navigator sonucundan BAĞIMSIZ kanal: hatası attempt'i bozmaz (D6
+            // dürüst boşluk llm-bar.json'a işlenir; yalnız disk hatası uyarıya düşer).
+            if args.bar_elicitation {
+                emit_bar_elicitation_result(&llm);
+            }
+            execution
         }
         _ => {
             // mock (default)
@@ -1935,6 +2064,35 @@ fn publish_no_clobber_attempt_artifact(
     Ok(canonical)
 }
 
+/// #171 D4: bar elicitation sonucunu INSAN okur özetle (kanıt zaten `llm-bar.json`;
+/// stdout/evidence kanalına GİRMEZ — attempt envelope'u bu üretici kanalı taşımaz).
+fn emit_bar_elicitation_result(llm: &osp_llm_runtime::RuntimeLlmClient) {
+    match llm.elicit_bar() {
+        Ok(Some(report)) => match (&report.elicited, &report.transport_error) {
+            (Some(bar), _) => eprintln!(
+                "llm-bar.json: bar_value={} · {} öngörü (τ sırası) · prompt {}",
+                bar.bar_value,
+                bar.predicted.len(),
+                report.prompt_digest
+            ),
+            (None, Some(err)) => {
+                eprintln!("llm-bar.json: transport hatası dürüst boşlukla kaydedildi: {err}")
+            }
+            (None, None) => eprintln!(
+                "llm-bar.json: parse ihlali dürüst boşlukla kaydedildi (D6): {:?}",
+                report.parse_error
+            ),
+        },
+        Ok(None) => {
+            eprintln!("llm-bar.json: ATLANDI — navigator hiç LLM çağrısı yapmadı (kör view yok)")
+        }
+        Err(e) => eprintln!(
+            "llm-bar.json: YAZILAMADI (disk hatası — attempt sonucu geçerli, bar kanıtı \
+             eksik): {e:#}"
+        ),
+    }
+}
+
 /// #166: attempt çıktısını yayınla — json modunda stdout'a tam envelope;
 /// human modunda progress stderr'de, stdout'ta HER ZAMAN geçerli evidence JSON
 /// dizisi (P1-3: boş evidence → `[]`; zero-evidence outcome'lar parser
@@ -2132,6 +2290,8 @@ mod mode_matrix_tests {
             format: "human".into(),
             out: None,
             state_dir: None,
+            llm_artifacts: None,
+            bar_elicitation: false,
         }
     }
 
@@ -2675,6 +2835,165 @@ mod staged_publish_tests {
             !first.exists(),
             "first output must NOT be visible when the second prep failed — \
              staged publish leaves no partial artifact set"
+        );
+    }
+}
+
+#[cfg(test)]
+mod llm_real_guard_tests {
+    //! #171: --llm-artifacts / --bar-elicitation guard + fence birim testleri
+    //! (navigator/analyze ÇALIŞMADAN önce red edildikleri için ağ-anahtarsız koşarlar).
+    use super::*;
+
+    fn args(
+        llm: &str,
+        llm_artifacts: Option<PathBuf>,
+        bar_elicitation: bool,
+    ) -> TrajectoryAttemptArgs {
+        TrajectoryAttemptArgs {
+            task_id: 7,
+            repo: PathBuf::from("repo-does-not-matter-here"),
+            proposals: None,
+            llm: llm.to_string(),
+            maneuver_limit: None,
+            task: None,
+            execution_mode: CliExecutionMode::Production,
+            witness: CliWitnessMode::Production,
+            format: "human".to_string(),
+            out: None,
+            state_dir: None,
+            llm_artifacts,
+            bar_elicitation,
+        }
+    }
+
+    fn guarded_dir(base: &Path) -> PathBuf {
+        // Parent VAR (#182 preflight) — dizinin kendisi guard içinde yaratılır.
+        base.join("llm-artifacts")
+    }
+
+    #[test]
+    fn real_without_artifacts_dir_rejected() {
+        let state = tempfile::tempdir().unwrap();
+        let err = validate_llm_real_guards(&args("real", None, false), state.path())
+            .expect_err("real without --llm-artifacts must reject");
+        assert!(
+            err.to_string()
+                .contains("--llm real requires --llm-artifacts"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn artifacts_dir_without_real_rejected() {
+        let state = tempfile::tempdir().unwrap();
+        let err = validate_llm_real_guards(
+            &args("mock", Some(guarded_dir(state.path())), false),
+            state.path(),
+        )
+        .expect_err("--llm-artifacts with mock must reject");
+        assert!(
+            err.to_string().contains("only used with --llm real"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn bar_elicitation_without_real_rejected() {
+        let state = tempfile::tempdir().unwrap();
+        let err = validate_llm_real_guards(&args("mock", None, true), state.path())
+            .expect_err("--bar-elicitation with mock must reject");
+        assert!(
+            err.to_string()
+                .contains("--bar-elicitation requires --llm real"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn mock_without_any_llm_flag_passes_with_none() {
+        let state = tempfile::tempdir().unwrap();
+        assert!(
+            validate_llm_real_guards(&args("mock", None, false), state.path())
+                .expect("mock path untouched")
+                .is_none(),
+            "mock yolu değişmez: guard Some dönmez"
+        );
+    }
+
+    #[test]
+    fn real_with_external_artifacts_dir_passes_and_creates_dir() {
+        let state = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let dir = external.path().join("run-llm");
+        let resolved =
+            validate_llm_real_guards(&args("real", Some(dir.clone()), true), state.path())
+                .expect("external dir passes");
+        assert_eq!(resolved, Some(dir.clone()));
+        assert!(
+            dir.is_dir(),
+            "guard dizini erken yaratır (izin hatası erken)"
+        );
+    }
+
+    #[test]
+    fn artifacts_dir_inside_analyzed_repo_rejected() {
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let state = base.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let mut a = args("real", Some(repo.join("evidence")), false);
+        a.repo = repo.clone();
+        let err = validate_llm_real_guards(&a, &state).expect_err("repo-inside dir must reject");
+        assert!(
+            err.to_string().contains("inside the analyzed repository"),
+            "message: {err}"
+        );
+    }
+
+    #[test]
+    fn artifacts_dir_inside_canonical_stores_rejected() {
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let state = base.path().join("state");
+        std::fs::create_dir_all(state.join("attempts")).unwrap();
+        std::fs::create_dir_all(state.join(".osp")).unwrap();
+
+        for reserved in ["attempts", ".osp"] {
+            let mut a = args("real", Some(state.join(reserved).join("x")), false);
+            a.repo = repo.clone();
+            let err = validate_llm_real_guards(&a, &state)
+                .expect_err(&format!("must reject inside {reserved}"));
+            assert!(
+                err.to_string().contains("canonical state store"),
+                "message for {reserved}: {err}"
+            );
+        }
+
+        // State-dir kökü (caller-owned) serbest — --out ile aynı kural.
+        let mut a = args("real", Some(state.join("llm-evidence")), false);
+        a.repo = repo.clone();
+        validate_llm_real_guards(&a, &state).expect("state-dir root is caller-owned");
+    }
+
+    #[test]
+    fn artifacts_dir_missing_parent_rejected_early() {
+        let base = tempfile::tempdir().unwrap();
+        let repo = base.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let state = base.path().join("state");
+        std::fs::create_dir_all(&state).unwrap();
+
+        let mut a = args("real", Some(base.path().join("missing").join("llm")), false);
+        a.repo = repo;
+        let err = validate_llm_real_guards(&a, &state)
+            .expect_err("missing parent must reject early (#182 discipline)");
+        assert!(
+            err.to_string().contains("parent directory does not exist"),
+            "message: {err}"
         );
     }
 }
