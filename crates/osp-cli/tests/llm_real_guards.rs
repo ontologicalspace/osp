@@ -146,6 +146,8 @@ use std::thread;
 enum EndpointStep {
     /// 200 + verilen gövde (OpenAI chat-completion envelope'u).
     Respond(String),
+    /// Verilen status kodu + gövde (ör. 401 — non-retryable sınıfı).
+    RespondStatus(u16, String),
     /// İsteği OKU (kayda geçer) ama bağlantıyı yanıtsız düşür (transport hatası).
     DropConnection,
 }
@@ -205,6 +207,21 @@ impl FakeEndpoint {
                         let _ = stream.write_all(response.as_bytes());
                         let _ = stream.flush();
                     }
+                    EndpointStep::RespondStatus(code, body) => {
+                        let reason = match code {
+                            401 => "Unauthorized",
+                            429 => "Too Many Requests",
+                            _ => "Status",
+                        };
+                        let response = format!(
+                            "HTTP/1.1 {code} {reason}\r\nContent-Type: application/json\r\n\
+                             Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = stream.flush();
+                    }
                     EndpointStep::DropConnection => {
                         // Yanıt YOK — istemci transport hatası görür (D6 retry tetiklenir).
                         let _ = stream.shutdown(std::net::Shutdown::Both);
@@ -230,21 +247,26 @@ fn openai_body(content: &str) -> String {
 
 fn attempt_real_against(fx: &HarnessFixture, port: u16) -> (std::process::Output, String) {
     let artifacts = external_artifacts_dir(fx);
-    let output = fx.run_attempt_no_task(|cmd| {
+    let output = attempt_real_dir(fx, port, &artifacts);
+    (output, artifacts)
+}
+
+/// Aynı artifacts dizinine İKİNCİ bir süreç koşusu (cross-process state machine).
+fn attempt_real_dir(fx: &HarnessFixture, port: u16, artifacts: &str) -> std::process::Output {
+    fx.run_attempt_no_task(|cmd| {
         cmd.arg("7")
             .arg("--repo")
             .arg(fx.repo_path())
             .arg("--llm")
             .arg("real")
             .arg("--llm-artifacts")
-            .arg(&artifacts)
+            .arg(artifacts)
             .env("OPENAI_API_KEY", "sk-loopback-test")
             .env(
                 "OSP_LLM_ENDPOINT",
                 format!("http://127.0.0.1:{port}/v1/chat/completions"),
             )
-    });
-    (output, artifacts)
+    })
 }
 
 fn read_artifact_json(artifacts: &str, name: &str) -> serde_json::Value {
@@ -336,4 +358,91 @@ fn d6_network_fail_retries_once_byte_identical_and_persists_retry() {
     assert!(proposals["parse_error"].is_string());
     assert!(proposals["proposal"].is_null());
     assert_eq!(proposals["usage"]["total_tokens"], 5);
+}
+
+#[test]
+fn d6_non_retryable_status_single_call_and_sealed() {
+    // Review R2 P1: 401 kalıcı hatadır — retry YOK (tam 1 çağrı), kayıt
+    // retry_count=0 ile MÜHÜRLÜ.
+    let fx = HarnessFixture::new();
+    let endpoint = FakeEndpoint::start(vec![EndpointStep::RespondStatus(
+        401,
+        r#"{"error":{"message":"bad key"}}"#.to_string(),
+    )]);
+
+    let (output, artifacts) = attempt_real_against(&fx, endpoint.port);
+    assert_eq!(
+        output.status.code(),
+        Some(90),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requests: Vec<Vec<u8>> = endpoint.requests.try_iter().collect();
+    assert_eq!(requests.len(), 1, "non-retryable: retry yapılmadı");
+
+    let proposals = read_artifact_json(&artifacts, "llm-proposals.json");
+    assert_eq!(proposals["network_retry_count"], 0);
+    let err_text = proposals["transport_error"].as_str().unwrap_or_default();
+    assert!(
+        err_text.contains("401"),
+        "hata kaydı 401'i taşır: {err_text}"
+    );
+    assert!(proposals["proposal"].is_null());
+}
+
+#[test]
+fn d6_sealed_line_blocks_second_process_before_any_http_call() {
+    // Review R2 P1: retry bütçesi EXPERIMENT-LINE bütçesidir — process
+    // restart ile sıfırlanamaz. Süreç 1: iki retryable deneme de düşer →
+    // transport-exhausted kaydı MÜHÜRLÜ. Süreç 2 (aynı dizin): çağrı-öncesi
+    // preflight RED — İKİNCİ endpoint HİÇ istek GÖRMEZ (wire düzeyi kanıtı).
+    let fx = HarnessFixture::new();
+    let artifacts = external_artifacts_dir(&fx);
+
+    let exhausted = FakeEndpoint::start(vec![
+        EndpointStep::DropConnection,
+        EndpointStep::DropConnection,
+    ]);
+    let output1 = attempt_real_dir(&fx, exhausted.port, &artifacts);
+    assert_eq!(
+        output1.status.code(),
+        Some(90),
+        "süreç 1: transport tükenmesi terminal; stderr: {}",
+        String::from_utf8_lossy(&output1.stderr)
+    );
+    let requests1: Vec<Vec<u8>> = exhausted.requests.try_iter().collect();
+    assert_eq!(requests1.len(), 2, "süreç 1: ilk çağrı + bir retry");
+    let proposals = read_artifact_json(&artifacts, "llm-proposals.json");
+    assert_eq!(proposals["network_retry_count"], 1);
+    assert!(proposals["transport_error"].is_string());
+
+    // Süreç 2: same directory — preflight, HTTP çağrısından ÖNCE reddeder.
+    let would_succeed = FakeEndpoint::start(vec![EndpointStep::Respond(openai_body(
+        "irrelevant — sealed line must not call",
+    ))]);
+    let output2 = attempt_real_dir(&fx, would_succeed.port, &artifacts);
+    assert_eq!(
+        output2.status.code(),
+        Some(90),
+        "süreç 2: sealed satır terminal; stderr: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
+    let stderr2 = String::from_utf8_lossy(&output2.stderr);
+    assert!(
+        stderr2.contains("SEALED"),
+        "preflight sealed mesajı: {stderr2}"
+    );
+    let requests2: Vec<Vec<u8>> = would_succeed.requests.try_iter().collect();
+    assert_eq!(
+        requests2.len(),
+        0,
+        "wire kanıtı: sealed dizinde hiç HTTP isteği yapılmadı"
+    );
+    // Kayıt süreç 1'in durumuyla değişmedi (üçüncü çağrı bütçe ihlali yok).
+    let proposals_after = read_artifact_json(&artifacts, "llm-proposals.json");
+    assert_eq!(
+        proposals_after["network_retry_count"], 1,
+        "bütçe sıfırlanmadı — kayıt değişmedi"
+    );
 }
