@@ -550,6 +550,24 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         !row.as_object().unwrap().contains_key("unanchored_legacy"),
         "anchored row must not carry the downgrade key"
     );
+    // #188: anchored satır finalize anındaki canonical kimliği taşır — digest
+    // bağımsız yeniden hesapla eşit (read-once tampon ≡ attempt.json baytları),
+    // ref state-dir'e göre ileri-slash, gösterdiği dosya bayt-özdeş.
+    assert_eq!(row["attempt_digest"], sha256_of(&attempt));
+    let canonical_ref = row["canonical_attempt_ref"].as_str().unwrap();
+    let stored: Vec<String> = fs::read_dir(fx.work_path().join("attempts"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("task-1-") && n.ends_with(".json"))
+        .collect();
+    assert_eq!(stored.len(), 1, "fixture tek canonical attempt yazar");
+    assert_eq!(canonical_ref, format!("attempts/{}", stored[0]));
+    assert_eq!(
+        sha256_of(&fx.work_path().join("attempts").join(&stored[0])),
+        row["attempt_digest"],
+        "canonical_attempt_ref'in gösterdiği dosya attempt.json ile bayt-özdeş"
+    );
     assert_eq!(row["after_ref"], "run/after.json");
     assert_eq!(row["analysis_profile"], "tier1");
     // Tur-1 P1-1: Exists(after)+Exists(patch) ≠ Patch(S0)=S_after —
@@ -1531,6 +1549,13 @@ fn finalize_run_digest_presence_matrix() {
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert_eq!(row["proposal_refs"], serde_json::Value::Null);
     assert_eq!(row["proposal_digest"], serde_json::Value::Null);
+    // #188: anchored geçiş — canonical kimlik read-once baytlardan; ref
+    // state-dir'e göre ileri-slash, hand-written mağaza adıyla birebir.
+    assert_eq!(row["attempt_digest"], sha256_of(&run.join("attempt.json")));
+    assert_eq!(
+        row["canonical_attempt_ref"],
+        "attempts/task-1-990001-1.json"
+    );
 }
 
 /// #178 review P0-2 (fail-open kapanışı): attempt proposals TÜKETTİYSE (zarf
@@ -1977,6 +2002,14 @@ fn finalize_run_unanchored_legacy_with_explicit_flag_passes() {
     let row: serde_json::Value =
         serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
     assert_eq!(row["unanchored_legacy"], serde_json::json!(true));
+    // #188: legacy downgrade satırında canonical kimlik alanları YOKTUR
+    // (missing ≡ downgrade tutarlılığı — unanchored_legacy zaten kayıtlı).
+    for key in ["attempt_digest", "canonical_attempt_ref"] {
+        assert!(
+            !row.as_object().unwrap().contains_key(key),
+            "legacy row must not carry {key}"
+        );
+    }
 }
 
 /// Basit özyinelemeli dizin kopyası (std-only; test yardımcısı).

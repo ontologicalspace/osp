@@ -208,6 +208,8 @@ Her run bir JSONL satırı üretir (markdown yalnızca render'dır; analiz
   "proposal_refs": ["…/proposals.json"],
   "proposal_digest": "sha256:… | null",
   "attempt_ref": "…/attempt.json",
+  "attempt_digest": "sha256:… (anchored) — alan yok: legacy downgrade",
+  "canonical_attempt_ref": "attempts/task-<id>-<millis>-<pid>.json (state-dir'e göre) — alan yok: legacy downgrade",
   "decision": "accept | reject | defer",
   "patch_outcome": "applied | build-failed-reverted | null (henüz uygulanmadı / reddedildi)",
   "patch_ref": "…/applied.patch | null",
@@ -305,6 +307,18 @@ kanıtlayabildiği şey*.
   ve `proposals.head == baseline.head` (v1 çıplak array state'e bağlanamaz →
   reddedilir). `--out` tüketilen artifact'lardan herhangi birinin alias'ı
   olamaz ve yazım atomic'tir (P0-3). `osp_revision` build-time gömülür.
+  **Canonical trust anchor (#178 tur-2/3):** digest fence'lerden önce `attempt.json`
+  no-clobber canonical mağazayla (`<state-dir>/attempts/`) bayt-eşleşmesiyle
+  doğrulanır; anchor'a ulaşılamayan yeni-şekil zarf her koşulda reddedilir,
+  legacy-şekil zarf yalnız açık `--allow-unanchored-legacy` downgrade'iyle geçer
+  (satır `unanchored_legacy: true` taşır). **#188 — kimliğin kalıcılığı:**
+  anchor'lu satır, eşleştiği canonical artifact'ın kimliğini de taşır:
+  `attempt_digest` (read-once `attempt_bytes` tamponunun sha256'ı — canonical
+  byte-match'in doğruladığı aynı baytlar) + `canonical_attempt_ref`
+  (`attempts/task-<id>-<millis>-<pid>.json`, state-dir'e göre ileri-slash).
+  Böylece run-dir kopyası sonradan değişse bile `ledger row → exact canonical
+  attempt artifact` bağı offline audit'te satırın kendisinden okunur; legacy
+  downgrade satırında iki alan da yoktur (missing ≡ downgrade tutarlılığı).
   **Yorum alanları null kalır** (tur-1 P1-4: null = "henüz değerlendirilmedi";
   `[]` = "değerlendirildi, friction yok" — başka iddia): `decision`,
   `patch_outcome`, `decision_utility`, `counterfactual`, `human_override`,
