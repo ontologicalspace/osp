@@ -98,7 +98,9 @@ yalnızca pre-#178 historical artifact'lar için anlamlıdır ("gerçekten eski
 artifact" ile "alanları silinmiş yeni artifact + taşınmış run-dir" dış bilgi
 olmadan ayırt edilemez; sessiz `trusted→untrusted` geçişi epistemik olarak
 kabul edilemez) ve kullanımı ledger satırına `unanchored_legacy: true` olarak
-yazılır. Presence semantiği: alan YOK = legacy-şekil ≠ `null` = "tüketilmedi"
+yazılır (anahtar YALNIZ downgrade'de eklenir — anchor'lu satırlarda alan
+yoktur; missing ≠ false ≠ null-beyan). Presence semantiği: alan YOK =
+legacy-şekil ≠ `null` = "tüketilmedi"
 (run-dir'de proposals.json varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu +
 hash eşit; silinmek RED).
 

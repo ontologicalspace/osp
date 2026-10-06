@@ -544,6 +544,12 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
 
     assert_eq!(row["task_ref"], "run/task.json");
     assert_eq!(row["attempt_ref"], "run/attempt.json");
+    // #178 tur-3/P2: anchor'lu satırda downgrade alanı YOKTUR (missing ≠ false
+    // ≠ null-beyan; anahtar yalnız --allow-unanchored-legacy kullanımında eklenir).
+    assert!(
+        !row.as_object().unwrap().contains_key("unanchored_legacy"),
+        "anchored row must not carry the downgrade key"
+    );
     assert_eq!(row["after_ref"], "run/after.json");
     assert_eq!(row["analysis_profile"], "tier1");
     // Tur-1 P1-1: Exists(after)+Exists(patch) ≠ Patch(S0)=S_after —
