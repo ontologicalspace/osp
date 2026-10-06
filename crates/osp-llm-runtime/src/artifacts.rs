@@ -197,6 +197,22 @@ fn freeze_prompt(dir: &Path, file_name: &str, doc: &PromptDoc) -> anyhow::Result
                 doc.max_tokens
             );
         }
+        // Review R2 P1: INV-E1 provenance eşitliği — donmuş anchor'ın "bu prompt
+        // ŞU girdilerden üretildi" iddiası da donmuştur; aynı prompt + aynı
+        // config + FARKLI girdi bağlamı (baseline/task/osp_revision/files_read)
+        // aynı deney satırı OLAMAZ.
+        if existing.inv_e1 != doc.inv_e1 {
+            anyhow::bail!(
+                "{file_name} is already FROZEN with different INV-E1 provenance \
+                 (frozen {:?}; new {:?}). The frozen anchor records WHICH inputs \
+                 produced this prompt (agent-task view, task, baseline, osp revision, \
+                 files read): reusing the directory from a different context would \
+                 attach new evidence to someone else's pre-registration. Use a fresh \
+                 --llm-artifacts directory.",
+                existing.inv_e1,
+                doc.inv_e1
+            );
+        }
         return Ok(());
     }
     let payload = serde_json::to_vec_pretty(doc)?;
@@ -216,11 +232,12 @@ struct ProposalsDoc {
 }
 
 impl ProposalsDoc {
-    /// Kayıt mühürlü mü? D6 matrisi: parse-null (terminal) ve success
-    /// (kanıt tamam) sonrası üzerine yazılamaz; YALNIZ transport tükenmesi
-    /// (network_retry yolu) sonrası aynı-prompt retry kaydı güncelleyebilir.
+    /// Kayıt mühürlü mü? D6 matrisi (review R2): HER sonuç kaydı terminaldir —
+    /// parse-null, success VE transport-exhausted. "Bir retry" bütçesi
+    /// EXPERIMENT-LINE bütçesidir, process-local değil: iki ağ denemesi de
+    /// tükendiyse satır tamamlanmıştır; aynı dizinde üçüncü çağrı RED.
     fn is_sealed(&self) -> bool {
-        self.parse_error.is_some() || self.proposal.is_some()
+        self.parse_error.is_some() || self.proposal.is_some() || self.transport_error.is_some()
     }
 }
 
@@ -259,15 +276,17 @@ struct BarResponseDoc {
     elicited: Option<ElicitedBar>,
     parse_error: Option<String>,
     transport_error: Option<String>,
+    /// D6 "retry kayda geçer" — bar completion'ı da kapsar (review R2).
+    #[serde(default)]
+    network_retry_count: u32,
 }
 
 impl BarResponseDoc {
-    /// Elicitation mühürlü mü? Proposals ile aynı D6 matrisi: parse-null ve
-    /// elicited-success sonrası yeniden örnekleme YASAK (cherry-pick: "beğen
-    /// edilene dek bar yeniden istenmez"); yalnız transport tükenmesi
-    /// retry'a açık.
+    /// Elicitation mühürlü mü? Proposals ile aynı D6 matrisi (review R2): her
+    /// sonuç terminaldir — parse-null, elicited-success VE transport-exhausted.
+    /// Transport sonrası yeniden elicitation = yeniden örnekleme (cherry-pick).
     fn is_sealed(&self) -> bool {
-        self.parse_error.is_some() || self.elicited.is_some()
+        self.parse_error.is_some() || self.elicited.is_some() || self.transport_error.is_some()
     }
 }
 
@@ -313,15 +332,56 @@ fn existing_proposals(dir: &Path) -> anyhow::Result<Option<ProposalsDoc>> {
     Ok(Some(doc))
 }
 
+fn proposals_seal_message(existing: &ProposalsDoc) -> String {
+    let outcome = if existing.parse_error.is_some() {
+        "parse violation (proposal=null)"
+    } else if existing.proposal.is_some() {
+        "recorded proposal"
+    } else {
+        "transport-exhausted (both network attempts failed)"
+    };
+    format!(
+        "llm-proposals.json is SEALED for this directory (outcome: {outcome}): D6's \
+         one-retry budget is an EXPERIMENT-LINE budget, not a process budget — a parse \
+         violation, a successful record, or transport exhaustion are all terminal for \
+         this line. A new completion needs a fresh --llm-artifacts directory."
+    )
+}
+
+/// **Çağrı-ÖNCESİ seal preflight** (review R2 P1): experiment-line bütçesi wire
+/// düzeyinde kapanır — sealed bir kayıt varsa hiç HTTP çağrısı yapılmadan RED.
+/// Kayıt fonksiyonlarındaki seal kontrolü (çift katman) korunur.
+pub fn ensure_proposals_line_open(dir: &Path) -> anyhow::Result<()> {
+    if let Some(existing) = existing_proposals(dir)? {
+        if existing.is_sealed() {
+            anyhow::bail!("{}", proposals_seal_message(&existing));
+        }
+    }
+    Ok(())
+}
+
+/// Bar kanalının çağrı-öncesi seal preflight'i — `ensure_proposals_line_open`
+/// ile aynı ilke (yeniden elicitation = yeniden örnekleme).
+pub fn ensure_bar_line_open(dir: &Path) -> anyhow::Result<()> {
+    let response_path = dir.join("llm-bar-response.json");
+    if !response_path.exists() {
+        return Ok(());
+    }
+    let raw = std::fs::read_to_string(&response_path)?;
+    let existing: BarResponseDoc = serde_json::from_str(&raw).map_err(|e| {
+        anyhow::anyhow!("llm-bar-response.json exists but is unreadable: {e} — resolve manually")
+    })?;
+    if existing.is_sealed() {
+        anyhow::bail!("{}", bar_seal_message(&existing));
+    }
+    Ok(())
+}
+
 /// İlk llm-real proposal completion'ını kaydet (first-freeze; §5 + D6).
 ///
-/// - `parse_error = Some` ⇒ `proposal: null` dürüst boşluk — **terminal**: bu
-///   dizinde proposals kaydı MÜHÜRLÜ, artık üzerine yazılamaz.
-/// - Başarı ⇒ kanıt tamam — aynı şekilde mühürlü.
-/// - Transport tükenmesi ([`record_transport_failure`]) ⇒ tek açık durum.
-///
-/// Disk hatası çağıranı hatayla bırakır: kanıt persist'i protokolün parçasıdır,
-/// sessiz unpersisted gerçek çağrı olmaz.
+/// HER sonuç kaydı terminaldir (review R2): parse-null, success VE
+/// transport-exhausted mühürler. Disk hatası çağıranı hatayla bırakır —
+/// kanıt persist'i protokolün parçasıdır, sessiz unpersisted çağrı olmaz.
 pub fn record_proposal_completion(
     dir: &Path,
     cfg: &RuntimeConfig,
@@ -336,17 +396,7 @@ pub fn record_proposal_completion(
 
     if let Some(existing) = existing_proposals(dir)? {
         if existing.is_sealed() {
-            anyhow::bail!(
-                "llm-proposals.json is SEALED for this directory (outcome: {}): D6 has no \
-                 repair loop — a parse violation or a successful record is terminal for \
-                 this experiment line. A new completion needs a fresh --llm-artifacts \
-                 directory.",
-                if existing.parse_error.is_some() {
-                    "parse violation (proposal=null)"
-                } else {
-                    "recorded proposal"
-                }
-            );
+            anyhow::bail!("{}", proposals_seal_message(&existing));
         }
     }
 
@@ -370,15 +420,17 @@ pub fn record_proposal_completion(
     Ok(())
 }
 
-/// D6 transport tükenmesi kaydı — iki ağ denemesi de yanıt alamadı: `usage`
-/// bilinmiyor (null), `proposal` null, `transport_error` + retry sayısı
-/// kayıtta. Bu TEK durum aynı-prompt ağ retry'sına açıktır (yeni süreçte
-/// [`record_proposal_completion`] transport-null kaydın üzerine yazabilir).
-pub fn record_transport_failure(
+/// Yanıtsız terminal çağrı hatası kaydı — iki yol buraya gelir (review R2):
+/// (i) retryable sınıfındayken iki ağ denemesi de tükendi (transport-
+/// exhausted; `network_retry_count` = 1); (ii) sınıflandırıcı hatayı
+/// non-retryable buldu (ör. 401/400; retry YAPILMADI, `network_retry_count`
+/// = 0). Her iki durumda da kayıt SEAL edilir: "bir retry" bütçesi
+/// experiment-line bütçesidir — aynı dizinde üçüncü çağrı RED.
+pub fn record_call_failure(
     dir: &Path,
     cfg: &RuntimeConfig,
     req: &CompletionRequest,
-    transport_error: &str,
+    call_error: &str,
     network_retry_count: u32,
     manifest: &InvE1Manifest,
 ) -> anyhow::Result<()> {
@@ -387,10 +439,7 @@ pub fn record_transport_failure(
     freeze_prompt(dir, "llm-prompt.json", &doc)?;
     if let Some(existing) = existing_proposals(dir)? {
         if existing.is_sealed() {
-            anyhow::bail!(
-                "llm-proposals.json is SEALED for this directory — no further records \
-                 (D6 terminal outcome)"
-            );
+            anyhow::bail!("{}", proposals_seal_message(&existing));
         }
     }
     let record = ProposalsDoc {
@@ -398,7 +447,7 @@ pub fn record_transport_failure(
         usage: None,
         proposal: None,
         parse_error: None,
-        transport_error: Some(transport_error.to_string()),
+        transport_error: Some(call_error.to_string()),
         network_retry_count,
     };
     write_proposals_doc(dir, &record)
@@ -411,11 +460,26 @@ fn write_proposals_doc(dir: &Path, record: &ProposalsDoc) -> anyhow::Result<()> 
     )
 }
 
+fn bar_seal_message(existing: &BarResponseDoc) -> String {
+    let outcome = if existing.parse_error.is_some() {
+        "parse violation"
+    } else if existing.elicited.is_some() {
+        "recorded bar"
+    } else {
+        "transport-exhausted (both network attempts failed)"
+    };
+    format!(
+        "llm-bar-response.json is SEALED for this directory (outcome: {outcome}): bar \
+         re-elicitation after any terminal outcome is resampling — cherry-pick, \
+         forbidden by the preregistration protocol. Use a fresh --llm-artifacts \
+         directory."
+    )
+}
+
 /// D4 bar elicitation kaydı — iki dosya: donmuş anchor
 /// (`llm-bar-prompt.json`) + yanıt kaydı (`llm-bar-response.json`).
-/// Transport hatası ve parse ihlali de DÜRÜST boşluk olarak yazılır; parse
-/// ihlali ve elicited-success sonrası yanıt kaydı mühürlenir (yeniden
-/// örnekleme = cherry-pick, yasak).
+/// Transport hatası ve parse ihlali de DÜRÜST boşluk olarak yazılır; HER sonuç
+/// (parse-null, elicited-success, transport-exhausted) mühürler (review R2).
 #[allow(clippy::too_many_arguments)]
 pub fn record_bar_elicitation(
     dir: &Path,
@@ -425,6 +489,7 @@ pub fn record_bar_elicitation(
     elicited: Option<&ElicitedBar>,
     parse_error: Option<&str>,
     transport_error: Option<&str>,
+    network_retry_count: u32,
     manifest: &InvE1Manifest,
 ) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
@@ -440,17 +505,7 @@ pub fn record_bar_elicitation(
             )
         })?;
         if existing.is_sealed() {
-            anyhow::bail!(
-                "llm-bar-response.json is SEALED for this directory (outcome: {}): bar \
-                 re-elicitation after a parse violation or a recorded bar is resampling \
-                 — cherry-pick, forbidden by the preregistration protocol. Use a fresh \
-                 --llm-artifacts directory.",
-                if existing.parse_error.is_some() {
-                    "parse violation"
-                } else {
-                    "recorded bar"
-                }
-            );
+            anyhow::bail!("{}", bar_seal_message(&existing));
         }
     }
 
@@ -464,6 +519,7 @@ pub fn record_bar_elicitation(
         elicited: elicited.cloned(),
         parse_error: parse_error.map(str::to_string),
         transport_error: transport_error.map(str::to_string),
+        network_retry_count,
     };
     atomic_replace(&response_path, &serde_json::to_vec_pretty(&record)?)
 }
@@ -780,12 +836,13 @@ mod tests {
     }
 
     #[test]
-    fn record_transport_failure_then_same_prompt_retry_succeeds() {
-        // D6'ın TEK açık durumu: iki ağ denemesi de tükenmiş → transport-null
-        // kaydı; aynı-prompt retry başarıyla gelirse kayıt güncellenir.
+    fn transport_exhausted_seals_experiment_line() {
+        // Review R2 P1: "bir retry" EXPERIMENT-LINE bütçesidir — iki retryable
+        // deneme de tükendiyse kayıt MÜHÜRLÜ; aynı dizinde üçüncü çağrı (yeni
+        // process'ten bile) RED. Process-restart ile bütçe sıfırlanamaz.
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys", "user");
-        record_transport_failure(
+        record_call_failure(
             dir.path(),
             &cfg("m"),
             &request,
@@ -800,8 +857,15 @@ mod tests {
         assert_eq!(proposals["network_retry_count"], 1);
         assert!(proposals["transport_error"].is_string());
 
-        // Aynı-prompt retry (D6): kayıt güncellenebilir.
-        record_proposal_completion(
+        // Preflight (çağrı-ÖNCESİ) sealed line'da RED — HTTP çağrısı yapılmaz.
+        let err = ensure_proposals_line_open(dir.path()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("SEALED"),
+            "preflight sealed hatası: {err:#}"
+        );
+
+        // record_proposal_completion da (çift katman) RED — kayıt değişmedi.
+        let err = record_proposal_completion(
             dir.path(),
             &cfg("m"),
             &request,
@@ -809,10 +873,49 @@ mod tests {
             0,
             &manifest(),
         )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("SEALED"),
+            "transport-exhausted mühür: {err:#}"
+        );
+        let proposals = read_json(dir.path(), "llm-proposals.json");
+        assert!(proposals["proposal"].is_null(), "kayıt değişmedi");
+    }
+
+    #[test]
+    fn non_retryable_failure_records_with_zero_retries_and_seals() {
+        // Sınıflandırıcı reddi (ör. 401): retry YAPILMADI → network_retry_count=0;
+        // sonuç yine terminal — kayıt mühürlenir.
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        record_call_failure(
+            dir.path(),
+            &cfg("m"),
+            &request,
+            "non-retryable (api status 401: unauthorized) — no retry attempted",
+            0,
+            &manifest(),
+        )
         .unwrap();
         let proposals = read_json(dir.path(), "llm-proposals.json");
-        assert_eq!(proposals["proposal"]["reasoning"], "r");
-        assert!(proposals["transport_error"].is_null());
+        assert_eq!(proposals["network_retry_count"], 0, "retry yapılmadı");
+        assert!(proposals["transport_error"].is_string());
+        assert!(proposals["proposal"].is_null());
+        assert!(
+            ensure_proposals_line_open(dir.path()).is_err(),
+            "401 sonrası da satır mühürlü"
+        );
+    }
+
+    #[test]
+    fn preflight_open_line_passes_when_no_record() {
+        // Kayıt yok (crash penceresi: freeze yazıldı, çağrı kayda ulaşmadı) →
+        // satır AÇIK: yeni süreç kendi retry bütçesiyle başlayabilir (kayıtsız
+        // çağrı denetlenemez; bütçe KAYITLI sonuçları korur).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path()).unwrap();
+        ensure_proposals_line_open(dir.path()).expect("no record = open line");
+        ensure_bar_line_open(dir.path()).expect("no bar record = open line");
     }
 
     #[test]
@@ -922,6 +1025,7 @@ mod tests {
             Some(&elicited),
             None,
             None,
+            0,
             &manifest(),
         )
         .unwrap();
@@ -945,6 +1049,7 @@ mod tests {
             Some(&elicited),
             None,
             None,
+            0,
             &manifest(),
         )
         .unwrap_err();
@@ -955,7 +1060,10 @@ mod tests {
     }
 
     #[test]
-    fn bar_transport_failure_then_same_prompt_retry_allowed() {
+    fn bar_transport_exhausted_seals_and_retry_count_persists() {
+        // Review R2: bar tarafı da experiment-line bütçesiyle çalışır —
+        // transport tükenmesi MÜHÜRLÜ; retry kaydı (network_retry_count) bar
+        // completion'ı için de persists ("retry kayda geçer").
         let dir = tempfile::tempdir().unwrap();
         let request = req("sys-bar", "user-view");
         record_bar_elicitation(
@@ -965,18 +1073,25 @@ mod tests {
             None,
             None,
             None,
-            Some("connection reset"),
+            Some("attempt 1: reset; attempt 2: timeout"),
+            1,
             &manifest(),
         )
         .unwrap();
         let bar = read_json(dir.path(), "llm-bar-response.json");
-        assert_eq!(bar["transport_error"], "connection reset");
+        assert_eq!(
+            bar["transport_error"],
+            "attempt 1: reset; attempt 2: timeout"
+        );
+        assert_eq!(bar["network_retry_count"], 1, "D6: retry kayda geçer");
         assert!(bar["elicited"].is_null());
 
-        // Aynı bar prompt'uyla retry → açık durum, kayıt güncellenir.
+        // Preflight: sealed bar hattında çağrı-öncesi RED.
+        assert!(ensure_bar_line_open(dir.path()).is_err());
+        // Yeniden elicitation (aynı prompt'la bile) = yeniden örnekleme → RED.
         let response = raw(r#"{"bar_value":0.7,"predicted":[]}"#);
         let elicited = parse_elicited_bar(&response.content).unwrap();
-        record_bar_elicitation(
+        let err = record_bar_elicitation(
             dir.path(),
             &cfg("m"),
             &request,
@@ -984,11 +1099,60 @@ mod tests {
             Some(&elicited),
             None,
             None,
+            0,
+            &manifest(),
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("SEALED"),
+            "bar transport mührü: {err:#}"
+        );
+    }
+
+    #[test]
+    fn freeze_refuses_different_inv_e1_provenance() {
+        // Review R2 P1: aynı prompt + aynı completion identity + FARKLI girdi
+        // bağlamı → RED (donmuş anchor KİMİN girdilerinden üretildiğini taşır).
+        let dir = tempfile::tempdir().unwrap();
+        let request = req("sys", "user");
+        record_proposal_completion(
+            dir.path(),
+            &cfg("m"),
+            &request,
+            &raw(&valid_proposal_json()),
+            0,
             &manifest(),
         )
         .unwrap();
-        let bar = read_json(dir.path(), "llm-bar-response.json");
-        assert_eq!(bar["elicited"]["bar_value"], 0.7);
+
+        // Tablo: baseline / task_digest / osp_revision değişimi → RED.
+        let mut other_baseline = manifest();
+        other_baseline.baseline_digest = "f".repeat(40);
+        let mut other_task = manifest();
+        other_task.task_digest = None;
+        let mut other_revision = manifest();
+        other_revision.osp_revision = "different-rev".into();
+
+        for (label, m) in [
+            ("baseline", other_baseline),
+            ("task_digest", other_task),
+            ("osp_revision", other_revision),
+        ] {
+            let err = record_proposal_completion(
+                dir.path(),
+                &cfg("m"),
+                &request,
+                &raw(&valid_proposal_json()),
+                0,
+                &m,
+            )
+            .unwrap_err();
+            let msg = format!("{err:#}");
+            assert!(
+                msg.contains("INV-E1 provenance"),
+                "{label} uyuşmazlığı RED: {msg}"
+            );
+        }
     }
 
     #[test]
@@ -1002,6 +1166,7 @@ mod tests {
             None,
             None,
             Some("x"),
+            0,
             &manifest(),
         )
         .unwrap();
@@ -1013,6 +1178,7 @@ mod tests {
             None,
             None,
             Some("x"),
+            0,
             &manifest(),
         )
         .unwrap_err();

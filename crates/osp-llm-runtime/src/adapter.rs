@@ -93,13 +93,16 @@ impl RuntimeLlmClient {
     /// "kabul barın olarak öngörülen değişim-sonrası coupling değerini bildir ve
     /// önerilerini öngörülen etkiye göre sırala". Elicitation prompt'u da donar
     /// (`llm-bar-prompt.json` + digest'ler); yanıt `llm-bar-response.json`'a
-    /// yazılır. Ağ hatasında aynı-prompt tek retry (D6); transport/parse ihlali
-    /// DÜRÜST boşluk olarak dosyaya işlenir — yalnız disk/protokol hatası Err
-    /// döner. None = hiç completion olmadı (kayda değer view yok).
+    /// yazılır. Retryable hatada aynı-prompt tek retry (D6); her terminal sonuç
+    /// (parse-null, elicited, transport-exhausted) kaydı MÜHÜRLER. None = hiç
+    /// completion olmadı (kayda değer view yok).
     pub fn elicit_bar(&self) -> anyhow::Result<Option<BarElicitationReport>> {
         let Some((dir, manifest)) = Self::recording(&self.artifacts_dir, &self.inv_e1) else {
             anyhow::bail!("bar elicitation requires the artifacts protocol (with_artifacts)");
         };
+        // Çağrı-öncesi seal preflight (review R2): sealed line'da HTTP çağrısı
+        // bile yapılmaz — yeniden elicitation = yeniden örnekleme.
+        artifacts::ensure_bar_line_open(dir)?;
         let Some(view) = self.first_task_view() else {
             return Ok(None);
         };
@@ -110,7 +113,10 @@ impl RuntimeLlmClient {
         };
         let cfg = self.runtime.config();
         match strict_d6_call(|r| self.runtime.complete_raw(r), &req) {
-            StrictD6Outcome::Response { raw, .. } => {
+            StrictD6Outcome::Response {
+                raw,
+                network_retries,
+            } => {
                 let parsed = artifacts::parse_elicited_bar(&raw.content);
                 let (elicited, parse_error) = match parsed {
                     Ok(bar) => (Some(bar), None),
@@ -124,6 +130,7 @@ impl RuntimeLlmClient {
                     elicited.as_ref(),
                     parse_error.as_deref(),
                     None,
+                    network_retries,
                     manifest,
                 )?;
                 Ok(Some(BarElicitationReport {
@@ -134,8 +141,8 @@ impl RuntimeLlmClient {
                 }))
             }
             StrictD6Outcome::TransportExhausted { first, second } => {
-                // İki ağ denemesi de tükenmiş — llm-bar-response.json dürüst
-                // boşlukla yazılır (bu durum aynı-prompt retry'a açık kalır).
+                // İki retryable deneme de tükenmiş — dürüst boşluk kaydı + MÜHÜR
+                // (experiment-line bütçesi tükendi; review R2).
                 let msg = format!("attempt 1: {first}; attempt 2: {second}");
                 artifacts::record_bar_elicitation(
                     dir,
@@ -145,6 +152,29 @@ impl RuntimeLlmClient {
                     None,
                     None,
                     Some(&msg),
+                    1,
+                    manifest,
+                )?;
+                Ok(Some(BarElicitationReport {
+                    elicited: None,
+                    parse_error: None,
+                    transport_error: Some(msg),
+                    prompt_digest: artifacts::completion_prompt_digest(&req),
+                }))
+            }
+            StrictD6Outcome::NonRetryable { error } => {
+                // Sınıflandırıcı reddi (ör. 401/400): retry YAPILMADI — kayıt
+                // retry_count=0 ile mühürlenir.
+                let msg = format!("non-retryable ({error}) — no retry attempted");
+                artifacts::record_bar_elicitation(
+                    dir,
+                    cfg,
+                    &req,
+                    None,
+                    None,
+                    None,
+                    Some(&msg),
+                    0,
                     manifest,
                 )?;
                 Ok(Some(BarElicitationReport {
@@ -158,10 +188,33 @@ impl RuntimeLlmClient {
     }
 }
 
-/// **D6 strict ağ-retry çekirdeği** (review P0): geçici ağ hatasında AYNI
-/// `CompletionRequest` ile EN FAZLA bir retry; ikinci hata terminal.
-/// Parse ihlaline retry YOKTUR (tamir döngüsü yasak — navigator
-/// `ParseFailurePolicy::TerminalNoRepair` + artifacts mührü bunu kapatar).
+/// **D6 retryable sınıflandırıcısı (review R2 P1; preregistered küme):**
+/// "yalnız GEÇİCİ ağ hatasında retry" kuralı error TÜRÜNE göre işler —
+/// generic Err-retry DEĞİL.
+///
+/// Retryable (issue #171 preregistration kaydı 6019658939):
+/// - `Http(_)` — transport katmanı (connect/timeout/reset/DNS/TLS): tanım
+///   gereği geçici ağ sınıfı.
+/// - `Status { code: 429 | 502 | 503 | 504 }` — açıkça preregister edilmiş
+///   geçici provider status kümesi.
+///
+/// Terminal (retry YOK): diğer tüm `Status` (401/400/500…), `BadResponse`
+/// (malformed envelope), `ProposalParse`, `MissingApiKey`.
+pub fn is_d6_retryable(e: &RtLlmError) -> bool {
+    match e {
+        RtLlmError::Http(_) => true,
+        RtLlmError::Status { code, .. } => matches!(code, 429 | 502 | 503 | 504),
+        RtLlmError::BadResponse(_)
+        | RtLlmError::ProposalParse { .. }
+        | RtLlmError::MissingApiKey => false,
+    }
+}
+
+/// **D6 strict retry çekirdeği** (R1 P0 + R2 P1): retryable hatada AYNI
+/// `CompletionRequest` ile EN FAZLA bir retry; non-retryable hata retry'sız
+/// terminal; ikinci retryable hata terminal. Parse ihlaline retry YOKTUR
+/// (tamir döngüsü yasak — navigator `ParseFailurePolicy::TerminalNoRepair` +
+/// artifacts mührü kapatır).
 ///
 /// Aynı `req` nesnesi iki denemede de değişmeden geçirilir — system/user
 /// bayt-özdeşliği yapısal garanti, deneysel iddia değildir.
@@ -172,7 +225,9 @@ pub(crate) enum StrictD6Outcome {
         raw: RawCompletion,
         network_retries: u32,
     },
-    /// İki ağ denemesi de yanıt alamadı — terminal transport hatası.
+    /// İlk hata sınıflandırıcıda non-retryable çıktı — retry yapıLMADI.
+    NonRetryable { error: RtLlmError },
+    /// İki retryable deneme de yanıt alamadı — terminal transport hatası.
     TransportExhausted {
         first: RtLlmError,
         second: RtLlmError,
@@ -188,6 +243,7 @@ pub(crate) fn strict_d6_call(
             raw,
             network_retries: 0,
         },
+        Err(first) if !is_d6_retryable(&first) => StrictD6Outcome::NonRetryable { error: first },
         Err(first) => match call(req) {
             Ok(raw) => StrictD6Outcome::Response {
                 raw,
@@ -232,28 +288,61 @@ impl LlmClient for RuntimeLlmClient {
 
         let cfg = self.runtime.config();
         let recording = Self::recording(&self.artifacts_dir, &self.inv_e1);
-        // D6 strict (yalnız preregistered/kayıtlı mod): ağ hatasında AYNI
-        // prompt'la bir retry; kayıtsız mod mevcut davranış (tek deneme).
+        // Çağrı-öncesi seal preflight (review R2): experiment-line "bir retry"
+        // bütçesi wire düzeyinde kapanır — sealed dizinde HTTP çağrısı YAPILMAZ.
+        if is_first {
+            if let Some((dir, _)) = recording {
+                artifacts::ensure_proposals_line_open(dir).map_err(|e| {
+                    NavLlmError::Network(format!(
+                        "llm experiment line is sealed ({}): {e:#}",
+                        dir.display()
+                    ))
+                })?;
+            }
+        }
+        // D6 strict (yalnız preregistered/kayıtlı mod): retryable hatada AYNI
+        // prompt'la bir retry (sınıflandırıcı: is_d6_retryable); non-retryable
+        // hatada retry'sız terminal; kayıtsız mod mevcut davranış (tek deneme).
         let (raw, network_retries) = match recording {
             Some((dir, manifest)) => match strict_d6_call(|r| self.runtime.complete_raw(r), &req) {
                 StrictD6Outcome::Response {
                     raw,
                     network_retries,
                 } => (raw, network_retries),
-                StrictD6Outcome::TransportExhausted { first, second } => {
-                    // İki ağ denemesi de tükenmiş: transport-null kaydı (D6'ın
-                    // TEK retry'a açık durumu) + terminal ağ hatası.
-                    let msg = format!("attempt 1: {first}; attempt 2: {second}");
-                    artifacts::record_transport_failure(dir, cfg, &req, &msg, 1, manifest)
-                        .map_err(|e| {
+                StrictD6Outcome::NonRetryable { error } => {
+                    // Sınıflandırıcı reddi (ör. 401/400/BadResponse): retry
+                    // YAPILMADI; kayıt retry_count=0 ile MÜHÜRLENİR (review R2).
+                    let msg = format!("non-retryable ({error}) — no retry attempted");
+                    artifacts::record_call_failure(dir, cfg, &req, &msg, 0, manifest).map_err(
+                        |e| {
                             NavLlmError::Network(format!(
                                 "llm artifact persist failed ({}): {e:#}",
                                 dir.display()
                             ))
-                        })?;
+                        },
+                    )?;
                     return Err(NavLlmError::Network(format!(
-                        "D6: both network attempts failed for this prompt ({msg}); \
-                         same-prompt retry is exhausted — terminal"
+                        "D6: terminal non-retryable call failure ({error}); no retry \
+                         — the experiment line is sealed with this outcome"
+                    )));
+                }
+                StrictD6Outcome::TransportExhausted { first, second } => {
+                    // İki retryable deneme de tükenmiş: transport-exhausted kaydı
+                    // MÜHÜRLÜ (experiment-line bütçesi tükendi; review R2) +
+                    // terminal ağ hatası.
+                    let msg = format!("attempt 1: {first}; attempt 2: {second}");
+                    artifacts::record_call_failure(dir, cfg, &req, &msg, 1, manifest).map_err(
+                        |e| {
+                            NavLlmError::Network(format!(
+                                "llm artifact persist failed ({}): {e:#}",
+                                dir.display()
+                            ))
+                        },
+                    )?;
+                    return Err(NavLlmError::Network(format!(
+                        "D6: both retryable attempts failed for this prompt ({msg}); \
+                         the one-retry budget is exhausted and the experiment line is \
+                         sealed — terminal"
                     )));
                 }
             },
@@ -647,6 +736,91 @@ mod tests {
             StrictD6Outcome::TransportExhausted { .. }
         ));
         assert_eq!(calls, 2, "bir retry sonrası terminal — üçüncü deneme yok");
+    }
+
+    // ── Review R2 P1: retryable sınıflandırıcı ───────────────────────────────
+
+    #[test]
+    fn d6_classifier_non_retryable_statuses_never_retry() {
+        // D6: "yalnız GEÇİCİ ağ hatasında retry" — kalıcı status kodları
+        // (401/400/500…) retry'sız terminal; TAM OLARAK 1 çağrı.
+        for code in [401u16, 400, 500, 403, 404] {
+            let mut calls = 0;
+            let outcome = strict_d6_call(
+                |_req| {
+                    calls += 1;
+                    Err(RtLlmError::Status {
+                        code,
+                        body: "permanent".into(),
+                    })
+                },
+                &CompletionRequest {
+                    system: "s".into(),
+                    user: "u".into(),
+                },
+            );
+            assert!(
+                matches!(outcome, StrictD6Outcome::NonRetryable { .. }),
+                "status {code} non-retryable olmalı"
+            );
+            assert_eq!(calls, 1, "status {code}: retry yapılmadı");
+        }
+    }
+
+    #[test]
+    fn d6_classifier_bad_response_and_missing_key_never_retry() {
+        for make_error in [
+            || RtLlmError::BadResponse("malformed envelope".into()),
+            || RtLlmError::MissingApiKey,
+        ] {
+            let mut calls = 0;
+            let outcome = strict_d6_call(
+                |_req| {
+                    calls += 1;
+                    Err(make_error())
+                },
+                &CompletionRequest {
+                    system: "s".into(),
+                    user: "u".into(),
+                },
+            );
+            assert!(matches!(outcome, StrictD6Outcome::NonRetryable { .. }));
+            assert_eq!(calls, 1, "retry yapılmadı");
+        }
+    }
+
+    #[test]
+    fn d6_classifier_preregistered_transient_statuses_retry_once() {
+        // Preregistered geçici küme (issue #171 kaydı 6019658939):
+        // 429/502/503/504 → retryable; başarılı retry network_retries=1.
+        for code in [429u16, 502, 503, 504] {
+            let mut calls = 0;
+            let outcome = strict_d6_call(
+                |_req| {
+                    calls += 1;
+                    if calls == 1 {
+                        Err(RtLlmError::Status {
+                            code,
+                            body: "transient".into(),
+                        })
+                    } else {
+                        Ok(ok_raw())
+                    }
+                },
+                &CompletionRequest {
+                    system: "s".into(),
+                    user: "u".into(),
+                },
+            );
+            match outcome {
+                StrictD6Outcome::Response {
+                    network_retries, ..
+                } => {
+                    assert_eq!(network_retries, 1, "status {code} retry edildi")
+                }
+                other => panic!("status {code} retryable olmalı: {other:?}"),
+            }
+        }
     }
 
     // 3. error_mapping_runtime_to_navigator
