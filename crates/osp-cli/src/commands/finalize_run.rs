@@ -55,6 +55,11 @@ pub struct FinalizeRunArgs {
     /// kendisi olamaz (alias fence — P0-3).
     #[arg(long)]
     pub out: Option<PathBuf>,
+    /// #178 tur-2 P0 (trust anchor): digest fence'lerin güven kökü run-dir
+    /// kopyası DEĞİL, no-clobber canonical mağazadır (`<state-dir>/attempts/`).
+    /// Verilmezse ritüel düzeni denenir: `<run_dir>/../../state`.
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
 }
 
 /// #166 run envelope'unun finalize-run tarafındaki SIKI okuma şekli (P0-2;
@@ -98,6 +103,93 @@ where
     D: serde::Deserializer<'de>,
 {
     serde::Deserialize::deserialize(de).map(Some)
+}
+
+/// #178 tur-2 P0 — **canonical trust anchor**: digest'ler yalnızca kendilerini
+/// taşıyan zarf güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned,
+/// overwrite edilebilir bir KOYADIR. Makinenin kaydı no-clobber canonical
+/// mağazadır (`<state-dir>/attempts/task-<id>-*.json`; `--out` kopyası tanım
+/// gereği aynı baytlar). Politika:
+///
+/// - Mağazada bu task için ≥1 canonical artifact VARSA → kopya bunlardan biriyle
+///   **bayt-özdeş** olmak zorundadır (tutarlı-tamper VE digest-alan-silme
+///   bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil → RED).
+/// - Mağaza erişilebilir ama bu task için artifact YOKSA → yeni-şekil zarf
+///   (digest alanları mevcut) RED ("kanonik kayıt yok"); legacy-şekil zarf GEÇER
+///   (store-öncesi dönemin gerçek artifact'ı).
+/// - Mağaza çözümlenemezse → yeni-şekil RED (`--state-dir` iste); legacy-şekil
+///   atlar (backward-compat: run-17 gibi store'suz eski run'lar yeniden
+///   finalize edilebilir).
+fn verify_attempt_against_canonical_store(
+    run_dir: &Path,
+    attempt_path: &Path,
+    task_id: u64,
+    explicit_state_dir: Option<&Path>,
+    envelope_has_digest_fields: bool,
+) -> anyhow::Result<()> {
+    // Ritüel düzeni varsayımı: dogfood/runs/<id> ↔ dogfood/state.
+    let probed = run_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("state"));
+    let state_dir: Option<PathBuf> = match explicit_state_dir {
+        Some(p) => Some(p.to_path_buf()),
+        None => probed.filter(|p| p.is_dir()),
+    };
+    let attempts_dir = state_dir.as_ref().map(|s| s.join("attempts"));
+
+    let candidates: Vec<PathBuf> = match attempts_dir.as_ref().filter(|d| d.is_dir()) {
+        Some(dir) => {
+            let prefix = format!("task-{task_id}-");
+            std::fs::read_dir(dir)
+                .map_err(|e| {
+                    anyhow::anyhow!("cannot read canonical attempt store {}: {e}", dir.display())
+                })?
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| {
+                    p.extension().map(|x| x == "json").unwrap_or(false)
+                        && p.file_name()
+                            .map(|n| n.to_string_lossy().starts_with(&prefix))
+                            .unwrap_or(false)
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+
+    if attempts_dir.as_ref().filter(|d| d.is_dir()).is_some() && !candidates.is_empty() {
+        let copy_bytes = std::fs::read(attempt_path)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", attempt_path.display()))?;
+        let matched = candidates
+            .iter()
+            .any(|p| std::fs::read(p).map(|b| b == copy_bytes).unwrap_or(false));
+        anyhow::ensure!(
+            matched,
+            "canonical attempt fence: attempt.json does not byte-match any canonical \
+             artifact for task {task_id} in {} — the run-dir copy was modified after \
+             the canonical publish; digest claims are evidence only when the envelope \
+             carrying them is the machine-published one",
+            attempts_dir.expect("checked above").display()
+        );
+        return Ok(());
+    }
+
+    // Mağaza bu task için boş ya da erişilemez.
+    if envelope_has_digest_fields {
+        anyhow::bail!(
+            "canonical attempt fence: the envelope carries digest fields (new producer \
+             shape) but no canonical attempt artifact for task {task_id} is reachable{} \
+             — pass --state-dir; the trust root for digest fences is the no-clobber \
+             canonical store, not the run-dir copy",
+            attempts_dir
+                .as_ref()
+                .map(|d| format!(" (searched {})", d.display()))
+                .unwrap_or_default()
+        );
+    }
+    // Legacy-şekil zarf + kayıt yok → store-öncesi dönem: fence atlanır.
+    Ok(())
 }
 
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
@@ -265,6 +357,16 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
          {baseline_head} — cross-state ledger row refused",
         attempt.run.repository_head
     );
+
+    // #178 tur-2 P0 — canonical trust anchor: digest fence'lerden ÖNCE, zarfın
+    // KENDİSİ makine kaydıyla doğrulanır (kopya-tamper + alan-silme bypass'ları).
+    verify_attempt_against_canonical_store(
+        &args.run_dir,
+        &attempt_path,
+        attempt.run.task_id,
+        args.state_dir.as_deref(),
+        attempt.run.task_digest.is_some() || attempt.run.proposals_digest.is_some(),
+    )?;
 
     // #178 (tur-1 P0-2 tam kapanış + review P0-2 presence-aware): digest alanı
     // bir VARLIK BEYANIDIR — "alan yok" (legacy zarf → fence atlanır) ≠ "null"

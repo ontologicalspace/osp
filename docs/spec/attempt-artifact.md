@@ -54,7 +54,9 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
     "execution_mode": "harness",           // production | harness
     "witness_mode": "harness_auto_approve", // production | harness_auto_approve
     "task_source": "harness_task_file",    // harness_task_file | legacy_hardcoded
-    "repository_head": "<40-hex SHA>"
+    "repository_head": "<40-hex SHA>",
+    "task_digest": "sha256:<64-hex>",      // #178: --task baytları (read-once tampon)
+    "proposals_digest": "sha256:<64-hex> | null" // #178: --proposals baytları; null = tüketilmedi (#171)
   },
   "execution_measurement": {
     "subject_authority": "task_scope",               // #95-A MD-1
@@ -70,6 +72,27 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
 requires_revision | requires_operator_approval | awaiting_cold_start_approval |
 task_not_found | witness_evaluation_error |
 pending_authorization_persistence_failure | system_failure | llm_error`.
+
+### #178 — tüketilen-girdi digest'leri ve güven kökü
+
+`run.task_digest` / `run.proposals_digest`, attempt'in **karar verdiği exact girdi
+baytlarının** `sha256:<64-hex>` özetleridir: dosya TEK okumayla alınır, digest ve
+parse AYNI tampondan üretilir (`load_and_validate_harness_task_str` /
+`load_proposals_str`); navigator sırasında diskteki dosya değişse bile zarfın
+beyanı tükettiği tampona bağlı kalır. `--llm real` proposals dosyası tüketmez →
+`proposals_digest: null` (#171 dürüst boşluğu).
+
+**Güven kökü hiyerarşisi (#178 tur-2):** digest'ler yalnızca onları taşıyan zarf
+güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned, overwrite
+edilebilir bir **kopyadır**. `osp finalize-run` bu yüzden (a) digest
+fence'lerinden ÖNCE kopyayı no-clobber canonical mağazayla (`--state-dir`;
+default probe `<run_dir>/../../state`) **bayt-özdeşliğe** göre doğrular:
+mağazada task için artifact VARSA eşleşmeyen kopya RED (tutarlı-tamper ve
+alan-silme bypass'larının ikisi de kopyayı değiştirir, canonical'ı değil);
+(b) digest alanı taşıyan zarf için kayıt bulunamazsa RED; (c) alan taşımayan
+legacy zarf + kayıt yok → fence atlanır (store-öncesi dönem). Presence
+semantiği: alan YOK = legacy ≠ `null` = "tüketilmedi" (run-dir'de proposals.json
+varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu + hash eşit; silinmek RED).
 
 ## Geriye uyumluluk notu
 

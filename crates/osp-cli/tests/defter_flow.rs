@@ -502,6 +502,8 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         .arg("run")
         .arg("--repository")
         .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
         .output()
         .expect("run osp finalize-run");
     assert!(
@@ -658,6 +660,8 @@ fn finalize_run_rejects_task_tampered_after_attempt() {
         .arg("run-tamper")
         .arg("--repository")
         .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
         .output()
         .expect("run osp finalize-run");
     assert!(
@@ -1442,25 +1446,36 @@ fn finalize_run_digest_presence_matrix() {
         env["run"]["proposals_digest"] = proposals_digest;
         env
     };
+    // #178 tur-2 P0: el-yapımı yeni-şekil zarflar digest alanları taşıdığı için
+    // canonical trust-anchor fence'i de geçmeli — zarfın AYNI baytları no-clobber
+    // mağazaya da yazılır (gerçek attempt'ın persist adımının el ile taklidi) ve
+    // finalize --state-dir alır.
+    let write_with_canonical = |run: &Path, env: &serde_json::Value| {
+        let bytes = env.to_string();
+        fs::write(run.join("attempt.json"), &bytes).unwrap();
+        let attempts = fx.work_path().join("attempts");
+        fs::create_dir_all(&attempts).unwrap();
+        fs::write(attempts.join("task-1-990001-1.json"), bytes).unwrap();
+    };
     let finalize = |run: &Path| {
         osp_in(&work)
             .arg("finalize-run")
             .arg(run)
+            .arg("--state-dir")
+            .arg(fx.work_path())
             .output()
             .expect("run osp finalize-run")
     };
 
     // (a) null beyanı + var olan dosya → red.
     let run = prepare("run-null-props-present");
-    fs::write(
-        run.join("attempt.json"),
-        envelope_with(
+    write_with_canonical(
+        &run,
+        &envelope_with(
             serde_json::json!(sha256_of(&run.join("task.json"))),
             serde_json::Value::Null,
-        )
-        .to_string(),
-    )
-    .unwrap();
+        ),
+    );
     fs::write(run.join("proposals.json"), "{}").unwrap();
     let out = finalize(&run);
     assert!(!out.status.success(), "(a) null + present must reject");
@@ -1472,11 +1487,10 @@ fn finalize_run_digest_presence_matrix() {
 
     // (b) harness_task_file + null task_digest → red (kanonik olmayan şekil).
     let run = prepare("run-null-task");
-    fs::write(
-        run.join("attempt.json"),
-        envelope_with(serde_json::Value::Null, serde_json::Value::Null).to_string(),
-    )
-    .unwrap();
+    write_with_canonical(
+        &run,
+        &envelope_with(serde_json::Value::Null, serde_json::Value::Null),
+    );
     let out = finalize(&run);
     assert!(!out.status.success(), "(b) null task_digest must reject");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1487,15 +1501,13 @@ fn finalize_run_digest_presence_matrix() {
 
     // (c) null + yok → GEÇER (#171 dürüst-boşluk).
     let run = prepare("run-null-props-absent");
-    fs::write(
-        run.join("attempt.json"),
-        envelope_with(
+    write_with_canonical(
+        &run,
+        &envelope_with(
             serde_json::json!(sha256_of(&run.join("task.json"))),
             serde_json::Value::Null,
-        )
-        .to_string(),
-    )
-    .unwrap();
+        ),
+    );
     let out = finalize(&run);
     assert!(
         out.status.success(),
@@ -1584,12 +1596,199 @@ fn finalize_run_rejects_proposals_deleted_after_attempt() {
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg("run-props-deleted")
+        .arg("--state-dir")
+        .arg(fx.work_path())
         .output()
         .expect("run osp finalize-run");
     assert!(!out.status.success(), "deleted proposals must fail closed");
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("no longer carries proposals.json"),
+        "message: {stderr}"
+    );
+}
+
+/// #178 tur-2 P0 (trust anchor): TUTARLI tamper — task.json DEĞİŞTİRİLİR ve
+/// attempt.json'un task_digest'i yeni hash'e GÜNCELLENİR (digest fence'lerin
+/// hepsi geçer). Yakalayan şey canonical fence'tir: run-dir kopyası artık
+/// makinenin no-clobber store'undaki artifact ile bayt-özdeş DEĞİLDİR.
+#[test]
+fn finalize_run_rejects_coherent_tamper_via_canonical_fence() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-coherent-tamper");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // TUTARLI saldırı: task.json'i değiştir + zarfdaki task_digest'i YENİ hash'e
+    // güncelle (head/id/evidence aynen — tüm digest fence'ler geçecek şekilde).
+    let mut tampered_task = read_json(&task);
+    tampered_task["task"]["label"] = serde_json::json!("coherently forged");
+    fs::write(&task, serde_json::to_string_pretty(&tampered_task).unwrap()).unwrap();
+    let mut forged = read_json(&attempt);
+    forged["run"]["task_digest"] = serde_json::json!(sha256_of(&task));
+    fs::write(&attempt, serde_json::to_string_pretty(&forged).unwrap()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-coherent-tamper")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "coherent tamper must fail the canonical fence (digest fences alone pass it)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not byte-match any canonical artifact"),
+        "message: {stderr}"
+    );
+}
+
+/// #178 tur-2 P0 (bypass #2): digest alanlarını zarfdan TAMAMEN SİLMEK —
+/// "legacy missing" gibi görünür ve digest fence'leri atlatırdı. Canonical
+/// fence: mağazada bu task'ın artifact'ı VAR → kopya bayt-özdeş olmalı → silinmiş
+/// kopya RED.
+#[test]
+fn finalize_run_rejects_stripped_digest_fields() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run-stripped");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    let spec = write_spec(&work, "main.rs", "a.rs");
+    let task = run.join("task.json");
+    let props = run.join("proposals.json");
+    let out = draft_task_cmd(&fx, &work, &baseline, "main.rs", Some(&spec))
+        .arg("--out-task")
+        .arg(&task)
+        .arg("--out-proposals")
+        .arg(&props)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let attempt = run.join("attempt.json");
+    let out = fx.run_attempt_no_task(|cmd| {
+        cmd.arg("1")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(&props)
+            .arg("--task")
+            .arg(&task)
+            .arg("--state-dir")
+            .arg(fx.work_path())
+            .arg("--out")
+            .arg(&attempt)
+            .arg("--format")
+            .arg("json")
+    });
+    assert!(out.status.success(), "attempt must complete");
+
+    // ALAN SİLME: digest alanlarını kaldır → "legacy" gibi görün.
+    let mut stripped = read_json(&attempt);
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("task_digest");
+    stripped["run"]
+        .as_object_mut()
+        .expect("run object")
+        .remove("proposals_digest");
+    fs::write(&attempt, serde_json::to_string_pretty(&stripped).unwrap()).unwrap();
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg("run-stripped")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        !out.status.success(),
+        "stripped digest fields must fail the canonical fence (legacy-look bypass)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not byte-match any canonical artifact"),
         "message: {stderr}"
     );
 }
