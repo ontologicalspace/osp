@@ -31,6 +31,20 @@
 //! **P0-3 — `--out` girdi koruması:** çıktı, tüketilen artifact'lardan herhangi
 //! birinin alias'ı olamaz (digest'i hesaplanan dosyayı overwrite etmek ref↔digest
 //! tutarsızlığı üretir); yazım unique-temp + rename atomic publish ile yapılır.
+//!
+//! **#188 — canonical kimliğin kalıcılığı:** anchor'lu finalize satırı, finalize
+//! anında bayt-eşleştiği canonical artifact'ın kimliğini de taşır:
+//! `attempt_digest` (read-once `attempt_bytes` tamponunun sha256'ı — canonical
+//! byte-match'in doğruladığı AYNI baytlar; tur-4 invariant) + `canonical_attempt_ref`
+//! (eşleşen `<state-dir>` dosyası, state-dir'e göre ileri-slash). İçerik bağı
+//! (digest) satırın kendisindedir; artifact KİMLİĞİ bağı satır + ilgili
+//! state-dir bağlamıyla denetlenir (ref state-dir'e görelidir — tek başına
+//! fiziksel store'u adlandırmaz; #190 review P2). Birden fazla byte-özdeş
+//! canonical artifact hangi invocation'a ait olduğunu belirsizleştirir → RED,
+//! fail-closed (#190 review P1: content identity ≠ artifact identity — digest
+//! bir şeyin NE olduğunu kanıtlar, HANGİ olayda üretildiğini değil).
+//! `--allow-unanchored-legacy` satırında iki alan da YOKTUR (missing ≡ downgrade
+//! tutarlılığı — zayıflama `unanchored_legacy: true` ile kayıtlı).
 
 use std::path::{Path, PathBuf};
 
@@ -114,6 +128,21 @@ where
     serde::Deserialize::deserialize(de).map(Some)
 }
 
+/// #188 — finalize anındaki anchor sonucu. Anchored ise eşleşen canonical
+/// artifact'ın ledger'a taşınan kimliği; açık legacy downgrade'i ise
+/// `UnanchoredLegacy` (satır `unanchored_legacy: true` taşır, #188 alanları YOK).
+enum AttemptAnchor {
+    /// Eşleşen canonical artifact — TEK byte-özdeş eşleşme (#190 review P1:
+    /// çoğul eşleşme artifact identity'sini belirsizleştirir → RED; sıralı
+    /// seçim deterministik ama truthful olmazdı); `--state-dir`'e göre ileri-
+    /// slash ref (`attempts/task-<id>-<millis>-<pid>[-N].json` — `[-N]` no-clobber
+    /// collision soneki), state-dir'in mutlak/göreli yazımına göre değişmez
+    /// (adaylar her zaman `<state-dir>/attempts/` altında).
+    Canonical { canonical_ref: String },
+    /// `--allow-unanchored-legacy` açık downgrade'i.
+    UnanchoredLegacy,
+}
+
 /// #178 tur-2/tur-3 P0 — **canonical trust anchor**: digest'ler yalnızca kendilerini
 /// taşıyan zarf güvenilir olduğunda kanıttır; `run/attempt.json` caller-owned,
 /// overwrite edilebilir bir KOYADIR. Makinenin kaydı no-clobber canonical
@@ -129,8 +158,15 @@ where
 ///   legacy-şekil zarf RED, yalnız `--allow-unanchored-legacy` (tur-3 P0:
 ///   otomatik legacy kabul fail-open'dı — "gerçekten eski artifact" ile
 ///   "alanları silinmiş yeni artifact + taşınmış run-dir" dış bilgi olmadan
-///   ayırt edilemez) AÇIK downgrade'iyle GEÇER; dönen `true` ledger satırına
-///   `unanchored_legacy: true` olarak işlenir.
+///   ayırt edilemez) AÇIK downgrade'iyle GEÇER; `UnanchoredLegacy` ledger
+///   satırına `unanchored_legacy: true` olarak işlenir (#188 alanları eklenmez).
+///
+/// #188: anchored geçiş eşleşen canonical dosyanın kimliğini DÖNDÜRÜR (satır
+/// `attempt_digest` + `canonical_attempt_ref` taşır) — digest'i üreten tampon
+/// buraya gelen read-once `attempt_bytes`'tır; fonksiyon dosyayı ikinci kez
+/// okumaz, yalnızca eşleşen adayın yolunu döndürür. Eşleşme TEKLİ olmalıdır
+/// (#190 review P1): birden fazla byte-özdeş artifact, hangi invocation'ın
+/// ürettiğini belirsizleştirir → RED (content identity ≠ artifact identity).
 fn verify_attempt_against_canonical_store(
     run_dir: &Path,
     attempt_bytes: &[u8],
@@ -138,7 +174,7 @@ fn verify_attempt_against_canonical_store(
     explicit_state_dir: Option<&Path>,
     envelope_has_digest_fields: bool,
     allow_unanchored_legacy: bool,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<AttemptAnchor> {
     // Ritüel düzeni varsayımı: dogfood/runs/<id> ↔ dogfood/state.
     let probed = run_dir
         .parent()
@@ -174,20 +210,48 @@ fn verify_attempt_against_canonical_store(
         // #178 tur-4 P0: karşılaştırma PARSE EDİLEN tamponla yapılır (path yeniden
         // okunmaz) — canonical fence'in doğruladığı baytlar karar mantığının
         // tükettiği baytlardır.
-        let matched = candidates.iter().any(|p| {
-            std::fs::read(p)
-                .map(|b| b == attempt_bytes)
-                .unwrap_or(false)
-        });
-        anyhow::ensure!(
-            matched,
-            "canonical attempt fence: attempt.json does not byte-match any canonical \
-             artifact for task {task_id} in {} — the run-dir copy was modified after \
-             the canonical publish; digest claims are evidence only when the envelope \
-             carrying them is the machine-published one",
-            attempts_dir.expect("checked above").display()
-        );
-        return Ok(false);
+        // #190 review P1 (content identity ≠ artifact identity): birden fazla
+        // byte-özdeş canonical artifact, satırın adlandırmaya çalıştığı şeyi
+        // belirsizleştirir — baytlar HANGİ invocation'ın ürettiğini taşımaz
+        // (retry senaryosu: A publish + --out FAIL; B publish + --out OK; A≡B).
+        // Sıralı seçim deterministik olurdu ama truthful olmazdı → ambiguity'de
+        // fail-closed.
+        let matches: Vec<&PathBuf> = candidates
+            .iter()
+            .filter(|p| {
+                std::fs::read(p)
+                    .map(|b| b == attempt_bytes)
+                    .unwrap_or(false)
+            })
+            .collect();
+        return match matches.as_slice() {
+            [matched] => {
+                // #188: ref, state-dir'e göre ileri-slash (mutlak/göreli yazımdan
+                // bağımsız); strip edilemezse (dejenere kök) yol-olduğu-gibi — dürüst locator.
+                let state_dir = state_dir.as_deref().expect("candidates imply a state dir");
+                let canonical_ref = matched
+                    .strip_prefix(state_dir)
+                    .unwrap_or(matched.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                Ok(AttemptAnchor::Canonical { canonical_ref })
+            }
+            [] => Err(anyhow::anyhow!(
+                "canonical attempt fence: attempt.json does not byte-match any canonical \
+                 artifact for task {task_id} in {} — the run-dir copy was modified after \
+                 the canonical publish; digest claims are evidence only when the envelope \
+                 carrying them is the machine-published one",
+                attempts_dir.expect("checked above").display()
+            )),
+            _ => Err(anyhow::anyhow!(
+                "canonical attempt identity is ambiguous: {} byte-identical canonical \
+                 artifacts for task {task_id} in {} — the digest proves content, not which \
+                 invocation produced it; a unique artifact is required to name \
+                 canonical_attempt_ref",
+                matches.len(),
+                attempts_dir.expect("checked above").display()
+            )),
+        };
     }
 
     // Anchor YOK (mağaza erişilemez ya da bu task için kayıt yok).
@@ -218,8 +282,9 @@ fn verify_attempt_against_canonical_store(
                 .unwrap_or_default()
         );
     }
-    // Açık downgrade — ledger satırına işlenir (unanchored_legacy: true).
-    Ok(true)
+    // Açık downgrade — ledger satırına işlenir (unanchored_legacy: true; #188
+    // canonical kimlik alanları EKLENMEZ — missing ≡ downgrade tutarlılığı).
+    Ok(AttemptAnchor::UnanchoredLegacy)
 }
 
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
@@ -410,8 +475,9 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
 
     // #178 tur-2/tur-3 P0 — canonical trust anchor: digest fence'lerden ÖNCE, zarfın
     // KENDİSİ makine kaydıyla doğrulanır (kopya-tamper + alan-silme + taşınmış-run
-    // bypass'ları). Dönen bool: açık legacy downgrade kullanıldı → ledger'a işlenir.
-    let unanchored_legacy = verify_attempt_against_canonical_store(
+    // bypass'ları). #188: anchored geçiş eşleşen canonical artifact'ın kimliğini
+    // döndürür (satıra işlenir); UnanchoredLegacy = açık downgrade kaydı.
+    let anchor = verify_attempt_against_canonical_store(
         &args.run_dir,
         &attempt_bytes,
         attempt.run.task_id,
@@ -589,10 +655,22 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     if neighborhood_path.is_file() {
         row["neighborhood_ref"] = serde_json::json!(make_ref(&args.run_dir, "neighborhood.json"));
     }
-    // #178 tur-3/P2: downgrade kaydı — anahtar YALNIZ açık downgrade kullanıldığında
-    // eklenir; anchor'lu satırlarda alan YOKTUR (missing ≠ false ≠ null-beyan).
-    if unanchored_legacy {
-        row["unanchored_legacy"] = serde_json::json!(true);
+    // #178 tur-3/P2 + #188: anchor sonucu satıra işlenir. Anchored satır,
+    // finalize anında bayt-eşleştiği canonical artifact'ın kimliğini KALICI olarak
+    // taşır: `attempt_digest` read-once `attempt_bytes` tamponunun sha256'ı
+    // (canonical byte-match'in doğruladığı AYNI baytlar — tur-4 invariant; run-dir
+    // kopyası sonradan değişse bile satır makine kaydına bağlı kalır) +
+    // `canonical_attempt_ref` (state-dir'e göre ileri-slash). Legacy downgrade
+    // satırında ikisi de YOKTUR (missing ≡ downgrade tutarlılığı; zayıflama
+    // `unanchored_legacy: true` ile zaten kayıtlı — anchor'lu satırda o alan yoktur).
+    match anchor {
+        AttemptAnchor::Canonical { canonical_ref } => {
+            row["attempt_digest"] = serde_json::json!(sha256_bytes(&attempt_bytes));
+            row["canonical_attempt_ref"] = serde_json::json!(canonical_ref);
+        }
+        AttemptAnchor::UnanchoredLegacy => {
+            row["unanchored_legacy"] = serde_json::json!(true);
+        }
     }
 
     let json = serde_json::to_string_pretty(&row)?;
