@@ -25,6 +25,14 @@
 //! - Ölçü dili (#195 review P1-2): `E_c = c_observed − c_predicted` (imzalı
 //!   target-axis residual) ile `D_G = d(G_predicted, G_observed)` (graph-genişliği
 //!   distance; RealizationMatch tolerans semantiği #196 karar 1) AYRI eksenlerdir.
+//! - **Gelecek gate API pini (#197 review tur-2):** gate YALNIZ graph-completed
+//!   iddia üzerinde koşar ve bunu yapısal kılar —
+//!   `GraphCompletedProof (opaque witness) + RealizationEvidence (raw) →
+//!   RealizationGate → RealizationVerdict`. İki üretici girişin de
+//!   (`VerifiedRealization`, `FailedDeclaredRealization` üretim yolları) witness
+//!   tüketmesi, `BuildInvalid.completion_basis() == Some(Graph)` zemininin örtük
+//!   varsayımını kanıta çevirir (build-failure kanıtı tek başına graph
+//!   predicate'in completed olduğunu KANITLAMAZ).
 
 use serde::{Deserialize, Serialize};
 
@@ -124,6 +132,64 @@ impl VerifiedRealization {
     }
 }
 
+/// #197 review tur-2 P1 — failure tarafı da proof-carrying: **"BuildInvalid ama
+/// build Succeeded" temsil EDİLEMEZ.** Alan özeldir; tek giriş `try_new`'dir ve
+/// yalnız `BuildOutcome::Failed` taşıyan raw evidence kabul eder (Succeeded →
+/// `Err(BuildWasNotFailed)`). Böylece verdict'in adı ile taşıdığı tip aynı
+/// önermeyi kanıtlar — `RealizedCompleted → VerifiedRealization` simetrisinin
+/// karşılığı: `DeclaredRealizationBuildInvalid → FailedDeclaredRealization`.
+///
+/// (Gelecek gate API'si — pin: `from_gate(GraphCompletedProof, raw)` — witness
+/// tüketimini de yapılandırır; bkz. modül dokümanı.)
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct FailedDeclaredRealization {
+    raw: RealizationEvidence,
+}
+
+/// `FailedDeclaredRealization::try_new` reddi: kanıtın build'i başarılıysa
+/// "build-invalid" verdict'i yalan söylemiş olur.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildWasNotFailed;
+
+impl std::fmt::Display for BuildWasNotFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "build-invalid verdict requires BuildOutcome::Failed evidence (found Succeeded)"
+        )
+    }
+}
+
+impl std::error::Error for BuildWasNotFailed {}
+
+impl FailedDeclaredRealization {
+    /// Kontrollü constructor — yalnız build'i KIRIK raw evidence kabul eder
+    /// (fallible + public: illegal state ÜRETİLEMEZ, ret ise kanıtlı).
+    pub fn try_new(raw: RealizationEvidence) -> Result<Self, BuildWasNotFailed> {
+        match raw.build {
+            BuildOutcome::Failed { .. } => Ok(Self { raw }),
+            BuildOutcome::Succeeded => Err(BuildWasNotFailed),
+        }
+    }
+
+    /// Kanıtın kendisi (read-only).
+    pub fn raw(&self) -> &RealizationEvidence {
+        &self.raw
+    }
+
+    /// Hata sayısı — invariant sayesinde HER ZAMAN vardıır (Succeeded dalı
+    /// `try_new` tarafından temsil edilemez kılındı).
+    pub fn build_error_count(&self) -> u64 {
+        match self.raw.build {
+            BuildOutcome::Failed { error_count } => error_count,
+            // try_new bu dalı üretmez; unreachable invariant'ın kendisidir.
+            BuildOutcome::Succeeded => unreachable!(
+                "FailedDeclaredRealization invariant: build Succeeded temsil edilemez (try_new reddeder)"
+            ),
+        }
+    }
+}
+
 /// RealizationGate verdict — karar (0) sözlüğü (freeze: #196 yorum 6050269005).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum RealizationVerdict {
@@ -136,7 +202,7 @@ pub enum RealizationVerdict {
     /// eşleşmesindedir — hata sayısı tek başına sim-öngörü/build ayrışmasını
     /// kaybettirirdi. Karar (0): beyan dışı kurtarma YENİ proposal'dır; bu
     /// verdict'in ötesine geçmez.
-    DeclaredRealizationBuildInvalid { evidence: RealizationEvidence },
+    DeclaredRealizationBuildInvalid { evidence: FailedDeclaredRealization },
     /// Gate koşulmadı (v1'in fiilî durumu — realization ritüel dışı/elle).
     NotAttempted,
 }
@@ -144,8 +210,13 @@ pub enum RealizationVerdict {
 impl RealizationVerdict {
     /// Verdict'in tamam-iddia zemini (#197 review P2-1: iddia yoksa `None`).
     /// `RealizedCompleted → Some(Realized)`; `BuildInvalid → Some(Graph)`
-    /// (graph-katmanı iddia ayaktadır, realization kırık); `NotAttempted →
-    /// None` (verdict tek başına hiçbir iddia kurulduğunu söyleyemez).
+    /// (graph-katmanı iddia ayaktadır, realization kırık — DİKKAT: bu `Some(Graph)`
+    /// **gate bağlam varsayımıdır**: gate yalnız graph-completed iddia üzerinde
+    /// koşar. Build-failure kanıtı TEK BAŞINA graph predicate'in completed
+    /// olduğunu kanıtlamaz; bu varsayım gate PR'ında `GraphCompletedProof`
+    /// witness-token'ı tüketilerek yapısal olacak — bkz. modül dokümanındaki
+    /// gelecek API pini); `NotAttempted → None` (verdict tek başına hiçbir iddia
+    /// kurulduğunu söyleyemez).
     pub fn completion_basis(&self) -> Option<CompletionBasis> {
         match self {
             Self::RealizedCompleted { .. } => Some(CompletionBasis::Realized),
@@ -154,13 +225,14 @@ impl RealizationVerdict {
         }
     }
 
-    /// Build-invalid yolunun hata sayısı (raw evidence içinden).
+    /// Build-invalid yolunun hata sayısı — `FailedDeclaredRealization`
+    /// invariant'ı sayesinde o varyantta HER ZAMAN vardır (Succeeded temsil
+    /// edilemez); diğer varyantlarda `None` (build kırılganlığı söz konusu değil).
     pub fn build_error_count(&self) -> Option<u64> {
         match self {
-            Self::DeclaredRealizationBuildInvalid { evidence } => match evidence.build {
-                BuildOutcome::Failed { error_count } => Some(error_count),
-                BuildOutcome::Succeeded => None,
-            },
+            Self::DeclaredRealizationBuildInvalid { evidence } => {
+                Some(evidence.build_error_count())
+            }
             _ => None,
         }
     }
@@ -227,13 +299,14 @@ mod tests {
     fn build_invalid_carries_full_evidence_and_exposes_error_count() {
         // D5a B-19: E_c = 0 (ölçüm tahmini doğru) ∧ build 122 hatayla çöktü.
         let invalid = RealizationVerdict::DeclaredRealizationBuildInvalid {
-            evidence: RealizationEvidence {
+            evidence: FailedDeclaredRealization::try_new(RealizationEvidence {
                 build: BuildOutcome::Failed { error_count: 122 },
                 c_observed: Some(0.0),
                 c_predicted: Some(0.0),
                 tests: None,
                 ..ok_evidence()
-            },
+            })
+            .expect("Failed evidence kabul edilmeli"),
         };
         assert_eq!(invalid.build_error_count(), Some(122));
         assert_eq!(invalid.completion_basis(), Some(CompletionBasis::Graph));
@@ -243,6 +316,21 @@ mod tests {
         // hata sayısıyla birlikte taşınır — P1-3'ün bizzat kendisi.
         assert!(wire.contains("\"c_observed\":0.0"), "{wire}");
         assert!(wire.contains("\"c_predicted\":0.0"), "{wire}");
+    }
+
+    /// #197 review tur-2 P1: "BuildInvalid ama build Succeeded" temsil EDİLEMEZ —
+    /// kontrollü constructor reddeder; verdict'in adı ile taşıdığı tip aynı
+    /// önermeyi kanıtlar (simetri: RealizedCompleted→VerifiedRealization,
+    /// DeclaredRealizationBuildInvalid→FailedDeclaredRealization).
+    #[test]
+    fn build_invalid_with_succeeded_evidence_is_unrepresentable() {
+        let refused = FailedDeclaredRealization::try_new(ok_evidence())
+            .expect_err("Succeeded build ile build-invalid kurulamaz");
+        assert_eq!(refused, BuildWasNotFailed);
+        assert_eq!(
+            refused.to_string(),
+            "build-invalid verdict requires BuildOutcome::Failed evidence (found Succeeded)"
+        );
     }
 
     /// #197 review P2-1: iddia yoksa zemin de yok — `NotAttempted` None döner.
