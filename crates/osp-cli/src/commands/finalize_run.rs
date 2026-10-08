@@ -726,10 +726,7 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
             .filter(|p| {
                 p.extension().map(|x| x == "json").unwrap_or(false)
                     && p.file_name()
-                        .map(|n| {
-                            n.to_string_lossy()
-                                .starts_with(&format!("realization-{task_id}-"))
-                        })
+                        .map(|n| n.to_string_lossy().starts_with("realization-"))
                         .unwrap_or(false)
             })
             .filter(|p| match std::fs::read(p) {
@@ -775,14 +772,9 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
             "verdict binding fence: realization-verdict.json was produced for different \
              task bytes — the task changed after the gate ran"
         );
-        if after_path.is_file() {
-            let after_bytes = read_artifact_bytes(&after_path)?;
-            anyhow::ensure!(
-                bound("after_digest") == Some(sha256_bytes(&after_bytes).as_str()),
-                "verdict binding fence: realization-verdict.json was produced for \
-                 different after bytes — the reanalysis changed after the gate ran"
-            );
-        }
+        // P0 (tur-3): after.json fence KALDIRILDI — gate kendi analizini
+        // yapar (own_after_digest binding'de); run-dir after.json sadece
+        // insan-mutfağı artifact'ıdır, trust zincirine GİRMEZ.
         // P0-2 (tur-2): realized delta kimliği — verdict'ün patch_digest'i
         // finalize'ın KENDİ read-once patch tamponuyla eşleşmeli.
         if let Some(patch_digest) = &patch_digest {

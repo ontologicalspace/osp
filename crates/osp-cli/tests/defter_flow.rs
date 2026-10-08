@@ -494,7 +494,12 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         .unwrap();
     assert!(out.status.success());
     let patch = run.join("applied.patch");
-    fs::write(&patch, b"diff --git a/main.rs b/main.rs\n-test\n").unwrap();
+    // P0 tur-3: gerçek git patch — gate worktree'de uygular. main.rs'e yorum.
+    fs::write(
+        &patch,
+        b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n use crate::a::A;\n",
+    )
+    .unwrap();
 
     // Adım 4b: realization-gate (karar 2: graph-completed finalization kapıyı
     // ZORUNLU tüketir). Declared evidence: yama gerçekten uygulandı + derlendi.
@@ -506,6 +511,8 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
     .unwrap();
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg("run")
         .arg("--state-dir")
         .arg(fx.work_path())
@@ -2055,7 +2062,7 @@ fn realization_gate_end_to_end_matrix() {
     let work = fx.work_path().to_path_buf();
     let (baseline, _) = measured_baseline(&fx);
 
-    let prepare = |name: &str, anchored: bool, threshold: f64, observed: f64| {
+    let prepare = |name: &str, anchored: bool, threshold: f64| {
         let run = work.join(name);
         fs::create_dir_all(&run).unwrap();
         fs::copy(&baseline, run.join("baseline.json")).unwrap();
@@ -2073,22 +2080,13 @@ fn realization_gate_end_to_end_matrix() {
             .to_string(),
         )
         .unwrap();
-        // Reanalysis gözlemi: after.json (analyze zarfı) — scope node coupling +
-        // snapshot-bound (P0-2 tur-2: binding=clean_pre_post_equal ∧ clean).
-        fs::write(
-            run.join("after.json"),
-            serde_json::json!({
-                "schema_version": 2,
-                "repository": {"head": fx.head, "binding": "clean_pre_post_equal", "clean": true},
-                "nodes": [{"path": "main.rs", "coupling": {"value": observed}}]
-            })
-            .to_string(),
-        )
-        .unwrap();
-        // Realized delta kimliği (P0-2 tur-2): applied.patch.
+        // P0 (tur-3): after.json YOK — gate kendi worktree'inde kendi analizini
+        // koşar (After = Apply(Base, Patch) yapı-tarafından kanıtlanır).
+        // applied.patch: fixture main.rs'ine yorum satırı ekler (coupling değişmez,
+        // git apply gerçekten çalışır; import tabanlı coupling ~2/3 ≈ 0.667).
         fs::write(
             run.join("applied.patch"),
-            b"diff --git a/main.rs b/main.rs\n",
+            b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n use crate::a::A;\n",
         )
         .unwrap();
         // Graph-completed zarf (kind=completed + completion_basis=graph +
@@ -2123,13 +2121,15 @@ fn realization_gate_end_to_end_matrix() {
     };
 
     // (a) D5a A-hücresi: build-geçer + gözlem predicate altı → RealizedCompleted (exit 0).
-    let run = prepare("run-gate-ok", true, 0.9, 0.875);
+    let run = prepare("run-gate-ok", true, 0.90);
     let ev = evidence_file(
         &run,
         r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":{"passed":271,"failed":0,"skipped":0}}"#,
     );
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg(&run)
         .arg("--state-dir")
         .arg(fx.work_path())
@@ -2151,20 +2151,27 @@ fn realization_gate_end_to_end_matrix() {
         verdict["verdict"]["RealizedCompleted"].is_object(),
         "{verdict}"
     );
-    assert_eq!(verdict["gate_context"]["c_observed"], 0.875);
-    // Sim-öngörü (evidence son after.x=0.8) → E_c = 0.875 − 0.8 imzalı residual.
+    // c_observed = gate'in KENDİ analizi (fixture coupling ~2/3; P0 tur-3:
+    // After = Apply(Base, Patch) yapı-tarafından ölçülür).
+    let c_obs = verdict["gate_context"]["c_observed"].as_f64().unwrap();
+    assert!((c_obs - 0.6667).abs() < 0.01, "c_observed={c_obs}");
     let e_c = verdict["e_c"].as_f64().expect("e_c derive edilmeli");
-    assert!((e_c - 0.075).abs() < 1e-9, "E_c={e_c}");
+    assert!(
+        e_c < 0.0,
+        "E_c={e_c} (favorable olmalı: gözlem < sim-öngörü)"
+    );
 
     // (b) D5a B-hücresi: build-kırık → DeclaredRealizationBuildInvalid (exit 2),
     // TAM kanıt taşınır (error_count + c_observed).
-    let run = prepare("run-gate-bad", true, 0.9, 0.0);
+    let run = prepare("run-gate-bad", true, 0.91);
     let ev = evidence_file(
         &run,
         r#"{"patch_created":true,"parse":true,"build":{"outcome":"failed","error_count":122},"tests":null}"#,
     );
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg(&run)
         .arg("--state-dir")
         .arg(fx.work_path())
@@ -2184,13 +2191,15 @@ fn realization_gate_end_to_end_matrix() {
     );
 
     // (c) Anchor yok → gate RED (legacy downgrade kapı bağlamı değildir).
-    let run = prepare("run-gate-unanchored", false, 0.9, 0.5);
+    let run = prepare("run-gate-unanchored", false, 0.92);
     let ev = evidence_file(
         &run,
         r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
     );
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg(&run)
         .arg("--evidence")
         .arg(&ev)
@@ -2206,13 +2215,15 @@ fn realization_gate_end_to_end_matrix() {
     );
 
     // (d) Predicate gözlemde düşer → PredicateUnsatisfiedAfterReanalysis (exit 3).
-    let run = prepare("run-gate-unsat", true, 0.85, 0.9167);
+    let run = prepare("run-gate-unsat", true, 0.50);
     let ev = evidence_file(
         &run,
         r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
     );
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg(&run)
         .arg("--state-dir")
         .arg(fx.work_path())
@@ -2234,6 +2245,8 @@ fn realization_gate_end_to_end_matrix() {
     );
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg(&run)
         .arg("--state-dir")
         .arg(fx.work_path())
@@ -2246,7 +2259,7 @@ fn realization_gate_end_to_end_matrix() {
 
     // (f) P0 artifact-identity: attempt koştuktan SONRA task.json değiştirilirse
     // (ör. threshold kolaylaştırma) digest fence RED — substitution reddi.
-    let run = prepare("run-gate-tamper", true, 0.9, 0.5);
+    let run = prepare("run-gate-tamper", true, 0.93);
     let ev = evidence_file(
         &run,
         r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
@@ -2260,6 +2273,8 @@ fn realization_gate_end_to_end_matrix() {
     fs::write(&task_file, serde_json::to_string(&easier).unwrap()).unwrap();
     let out = osp_in(&work)
         .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
         .arg(&run)
         .arg("--state-dir")
         .arg(fx.work_path())
@@ -2278,7 +2293,7 @@ fn realization_gate_end_to_end_matrix() {
     );
 
     // (g) Karar 2 (zorunlu tüketim): graph-completed run KAPISIZ finalize EDİLEMEZ.
-    let run = prepare("run-gate-noverdict", true, 0.9, 0.5);
+    let run = prepare("run-gate-noverdict", true, 0.94);
     let out = osp_in(&work)
         .arg("finalize-run")
         .arg(&run)
@@ -2295,12 +2310,13 @@ fn realization_gate_end_to_end_matrix() {
     );
 
     // (h) P0-1 saldırısı: ELLLE yazılmış verdict — binding digest'leri GERÇEK
-    // dosyalardan hesaplanmış (attempt/task/after eşleşir!) ama kanonik mağazada
+    // dosyalardan hesaplanmış (attempt/task eşleşir!) ama kanonik mağazada
     // gate-execution kanıtı yok → finalize RED (canonical provenance fence).
-    let run = prepare("run-gate-forged", true, 0.9, 0.5);
+    // P0 tur-3: after.json yok — gate kendi analizini yapar; saldırgan
+    // candidate_head/own_after_digest bilemez ama umursamaz — canonical YOK.
+    let run = prepare("run-gate-forged", true, 0.95);
     let attempt_digest = sha256_of(&run.join("attempt.json"));
     let task_digest = sha256_of(&run.join("task.json"));
-    let after_digest = sha256_of(&run.join("after.json"));
     fs::write(
         run.join("realization-verdict.json"),
         serde_json::json!({
@@ -2310,7 +2326,6 @@ fn realization_gate_end_to_end_matrix() {
             "binding": {
                 "attempt_digest": attempt_digest,
                 "task_digest": task_digest,
-                "after_digest": after_digest,
             },
             "verdict": {"RealizedCompleted": {}}
         })
