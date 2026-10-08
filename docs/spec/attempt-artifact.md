@@ -124,6 +124,34 @@ legacy-şekil ≠ `null` = "tüketilmedi"
 (run-dir'de proposals.json varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu +
 hash eşit; silinmek RED).
 
+## INV-T10 — `osp realization-gate` (#196 uygulama-2; karar 2: gate konumu = CLI ritüeli)
+
+Graph-completed attempt'i source gerçekliğine bağlar (#171 D5a: graph predicate
+success ⇏ build-valid declared realization):
+
+```text
+osp realization-gate <run-dir> [--state-dir S] --evidence <declared.json>
+```
+
+- **Girdiler:** `attempt.json` (canonical-anchor bayt-doğrulamalı — legacy
+  downgrade kapı bağlamı DEĞİL), `task.json` (v1: tek Coupling/Le predicate +
+  Path scope), `after.json` (reanalysis gözlemi) ve `--evidence`
+  (insan-beyanlı: `patch_created/parse/build{outcome,error_count}/tests`;
+  deny_unknown_fields).
+- **Motor türetimleri (D5a şemasının motorlaşması):** `c_observed` =
+  after.json scope-node coupling'i; `c_predicted` = zarf evidence son
+  `after.x` (sim öngörüsü); `predicate_after_reanalysis` = observed ≤
+  threshold + tolerance; `E_c = c_observed − c_predicted` kanıtta yaşar.
+- **Verdict:** `evaluate_gate` → `realization-verdict.json` (run dizinine,
+  **no-clobber — tek yazım**; yeniden değerlendirme = yeni run-dir). Exit:
+  0 = RealizedCompleted · 2 = DeclaredRealizationBuildInvalid ·
+  3 = PredicateUnsatisfiedAfterReanalysis · 4 = NotAttempted.
+- **Tolerans v1 (karar 1 dürüst kesiti):** RealizedCompleted yalnız
+  `build=Succeeded ∧ predicate_after_reanalysis=Some(true)`; sayısal `D_G`
+  eşiği YOK — eşik verisi birikene dek uydurulmaz ("koordinat ölçümle
+  kazanılır"). `completion_basis` ledger'a finalize-run üzerinden taşınır
+  (yalnız graph-completed satırlar `"graph"`).
+
 ## Geriye uyumluluk notu
 
 Run 10 (`0b88e7e`) çıktısı `schema_version: 1` zarflıydı; ara revizyonlarda

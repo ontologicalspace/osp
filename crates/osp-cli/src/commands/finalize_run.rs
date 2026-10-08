@@ -99,6 +99,12 @@ struct AttemptEnvelopeRead {
     schema_version: u32,
     run: AttemptRunRead,
     execution_measurement: ExecutionMeasurementRead,
+    /// INV-T10 (#197/#198): zarfın tamam-iddia kanıt zemini — `"graph"` yalnız
+    /// `result.kind == completed` iken; `null`/missing = iddia yok / pre-#197.
+    /// Finalize bu değeri ledger satırına TAŞIR (canonical consumer bağlaması —
+    /// #196 uygulama-2): downstream eski "completed" semantiğiyle yaşamaz.
+    #[serde(default)]
+    completion_basis: Option<String>,
     result: AttemptResultRead,
     evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
 }
@@ -131,7 +137,7 @@ where
 /// #188 — finalize anındaki anchor sonucu. Anchored ise eşleşen canonical
 /// artifact'ın ledger'a taşınan kimliği; açık legacy downgrade'i ise
 /// `UnanchoredLegacy` (satır `unanchored_legacy: true` taşır, #188 alanları YOK).
-enum AttemptAnchor {
+pub(crate) enum AttemptAnchor {
     /// Eşleşen canonical artifact — TEK byte-özdeş eşleşme (#190 review P1:
     /// çoğul eşleşme artifact identity'sini belirsizleştirir → RED; sıralı
     /// seçim deterministik ama truthful olmazdı); `--state-dir`'e göre ileri-
@@ -167,7 +173,7 @@ enum AttemptAnchor {
 /// okumaz, yalnızca eşleşen adayın yolunu döndürür. Eşleşme TEKLİ olmalıdır
 /// (#190 review P1): birden fazla byte-özdeş artifact, hangi invocation'ın
 /// ürettiğini belirsizleştirir → RED (content identity ≠ artifact identity).
-fn verify_attempt_against_canonical_store(
+pub(crate) fn verify_attempt_against_canonical_store(
     run_dir: &Path,
     attempt_bytes: &[u8],
     task_id: u64,
@@ -671,6 +677,12 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         AttemptAnchor::UnanchoredLegacy => {
             row["unanchored_legacy"] = serde_json::json!(true);
         }
+    }
+    // #198 (INV-T10 canonical consumer): zarfın tamam-iddia zeminini satır taşır.
+    // Yalnız graph-completed satırlar "graph" taşır; null/missing (iddia yok /
+    // pre-#197 zarflar) → anahtar YOK (missing ≡ iddia-yok, #178 tur-3/P2 disiplini).
+    if let Some(basis) = &attempt.completion_basis {
+        row["completion_basis"] = serde_json::json!(basis);
     }
 
     let json = serde_json::to_string_pretty(&row)?;

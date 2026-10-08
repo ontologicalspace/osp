@@ -10,6 +10,7 @@ pub mod finalize_run;
 pub mod harness_task;
 pub mod path_bindings;
 pub mod path_keyed_proposals;
+pub mod realization_gate;
 pub mod repo_snapshot;
 pub mod run_envelope;
 pub mod suggest_targets;
