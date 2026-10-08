@@ -2073,15 +2073,22 @@ fn realization_gate_end_to_end_matrix() {
             .to_string(),
         )
         .unwrap();
-        // Reanalysis gözlemi: after.json (analyze zarfı) — scope node coupling.
+        // Reanalysis gözlemi: after.json (analyze zarfı) — scope node coupling +
+        // snapshot-bound (P0-2 tur-2: binding=clean_pre_post_equal ∧ clean).
         fs::write(
             run.join("after.json"),
             serde_json::json!({
                 "schema_version": 2,
-                "repository": {"head": fx.head},
+                "repository": {"head": fx.head, "binding": "clean_pre_post_equal", "clean": true},
                 "nodes": [{"path": "main.rs", "coupling": {"value": observed}}]
             })
             .to_string(),
+        )
+        .unwrap();
+        // Realized delta kimliği (P0-2 tur-2): applied.patch.
+        fs::write(
+            run.join("applied.patch"),
+            b"diff --git a/main.rs b/main.rs\n",
         )
         .unwrap();
         // Graph-completed zarf (kind=completed + completion_basis=graph +
@@ -2285,6 +2292,44 @@ fn realization_gate_end_to_end_matrix() {
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("realization gate fence"),
         "zorunlu-tüketim mesajı"
+    );
+
+    // (h) P0-1 saldırısı: ELLLE yazılmış verdict — binding digest'leri GERÇEK
+    // dosyalardan hesaplanmış (attempt/task/after eşleşir!) ama kanonik mağazada
+    // gate-execution kanıtı yok → finalize RED (canonical provenance fence).
+    let run = prepare("run-gate-forged", true, 0.9, 0.5);
+    let attempt_digest = sha256_of(&run.join("attempt.json"));
+    let task_digest = sha256_of(&run.join("task.json"));
+    let after_digest = sha256_of(&run.join("after.json"));
+    fs::write(
+        run.join("realization-verdict.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "kind": "realization-verdict-v1",
+            "task_id": 1,
+            "binding": {
+                "attempt_digest": attempt_digest,
+                "task_digest": task_digest,
+                "after_digest": after_digest,
+            },
+            "verdict": {"RealizedCompleted": {}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--repository")
+        .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "sahte verdict RED olmalı");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("verdict provenance fence"),
+        "canonical provenance mesajı"
     );
 }
 

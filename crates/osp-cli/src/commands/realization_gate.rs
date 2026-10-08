@@ -26,8 +26,8 @@ use std::path::{Path, PathBuf};
 
 use clap::Args;
 use osp_core::realization::{
-    evaluate_gate, BuildOutcome, CompletionBasis, GraphCompletionFacts, RealizationEvidence,
-    RealizationVerdict, TestOutcome,
+    evaluate_gate, BuildOutcome, CompletionBasis, RealizationEvidence, RealizationVerdict,
+    TestOutcome,
 };
 
 /// `osp realization-gate` — INV-T10 kapısı.
@@ -157,6 +157,38 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
             );
         }
     };
+    // **P0-1 (tur-2): verdict KANONİK mağazaya da publish edilir** — run-dir
+    // kopyası caller-owned'dır; finalize kanonik nüshayı arayıp bayt-eşleştirir
+    // (#178/#188 deseni: elle yazılmış verdict'in canonical provenance'ı yoktur).
+    let state_dir: PathBuf = match args.state_dir.as_deref() {
+        Some(p) => p.to_path_buf(),
+        None => args
+            .run_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("state"))
+            .filter(|p| p.is_dir())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cannot resolve the canonical state dir (anchor succeeded; probe broken?)"
+                )
+            })?,
+    };
+    // **P1 (tur-2): GraphCompletedProof** — graph-completed OLMAYAN gerçelerden
+    // proof kurulamaz; gate bağlamı RED ile belli olur (NotAttempted verdict'i yazılmaz).
+    let proof = osp_core::realization::GraphCompletedProof::from_facts(
+        task_id,
+        canonical_attempt_ref.clone(),
+        &result_kind,
+        completion_basis,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "realization-gate context: the attempt is not a graph-completed claim \
+             (result.kind={result_kind:?}, completion_basis={completion_basis:?}) — the \
+             gate only runs on graph-completed claims"
+        )
+    })?;
 
     // 3) **Artifact identity (P0 fence ailesi — #198 review):** task/after/evidence
     //    read-once tamponlardan okunur ve verdict artifact'ı tükettiği her şeyin
@@ -203,7 +235,25 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
     let after_bytes = std::fs::read(&after_path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", after_path.display()))?;
     let after_digest = crate::commands::finalize_run::sha256_bytes(&after_bytes);
+    // P0-2 (tur-2 — state identity, zincir-güvenlik kesiti): after.json yalnız
+    // snapshot-BAĞLI temiz analiz olabilir (binding=clean_pre_post_equal ∧ clean)
+    // — "herhangi bir schema-v2" RED; ölçülen commit'in head'i kayda geçer.
+    // after'ın base⊕patch state'inin analizi olduğu v1'de operatör beyanıdır
+    // (daha güçlü exact-state bağı ayrı iş; artifact identity ≠ state identity).
+    let after_head = require_snapshot_bound_after(&after_bytes, &after_path)?;
     let c_observed = read_observed_coupling(&after_bytes, &after_path, &scope_path)?;
+    // P0-2: gerçekleştirilen yamanın kimliği — applied.patch zorunlu + digest
+    // binding'e girer (finalize kendi hesabıyla eşleştirir).
+    let patch_path = args.run_dir.join("applied.patch");
+    anyhow::ensure!(
+        patch_path.is_file(),
+        "realization-gate requires {} — the gate binds the realized delta's identity \
+         (artifact identity ≠ state identity; the patch digest is the chain-of-custody link)",
+        patch_path.display()
+    );
+    let patch_bytes = std::fs::read(&patch_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", patch_path.display()))?;
+    let patch_digest = crate::commands::finalize_run::sha256_bytes(&patch_bytes);
     let c_predicted = envelope
         .pointer("/evidence")
         .and_then(|e| e.as_array())
@@ -236,14 +286,8 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
     };
 
     // 5) Kapı.
-    let facts = GraphCompletionFacts {
-        task_id,
-        canonical_attempt_ref: canonical_attempt_ref.clone(),
-        result_kind,
-        completion_basis,
-    };
     let e_c = evidence.e_c();
-    let verdict = evaluate_gate(facts, evidence);
+    let verdict = evaluate_gate(proof, evidence);
 
     // 6) Kanıt artifact'ı — no-clobber (tek yazım; yeniden değerlendirme = yeni kanıt dosyası değil RED).
     let verdict_path = args.run_dir.join("realization-verdict.json");
@@ -260,11 +304,14 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         "canonical_attempt_ref": canonical_attempt_ref,
         // P0 artifact-identity bağı: verdict'in tükettiği her şeyin read-once
         // digest'i — finalize bu değerleri KENDİ read-once tamponlarıyla
-        // eşleştirir (post-hoc substitution reddi).
+        // eşleştirir (post-hoc substitution reddi). P0-2 kesiti: patch digest +
+        // after head = zincir-güvenlik (exact-state bağı v1 sınırı: operatör beyanı).
         "binding": {
             "attempt_digest": crate::commands::finalize_run::sha256_bytes(&attempt_bytes),
             "task_digest": task_digest,
             "after_digest": after_digest,
+            "after_head": after_head,
+            "patch_digest": patch_digest,
             "evidence_input_digest": evidence_input_digest,
         },
         "verdict": serde_json::to_value(&verdict)?,
@@ -280,6 +327,12 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
     // No-clobber yayın (P1/P2 — TOCTOU'ya kapalı): unique temp + hard_link
     // atomik create — hedef VARSA link RED verir (iki eşzamanlı süreçten yalnız
     // ilki yazar; #171 claim deseni). atomic_write_replace (rename) YOK.
+    // **P0-1 (tur-2): ÖNCE kanonik mağazaya** (`<state-dir>/realizations/`,
+    // no-clobber `-N` soneğiyle) — run-dir kopyası caller-owned'dur; finalize
+    // kanonik nüshayı binding.attempt_digest ile bulur ve bayt-eşleştirir
+    // (elle yazılmış verdict'in canonical provenance'ı YOKTUR).
+    let canonical_ref =
+        publish_canonical_verdict(&state_dir, task_id, payload.to_string().as_bytes())?;
     no_clobber_publish(&verdict_path, payload.to_string().as_bytes())?;
 
     // 7) İnsan yüzü + exit kodu.
@@ -293,6 +346,7 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         }
         RealizationVerdict::NotAttempted => ("NotAttempted", 4),
     };
+    println!("✓ canonical verdict published: {canonical_ref}");
     println!(
         "✓ realization verdict written to {}",
         verdict_path.display()
@@ -303,6 +357,84 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         verdict.build_error_count(),
     );
     std::process::exit(code);
+}
+
+/// after.json (read-once tampon) → **snapshot-bound** temiz analiz zorunluluğu
+/// (P0-2 zincir-güvenlik kesiti): `repository.binding == clean_pre_post_equal ∧
+/// repository.clean == true` — herhangi bir schema-v2 RED. Dönen head,
+/// binding'e kaydedilir (ölçülen commit'in kimliği).
+fn require_snapshot_bound_after(after_bytes: &[u8], after_path: &Path) -> anyhow::Result<String> {
+    let value: serde_json::Value = serde_json::from_slice(after_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", after_path.display()))?;
+    let binding = value
+        .pointer("/repository/binding")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let clean = value.pointer("/repository/clean").and_then(|v| v.as_bool());
+    anyhow::ensure!(
+        binding == "clean_pre_post_equal" && clean == Some(true),
+        "{} must be a snapshot-bound clean analysis (repository.binding=\
+         clean_pre_post_equal ∧ repository.clean=true; found binding={binding:?}, \
+         clean={clean:?}) — a generic/unbound analysis does not establish which \
+         state was measured",
+        after_path.display()
+    );
+    value
+        .pointer("/repository/head")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .ok_or_else(|| anyhow::anyhow!("{} is missing repository.head", after_path.display()))
+}
+
+/// **P0-1 (tur-2): kanonik verdict publish** — `<state-dir>/realizations/
+/// realization-<task>-<millis>-<pid>[-N].json`, no-clobber hard-link atomik
+/// create (`-N` soneği çakışmada; attempts mağazası deseni). Dönen ref
+/// canonical provenance'dır — finalize binding.attempt_digest ile BULUR, bu
+/// nedenle payload kendi adını taşımak zorunda değildir.
+fn publish_canonical_verdict(
+    state_dir: &Path,
+    task_id: u64,
+    payload: &[u8],
+) -> anyhow::Result<String> {
+    use std::io::Write as _;
+    let realizations_dir = state_dir.join("realizations");
+    std::fs::create_dir_all(&realizations_dir)
+        .map_err(|e| anyhow::anyhow!("cannot create {}: {e}", realizations_dir.display()))?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let pid = std::process::id();
+    let tmp = realizations_dir.join(format!("verdict.tmp.{pid}.{millis}"));
+    {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(payload)?;
+        file.sync_all()?;
+    }
+    for suffix in 0..=64u32 {
+        let name = match suffix {
+            0 => format!("realization-{task_id}-{millis}-{pid}.json"),
+            n => format!("realization-{task_id}-{millis}-{pid}-{n}.json"),
+        };
+        let candidate = realizations_dir.join(&name);
+        match std::fs::hard_link(&tmp, &candidate) {
+            Ok(()) => {
+                let _ = std::fs::File::open(&realizations_dir).and_then(|d| d.sync_all());
+                let _ = std::fs::remove_file(&tmp);
+                return Ok(format!("realizations/{name}"));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                anyhow::bail!("canonical verdict publish failed: {e}");
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    anyhow::bail!("canonical verdict collision budget exhausted for task {task_id}")
 }
 
 /// task.json (read-once tampon) → (repository_head, task.id) — P0 fence girdileri.

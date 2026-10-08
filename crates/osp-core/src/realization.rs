@@ -305,28 +305,53 @@ impl RealizationVerdict {
     }
 }
 
-/// Gate girdisi — **GraphCompletedProof pini icrası** (#197 review tur-2):
-/// doğrulanmış kanonik zarfın graph-completion gerçeleri. Caller (CLI gate),
-/// bu gerçeleri #178/#188 canonical-store bayt-doğrulamasından sonra doldurur;
-/// `evaluate_gate` facts'i değil KURALI denetler: graph-completed olmayan
-/// iddia üzerinde gate koşmaz (`NotAttempted`) — böylece "BuildInvalid ⇒
-/// graph iddiası ayakta" zemin varsayımı yapısal hâle gelir.
+/// **GraphCompletedProof pini icrası** (#198 review tur-2 P1: facts ≠ proof).
+/// Private alanlar + **doğrulayan constructor**: `from_facts` yalnız
+/// `result_kind == "completed" ∧ completion_basis == Some(Graph)` gerçelerini
+/// mühürler — graph-completed OLMAYAN iddia için `GraphCompletedProof`
+/// **kurulamaz** (yalnız NotAttempted üretebilir). `task_id`/`canonical_ref`
+/// kimlik KAYITLARIDIR (core store'u okuyamaz); bunların doğruluğu
+/// producer'ın (CLI gate) canonical bayt-doğrulamasına ve tüketicinin
+/// (finalize) kanonik-verdict zincirine yaslanır — proof'ın kendi garantisi
+/// **şekil önermesidir**: bu zarf graph-completed iddia taşıyordu.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct GraphCompletionFacts {
-    pub task_id: u64,
+pub struct GraphCompletedProof {
+    task_id: u64,
     /// Kanonik zarf referansı (`attempts/task-<id>-<millis>-<pid>[-N].json`).
-    pub canonical_attempt_ref: String,
-    /// Zarfın `result.kind` wire değeri — gate yalnız `"completed"` üzerinde koşar.
-    pub result_kind: String,
-    /// Zarfın `completion_basis` alanı — `Some(Graph)` beklenir.
-    pub completion_basis: Option<CompletionBasis>,
+    canonical_attempt_ref: String,
+}
+
+impl GraphCompletedProof {
+    /// Doğrulayan constructor — graph-completed olmayan gerçeler `None` döner
+    /// (ret kanıtlı; sahte facts ile proof kurulamaz).
+    pub fn from_facts(
+        task_id: u64,
+        canonical_attempt_ref: String,
+        result_kind: &str,
+        completion_basis: Option<CompletionBasis>,
+    ) -> Option<Self> {
+        (result_kind == "completed" && completion_basis == Some(CompletionBasis::Graph)).then_some(
+            Self {
+                task_id,
+                canonical_attempt_ref,
+            },
+        )
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn canonical_attempt_ref(&self) -> &str {
+        &self.canonical_attempt_ref
+    }
 }
 
 /// **RealizationGate (#196 uygulama-2, karar 2: CLI ritüelinde).** INV-T10
 /// zincirinin kararı üreten çekirdeği:
 ///
 /// ```text
-/// GraphCompletionFacts (witness) + RealizationEvidence (raw)
+/// GraphCompletedProof (doğrulanmış şekil-kanıtı) + RealizationEvidence (raw)
 ///         → evaluate_gate → RealizationVerdict
 /// ```
 ///
@@ -335,15 +360,13 @@ pub struct GraphCompletionFacts {
 /// RealizedCompleted yalnız `build == Succeeded ∧ predicate_after_reanalysis ==
 /// Some(true)` ile verilir; `c_observed/c_predicted` (E_c) kanıtta YAŞAR ama
 /// gate'i bağlamaz — graph-genişliği `D_G` toleransı ayrı çalışmadır.
+/// Proof'un **varlığı** garantiyi taşır (`from_facts` graph-completed şeklini
+/// doğrulamadan mühür vermez) — alanları karar girdisi olarak tüketilmez;
+/// kimlik kayıtları verdict kanalında (canonical ref) yaşar.
 pub fn evaluate_gate(
-    graph: GraphCompletionFacts,
+    _proof: GraphCompletedProof,
     realization: RealizationEvidence,
 ) -> RealizationVerdict {
-    let graph_completed =
-        graph.result_kind == "completed" && graph.completion_basis == Some(CompletionBasis::Graph);
-    if !graph_completed {
-        return RealizationVerdict::NotAttempted;
-    }
     match realization.build {
         BuildOutcome::Failed { .. } => RealizationVerdict::DeclaredRealizationBuildInvalid {
             evidence: FailedDeclaredRealization::try_new(realization)
@@ -480,13 +503,14 @@ mod tests {
         );
     }
 
-    fn facts() -> GraphCompletionFacts {
-        GraphCompletionFacts {
-            task_id: 18,
-            canonical_attempt_ref: "attempts/task-18-990-1.json".to_string(),
-            result_kind: "completed".to_string(),
-            completion_basis: Some(CompletionBasis::Graph),
-        }
+    fn facts() -> GraphCompletedProof {
+        GraphCompletedProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "completed",
+            Some(CompletionBasis::Graph),
+        )
+        .expect("graph-completed gerçeler proof mühürler")
     }
 
     /// #198: gate'in mutlu yolu — yalnız KANITLI mühür. `from_gate` redleri:
@@ -586,21 +610,32 @@ mod tests {
         assert_eq!(none.completion_basis(), None);
     }
 
-    /// GraphCompletedProof pini: graph-completed olmayan iddia üzerinde gate koşmaz.
+    /// GraphCompletedProof pini (#198 tur-2 P1): graph-completed OLMAYAN
+    /// gerçelerden proof KURULAMAZ — ret kanıtlı (evaluate_gate'e sahte facts
+    /// sokulması tip-düzeyinde imkânsız).
     #[test]
     fn gate_refuses_non_graph_completed_witness() {
-        let mut f = facts();
-        f.result_kind = "llm_error".to_string();
-        assert!(matches!(
-            evaluate_gate(f, ok_evidence()),
-            RealizationVerdict::NotAttempted
-        ));
-        let mut f2 = facts();
-        f2.completion_basis = None;
-        assert!(matches!(
-            evaluate_gate(f2, ok_evidence()),
-            RealizationVerdict::NotAttempted
-        ));
+        assert!(GraphCompletedProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "llm_error",
+            Some(CompletionBasis::Graph),
+        )
+        .is_none());
+        assert!(GraphCompletedProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "completed",
+            None,
+        )
+        .is_none());
+        assert!(GraphCompletedProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "completed",
+            Some(CompletionBasis::Realized),
+        )
+        .is_none());
     }
 
     /// Üçüncü seal: "unsatisfied" adı ancak Some(false) kanıtıyla kurulabilir.

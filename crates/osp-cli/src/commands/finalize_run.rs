@@ -696,6 +696,69 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
             verdict_path.display()
         );
         let verdict_bytes = read_artifact_bytes(&verdict_path)?;
+        // **P0-1 (tur-2): canonical verdict provenance** — run-dir kopyası
+        // caller-owned'dır; kanonik mağazada (`<state-dir>/realizations/`) bu
+        // attempt'e bağlı (binding.attempt_digest eşleşen) TAM OLARAK BİR
+        // nüsha aranır ve bayt-eşleşmesi zorlanır. Elle yazılmış verdict'in
+        // canonical nüshası yoktur → RED; birden çok nüsha → ambiguity RED
+        // (#190 dersi: content identity ≠ artifact identity).
+        let attempt_digest = sha256_bytes(&attempt_bytes);
+        let realizations_dir = match args.state_dir.as_deref() {
+            Some(p) => p.join("realizations"),
+            None => args
+                .run_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("state").join("realizations"))
+                .unwrap_or_else(|| PathBuf::from("realizations")),
+        };
+        anyhow::ensure!(
+            realizations_dir.is_dir(),
+            "verdict provenance fence: canonical realizations store not found ({}) — \
+             the gate publishes there; a hand-written run-dir verdict has no canonical \
+             provenance",
+            realizations_dir.display()
+        );
+        let mut canonical_matches: Vec<PathBuf> = std::fs::read_dir(&realizations_dir)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", realizations_dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().map(|x| x == "json").unwrap_or(false)
+                    && p.file_name()
+                        .map(|n| {
+                            n.to_string_lossy()
+                                .starts_with(&format!("realization-{task_id}-"))
+                        })
+                        .unwrap_or(false)
+            })
+            .filter(|p| match std::fs::read(p) {
+                Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/binding/attempt_digest")
+                            .and_then(|d| d.as_str())
+                            .map(|d| d == attempt_digest)
+                    })
+                    .unwrap_or(false),
+                Err(_) => false,
+            })
+            .collect();
+        canonical_matches.sort();
+        anyhow::ensure!(
+            canonical_matches.len() == 1,
+            "verdict provenance fence: expected exactly ONE canonical realization \
+             verdict bound to this attempt in {} (found {}) — 0 = hand-written verdict \
+             (no gate execution proof); >1 = ambiguous artifact identity",
+            realizations_dir.display(),
+            canonical_matches.len()
+        );
+        let canonical_bytes = read_artifact_bytes(&canonical_matches[0])?;
+        anyhow::ensure!(
+            canonical_bytes == verdict_bytes,
+            "verdict provenance fence: the run-dir realization-verdict.json does not \
+             byte-match its canonical store copy — the caller-owned copy was modified"
+        );
         let verdict: serde_json::Value = serde_json::from_slice(&verdict_bytes)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", verdict_path.display()))?;
         let binding = verdict.get("binding").ok_or_else(|| {
@@ -718,6 +781,16 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                 bound("after_digest") == Some(sha256_bytes(&after_bytes).as_str()),
                 "verdict binding fence: realization-verdict.json was produced for \
                  different after bytes — the reanalysis changed after the gate ran"
+            );
+        }
+        // P0-2 (tur-2): realized delta kimliği — verdict'ün patch_digest'i
+        // finalize'ın KENDİ read-once patch tamponuyla eşleşmeli.
+        if let Some(patch_digest) = &patch_digest {
+            anyhow::ensure!(
+                bound("patch_digest") == Some(patch_digest.as_str()),
+                "verdict binding fence: realization-verdict.json was produced for \
+                 different applied.patch bytes — the realized delta changed after \
+                 the gate ran"
             );
         }
         let verdict_obj = verdict
