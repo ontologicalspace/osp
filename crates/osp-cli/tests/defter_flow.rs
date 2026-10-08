@@ -496,6 +496,34 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
     let patch = run.join("applied.patch");
     fs::write(&patch, b"diff --git a/main.rs b/main.rs\n-test\n").unwrap();
 
+    // Adım 4b: realization-gate (karar 2: graph-completed finalization kapıyı
+    // ZORUNLU tüketir). Declared evidence: yama gerçekten uygulandı + derlendi.
+    let declared = run.join("declared-realization.json");
+    fs::write(
+        &declared,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    )
+    .unwrap();
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("run")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&declared)
+        .output()
+        .expect("run osp realization-gate");
+    assert!(
+        out.status.code() == Some(0) || out.status.code() == Some(3),
+        "gate realized veya predicate-unsat olmalı (gerçek after ölçümüne göre); \
+         stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let verdict: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("realization-verdict.json")).unwrap())
+            .unwrap();
+    let gate_realized = verdict["verdict"]["RealizedCompleted"].is_object();
+
     // Adım 5: finalize-run (ritüel gibi OSP kökünden görece run-dir → ref'ler görece).
     let out = osp_in(&work)
         .arg("finalize-run")
@@ -568,8 +596,14 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         row["attempt_digest"],
         "canonical_attempt_ref'in gösterdiği dosya attempt.json ile bayt-özdeş"
     );
-    // #198 (INV-T10 canonical consumer): graph-completed satır zeminini taşır.
-    assert_eq!(row["completion_basis"], "graph");
+    // #198 (INV-T10 canonical consumer): graph-completed satır zeminini taşır —
+    // kapı realized dediyse "realized"; değilse "graph" + verdict etiketi.
+    if gate_realized {
+        assert_eq!(row["completion_basis"], "realized");
+    } else {
+        assert_eq!(row["completion_basis"], "graph");
+        assert!(row["realization_verdict"].is_string());
+    }
     assert_eq!(row["after_ref"], "run/after.json");
     assert_eq!(row["analysis_profile"], "tier1");
     // Tur-1 P1-1: Exists(after)+Exists(patch) ≠ Patch(S0)=S_after —
@@ -2050,10 +2084,13 @@ fn realization_gate_end_to_end_matrix() {
             .to_string(),
         )
         .unwrap();
-        // Graph-completed zarf (kind=completed + completion_basis=graph) +
-        // kanonik mağaza kopyası (bayt-özdeş).
+        // Graph-completed zarf (kind=completed + completion_basis=graph +
+        // run.task_digest — gate yalnız digest-taşıyan yeni-şekil zarflarda koşar)
+        // ve kanonik mağaza kopyası (bayt-özdeş).
+        let task_digest = sha256_of(&run.join("task.json"));
         let mut env = attempt_envelope(&fx.head, 1);
         env["completion_basis"] = serde_json::json!("graph");
+        env["run"]["task_digest"] = serde_json::json!(task_digest);
         env["evidence"] = serde_json::json!([{
             "trajectory_id": 1, "milestone_id": 1, "task_id": 1, "attempt_id": 1,
             "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
@@ -2199,6 +2236,56 @@ fn realization_gate_end_to_end_matrix() {
         .unwrap();
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("written once"));
+
+    // (f) P0 artifact-identity: attempt koştuktan SONRA task.json değiştirilirse
+    // (ör. threshold kolaylaştırma) digest fence RED — substitution reddi.
+    let run = prepare("run-gate-tamper", true, 0.9, 0.5);
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    );
+    let task_file = run.join("task.json");
+    let task_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&task_file).unwrap()).unwrap();
+    let mut easier = task_json.clone();
+    easier["task"]["target_predicate_set"]["predicates"][0]["predicate"]["threshold"] =
+        serde_json::json!(0.99);
+    fs::write(&task_file, serde_json::to_string(&easier).unwrap()).unwrap();
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "kolaylaştırılmış threshold RED olmalı"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("substitution refused") || stderr.contains("changed after the attempt"),
+        "P0 fence gerekçesi: {stderr}"
+    );
+
+    // (g) Karar 2 (zorunlu tüketim): graph-completed run KAPISIZ finalize EDİLEMEZ.
+    let run = prepare("run-gate-noverdict", true, 0.9, 0.5);
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--repository")
+        .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "verdict'siz finalize RED olmalı");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("realization gate fence"),
+        "zorunlu-tüketim mesajı"
+    );
 }
 
 /// #178 tur-3 P0 kabul testi (ikinci yarısı): gerçek historical legacy zarf +

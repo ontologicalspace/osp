@@ -681,7 +681,72 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     // #198 (INV-T10 canonical consumer): zarfın tamam-iddia zeminini satır taşır.
     // Yalnız graph-completed satırlar "graph" taşır; null/missing (iddia yok /
     // pre-#197 zarflar) → anahtar YOK (missing ≡ iddia-yok, #178 tur-3/P2 disiplini).
-    if let Some(basis) = &attempt.completion_basis {
+    // **Karar 2 (freeze #196/6051272311): graph-completed iddianın finalization'ı
+    // realization verdict'ini ZORUNLU tüketir** — verdict yok RED; verdict'in
+    // artifact-identity bağı (attempt/task/after digest) finalize'ın KENDİ
+    // read-once tamponlarıyla eşleşir (post-hoc substitution reddi). Başarısız
+    // verdict finalization'ı engellemez (veri; kabul insan) ama satıra işlenir.
+    if attempt.completion_basis.as_deref() == Some("graph") {
+        let verdict_path = args.run_dir.join("realization-verdict.json");
+        anyhow::ensure!(
+            verdict_path.is_file(),
+            "realization gate fence: the attempt claims completion_basis=graph but {} is \
+             missing — a graph-completed claim can only be finalized through its \
+             realization verdict (run `osp realization-gate` first)",
+            verdict_path.display()
+        );
+        let verdict_bytes = read_artifact_bytes(&verdict_path)?;
+        let verdict: serde_json::Value = serde_json::from_slice(&verdict_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", verdict_path.display()))?;
+        let binding = verdict.get("binding").ok_or_else(|| {
+            anyhow::anyhow!("{} is missing its binding block", verdict_path.display())
+        })?;
+        let bound = |key: &str| binding.get(key).and_then(|v| v.as_str());
+        anyhow::ensure!(
+            bound("attempt_digest") == Some(sha256_bytes(&attempt_bytes).as_str()),
+            "verdict binding fence: realization-verdict.json was produced for different \
+             attempt bytes — the attempt changed after the gate ran"
+        );
+        anyhow::ensure!(
+            bound("task_digest") == Some(sha256_bytes(&task_bytes).as_str()),
+            "verdict binding fence: realization-verdict.json was produced for different \
+             task bytes — the task changed after the gate ran"
+        );
+        if after_path.is_file() {
+            let after_bytes = read_artifact_bytes(&after_path)?;
+            anyhow::ensure!(
+                bound("after_digest") == Some(sha256_bytes(&after_bytes).as_str()),
+                "verdict binding fence: realization-verdict.json was produced for \
+                 different after bytes — the reanalysis changed after the gate ran"
+            );
+        }
+        let verdict_obj = verdict
+            .get("verdict")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow::anyhow!("{} is missing its verdict", verdict_path.display()))?;
+        let variant = verdict_obj
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{} verdict is empty", verdict_path.display()))?;
+        let label = match variant.as_str() {
+            "RealizedCompleted" => "realized",
+            "DeclaredRealizationBuildInvalid" => "declared_realization_build_invalid",
+            "PredicateUnsatisfiedAfterReanalysis" => "predicate_unsatisfied_after_reanalysis",
+            "NotAttempted" => "not_attempted",
+            other => anyhow::bail!(
+                "{} carries unknown verdict variant {other:?}",
+                verdict_path.display()
+            ),
+        };
+        if label == "realized" {
+            row["completion_basis"] = serde_json::json!("realized");
+        } else {
+            row["completion_basis"] = serde_json::json!("graph");
+            row["realization_verdict"] = serde_json::json!(label);
+        }
+    } else if let Some(basis) = &attempt.completion_basis {
+        // İddia-yok (null) zarflar basis taşımaz; "graph" dışı değer zaten üstte
+        // parse sırasında geçersiz kılındı (serde enum).
         row["completion_basis"] = serde_json::json!(basis);
     }
 

@@ -158,10 +158,52 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         }
     };
 
-    // 3) Task predicate (v1: Coupling/Le tek-predicate) + after.json gözlemi —
-    //    makine türetimleri.
-    let (threshold, tolerance, scope_path) = read_task_predicate(&task_path)?;
-    let c_observed = read_observed_coupling(&after_path, &scope_path)?;
+    // 3) **Artifact identity (P0 fence ailesi — #198 review):** task/after/evidence
+    //    read-once tamponlardan okunur ve verdict artifact'ı tükettiği her şeyin
+    //    digest'ini taşır. Çapraz-fence'ler: task.id ↔ run.task_id,
+    //    run.task_digest ↔ hash(task.json), task.repository_head ↔ zarf head'i.
+    //    after.json'in patch'li-state bağı v1'de digest kaydıyla (post-hoc tamper
+    //    reddi) kurulur — daha güçlü cross-fence ayrı çalışmadır.
+    let task_bytes = std::fs::read(&task_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", task_path.display()))?;
+    let task_digest = crate::commands::finalize_run::sha256_bytes(&task_bytes);
+    let (task_head, task_id_from_task) = read_task_identity(&task_bytes, &task_path)?;
+    anyhow::ensure!(
+        task_id_from_task == task_id,
+        "task-id fence: task.json carries id {task_id_from_task} but the attempt ran \
+         task_id {task_id} — cross-artifact substitution refused"
+    );
+    anyhow::ensure!(
+        task_head == envelope_run_head(&envelope),
+        "head fence: task.json binds {} but the attempt ran on {} — cross-artifact \
+         substitution refused",
+        task_head,
+        envelope_run_head(&envelope)
+    );
+    // P0: gate yalnız digest TAŞIYAN (post-#178 yeni-şekil) zarflarda koşar —
+    // task baytlarına bağlanamayan zarf, substitution'a açıktır (anchor
+    // felsefesiyle aynı: yeni-şekil + anchor'suz = RED).
+    let claimed_task_digest = envelope
+        .pointer("/run/task_digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "realization-gate requires a digest-carrying envelope (run.task_digest) — \
+                 pre-#178 shapes cannot be byte-bound to their task.json; re-run the attempt"
+            )
+        })?
+        .to_string();
+    anyhow::ensure!(
+        claimed_task_digest == task_digest,
+        "task digest fence: the attempt bound task.json as {claimed_task_digest} but the \
+         run dir now hashes {task_digest} — the task file changed after the attempt \
+         (cross-artifact substitution refused)"
+    );
+    let (threshold, tolerance, scope_path) = read_task_predicate(&task_bytes, &task_path)?;
+    let after_bytes = std::fs::read(&after_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", after_path.display()))?;
+    let after_digest = crate::commands::finalize_run::sha256_bytes(&after_bytes);
+    let c_observed = read_observed_coupling(&after_bytes, &after_path, &scope_path)?;
     let c_predicted = envelope
         .pointer("/evidence")
         .and_then(|e| e.as_array())
@@ -170,17 +212,17 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         .and_then(|x| x.as_f64());
     let predicate_after_reanalysis = Some(c_observed <= threshold + tolerance + 1e-12);
 
-    // 4) İnsan-beyanlı gerçeler + kanıt.
-    let declared: DeclaredRealizationInput = serde_json::from_reader(
-        std::fs::File::open(&args.evidence)
-            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", args.evidence.display()))?,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "{} does not match the declared-realization input shape: {e}",
-            args.evidence.display()
-        )
-    })?;
+    // 4) İnsan-beyanlı gerçeler + kanıt (read-once + digest).
+    let evidence_bytes = std::fs::read(&args.evidence)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", args.evidence.display()))?;
+    let evidence_input_digest = crate::commands::finalize_run::sha256_bytes(&evidence_bytes);
+    let declared: DeclaredRealizationInput =
+        serde_json::from_slice(&evidence_bytes).map_err(|e| {
+            anyhow::anyhow!(
+                "{} does not match the declared-realization input shape: {e}",
+                args.evidence.display()
+            )
+        })?;
     let build = BuildOutcome::try_from(declared.build)
         .map_err(|e| anyhow::anyhow!("{}: {e}", args.evidence.display()))?;
     let evidence = RealizationEvidence {
@@ -216,6 +258,15 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         "task_id": task_id,
         "task_ref": make_ref(&args.run_dir, "task.json"),
         "canonical_attempt_ref": canonical_attempt_ref,
+        // P0 artifact-identity bağı: verdict'in tükettiği her şeyin read-once
+        // digest'i — finalize bu değerleri KENDİ read-once tamponlarıyla
+        // eşleştirir (post-hoc substitution reddi).
+        "binding": {
+            "attempt_digest": crate::commands::finalize_run::sha256_bytes(&attempt_bytes),
+            "task_digest": task_digest,
+            "after_digest": after_digest,
+            "evidence_input_digest": evidence_input_digest,
+        },
         "verdict": serde_json::to_value(&verdict)?,
         "e_c": e_c,
         "gate_context": {
@@ -226,7 +277,10 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
             "c_predicted": c_predicted,
         },
     });
-    crate::commands::atomic_write_replace(&verdict_path, payload.to_string().as_bytes())?;
+    // No-clobber yayın (P1/P2 — TOCTOU'ya kapalı): unique temp + hard_link
+    // atomik create — hedef VARSA link RED verir (iki eşzamanlı süreçten yalnız
+    // ilki yazar; #171 claim deseni). atomic_write_replace (rename) YOK.
+    no_clobber_publish(&verdict_path, payload.to_string().as_bytes())?;
 
     // 7) İnsan yüzü + exit kodu.
     let (label, code) = match &verdict {
@@ -251,10 +305,52 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
     std::process::exit(code);
 }
 
-/// task.json → (threshold, tolerance, scope.Path) — v1: Coupling/Le tek predicate.
-fn read_task_predicate(task_path: &Path) -> anyhow::Result<(f64, f64, String)> {
-    let value: serde_json::Value = serde_json::from_reader(std::fs::File::open(task_path)?)
+/// task.json (read-once tampon) → (repository_head, task.id) — P0 fence girdileri.
+fn read_task_identity(task_bytes: &[u8], task_path: &Path) -> anyhow::Result<(String, u64)> {
+    let value: serde_json::Value = serde_json::from_slice(task_bytes)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", task_path.display()))?;
+    let head = value
+        .get("repository_head")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("{} is missing repository_head", task_path.display()))?
+        .to_string();
+    let id = value
+        .pointer("/task/id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("{} is missing task.id", task_path.display()))?;
+    Ok((head, id))
+}
+
+/// Zarfın run.repository_head'i (fence karşılaştırması için).
+fn envelope_run_head(envelope: &serde_json::Value) -> String {
+    envelope
+        .pointer("/run/repository_head")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
+/// task.json (read-once tampon) → (threshold, tolerance, scope.Path) —
+/// v1: Coupling/Le, **mode=All VE tam 1 predicate** (fail-closed: çoklu
+/// predicate'li task sessizce değerlendirilemez — RED).
+fn read_task_predicate(task_bytes: &[u8], task_path: &Path) -> anyhow::Result<(f64, f64, String)> {
+    let value: serde_json::Value = serde_json::from_slice(task_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", task_path.display()))?;
+    let mode = value
+        .pointer("/task/target_predicate_set/mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let count = value
+        .pointer("/task/target_predicate_set/predicates")
+        .and_then(|p| p.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    anyhow::ensure!(
+        mode == "All" && count == 1,
+        "realization-gate v1 evaluates exactly one predicate with mode=All (found \
+         mode={mode:?}, {count} predicates) — multi-predicate tasks are refused \
+         fail-closed, not silently partially evaluated"
+    );
     let predicate = value
         .pointer("/task/target_predicate_set/predicates/0/predicate")
         .ok_or_else(|| {
@@ -296,9 +392,13 @@ fn read_task_predicate(task_path: &Path) -> anyhow::Result<(f64, f64, String)> {
     Ok((threshold, tolerance, scope_path))
 }
 
-/// after.json → scope node'unun ölçülmüş coupling'i.
-fn read_observed_coupling(after_path: &Path, scope_path: &str) -> anyhow::Result<f64> {
-    let value: serde_json::Value = serde_json::from_reader(std::fs::File::open(after_path)?)
+/// after.json (read-once tampon) → scope node'unun ölçülmüş coupling'i.
+fn read_observed_coupling(
+    after_bytes: &[u8],
+    after_path: &Path,
+    scope_path: &str,
+) -> anyhow::Result<f64> {
+    let value: serde_json::Value = serde_json::from_slice(after_bytes)
         .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", after_path.display()))?;
     let version = value
         .get("schema_version")
@@ -323,6 +423,32 @@ fn read_observed_coupling(after_path: &Path, scope_path: &str) -> anyhow::Result
                 after_path.display()
             )
         })
+}
+
+/// **No-clobber publish (P1/P2 — TOCTOU'ya kapalı):** içerik shared
+/// `stage_temp` ile unique temp'e yazılır, hedefe **hard_link** ile atomik
+/// create edilir — hedef VARSA link RED verir (iki eşzamanlı süreçten yalnız
+/// ilki kazanır; #171 claim deseni).
+fn no_clobber_publish(target: &Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let temp = crate::commands::stage_temp(target, bytes)?;
+    match std::fs::hard_link(&temp, target) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(&temp);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let _ = std::fs::remove_file(&temp);
+            anyhow::bail!(
+                "{} already exists — a realization verdict is written once \
+                 (hard-link atomic create; concurrent writers: only the first wins)",
+                target.display()
+            )
+        }
+        Err(e) => {
+            let _ = std::fs::remove_file(&temp);
+            anyhow::bail!("verdict publish failed: {e}")
+        }
+    }
 }
 
 /// Ledger ref'i üretimi (finalize_run ile aynı normalizasyon).
@@ -372,21 +498,32 @@ mod tests {
         let ok = dir.path().join("t.json");
         std::fs::write(
             &ok,
-            r#"{"task":{"target_predicate_set":{"predicates":[{"predicate":{"metric":"Coupling","operator":"Le","threshold":0.875,"tolerance":0.0,"scope":{"Path":"a.rs"}}}]}}}"#,
+            r#"{"task":{"target_predicate_set":{"mode":"All","predicates":[{"predicate":{"metric":"Coupling","operator":"Le","threshold":0.875,"tolerance":0.0,"scope":{"Path":"a.rs"}}}]}}}"#,
         )
         .unwrap();
         assert_eq!(
-            read_task_predicate(&ok).unwrap(),
+            read_task_predicate(&std::fs::read(&ok).unwrap(), &ok).unwrap(),
             (0.875, 0.0, "a.rs".to_string())
         );
 
         let bad = dir.path().join("bad.json");
         std::fs::write(
             &bad,
-            r#"{"task":{"target_predicate_set":{"predicates":[{"predicate":{"metric":"Instability","operator":"Le","threshold":0.5,"scope":{"Path":"a.rs"}}}]}}}"#,
+            r#"{"task":{"target_predicate_set":{"mode":"All","predicates":[{"predicate":{"metric":"Instability","operator":"Le","threshold":0.5,"scope":{"Path":"a.rs"}}}]}}}"#,
         )
         .unwrap();
-        assert!(read_task_predicate(&bad).is_err());
+        assert!(read_task_predicate(&std::fs::read(&bad).unwrap(), &bad).is_err());
+
+        // P1: çoklu predicate sessizce kısmi değerlendirilemez — RED.
+        let multi = dir.path().join("multi.json");
+        std::fs::write(
+            &multi,
+            r#"{"task":{"target_predicate_set":{"mode":"All","predicates":[{"predicate":{"metric":"Coupling","operator":"Le","threshold":0.5,"scope":{"Path":"a.rs"}}},{"predicate":{"metric":"Coupling","operator":"Le","threshold":0.4,"scope":{"Path":"b.rs"}}}]}}}"#,
+        )
+        .unwrap();
+        let err = read_task_predicate(&std::fs::read(&multi).unwrap(), &multi)
+            .expect_err("multi-predicate RED olmalı");
+        assert!(err.to_string().contains("fail-closed"), "{err}");
     }
 
     #[test]
@@ -398,7 +535,24 @@ mod tests {
             r#"{"schema_version":2,"nodes":[{"path":"x.rs","coupling":{"value":0.1}},{"path":"a.rs","coupling":{"value":0.9167}}]}"#,
         )
         .unwrap();
-        assert!((read_observed_coupling(&p, "a.rs").unwrap() - 0.9167).abs() < 1e-12);
-        assert!(read_observed_coupling(&p, "yok.rs").is_err());
+        let bytes = std::fs::read(&p).unwrap();
+        assert!((read_observed_coupling(&bytes, &p, "a.rs").unwrap() - 0.9167).abs() < 1e-12);
+        assert!(read_observed_coupling(&bytes, &p, "yok.rs").is_err());
+    }
+
+    /// P1/P2: no-clobber publish gerçek yarış-korumalı — hedef VARSA hard_link RED.
+    #[test]
+    fn no_clobber_publish_refuses_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("verdict.json");
+        no_clobber_publish(&target, b"first").unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"first");
+        let err = no_clobber_publish(&target, b"second").expect_err("ikinci yazım RED olmalı");
+        assert!(err.to_string().contains("written once"), "{err}");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            b"first",
+            "ilk yazım bozulmadı"
+        );
     }
 }

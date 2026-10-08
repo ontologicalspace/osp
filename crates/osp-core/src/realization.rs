@@ -103,14 +103,16 @@ impl RealizationEvidence {
     }
 }
 
-/// **Proof-carrying tamam-iddia jetonu** (#197 review P1-1) — `RealizedCompleted`
-/// ancak bunu taşıyabilir. Alanları özeldir; tek public giriş **`from_gate`**
-/// (RealizationGate): build başarılı VE `predicate_after_reanalysis == Some(true)`
-/// DEĞİLSE `None` döner — kanıtsız `RealizedCompleted` üretilemez. "Illegal
-/// state temsil edilemez" disiplininin INV-T10 karşılığı: `RealizedCompleted`
-/// oluşturulabiliyorsa kanıt zaten doğrulanmış olmak ZORUNDADIR — tip sisteminin
-/// garantisi `∃evidence` değil, `Verify(C') ∧ Predicate(G_observed)` sürecinden
-/// geçmiş olmaktır. (`Deserialize` türetilMEZ — wire okuma constructor deliği.)
+/// **Proof-carrying tamam-iddia jetonu** (#197 review P1-1 / #198 review P1) —
+/// `RealizedCompleted` ancak bunu taşıyabilir. Alanları özeldir ve **mühürleme
+/// yolu (`from_gate`) modül-özelidir**: yalnız `evaluate_gate` çağırabilir —
+/// graph-completion witness'ı olmayan hiçbir caller (osp-core içi dâhil)
+/// `VerifiedRealization` üretemez. Mühür koşulları **Verify(C') v1** (freeze:
+/// #196/6051272311): `patch_created ∧ parse ∧ build=Succeeded ∧
+/// predicate_after_reanalysis=Some(true)` — aksi hâlde `None`. "Illegal state
+/// temsil edilemez": `RealizedCompleted` oluşturulabiliyorsa kanıt zaten
+/// doğrulanmış olmak ZORUNDADIR. (`Deserialize` türetilMEZ — wire constructor
+/// deliği; `for_tests` yalnız `#[cfg(test)]`.)
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VerifiedRealization {
     raw: RealizationEvidence,
@@ -119,17 +121,16 @@ pub struct VerifiedRealization {
 }
 
 impl VerifiedRealization {
-    /// **Gate'in kontrollü girişi** (#196 API pini icrası): yalnız build'i
-    /// başarılı VE reanalysis predicate'ini DOĞRULAMIŞ raw kanıtı mühürler;
-    /// aksi hâlde `None` (ret kanıtlıdır — session sahteciliği temsil edilemez).
-    pub fn from_gate(raw: RealizationEvidence) -> Option<Self> {
-        match (&raw.build, raw.predicate_after_reanalysis) {
-            (BuildOutcome::Succeeded, Some(true)) => Some(Self {
-                raw,
-                predicate_verified: true,
-            }),
-            _ => None,
-        }
+    /// **Gate'in kontrollü girişi (modül-özel)** — yalnız `evaluate_gate`.
+    fn from_gate(raw: RealizationEvidence) -> Option<Self> {
+        let verified = raw.patch_created
+            && raw.parse
+            && matches!(raw.build, BuildOutcome::Succeeded)
+            && raw.predicate_after_reanalysis == Some(true);
+        verified.then_some(Self {
+            raw,
+            predicate_verified: true,
+        })
     }
 
     /// Mühürlü kanıt (read-only).
@@ -180,9 +181,10 @@ impl std::fmt::Display for BuildWasNotFailed {
 impl std::error::Error for BuildWasNotFailed {}
 
 impl FailedDeclaredRealization {
-    /// Kontrollü constructor — yalnız build'i KIRIK raw evidence kabul eder
-    /// (fallible + public: illegal state ÜRETİLEMEZ, ret ise kanıtlı).
-    pub fn try_new(raw: RealizationEvidence) -> Result<Self, BuildWasNotFailed> {
+    /// Kontrollü constructor (**modül-özel** — #198 review P1: mühürleme
+    /// yolları gate dışından erişilemez; yalnız `evaluate_gate` ve modül
+    /// testleri) — yalnız build'i KIRIK raw evidence kabul eder.
+    fn try_new(raw: RealizationEvidence) -> Result<Self, BuildWasNotFailed> {
         match raw.build {
             BuildOutcome::Failed { .. } => Ok(Self { raw }),
             BuildOutcome::Succeeded => Err(BuildWasNotFailed),
@@ -232,8 +234,9 @@ impl std::fmt::Display for PredicateWasNotUnsatisfied {
 impl std::error::Error for PredicateWasNotUnsatisfied {}
 
 impl UnsatisfiedPredicateEvidence {
-    /// Kontrollü constructor — yalnız reanalysis predicate'ini DÜŞÜRMÜŞ kanıt.
-    pub fn try_new(raw: RealizationEvidence) -> Result<Self, PredicateWasNotUnsatisfied> {
+    /// Kontrollü constructor (**modül-özel** — #198 review P1) — yalnız
+    /// reanalysis predicate'ini DÜŞÜRMÜŞ kanıt.
+    fn try_new(raw: RealizationEvidence) -> Result<Self, PredicateWasNotUnsatisfied> {
         match raw.predicate_after_reanalysis {
             Some(false) => Ok(Self { raw }),
             _ => Err(PredicateWasNotUnsatisfied),
@@ -347,9 +350,11 @@ pub fn evaluate_gate(
                 .expect("evaluate_gate: build Failed dalı try_new tarafından kabul edilir"),
         },
         BuildOutcome::Succeeded => match realization.predicate_after_reanalysis {
+            // Verify(C') v1 (freeze #196/6051272311): patch/parse/build/predicate
+            // koşullarından biri tutmazsa mühür ÜRETİLEMEZ → kanıt yok → NotAttempted.
             Some(true) => VerifiedRealization::from_gate(realization)
                 .map(|evidence| RealizationVerdict::RealizedCompleted { evidence })
-                .expect("evaluate_gate: Succeeded ∧ Some(true) from_gate tarafından mühürlenir"),
+                .unwrap_or(RealizationVerdict::NotAttempted),
             Some(false) => RealizationVerdict::PredicateUnsatisfiedAfterReanalysis {
                 evidence: UnsatisfiedPredicateEvidence::try_new(realization)
                     .expect("evaluate_gate: Some(false) try_new tarafından kabul edilir"),
@@ -507,6 +512,34 @@ mod tests {
             .is_none(),
             "build kırık → RealizedCompleted mührü yok"
         );
+        // #198 review P1: Verify(C') v1 — realization UYGULANMAMIŞSA mühür yok.
+        assert!(
+            VerifiedRealization::from_gate(RealizationEvidence {
+                patch_created: false,
+                ..ok_evidence()
+            })
+            .is_none(),
+            "patch üretilmedi → mühür yok"
+        );
+        assert!(
+            VerifiedRealization::from_gate(RealizationEvidence {
+                parse: false,
+                ..ok_evidence()
+            })
+            .is_none(),
+            "kaynak ayrıştırılamadı → mühür yok"
+        );
+        // Gate de dürüst: eksik verify → NotAttempted (panic değil).
+        assert!(matches!(
+            evaluate_gate(
+                facts(),
+                RealizationEvidence {
+                    patch_created: false,
+                    ..ok_evidence()
+                }
+            ),
+            RealizationVerdict::NotAttempted
+        ));
     }
 
     /// #198: verdict matrisi — D5a'nın üç hücresi (B-19 / A-20 / dürüst-boşluk).

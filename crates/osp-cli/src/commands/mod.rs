@@ -953,7 +953,7 @@ pub(crate) fn atomic_write_replace_staged(pairs: &[(&Path, &[u8])]) -> anyhow::R
 }
 
 /// Unique same-dir temp oluştur, payload'ı yaz, sync et — publish ETMEDEN dön.
-fn stage_temp(out: &Path, payload: &[u8]) -> anyhow::Result<PathBuf> {
+pub(crate) fn stage_temp(out: &Path, payload: &[u8]) -> anyhow::Result<PathBuf> {
     use std::io::Write as _;
     let dir = out
         .parent()
