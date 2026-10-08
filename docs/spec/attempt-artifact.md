@@ -63,6 +63,15 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
     "provenance_authority": "engine_native_per_axis", // #96 MD-2
     "provenance_native": true
   },
+  "completion_basis": "graph", // INV-T10 (#196): tamam-iddia kanıt zemini —
+                               // yalnız result.kind "completed" için "graph",
+                               // diğer kind'lar null (iddia yoksa zemin de yok).
+                               // "realized" attempt-anında temsil EDİLEMEZ — yalnız
+                               // RealizationGate kanıt-jetonu (VerifiedRealization)
+                               // üzerinden gelir. "completed" = GraphCompleted'tir —
+                               // mainline tamamlama iddiası DEĞİLDİR (#171 D5a:
+                               // graph predicate success ⇏ build-valid declared
+                               // realization; B: E_c=0 iken build çöktü).
   "result": { "kind": "completed", "attempts": 2 },
   "evidence": [ /* TrajectoryEvidence[]: before/after + gate/mutation/completion kararları */ ]
 }
@@ -72,6 +81,17 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
 requires_revision | requires_operator_approval | awaiting_cold_start_approval |
 task_not_found | witness_evaluation_error |
 pending_authorization_persistence_failure | system_failure | llm_error`.
+
+`completion_basis`: `graph | realized | null` — INV-T10 tip-ayrımının wire yüzü
+(`osp_core::realization::CompletionBasis`; snake_case). `realized`, attempt-anında
+temsil edilemez: yalnız `RealizationVerdict::RealizedCompleted` üzerinden — ve o
+varyant **kanıt-jetonu** (`VerifiedRealization`: private alanlar, public
+constructor YOK; gate PR'ının `try_from_gate` girişi) taşır. Karar (0) (freeze
+#196/6050269005): beyan dışı semantic work yeni proposal'dır;
+`DeclaredRealizationBuildInvalid` gerçek-dünya hükmü değil, beyan-realization'ın
+build sonucudur ve **tam raw evidence taşır** (E_c=0 ∧ BuildFailed eşleşmesi
+kaybolmaz). Eski (alansız) envelope'lar: missing ≡
+`kind==completed ? graph : null` (realized katmanı hiç var olmadı).
 
 ### #178 — tüketilen-girdi digest'leri ve güven kökü
 
