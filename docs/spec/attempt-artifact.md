@@ -63,6 +63,13 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
     "provenance_authority": "engine_native_per_axis", // #96 MD-2
     "provenance_native": true
   },
+  "completion_basis": "Graph", // INV-T10 (#196): tamam-iddia kanıt zemini — attempt
+                               // yalnız hypothetical-graph ölçer, daima "Graph";
+                               // "Realized" yalnız RealizationGate kanıtıyla kurulur.
+                               // result.kind "completed" = GraphCompleted'tir —
+                               // mainline tamamlama iddiası DEĞİLDİR (#171 D5a:
+                               // graph predicate success ⇏ build-valid declared
+                               // realization; B: E_c=0 iken build çöktü).
   "result": { "kind": "completed", "attempts": 2 },
   "evidence": [ /* TrajectoryEvidence[]: before/after + gate/mutation/completion kararları */ ]
 }
@@ -72,6 +79,15 @@ Her attempt kendi artifact'ını alır; yeniden koşu üstüne yazmaz.
 requires_revision | requires_operator_approval | awaiting_cold_start_approval |
 task_not_found | witness_evaluation_error |
 pending_authorization_persistence_failure | system_failure | llm_error`.
+
+`completion_basis`: `Graph | Realized` — INV-T10 tip-ayrımının wire yüzü
+(`osp_core::realization::CompletionBasis`). `Realized`, attempt-anında temsil
+edilemez: yalnız `RealizationVerdict::RealizedCompleted { evidence }`
+(RealizationGate; parse/build/test + reanalysis kanıtı) üzerinden gelebilir.
+Karar (0): beyan dışı semantic work yeni proposal'dır;
+`DeclaredRealizationBuildInvalid` gerçek-dünya hükmü değil, beyan-realization'ın
+build sonucudur. Eski (alansız) envelope'lar ≡ `Graph` (missing ≡ graph-only —
+realized katmanı hiç var olmadı).
 
 ### #178 — tüketilen-girdi digest'leri ve güven kökü
 
