@@ -17,7 +17,8 @@
 //!
 //! - `MutationDecision::AcceptAsCompleted` (Paper-2 lane sözlüğü) DOKUNULMAZ —
 //!   bu eksen tamam **iddia-stratum**'udur (#196 karar 5).
-//! - **Karar (0):** "beyan dışı semantic work yeni proposal sayılır" —
+//! - **Karar (0) DONDURULDU** (freeze: #196 yorum 6050269005; kullanıcı onayı
+//!   2026-10-08): "beyan dışı semantic work yeni proposal sayılır" —
 //!   `DeclaredRealizationBuildInvalid` yalnız beyan-realization'ın build
 //!   sonucunu adlandırır; varoluşsal "unrealizable" etiketi bu normatif karar
 //!   verilerek TÜRETİLMİŞ bir label'dır (deney sonucu değil).
@@ -28,7 +29,10 @@
 use serde::{Deserialize, Serialize};
 
 /// Tamamlama iddiasının kanıt zemini — hangi katmanda kuruldu (#196).
+/// Wire: snake_case (`"graph" | "realized"` — envelope'un diğer kind'leriyle
+/// tutarlı; #197 review P2-2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CompletionBasis {
     /// Hypothetical-graph predicate pass (Q5.b çıktısı). **Mainline tamamlama
     /// iddiası TAŞIMAZ** — realized katmanı hakkında hiçbir şey söylemez.
@@ -56,9 +60,11 @@ pub struct TestOutcome {
     pub skipped: u64,
 }
 
-/// Bir declared-realization'ın kanıt kaydı — D5a şemasının
+/// Bir declared-realization'ın **raw** kanıt kaydı — D5a şemasının
 /// (`dogfood/runs/2026-10-07-author-exp/realization-evidence.jsonl`) motor
-/// tarafı karşılığı (gate PR'ı üretici yapacak; v1'de elle doldurulur).
+/// tarafı karşılığı. Ham veridir: alanları herkes doldurabilir ve tek başına
+/// HİÇBİR tamam-iddia kanıtı taşımaz (#197 review P1-1 — kanıtlayan sarmalayıcı
+/// `VerifiedRealization`'dır; gate PR'ı üretici yapar, v1'de elle doldurulur).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RealizationEvidence {
     /// Beyan (ΔG + reasoning) gerçekleştirildi mi (patch üretildi mi).
@@ -71,6 +77,10 @@ pub struct RealizationEvidence {
     pub c_observed: Option<f64>,
     /// Önerinin/sim'in öngördüğü target-axis coupling.
     pub c_predicted: Option<f64>,
+    /// Yeniden analiz predicate'i sağladı mı (D5a amendment alanı; reanalysis
+    /// yoksa `None` — `c_observed` TEK BAŞINA predicate kanıtı değildir: task
+    /// coupling dışında eksen/provenance/çoklu predicate taşıyabilir).
+    pub predicate_after_reanalysis: Option<bool>,
 }
 
 impl RealizationEvidence {
@@ -85,28 +95,73 @@ impl RealizationEvidence {
     }
 }
 
-/// RealizationGate verdict — karar (0) sözlüğü.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// **Proof-carrying tamam-iddia jetonu** (#197 review P1-1) — `RealizedCompleted`
+/// ancak bunu taşıyabilir ve bu tipin **public constructor'ü YOKTUR**: alanları
+/// özeldir; yalnız RealizationGate'in kontrollü girişi (`try_from_gate` — gate
+/// PR'ı) üretebilir. "Illegal state temsil edilemez" disiplininin INV-T10
+/// karşılığı: `RealizedCompleted` oluşturulabiliyorsa kanıt zaten doğrulanmış
+/// olmak ZORUNDADIR — tip sisteminin garantisi `∃evidence` değil,
+/// `Verify(C') ∧ Predicate(G_observed)` sürecinden geçmiş olmaktır.
+///
+/// Bu PR'da (type-split) jeton bilinçLE OPAK kalır: gate var olana dek dışarıda
+/// `RealizedCompleted` üretilemez (`Deserialize` de türetilMEZ — wire okuma
+/// constructor deliği açar; gate PR'ı kontrollü deserializasyon kararıyla ekler).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct VerifiedRealization {
+    raw: RealizationEvidence,
+    /// Gate'in predicate-doğrulama sonucu (kanıtın parçası — dışarıdan set edilemez).
+    predicate_verified: bool,
+}
+
+#[cfg(test)]
+impl VerifiedRealization {
+    /// Yalnız çekirdek testleri — production constructor'ü gate PR'ıdır.
+    pub(crate) fn for_tests(raw: RealizationEvidence, predicate_verified: bool) -> Self {
+        Self {
+            raw,
+            predicate_verified,
+        }
+    }
+}
+
+/// RealizationGate verdict — karar (0) sözlüğü (freeze: #196 yorum 6050269005).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum RealizationVerdict {
     /// Beyan-realization uygulandı, build/tests geçti, reanalysis predicate'i
-    /// sağladı. **Kanıt yapıda taşınır** — `RealizationEvidence`'sız
-    /// `RealizedCompleted` kurulamaz (INV-T10'un tip-düzeyi karşılığı).
-    RealizedCompleted { evidence: RealizationEvidence },
-    /// Beyan-realization uygulandı ve build kırıldı (karar (0): beyan dışı
-    /// kurtarma YENİ proposal'dır — bu verdict'in ötesine geçmez).
-    DeclaredRealizationBuildInvalid { build_error_count: u64 },
+    /// sağladı. Kanıt **yapıda** taşınır (`VerifiedRealization` — public
+    /// constructor yok; INV-T10'un tip-düzeyi karşılığı).
+    RealizedCompleted { evidence: VerifiedRealization },
+    /// Beyan-realization uygulandı ve build kırıldı. **Raw evidence TAM taşınır**
+    /// (#197 review P1-3): bu bulgunun epistemik değeri `E_c = 0 ∧ BuildFailed`
+    /// eşleşmesindedir — hata sayısı tek başına sim-öngörü/build ayrışmasını
+    /// kaybettirirdi. Karar (0): beyan dışı kurtarma YENİ proposal'dır; bu
+    /// verdict'in ötesine geçmez.
+    DeclaredRealizationBuildInvalid { evidence: RealizationEvidence },
     /// Gate koşulmadı (v1'in fiilî durumu — realization ritüel dışı/elle).
     NotAttempted,
 }
 
 impl RealizationVerdict {
-    /// Verdict'in tamam-iddia zemini.
-    pub fn completion_basis(&self) -> CompletionBasis {
+    /// Verdict'in tamam-iddia zemini (#197 review P2-1: iddia yoksa `None`).
+    /// `RealizedCompleted → Some(Realized)`; `BuildInvalid → Some(Graph)`
+    /// (graph-katmanı iddia ayaktadır, realization kırık); `NotAttempted →
+    /// None` (verdict tek başına hiçbir iddia kurulduğunu söyleyemez).
+    pub fn completion_basis(&self) -> Option<CompletionBasis> {
         match self {
-            Self::RealizedCompleted { .. } => CompletionBasis::Realized,
-            Self::DeclaredRealizationBuildInvalid { .. } | Self::NotAttempted => {
-                CompletionBasis::Graph
-            }
+            Self::RealizedCompleted { .. } => Some(CompletionBasis::Realized),
+            Self::DeclaredRealizationBuildInvalid { .. } => Some(CompletionBasis::Graph),
+            Self::NotAttempted => None,
+        }
+    }
+
+    /// Build-invalid yolunun hata sayısı (raw evidence içinden).
+    pub fn build_error_count(&self) -> Option<u64> {
+        match self {
+            Self::DeclaredRealizationBuildInvalid { evidence } => match evidence.build {
+                BuildOutcome::Failed { error_count } => Some(error_count),
+                BuildOutcome::Succeeded => None,
+            },
+            _ => None,
         }
     }
 }
@@ -127,6 +182,7 @@ mod tests {
             }),
             c_observed: Some(0.9167),
             c_predicted: Some(0.9167),
+            predicate_after_reanalysis: Some(true),
         }
     }
 
@@ -150,44 +206,62 @@ mod tests {
         );
     }
 
+    /// #197 review P1-1: `RealizedCompleted` yalnız gate-jetonuyla kurulabilir —
+    /// raw evidence'dan DEĞİL. Bu test yalnız çekirdek-içi test constructor'üyle
+    /// wire biçimini pinler (public yol yoktur; Deserialize de türetilmemiştir).
     #[test]
-    fn realized_completed_requires_evidence_by_construction() {
-        // `RealizedCompleted { evidence }` — evidence'sız varyant yazılamaz
-        // (derleme hatası); bu test yalnızca wire biçimini pinler.
+    fn realized_completed_carries_verified_realization_jetoonu() {
         let v = RealizationVerdict::RealizedCompleted {
-            evidence: ok_evidence(),
+            evidence: VerifiedRealization::for_tests(ok_evidence(), true),
         };
-        assert_eq!(v.completion_basis(), CompletionBasis::Realized);
+        assert_eq!(v.completion_basis(), Some(CompletionBasis::Realized));
         let wire = serde_json::to_string(&v).unwrap();
         assert!(wire.contains("\"RealizedCompleted\""), "{wire}");
         assert!(wire.contains("\"c_observed\":0.9167"), "{wire}");
+        assert!(wire.contains("\"predicate_verified\":true"), "{wire}");
     }
 
+    /// #197 review P1-3: build-invalid TAM raw evidence taşır — hata sayısı
+    /// `evidence.build` içinden erişilir; E_c = 0 ∧ BuildFailed eşleşmesi kaybolmaz.
     #[test]
-    fn build_invalid_and_not_attempted_stay_graph_basised() {
-        // Karar (0): DeclaredRealizationBuildInvalid gerçek-dünya hükmü DEĞİL —
-        // beyan-realization'ın build sonucu; iddia zemini graph'ta kalır.
+    fn build_invalid_carries_full_evidence_and_exposes_error_count() {
+        // D5a B-19: E_c = 0 (ölçüm tahmini doğru) ∧ build 122 hatayla çöktü.
         let invalid = RealizationVerdict::DeclaredRealizationBuildInvalid {
-            build_error_count: 122,
+            evidence: RealizationEvidence {
+                build: BuildOutcome::Failed { error_count: 122 },
+                c_observed: Some(0.0),
+                c_predicted: Some(0.0),
+                tests: None,
+                ..ok_evidence()
+            },
         };
-        assert_eq!(invalid.completion_basis(), CompletionBasis::Graph);
-        assert_eq!(
-            RealizationVerdict::NotAttempted.completion_basis(),
-            CompletionBasis::Graph
-        );
+        assert_eq!(invalid.build_error_count(), Some(122));
+        assert_eq!(invalid.completion_basis(), Some(CompletionBasis::Graph));
         let wire = serde_json::to_string(&invalid).unwrap();
         assert!(wire.contains("122"), "{wire}");
+        // Tam raw-kanıt gövdesi wire'da: E_c=0 eşleşmesi (c_observed=c_predicted=0)
+        // hata sayısıyla birlikte taşınır — P1-3'ün bizzat kendisi.
+        assert!(wire.contains("\"c_observed\":0.0"), "{wire}");
+        assert!(wire.contains("\"c_predicted\":0.0"), "{wire}");
     }
 
+    /// #197 review P2-1: iddia yoksa zemin de yok — `NotAttempted` None döner.
     #[test]
-    fn completion_basis_wire_is_stable_lowercase() {
+    fn not_attempted_establishes_no_completion_claim() {
+        assert_eq!(RealizationVerdict::NotAttempted.completion_basis(), None);
+        assert_eq!(RealizationVerdict::NotAttempted.build_error_count(), None);
+    }
+
+    /// #197 review P2-2: wire snake_case — envelope'un diğer kind'leriyle tutarlı.
+    #[test]
+    fn completion_basis_wire_is_stable_snake_case() {
         assert_eq!(
             serde_json::to_string(&CompletionBasis::Graph).unwrap(),
-            "\"Graph\""
+            "\"graph\""
         );
         assert_eq!(
             serde_json::to_string(&CompletionBasis::Realized).unwrap(),
-            "\"Realized\""
+            "\"realized\""
         );
     }
 }

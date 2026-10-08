@@ -122,14 +122,17 @@ pub struct CliRunEnvelopeV1 {
     pub schema_version: u32,
     pub run: CliRunMeta,
     pub execution_measurement: CliExecutionMeasurement,
-    /// **INV-T10 (#196 type-split):** bu envelope'un tamamlama iddiasının kanıt
-    /// zemini. Attempt yalnız hypothetical-graph katmanını ölçtüğü için üretici
-    /// HER ZAMAN `Graph` yazar — `Realized` yalnız RealizationGate
-    /// (`RealizationVerdict::RealizedCompleted { evidence }`) çıktısıyla
-    /// kurulabilir ve bu envelope'a attempt-anında sızamaz. `result.kind:
+    /// **INV-T10 (#196 type-split):** bu envelope'un tamam-iddia kanıt zemini
+    /// (#197 review P2-1: iddia YOKSA zemin de yok). Attempt yalnız
+    /// hypothetical-graph katmanını ölçtüğü için üretici yalnız
+    /// `kind == completed` için `Some(Graph)` yazar; diğer tüm kind'lar `null`.
+    /// `Realized` bu alanda attempt-anında TEMSİL EDİLEMEZ — yalnız
+    /// RealizationGate'in kanıt-jetonu (`VerifiedRealization`) üzerinden
+    /// kurulabilir ve attempt'in kendi zarfına sızamaz. `result.kind:
     /// "completed"` = GraphCompleted'tir; **mainline tamamlama iddiası DEĞİLDİR**
     /// (graph predicate success ⇏ build-valid declared realization — #171 D5a).
-    pub completion_basis: osp_core::realization::CompletionBasis,
+    /// Eski (alansız) zarflar: missing ≡ `kind==completed ? Some(Graph) : None`.
+    pub completion_basis: Option<osp_core::realization::CompletionBasis>,
     pub result: CliRunResult,
     pub evidence: Vec<TrajectoryEvidence>,
 }
@@ -207,6 +210,8 @@ pub fn build_run_envelope_v1(
     task_digest: Option<String>,
     proposals_digest: Option<String>,
 ) -> CliRunEnvelopeV1 {
+    let cli_result = CliRunResult::from_navigator(result);
+    let completion_basis = completion_basis_for(&cli_result.kind);
     CliRunEnvelopeV1 {
         schema_version: 1,
         run: CliRunMeta {
@@ -219,11 +224,21 @@ pub fn build_run_envelope_v1(
             proposals_digest,
         },
         execution_measurement: CliExecutionMeasurement::engine_native_per_axis(),
-        // INV-T10: attempt'in ölçtüğü tek katman hypothetical graph'tur —
+        // INV-T10: attempt'in ölçtüğü tek katman hypothetical graph'tır —
         // realized iddiası burada temsil edilemez (bkz. alan dokümantasyonu).
-        completion_basis: osp_core::realization::CompletionBasis::Graph,
-        result: CliRunResult::from_navigator(result),
+        completion_basis,
+        result: cli_result,
         evidence: evidence.to_vec(),
+    }
+}
+
+/// INV-T10 (#197 review P2-1): tamam-iddia zemini yalnız iddia varsa kurulur —
+/// `completed` (GraphCompleted) → `Some(Graph)`; diğer kind'lar (llm_error,
+/// awaiting_witnesses, …) → `None` (ortada completion claim yok).
+fn completion_basis_for(kind: &CliRunResultKind) -> Option<osp_core::realization::CompletionBasis> {
+    match kind {
+        CliRunResultKind::Completed => Some(osp_core::realization::CompletionBasis::Graph),
+        _ => None,
     }
 }
 
@@ -341,11 +356,17 @@ mod tests {
         assert_eq!(v["run"]["execution_mode"], "harness");
         assert_eq!(v["run"]["witness_mode"], "harness_auto_approve");
         assert_eq!(v["run"]["task_source"], "harness_task_file");
-        // INV-T10 (#196 type-split): attempt yalnız hypothetical-graph katmanını
-        // ölçer — envelope'un tamam-iddia zemini daima "Graph"; "completed" =
-        // GraphCompleted'tir, mainline iddiası DEĞİLDİR (D5a: graph predicate
-        // success ⇏ build-valid declared realization).
-        assert_eq!(v["completion_basis"], "Graph");
+        // INV-T10 (#196 type-split + #197 review P2-1): iddia varsa zemin vardır —
+        // completed (GraphCompleted) → "graph"; değilse null. attempt yalnız
+        // hypothetical-graph ölçer; "realized" yalnız RealizationGate kanıt-jetonuyla
+        // kurulabilir. "completed" = GraphCompleted'tir, mainline iddiası DEĞİLDİR
+        // (D5a: graph predicate success ⇏ build-valid declared realization).
+        assert_eq!(v["completion_basis"], "graph");
+        assert_eq!(
+            completion_basis_for(&CliRunResultKind::LlmError),
+            None,
+            "iddia yoksa zemin de yok"
+        );
         // #178: tüketilen dosya digest'leri wire'da; yoksa null (legacy/llm-real).
         assert_eq!(v["run"]["task_digest"], "sha256:aa11");
         assert!(v["run"]["proposals_digest"].is_null());
