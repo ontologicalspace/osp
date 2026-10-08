@@ -177,7 +177,7 @@ impl FailedDeclaredRealization {
         &self.raw
     }
 
-    /// Hata sayısı — invariant sayesinde HER ZAMAN vardıır (Succeeded dalı
+    /// Hata sayısı — invariant sayesinde HER ZAMAN vardır (Succeeded dalı
     /// `try_new` tarafından temsil edilemez kılındı).
     pub fn build_error_count(&self) -> u64 {
         match self.raw.build {
