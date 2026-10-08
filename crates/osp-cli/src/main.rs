@@ -49,6 +49,9 @@ enum Commands {
     SuggestTargets(commands::suggest_targets::SuggestTargetsArgs),
     /// #172: run dizininden ledger satırı taslağı (makine-alanları dolu, K4).
     FinalizeRun(commands::finalize_run::FinalizeRunArgs),
+    /// #196 INV-T10: RealizationGate — graph-completed attempt'i source
+    /// gerçekliğine bağlar (declared realization + build/test + reanalysis).
+    RealizationGate(commands::realization_gate::RealizationGateArgs),
     /// Trajectory işlemleri (init, attempt).
     Trajectory {
         #[command(subcommand)]
@@ -132,6 +135,7 @@ fn main() -> anyhow::Result<()> {
         Commands::DraftTask(args) => commands::draft_task::run_draft_task(args),
         Commands::SuggestTargets(args) => commands::suggest_targets::run_suggest_targets(args),
         Commands::FinalizeRun(args) => commands::finalize_run::run_finalize_run(args),
+        Commands::RealizationGate(args) => commands::realization_gate::run_realization_gate(args),
         Commands::Trajectory { action } => match action {
             TrajectoryAction::Init(args) => commands::run_trajectory_init(args),
             TrajectoryAction::Attempt(args) => commands::run_trajectory_attempt(args),

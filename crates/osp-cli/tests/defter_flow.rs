@@ -494,7 +494,42 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         .unwrap();
     assert!(out.status.success());
     let patch = run.join("applied.patch");
-    fs::write(&patch, b"diff --git a/main.rs b/main.rs\n-test\n").unwrap();
+    // P0 tur-3: gerçek git patch — gate worktree'de uygular. main.rs'e yorum.
+    fs::write(
+        &patch,
+        b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n use crate::a::A;\n",
+    )
+    .unwrap();
+
+    // Adım 4b: realization-gate (karar 2: graph-completed finalization kapıyı
+    // ZORUNLU tüketir). Declared evidence: yama gerçekten uygulandı + derlendi.
+    let declared = run.join("declared-realization.json");
+    fs::write(
+        &declared,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    )
+    .unwrap();
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("run")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&declared)
+        .output()
+        .expect("run osp realization-gate");
+    assert!(
+        out.status.code() == Some(0) || out.status.code() == Some(3),
+        "gate realized veya predicate-unsat olmalı (gerçek after ölçümüne göre); \
+         stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let verdict: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(run.join("realization-verdict.json")).unwrap())
+            .unwrap();
+    let gate_realized = verdict["verdict"]["RealizedCompleted"].is_object();
 
     // Adım 5: finalize-run (ritüel gibi OSP kökünden görece run-dir → ref'ler görece).
     let out = osp_in(&work)
@@ -568,6 +603,14 @@ fn finalize_run_full_ritual_emits_machine_complete_ledger_row() {
         row["attempt_digest"],
         "canonical_attempt_ref'in gösterdiği dosya attempt.json ile bayt-özdeş"
     );
+    // #198 (INV-T10 canonical consumer): graph-completed satır zeminini taşır —
+    // kapı realized dediyse "realized"; değilse "graph" + verdict etiketi.
+    if gate_realized {
+        assert_eq!(row["completion_basis"], "realized");
+    } else {
+        assert_eq!(row["completion_basis"], "graph");
+        assert!(row["realization_verdict"].is_string());
+    }
     assert_eq!(row["after_ref"], "run/after.json");
     assert_eq!(row["analysis_profile"], "tier1");
     // Tur-1 P1-1: Exists(after)+Exists(patch) ≠ Patch(S0)=S_after —
@@ -2007,6 +2050,301 @@ fn finalize_run_rejects_ambiguous_byte_identical_canonical_artifacts() {
     assert!(
         stderr.contains("the digest proves content, not which invocation"),
         "content-vs-artifact rationale in message: {stderr}"
+    );
+}
+
+/// #198 INV-T10: `osp realization-gate` uçtan uca — D5a'nın üç hücresi +
+/// anchor zorunluluğu + no-clobber. Motor türetimleri: c_observed after.json'dan,
+/// predicate_after_reanalysis = observed ≤ threshold.
+#[test]
+fn realization_gate_end_to_end_matrix() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+
+    let prepare = |name: &str, anchored: bool, threshold: f64| {
+        let run = work.join(name);
+        fs::create_dir_all(&run).unwrap();
+        fs::copy(&baseline, run.join("baseline.json")).unwrap();
+        fs::write(
+            run.join("task.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "repository_head": fx.head,
+                "scope_bindings": [{"path": "main.rs"}],
+                "task": {"id": 1, "target_predicate_set": {"mode": "All", "predicates": [
+                    {"predicate": {"metric": "Coupling", "operator": "Le", "threshold": threshold,
+                                   "tolerance": 0.0, "scope": {"Path": "main.rs"}, "required_source": "TreeSitter"},
+                     "weight": null}]}}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        // P0 (tur-3): after.json YOK — gate kendi worktree'inde kendi analizini
+        // koşar (After = Apply(Base, Patch) yapı-tarafından kanıtlanır).
+        // applied.patch: fixture main.rs'ine yorum satırı ekler (coupling değişmez,
+        // git apply gerçekten çalışır; import tabanlı coupling ~2/3 ≈ 0.667).
+        fs::write(
+            run.join("applied.patch"),
+            b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n use crate::a::A;\n",
+        )
+        .unwrap();
+        // Graph-completed zarf (kind=completed + completion_basis=graph +
+        // run.task_digest — gate yalnız digest-taşıyan yeni-şekil zarflarda koşar)
+        // ve kanonik mağaza kopyası (bayt-özdeş).
+        let task_digest = sha256_of(&run.join("task.json"));
+        let mut env = attempt_envelope(&fx.head, 1);
+        env["completion_basis"] = serde_json::json!("graph");
+        env["run"]["task_digest"] = serde_json::json!(task_digest);
+        env["evidence"] = serde_json::json!([{
+            "trajectory_id": 1, "milestone_id": 1, "task_id": 1, "attempt_id": 1,
+            "before": {"x": 0.7, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+            "after": {"x": 0.8, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3},
+            "gate_decision": "PassedAll", "predicate_completion": "Completed",
+            "mutation_decision": "AcceptAsCompleted",
+            "token_cost": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            "duration_ms": 1
+        }]);
+        let bytes = env.to_string();
+        fs::write(run.join("attempt.json"), &bytes).unwrap();
+        if anchored {
+            let attempts = fx.work_path().join("attempts");
+            fs::create_dir_all(&attempts).unwrap();
+            fs::write(attempts.join("task-1-990001-1.json"), bytes).unwrap();
+        }
+        run
+    };
+    let evidence_file = |run: &Path, body: &str| {
+        let p = run.join("declared-realization.json");
+        fs::write(&p, body).unwrap();
+        p
+    };
+
+    // (a) D5a A-hücresi: build-geçer + gözlem predicate altı → RealizedCompleted (exit 0).
+    let run = prepare("run-gate-ok", true, 0.90);
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":{"passed":271,"failed":0,"skipped":0}}"#,
+    );
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .expect("run osp realization-gate");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let verdict: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join("realization-verdict.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        verdict["verdict"]["RealizedCompleted"].is_object(),
+        "{verdict}"
+    );
+    // c_observed = gate'in KENDİ analizi (fixture coupling ~2/3; P0 tur-3:
+    // After = Apply(Base, Patch) yapı-tarafından ölçülür).
+    let c_obs = verdict["gate_context"]["c_observed"].as_f64().unwrap();
+    assert!((c_obs - 0.6667).abs() < 0.01, "c_observed={c_obs}");
+    let e_c = verdict["e_c"].as_f64().expect("e_c derive edilmeli");
+    assert!(
+        e_c < 0.0,
+        "E_c={e_c} (favorable olmalı: gözlem < sim-öngörü)"
+    );
+
+    // (b) D5a B-hücresi: build-kırık → DeclaredRealizationBuildInvalid (exit 2),
+    // TAM kanıt taşınır (error_count + c_observed).
+    let run = prepare("run-gate-bad", true, 0.91);
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"failed","error_count":122},"tests":null}"#,
+    );
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let verdict: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join("realization-verdict.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        verdict["verdict"]["DeclaredRealizationBuildInvalid"]["evidence"]["raw"]["build"]["Failed"]
+            ["error_count"],
+        122
+    );
+
+    // (c) Anchor yok → gate RED (legacy downgrade kapı bağlamı değildir).
+    let run = prepare("run-gate-unanchored", false, 0.92);
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    );
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(&run)
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    // Anchor yok → #178 fence'i RED (digest'siz zarf legacy-şekli mesajıyla;
+    // gate'in kendi UnanchoredLegacy RED'i ancak flag'li indirimde devreye girer).
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("allow-unanchored-legacy") || stderr.contains("anchored attempt envelope"),
+        "anchor gerekçesi mesajda yok: {stderr}"
+    );
+
+    // (d) Predicate gözlemde düşer → PredicateUnsatisfiedAfterReanalysis (exit 3).
+    let run = prepare("run-gate-unsat", true, 0.50);
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    );
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let verdict: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(run.join("realization-verdict.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(verdict["verdict"]["PredicateUnsatisfiedAfterReanalysis"].is_object());
+
+    // (e) No-clobber: aynı run-dir'de ikinci değerlendirme RED.
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    );
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("written once"));
+
+    // (f) P0 artifact-identity: attempt koştuktan SONRA task.json değiştirilirse
+    // (ör. threshold kolaylaştırma) digest fence RED — substitution reddi.
+    let run = prepare("run-gate-tamper", true, 0.93);
+    let ev = evidence_file(
+        &run,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":null}"#,
+    );
+    let task_file = run.join("task.json");
+    let task_json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&task_file).unwrap()).unwrap();
+    let mut easier = task_json.clone();
+    easier["task"]["target_predicate_set"]["predicates"][0]["predicate"]["threshold"] =
+        serde_json::json!(0.99);
+    fs::write(&task_file, serde_json::to_string(&easier).unwrap()).unwrap();
+    let out = osp_in(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(&run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "kolaylaştırılmış threshold RED olmalı"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("substitution refused") || stderr.contains("changed after the attempt"),
+        "P0 fence gerekçesi: {stderr}"
+    );
+
+    // (g) Karar 2 (zorunlu tüketim): graph-completed run KAPISIZ finalize EDİLEMEZ.
+    let run = prepare("run-gate-noverdict", true, 0.94);
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--repository")
+        .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "verdict'siz finalize RED olmalı");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("realization gate fence"),
+        "zorunlu-tüketim mesajı"
+    );
+
+    // (h) P0-1 saldırısı: ELLLE yazılmış verdict — binding digest'leri GERÇEK
+    // dosyalardan hesaplanmış (attempt/task eşleşir!) ama kanonik mağazada
+    // gate-execution kanıtı yok → finalize RED (canonical provenance fence).
+    // P0 tur-3: after.json yok — gate kendi analizini yapar; saldırgan
+    // candidate_head/own_after_digest bilemez ama umursamaz — canonical YOK.
+    let run = prepare("run-gate-forged", true, 0.95);
+    let attempt_digest = sha256_of(&run.join("attempt.json"));
+    let task_digest = sha256_of(&run.join("task.json"));
+    fs::write(
+        run.join("realization-verdict.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "kind": "realization-verdict-v1",
+            "task_id": 1,
+            "binding": {
+                "attempt_digest": attempt_digest,
+                "task_digest": task_digest,
+            },
+            "verdict": {"RealizedCompleted": {}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run)
+        .arg("--repository")
+        .arg("testrepo")
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "sahte verdict RED olmalı");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("verdict provenance fence"),
+        "canonical provenance mesajı"
     );
 }
 

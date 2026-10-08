@@ -124,6 +124,51 @@ legacy-şekil ≠ `null` = "tüketilmedi"
 (run-dir'de proposals.json varsa RED) ≠ değer = "bu baytlar" (dosya zorunlu +
 hash eşit; silinmek RED).
 
+## INV-T10 — `osp realization-gate` (#196 uygulama-2; karar 2: gate konumu = CLI ritüeli)
+
+Graph-completed attempt'i source gerçekliğine bağlar (#171 D5a: graph predicate
+success ⇏ build-valid declared realization):
+
+```text
+osp realization-gate <run-dir> [--state-dir S] --evidence <declared.json>
+```
+
+- **Girdiler:** `attempt.json` (canonical-anchor bayt-doğrulamalı — legacy
+  downgrade kapı bağlamı DEĞİL; **digest-taşıyan post-#178 zarf ZORUNLU**),
+  `task.json` (v1: **tam 1 Coupling/Le predicate, mode=All** — çoklu predicate
+  RED, sessiz kısmi değerlendirme yok), `after.json` (reanalysis gözlemi) ve
+  `--evidence` (insan-beyanlı: `patch_created/parse/build{outcome,error_count}/tests`;
+  deny_unknown_fields).
+- **P0 artifact-identity fence'leri:** task.id ↔ `run.task_id`; task head ↔
+  zarf head'i; `run.task_digest` ↔ hash(task.json) — attempt sonrası task
+  değişimi (kolaylaştırılmış threshold dâhil) RED. Verdict artifact'ı
+  tükettiği HER ŞEYİN read-once digest'ini taşır (`binding`: attempt/task/
+  after/evidence) — finalize bu bağı kendi read-once tamponlarıyla eşleştirir
+  (post-hoc substitution reddi). after.json'in patch'li-state bağı v1'de
+  digest kaydıyladır; daha güçlü cross-fence ayrı çalışma.
+- **Verify(C') v1 (freeze #196/6051272311):** `patch_created ∧ parse ∧
+  build=Succeeded ∧ predicate_after_reanalysis=Some(true)`; tests taşınır,
+  bağlamaz. Mühürleme yolları (`VerifiedRealization::from_gate` vb.)
+  **modül-özel** — yalnız `evaluate_gate` üretir; graph-completion witness'ı
+  olmayan caller `RealizedCompleted` kuramaz.
+- **Motor türetimleri (D5a şemasının motorlaşması):** `c_observed` =
+  after.json scope-node coupling'i; `c_predicted` = zarf evidence son
+  `after.x` (sim öngörüsü); `predicate_after_reanalysis` = observed ≤
+  threshold + tolerance; `E_c = c_observed − c_predicted` kanıtta yaşar.
+- **Verdict:** `evaluate_gate` → `realization-verdict.json` (run dizinine,
+  **no-clobber — unique temp + hard-link atomik create**; eşzamanlı süreçlerden
+  yalnız ilki yazar). Exit: 0 = RealizedCompleted ·
+  2 = DeclaredRealizationBuildInvalid · 3 = PredicateUnsatisfiedAfterReanalysis
+  · 4 = NotAttempted.
+- **Zorunlu tüketim (karar 2):** `completion_basis=graph` taşıyan run'ın
+  **finalize'ı verdict'siz RED**; finalize binding fence'lerini kendi
+  read-once tamponlarıyla doğrular; ledger basis'i `realized` (yalnız
+  RealizedCompleted) ya da `graph` + `realization_verdict` etiketi. Başarısız
+  verdict finalization'ı engellemez — veri olarak kayda geçer (kabut insan).
+- **Tolerans v1 (karar 1 dürüst kesiti):** RealizedCompleted yalnız
+  Verify(C') koşuluyla; sayısal `D_G` eşiği YOK — eşik verisi birikene dek
+  uydurulmaz ("koordinat ölçümle kazanılır").
+
 ## Geriye uyumluluk notu
 
 Run 10 (`0b88e7e`) çıktısı `schema_version: 1` zarflıydı; ara revizyonlarda

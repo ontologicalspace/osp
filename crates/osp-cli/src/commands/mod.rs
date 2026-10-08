@@ -10,6 +10,7 @@ pub mod finalize_run;
 pub mod harness_task;
 pub mod path_bindings;
 pub mod path_keyed_proposals;
+pub mod realization_gate;
 pub mod repo_snapshot;
 pub mod run_envelope;
 pub mod suggest_targets;
@@ -952,7 +953,7 @@ pub(crate) fn atomic_write_replace_staged(pairs: &[(&Path, &[u8])]) -> anyhow::R
 }
 
 /// Unique same-dir temp oluştur, payload'ı yaz, sync et — publish ETMEDEN dön.
-fn stage_temp(out: &Path, payload: &[u8]) -> anyhow::Result<PathBuf> {
+pub(crate) fn stage_temp(out: &Path, payload: &[u8]) -> anyhow::Result<PathBuf> {
     use std::io::Write as _;
     let dir = out
         .parent()

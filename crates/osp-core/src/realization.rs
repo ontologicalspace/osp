@@ -27,7 +27,7 @@
 //!   distance; RealizationMatch tolerans semantiği #196 karar 1) AYRI eksenlerdir.
 //! - **Gelecek gate API pini (#197 review tur-2):** gate YALNIZ graph-completed
 //!   iddia üzerinde koşar ve bunu yapısal kılar —
-//!   `GraphCompletedProof (opaque witness) + RealizationEvidence (raw) →
+//!   `GraphCompletionShapeProof (opaque witness) + RealizationEvidence (raw) →
 //!   RealizationGate → RealizationVerdict`. İki üretici girişin de
 //!   (`VerifiedRealization`, `FailedDeclaredRealization` üretim yolları) witness
 //!   tüketmesi, `BuildInvalid.completion_basis() == Some(Graph)` zemininin örtük
@@ -103,22 +103,40 @@ impl RealizationEvidence {
     }
 }
 
-/// **Proof-carrying tamam-iddia jetonu** (#197 review P1-1) — `RealizedCompleted`
-/// ancak bunu taşıyabilir ve bu tipin **public constructor'ü YOKTUR**: alanları
-/// özeldir; yalnız RealizationGate'in kontrollü girişi (`try_from_gate` — gate
-/// PR'ı) üretebilir. "Illegal state temsil edilemez" disiplininin INV-T10
-/// karşılığı: `RealizedCompleted` oluşturulabiliyorsa kanıt zaten doğrulanmış
-/// olmak ZORUNDADIR — tip sisteminin garantisi `∃evidence` değil,
-/// `Verify(C') ∧ Predicate(G_observed)` sürecinden geçmiş olmaktır.
-///
-/// Bu PR'da (type-split) jeton bilinçLE OPAK kalır: gate var olana dek dışarıda
-/// `RealizedCompleted` üretilemez (`Deserialize` de türetilMEZ — wire okuma
-/// constructor deliği açar; gate PR'ı kontrollü deserializasyon kararıyla ekler).
+/// **Proof-carrying tamam-iddia jetonu** (#197 review P1-1 / #198 review P1) —
+/// `RealizedCompleted` ancak bunu taşıyabilir. Alanları özeldir ve **mühürleme
+/// yolu (`from_gate`) modül-özelidir**: yalnız `evaluate_gate` çağırabilir —
+/// graph-completion witness'ı olmayan hiçbir caller (osp-core içi dâhil)
+/// `VerifiedRealization` üretemez. Mühür koşulları **Verify(C') v1** (freeze:
+/// #196/6051272311): `patch_created ∧ parse ∧ build=Succeeded ∧
+/// predicate_after_reanalysis=Some(true)` — aksi hâlde `None`. "Illegal state
+/// temsil edilemez": `RealizedCompleted` oluşturulabiliyorsa kanıt zaten
+/// doğrulanmış olmak ZORUNDADIR. (`Deserialize` türetilMEZ — wire constructor
+/// deliği; `for_tests` yalnız `#[cfg(test)]`.)
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct VerifiedRealization {
     raw: RealizationEvidence,
     /// Gate'in predicate-doğrulama sonucu (kanıtın parçası — dışarıdan set edilemez).
     predicate_verified: bool,
+}
+
+impl VerifiedRealization {
+    /// **Gate'in kontrollü girişi (modül-özel)** — yalnız `evaluate_gate`.
+    fn from_gate(raw: RealizationEvidence) -> Option<Self> {
+        let verified = raw.patch_created
+            && raw.parse
+            && matches!(raw.build, BuildOutcome::Succeeded)
+            && raw.predicate_after_reanalysis == Some(true);
+        verified.then_some(Self {
+            raw,
+            predicate_verified: true,
+        })
+    }
+
+    /// Mühürlü kanıt (read-only).
+    pub fn raw(&self) -> &RealizationEvidence {
+        &self.raw
+    }
 }
 
 #[cfg(test)]
@@ -139,7 +157,7 @@ impl VerifiedRealization {
 /// önermeyi kanıtlar — `RealizedCompleted → VerifiedRealization` simetrisinin
 /// karşılığı: `DeclaredRealizationBuildInvalid → FailedDeclaredRealization`.
 ///
-/// (Gelecek gate API'si — pin: `from_gate(GraphCompletedProof, raw)` — witness
+/// (Gelecek gate API'si — pin: `from_gate(GraphCompletionShapeProof, raw)` — witness
 /// tüketimini de yapılandırır; bkz. modül dokümanı.)
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FailedDeclaredRealization {
@@ -163,9 +181,10 @@ impl std::fmt::Display for BuildWasNotFailed {
 impl std::error::Error for BuildWasNotFailed {}
 
 impl FailedDeclaredRealization {
-    /// Kontrollü constructor — yalnız build'i KIRIK raw evidence kabul eder
-    /// (fallible + public: illegal state ÜRETİLEMEZ, ret ise kanıtlı).
-    pub fn try_new(raw: RealizationEvidence) -> Result<Self, BuildWasNotFailed> {
+    /// Kontrollü constructor (**modül-özel** — #198 review P1: mühürleme
+    /// yolları gate dışından erişilemez; yalnız `evaluate_gate` ve modül
+    /// testleri) — yalnız build'i KIRIK raw evidence kabul eder.
+    fn try_new(raw: RealizationEvidence) -> Result<Self, BuildWasNotFailed> {
         match raw.build {
             BuildOutcome::Failed { .. } => Ok(Self { raw }),
             BuildOutcome::Succeeded => Err(BuildWasNotFailed),
@@ -190,10 +209,50 @@ impl FailedDeclaredRealization {
     }
 }
 
+/// #198 — üçüncü seal: **"predicate gözlemde sağlanMADI"** (D5a A-20 hücresi:
+/// build-geçer declared realization + reanalysis predicate'i düşer). Yalnız
+/// `predicate_after_reanalysis == Some(false)` taşıyan raw kanıtı mühürler —
+/// "unsatisfied ama predicate Some(true)" temsil edilemez.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnsatisfiedPredicateEvidence {
+    raw: RealizationEvidence,
+}
+
+/// `UnsatisfiedPredicateEvidence::try_new` reddi.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PredicateWasNotUnsatisfied;
+
+impl std::fmt::Display for PredicateWasNotUnsatisfied {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "predicate-unsatisfied verdict requires predicate_after_reanalysis == Some(false)"
+        )
+    }
+}
+
+impl std::error::Error for PredicateWasNotUnsatisfied {}
+
+impl UnsatisfiedPredicateEvidence {
+    /// Kontrollü constructor (**modül-özel** — #198 review P1) — yalnız
+    /// reanalysis predicate'ini DÜŞÜRMÜŞ kanıt.
+    fn try_new(raw: RealizationEvidence) -> Result<Self, PredicateWasNotUnsatisfied> {
+        match raw.predicate_after_reanalysis {
+            Some(false) => Ok(Self { raw }),
+            _ => Err(PredicateWasNotUnsatisfied),
+        }
+    }
+
+    /// Kanıtın kendisi (read-only).
+    pub fn raw(&self) -> &RealizationEvidence {
+        &self.raw
+    }
+}
+
 /// RealizationGate verdict — karar (0) sözlüğü (freeze: #196 yorum 6050269005).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub enum RealizationVerdict {
-    /// Beyan-realization uygulandı, build/tests geçti, reanalysis predicate'i
+    /// Beyan-realization uygulandı, build başarılı, reanalysis predicate'i
     /// sağladı. Kanıt **yapıda** taşınır (`VerifiedRealization` — public
     /// constructor yok; INV-T10'un tip-düzeyi karşılığı).
     RealizedCompleted { evidence: VerifiedRealization },
@@ -203,24 +262,32 @@ pub enum RealizationVerdict {
     /// kaybettirirdi. Karar (0): beyan dışı kurtarma YENİ proposal'dır; bu
     /// verdict'in ötesine geçmez.
     DeclaredRealizationBuildInvalid { evidence: FailedDeclaredRealization },
-    /// Gate koşulmadı (v1'in fiilî durumu — realization ritüel dışı/elle).
+    /// Beyan-realization uygulandı, build başarılı AMA yeniden analiz edilen
+    /// graph predicate'i sağlamıyor (D5a A-20: 0.9167 > τ̂=0.89 — dürüst fail'in
+    /// gerçekleşmiş hâli). Build-geçer ≠ task-tamamlandı: iddia graph katmanında
+    /// kalır VE realized katmanında da kurulamadı.
+    PredicateUnsatisfiedAfterReanalysis {
+        evidence: UnsatisfiedPredicateEvidence,
+    },
+    /// Gate koşulmadı (graph-completed iddia yok, reanalysis kanıtı yok — v1'in
+    /// fiilî durumu: realization ritüel dışı/elle).
     NotAttempted,
 }
 
 impl RealizationVerdict {
     /// Verdict'in tamam-iddia zemini (#197 review P2-1: iddia yoksa `None`).
-    /// `RealizedCompleted → Some(Realized)`; `BuildInvalid → Some(Graph)`
-    /// (graph-katmanı iddia ayaktadır, realization kırık — DİKKAT: bu `Some(Graph)`
-    /// **gate bağlam varsayımıdır**: gate yalnız graph-completed iddia üzerinde
-    /// koşar. Build-failure kanıtı TEK BAŞINA graph predicate'in completed
-    /// olduğunu kanıtlamaz; bu varsayım gate PR'ında `GraphCompletedProof`
-    /// witness-token'ı tüketilerek yapısal olacak — bkz. modül dokümanındaki
-    /// gelecek API pini); `NotAttempted → None` (verdict tek başına hiçbir iddia
-    /// kurulduğunu söyleyemez).
+    /// `RealizedCompleted → Some(Realized)`; `BuildInvalid` VE
+    /// `PredicateUnsatisfied` → `Some(Graph)` (graph-katmanı iddia
+    /// `evaluate_gate`'in GraphCompletionShapeProof-pini sayesinde ayaktadır —
+    /// gate yalnız graph-completed iddia üzerinde koşar; build-failure /
+    /// predicate-failure kanıtı tek başına graph-completion'ı kanıtlamaz,
+    /// yapısal bağlam gate girişidir); `NotAttempted → None` (verdict tek
+    /// başına hiçbir iddia kurulduğunu söyleyemez).
     pub fn completion_basis(&self) -> Option<CompletionBasis> {
         match self {
             Self::RealizedCompleted { .. } => Some(CompletionBasis::Realized),
-            Self::DeclaredRealizationBuildInvalid { .. } => Some(CompletionBasis::Graph),
+            Self::DeclaredRealizationBuildInvalid { .. }
+            | Self::PredicateUnsatisfiedAfterReanalysis { .. } => Some(CompletionBasis::Graph),
             Self::NotAttempted => None,
         }
     }
@@ -235,6 +302,89 @@ impl RealizationVerdict {
             }
             _ => None,
         }
+    }
+}
+
+/// **GraphCompletionShapeProof** (#198 tur-3 P1: facts ≠ proof ≠ canonical
+/// provenance). Private alanlar + doğrulayan constructor: `from_facts` yalnız
+/// `result_kind == "completed" ∧ completion_basis == Some(Graph)` gerçelerini
+/// mühürler. **Dürüst adlandırma:** bu bir ŞEKİL kanıtıdır — "bu zarf
+/// graph-completed iddia taşıyordu" önermesi. Canonical provenance (zarfın
+/// gerçekten kanonik mağazadaki graph-completed attempt olduğu) CLI zincirinde
+/// yaşamaktadır; core IO yapamaz. Sahte `from_facts(…, "completed", Some(Graph))`
+/// çağrısı ile şekil kanıtı üretilebilir — ama bu yalnız ShapeProof üretir;
+/// güven zinciri (canonical anchor + verdict provenance) CLI tarafındadır ve
+/// finalize bu zinciri doğrulamadan `RealizedCompleted`'i ledger'a taşımaz.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GraphCompletionShapeProof {
+    task_id: u64,
+    /// Kanonik zarf referansı (`attempts/task-<id>-<millis>-<pid>[-N].json`).
+    canonical_attempt_ref: String,
+}
+
+impl GraphCompletionShapeProof {
+    /// Doğrulayan constructor — graph-completed olmayan gerçeler `None` döner.
+    pub fn from_facts(
+        task_id: u64,
+        canonical_attempt_ref: String,
+        result_kind: &str,
+        completion_basis: Option<CompletionBasis>,
+    ) -> Option<Self> {
+        (result_kind == "completed" && completion_basis == Some(CompletionBasis::Graph)).then_some(
+            Self {
+                task_id,
+                canonical_attempt_ref,
+            },
+        )
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn canonical_attempt_ref(&self) -> &str {
+        &self.canonical_attempt_ref
+    }
+}
+
+/// **RealizationGate (#196 uygulama-2, karar 2: CLI ritüelinde).** INV-T10
+/// zincirinin kararı üreten çekirdeği:
+///
+/// ```text
+/// GraphCompletionShapeProof (doğrulanmış şekil-kanıtı) + RealizationEvidence (raw)
+///         → evaluate_gate → RealizationVerdict
+/// ```
+///
+/// Tolerans v1 (karar 1'in dürüst kesiti — eşik verisi birikene dek sabit
+/// sayısal `D_G` sınırı UYDURULMAZ, "koordinat ölçümle kazanılır" ilkesi):
+/// RealizedCompleted yalnız `build == Succeeded ∧ predicate_after_reanalysis ==
+/// Some(true)` ile verilir; `c_observed/c_predicted` (E_c) kanıtta YAŞAR ama
+/// gate'i bağlamaz — graph-genişliği `D_G` toleransı ayrı çalışmadır.
+/// Proof'un **varlığı** garantiyi taşır (`from_facts` graph-completed şeklini
+/// doğrulamadan mühür vermez) — alanları karar girdisi olarak tüketilmez;
+/// kimlik kayıtları verdict kanalında (canonical ref) yaşar.
+pub fn evaluate_gate(
+    _proof: GraphCompletionShapeProof,
+    realization: RealizationEvidence,
+) -> RealizationVerdict {
+    match realization.build {
+        BuildOutcome::Failed { .. } => RealizationVerdict::DeclaredRealizationBuildInvalid {
+            evidence: FailedDeclaredRealization::try_new(realization)
+                .expect("evaluate_gate: build Failed dalı try_new tarafından kabul edilir"),
+        },
+        BuildOutcome::Succeeded => match realization.predicate_after_reanalysis {
+            // Verify(C') v1 (freeze #196/6051272311): patch/parse/build/predicate
+            // koşullarından biri tutmazsa mühür ÜRETİLEMEZ → kanıt yok → NotAttempted.
+            Some(true) => VerifiedRealization::from_gate(realization)
+                .map(|evidence| RealizationVerdict::RealizedCompleted { evidence })
+                .unwrap_or(RealizationVerdict::NotAttempted),
+            Some(false) => RealizationVerdict::PredicateUnsatisfiedAfterReanalysis {
+                evidence: UnsatisfiedPredicateEvidence::try_new(realization)
+                    .expect("evaluate_gate: Some(false) try_new tarafından kabul edilir"),
+            },
+            // Reanalysis yok → kanıt yok (dürüst boşluk): realized iddiası kurulamaz.
+            None => RealizationVerdict::NotAttempted,
+        },
     }
 }
 
@@ -351,5 +501,146 @@ mod tests {
             serde_json::to_string(&CompletionBasis::Realized).unwrap(),
             "\"realized\""
         );
+    }
+
+    fn facts() -> GraphCompletionShapeProof {
+        GraphCompletionShapeProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "completed",
+            Some(CompletionBasis::Graph),
+        )
+        .expect("graph-completed gerçeler proof mühürler")
+    }
+
+    /// #198: gate'in mutlu yolu — yalnız KANITLI mühür. `from_gate` redleri:
+    /// predicate kanıtı yoksa / build kırıksa seal ÜRETİLEMEZ.
+    #[test]
+    fn gate_realizes_only_with_verified_predicate() {
+        let v = evaluate_gate(facts(), ok_evidence());
+        assert!(matches!(v, RealizationVerdict::RealizedCompleted { .. }));
+        assert_eq!(v.completion_basis(), Some(CompletionBasis::Realized));
+        assert!(
+            VerifiedRealization::from_gate(RealizationEvidence {
+                predicate_after_reanalysis: None,
+                ..ok_evidence()
+            })
+            .is_none(),
+            "reanalysis kanıtı yok → mühür yok"
+        );
+        assert!(
+            VerifiedRealization::from_gate(RealizationEvidence {
+                build: BuildOutcome::Failed { error_count: 1 },
+                ..ok_evidence()
+            })
+            .is_none(),
+            "build kırık → RealizedCompleted mührü yok"
+        );
+        // #198 review P1: Verify(C') v1 — realization UYGULANMAMIŞSA mühür yok.
+        assert!(
+            VerifiedRealization::from_gate(RealizationEvidence {
+                patch_created: false,
+                ..ok_evidence()
+            })
+            .is_none(),
+            "patch üretilmedi → mühür yok"
+        );
+        assert!(
+            VerifiedRealization::from_gate(RealizationEvidence {
+                parse: false,
+                ..ok_evidence()
+            })
+            .is_none(),
+            "kaynak ayrıştırılamadı → mühür yok"
+        );
+        // Gate de dürüst: eksik verify → NotAttempted (panic değil).
+        assert!(matches!(
+            evaluate_gate(
+                facts(),
+                RealizationEvidence {
+                    patch_created: false,
+                    ..ok_evidence()
+                }
+            ),
+            RealizationVerdict::NotAttempted
+        ));
+    }
+
+    /// #198: verdict matrisi — D5a'nın üç hücresi (B-19 / A-20 / dürüst-boşluk).
+    #[test]
+    fn gate_matrix_build_invalid_predicate_unsatisfied_not_attempted() {
+        // D5a B-19: E_c = 0 ∧ BuildFailed(122).
+        let inv = evaluate_gate(
+            facts(),
+            RealizationEvidence {
+                build: BuildOutcome::Failed { error_count: 122 },
+                c_observed: Some(0.0),
+                c_predicted: Some(0.0),
+                tests: None,
+                ..ok_evidence()
+            },
+        );
+        assert_eq!(inv.build_error_count(), Some(122));
+        assert_eq!(inv.completion_basis(), Some(CompletionBasis::Graph));
+
+        // D5a A-20: build-geçer ama reanalysis predicate'i düşer (0.9167 > 0.89).
+        let unsat = evaluate_gate(
+            facts(),
+            RealizationEvidence {
+                predicate_after_reanalysis: Some(false),
+                c_observed: Some(0.9167),
+                ..ok_evidence()
+            },
+        );
+        assert!(matches!(
+            unsat,
+            RealizationVerdict::PredicateUnsatisfiedAfterReanalysis { .. }
+        ));
+        assert_eq!(unsat.completion_basis(), Some(CompletionBasis::Graph));
+
+        // Dürüst boşluk: reanalysis yok → realized iddiası kurulamaz.
+        let none = evaluate_gate(
+            facts(),
+            RealizationEvidence {
+                predicate_after_reanalysis: None,
+                ..ok_evidence()
+            },
+        );
+        assert!(matches!(none, RealizationVerdict::NotAttempted));
+        assert_eq!(none.completion_basis(), None);
+    }
+
+    /// GraphCompletionShapeProof pini (#198 tur-2 P1): graph-completed OLMAYAN
+    /// gerçelerden proof KURULAMAZ — ret kanıtlı (evaluate_gate'e sahte facts
+    /// sokulması tip-düzeyinde imkânsız).
+    #[test]
+    fn gate_refuses_non_graph_completed_witness() {
+        assert!(GraphCompletionShapeProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "llm_error",
+            Some(CompletionBasis::Graph),
+        )
+        .is_none());
+        assert!(GraphCompletionShapeProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "completed",
+            None,
+        )
+        .is_none());
+        assert!(GraphCompletionShapeProof::from_facts(
+            18,
+            "attempts/task-18-990-1.json".to_string(),
+            "completed",
+            Some(CompletionBasis::Realized),
+        )
+        .is_none());
+    }
+
+    /// Üçüncü seal: "unsatisfied" adı ancak Some(false) kanıtıyla kurulabilir.
+    #[test]
+    fn unsatisfied_seal_requires_false() {
+        assert!(UnsatisfiedPredicateEvidence::try_new(ok_evidence()).is_err());
     }
 }

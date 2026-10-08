@@ -99,6 +99,12 @@ struct AttemptEnvelopeRead {
     schema_version: u32,
     run: AttemptRunRead,
     execution_measurement: ExecutionMeasurementRead,
+    /// INV-T10 (#197/#198): zarfın tamam-iddia kanıt zemini — `"graph"` yalnız
+    /// `result.kind == completed` iken; `null`/missing = iddia yok / pre-#197.
+    /// Finalize bu değeri ledger satırına TAŞIR (canonical consumer bağlaması —
+    /// #196 uygulama-2): downstream eski "completed" semantiğiyle yaşamaz.
+    #[serde(default)]
+    completion_basis: Option<String>,
     result: AttemptResultRead,
     evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
 }
@@ -131,7 +137,7 @@ where
 /// #188 — finalize anındaki anchor sonucu. Anchored ise eşleşen canonical
 /// artifact'ın ledger'a taşınan kimliği; açık legacy downgrade'i ise
 /// `UnanchoredLegacy` (satır `unanchored_legacy: true` taşır, #188 alanları YOK).
-enum AttemptAnchor {
+pub(crate) enum AttemptAnchor {
     /// Eşleşen canonical artifact — TEK byte-özdeş eşleşme (#190 review P1:
     /// çoğul eşleşme artifact identity'sini belirsizleştirir → RED; sıralı
     /// seçim deterministik ama truthful olmazdı); `--state-dir`'e göre ileri-
@@ -167,7 +173,7 @@ enum AttemptAnchor {
 /// okumaz, yalnızca eşleşen adayın yolunu döndürür. Eşleşme TEKLİ olmalıdır
 /// (#190 review P1): birden fazla byte-özdeş artifact, hangi invocation'ın
 /// ürettiğini belirsizleştirir → RED (content identity ≠ artifact identity).
-fn verify_attempt_against_canonical_store(
+pub(crate) fn verify_attempt_against_canonical_store(
     run_dir: &Path,
     attempt_bytes: &[u8],
     task_id: u64,
@@ -671,6 +677,142 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         AttemptAnchor::UnanchoredLegacy => {
             row["unanchored_legacy"] = serde_json::json!(true);
         }
+    }
+    // #198 (INV-T10 canonical consumer): zarfın tamam-iddia zeminini satır taşır.
+    // Yalnız graph-completed satırlar "graph" taşır; null/missing (iddia yok /
+    // pre-#197 zarflar) → anahtar YOK (missing ≡ iddia-yok, #178 tur-3/P2 disiplini).
+    // **Karar 2 (freeze #196/6051272311): graph-completed iddianın finalization'ı
+    // realization verdict'ini ZORUNLU tüketir** — verdict yok RED; verdict'in
+    // artifact-identity bağı (attempt/task/after digest) finalize'ın KENDİ
+    // read-once tamponlarıyla eşleşir (post-hoc substitution reddi). Başarısız
+    // verdict finalization'ı engellemez (veri; kabul insan) ama satıra işlenir.
+    if attempt.completion_basis.as_deref() == Some("graph") {
+        let verdict_path = args.run_dir.join("realization-verdict.json");
+        anyhow::ensure!(
+            verdict_path.is_file(),
+            "realization gate fence: the attempt claims completion_basis=graph but {} is \
+             missing — a graph-completed claim can only be finalized through its \
+             realization verdict (run `osp realization-gate` first)",
+            verdict_path.display()
+        );
+        let verdict_bytes = read_artifact_bytes(&verdict_path)?;
+        // **P0-1 (tur-2): canonical verdict provenance** — run-dir kopyası
+        // caller-owned'dır; kanonik mağazada (`<state-dir>/realizations/`) bu
+        // attempt'e bağlı (binding.attempt_digest eşleşen) TAM OLARAK BİR
+        // nüsha aranır ve bayt-eşleşmesi zorlanır. Elle yazılmış verdict'in
+        // canonical nüshası yoktur → RED; birden çok nüsha → ambiguity RED
+        // (#190 dersi: content identity ≠ artifact identity).
+        let attempt_digest = sha256_bytes(&attempt_bytes);
+        let realizations_dir = match args.state_dir.as_deref() {
+            Some(p) => p.join("realizations"),
+            None => args
+                .run_dir
+                .parent()
+                .and_then(|p| p.parent())
+                .map(|p| p.join("state").join("realizations"))
+                .unwrap_or_else(|| PathBuf::from("realizations")),
+        };
+        anyhow::ensure!(
+            realizations_dir.is_dir(),
+            "verdict provenance fence: canonical realizations store not found ({}) — \
+             the gate publishes there; a hand-written run-dir verdict has no canonical \
+             provenance",
+            realizations_dir.display()
+        );
+        let mut canonical_matches: Vec<PathBuf> = std::fs::read_dir(&realizations_dir)
+            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", realizations_dir.display()))?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| {
+                p.extension().map(|x| x == "json").unwrap_or(false)
+                    && p.file_name()
+                        .map(|n| n.to_string_lossy().starts_with("realization-"))
+                        .unwrap_or(false)
+            })
+            .filter(|p| match std::fs::read(p) {
+                Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                    .ok()
+                    .and_then(|v| {
+                        v.pointer("/binding/attempt_digest")
+                            .and_then(|d| d.as_str())
+                            .map(|d| d == attempt_digest)
+                    })
+                    .unwrap_or(false),
+                Err(_) => false,
+            })
+            .collect();
+        canonical_matches.sort();
+        anyhow::ensure!(
+            canonical_matches.len() == 1,
+            "verdict provenance fence: expected exactly ONE canonical realization \
+             verdict bound to this attempt in {} (found {}) — 0 = hand-written verdict \
+             (no gate execution proof); >1 = ambiguous artifact identity",
+            realizations_dir.display(),
+            canonical_matches.len()
+        );
+        let canonical_bytes = read_artifact_bytes(&canonical_matches[0])?;
+        anyhow::ensure!(
+            canonical_bytes == verdict_bytes,
+            "verdict provenance fence: the run-dir realization-verdict.json does not \
+             byte-match its canonical store copy — the caller-owned copy was modified"
+        );
+        let verdict: serde_json::Value = serde_json::from_slice(&verdict_bytes)
+            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", verdict_path.display()))?;
+        let binding = verdict.get("binding").ok_or_else(|| {
+            anyhow::anyhow!("{} is missing its binding block", verdict_path.display())
+        })?;
+        let bound = |key: &str| binding.get(key).and_then(|v| v.as_str());
+        anyhow::ensure!(
+            bound("attempt_digest") == Some(sha256_bytes(&attempt_bytes).as_str()),
+            "verdict binding fence: realization-verdict.json was produced for different \
+             attempt bytes — the attempt changed after the gate ran"
+        );
+        anyhow::ensure!(
+            bound("task_digest") == Some(sha256_bytes(&task_bytes).as_str()),
+            "verdict binding fence: realization-verdict.json was produced for different \
+             task bytes — the task changed after the gate ran"
+        );
+        // P0 (tur-3): after.json fence KALDIRILDI — gate kendi analizini
+        // yapar (own_after_digest binding'de); run-dir after.json sadece
+        // insan-mutfağı artifact'ıdır, trust zincirine GİRMEZ.
+        // P0-2 (tur-2): realized delta kimliği — verdict'ün patch_digest'i
+        // finalize'ın KENDİ read-once patch tamponuyla eşleşmeli.
+        if let Some(patch_digest) = &patch_digest {
+            anyhow::ensure!(
+                bound("patch_digest") == Some(patch_digest.as_str()),
+                "verdict binding fence: realization-verdict.json was produced for \
+                 different applied.patch bytes — the realized delta changed after \
+                 the gate ran"
+            );
+        }
+        let verdict_obj = verdict
+            .get("verdict")
+            .and_then(|v| v.as_object())
+            .ok_or_else(|| anyhow::anyhow!("{} is missing its verdict", verdict_path.display()))?;
+        let variant = verdict_obj
+            .keys()
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("{} verdict is empty", verdict_path.display()))?;
+        let label = match variant.as_str() {
+            "RealizedCompleted" => "realized",
+            "DeclaredRealizationBuildInvalid" => "declared_realization_build_invalid",
+            "PredicateUnsatisfiedAfterReanalysis" => "predicate_unsatisfied_after_reanalysis",
+            "NotAttempted" => "not_attempted",
+            other => anyhow::bail!(
+                "{} carries unknown verdict variant {other:?}",
+                verdict_path.display()
+            ),
+        };
+        if label == "realized" {
+            row["completion_basis"] = serde_json::json!("realized");
+        } else {
+            row["completion_basis"] = serde_json::json!("graph");
+            row["realization_verdict"] = serde_json::json!(label);
+        }
+    } else if let Some(basis) = &attempt.completion_basis {
+        // İddia-yok (null) zarflar basis taşımaz; "graph" dışı değer zaten üstte
+        // parse sırasında geçersiz kılındı (serde enum).
+        row["completion_basis"] = serde_json::json!(basis);
     }
 
     let json = serde_json::to_string_pretty(&row)?;
