@@ -197,6 +197,13 @@ pub enum PathKeyedProposalError {
          new_edges in the v3 envelope (#199)"
     )]
     ConnectedToNewNode { path: String },
+    #[error(
+        "new_nodes path {path:?} is not a canonical repo-relative path — the measured \
+         space's identity axis requires a non-empty, forward-slash, repo-relative path \
+         without `./`, `../`, empty or absolute segments (#199 review P1-2: an alias \
+         such as `./main.rs` would count as a SECOND node in the hypothetical graph)"
+    )]
+    InvalidNewNodePath { path: String },
 }
 
 /// Proposals dosyası yükle + re-bind → `Vec<DeltaProposal>`.
@@ -230,53 +237,59 @@ pub fn load_proposals_str(
         serde_json::Value::Array(_) => Ok(serde_json::from_value(value)?),
         serde_json::Value::Object(_) => {
             // #199: zarf sürümü ÖNCE okunur, sonra tip-li parse — v2/v3 gövde
-            // tipleri farklı (new_nodes path alanı), HEAD fence ikisinde de aynı.
+            // tipleri farklı (new_nodes path alanı). Guard sırası v2 sözleşmesiyle
+            // AYNEN: parse → **HEAD fence** → build_path_to_id → re-bind
+            // (R1 P1-1: stale artifact'ın yanlış HEAD'i, path'leri bu snapshot'ta
+            // çözümlenemese de DAHA ÖNCE reddedilir — review P1-1: fence asla
+            // re-bind'in arkasına geçmez).
             let version = value.get("schema_version").and_then(|v| v.as_u64());
-            let (repository_head, rebound): (String, Vec<DeltaProposal>) = match version {
+            match version {
                 Some(2) => {
                     let file: CliPathKeyedProposalsFileV2 = serde_json::from_value(value)?;
-                    let head = file.repository_head.clone();
+                    ensure_head_fence(&file.repository_head, snapshot_head)?;
                     let path_to_id = build_path_to_id(node_paths)?;
-                    let out = file
-                        .proposals
+                    file.proposals
                         .into_iter()
                         .map(|p| rebind_proposal(p, &path_to_id))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    (head, out)
+                        .collect()
                 }
                 Some(3) => {
                     let file: CliPathKeyedProposalsFileV3 = serde_json::from_value(value)?;
-                    let head = file.repository_head.clone();
+                    ensure_head_fence(&file.repository_head, snapshot_head)?;
                     let path_to_id = build_path_to_id(node_paths)?;
-                    let out = file
-                        .proposals
+                    file.proposals
                         .into_iter()
                         .map(|p| rebind_proposal_v3(p, &path_to_id))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    (head, out)
+                        .collect()
                 }
-                Some(v) => {
-                    return Err(PathKeyedProposalError::UnsupportedEnvelopeVersion {
-                        found: v.to_string(),
-                    })
-                }
-                None => return Err(PathKeyedProposalError::MissingEnvelopeVersion),
-            };
-            // HEAD fence — re-bind'ten ÖNCE: path identity doğru olsa bile proposal
-            // intent, üretildiği state'e bağlıdır (#160 state-identity ilkesinin
-            // proposal artefaktındaki karşılığı).
-            if repository_head != snapshot_head {
-                return Err(PathKeyedProposalError::ProposalRepositoryHeadMismatch {
-                    proposal_head: repository_head,
-                    repo_head: snapshot_head.to_string(),
-                });
+                Some(v) => Err(PathKeyedProposalError::UnsupportedEnvelopeVersion {
+                    found: v.to_string(),
+                }),
+                None => Err(PathKeyedProposalError::MissingEnvelopeVersion),
             }
-            Ok(rebound)
         }
         other => Err(PathKeyedProposalError::UnexpectedTopLevelShape {
             found: other.to_string(),
         }),
     }
+}
+
+/// HEAD fence — re-bind'ten ÖNCE koşar (v2 sözleşmesi, #199 review P1-1):
+/// path identity doğru olsa bile proposal intent, üretildiği state'e bağlıdır
+/// (#160 state-identity ilkesinin proposal artefaktındaki karşılığı). Stale
+/// artifact'ın yanlış HEAD'i, çözümlenemeyen path'lerden DAHA SPESİFİK hata
+/// olarak döner.
+fn ensure_head_fence(
+    proposal_head: &str,
+    snapshot_head: &str,
+) -> Result<(), PathKeyedProposalError> {
+    if proposal_head != snapshot_head {
+        return Err(PathKeyedProposalError::ProposalRepositoryHeadMismatch {
+            proposal_head: proposal_head.to_string(),
+            repo_head: snapshot_head.to_string(),
+        });
+    }
+    Ok(())
 }
 
 /// Tek path-keyed proposal → id-keyed `DeltaProposal`.
@@ -401,9 +414,14 @@ fn rebind_proposal_v3(
     path_to_id: &HashMap<String, NodeId>,
 ) -> Result<DeltaProposal, PathKeyedProposalError> {
     // 1. Beyan edilen yeni-düğüm path'leri → index (sentezik ID kaynağı).
+    //    Sıra: kanoniklik → baseline gölgeleme → duplicate (review P1-2: alias
+    //    reddi en spesifik hata olarak önce döner).
     let mut new_paths: HashMap<String, usize> = HashMap::with_capacity(p.new_nodes.len());
     for (index, n) in p.new_nodes.iter().enumerate() {
         if let Some(path) = &n.path {
+            if osp_analyzer::language::RepoRelativePath::from_repo_relative_str(path).is_none() {
+                return Err(PathKeyedProposalError::InvalidNewNodePath { path: path.clone() });
+            }
             if path_to_id.contains_key(path) {
                 return Err(PathKeyedProposalError::NewNodePathShadowsBaseline {
                     path: path.clone(),
@@ -890,12 +908,16 @@ mod tests {
 
     #[test]
     fn v3_head_fence_applies_before_rebind() {
+        // Review P1-1: stale artifact bilerek ÇÖZÜMLENEMEYEN endpoint da taşıyor
+        // (gone.rs baseline'da yok) — fence önceliği ancak böyle kanıtlanır;
+        // rebind-valid bir proposal'da UnknownPath hiç tetiklenmezdi.
         let raw = r#"{
             "schema_version": 3,
             "repository_head": "ffffffffffffffffffffffffffffffffffffffff",
             "proposals": [{
                 "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "n.rs"}],
-                "reasoning": "fence"
+                "new_edges": [{"from": "gone.rs", "to": "n.rs", "kind": "Imports"}],
+                "reasoning": "fence precedence"
             }]
         }"#;
         let p = write("proposals.v3.json", raw);
@@ -903,5 +925,46 @@ mod tests {
             load_proposals_file(&p, V2_HEAD, &node_paths()).unwrap_err(),
             PathKeyedProposalError::ProposalRepositoryHeadMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn v2_head_fence_precedence_survives_v3_refactor() {
+        // Review P1-1: v1→v3 dispatch refactor'u v2 precedence'ını bozmamalı —
+        // yanlış HEAD + stale path → Mismatch (UnknownPath DEĞİL).
+        let raw = r#"{
+            "schema_version": 2,
+            "repository_head": "ffffffffffffffffffffffffffffffffffffffff",
+            "proposals": [{
+                "removed_edges": [{"from": "stale.rs", "to": "b.rs", "kind": "Imports"}]
+            }]
+        }"#;
+        let p = write("proposals.v2.json", raw);
+        assert!(matches!(
+            load_proposals_file(&p, V2_HEAD, &node_paths()).unwrap_err(),
+            PathKeyedProposalError::ProposalRepositoryHeadMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn v3_non_canonical_new_node_path_rejected() {
+        // Review P1-2: `./main.rs` baseline `main.rs`'in alias'ı — raw-string
+        // duplicate/gölgeleme kontrolleri bunu yakalamazdı; hipotetik grafta
+        // İKİNCİ bir düğüm olarak sayılırdı.
+        for bad in ["./main.rs", "", "../x.rs", "/tmp/x.rs", "src\\x.rs"] {
+            let raw = format!(
+                r#"{{"schema_version": 3,
+                    "repository_head": "0123456789abcdef0123456789abcdef01234567",
+                    "proposals": [{{"new_nodes": [{{"kind": "Module", "initial_mass": 1.0,
+                     "path": {bad:?}}}], "reasoning": "alias"}}]}}"#
+            );
+            let p = write("proposals.v3.json", &raw);
+            assert!(
+                matches!(
+                    load_proposals_file(&p, V2_HEAD, &node_paths()).unwrap_err(),
+                    PathKeyedProposalError::InvalidNewNodePath { .. }
+                ),
+                "{bad:?} must be rejected as non-canonical"
+            );
+        }
     }
 }

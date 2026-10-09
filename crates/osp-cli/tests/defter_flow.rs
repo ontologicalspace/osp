@@ -324,17 +324,234 @@ fn v3_new_node_import_edge_flips_threshold_decision_at_attempt() {
         );
         let a = read_json(&attempt);
         let kind = a["result"]["kind"].as_str().unwrap_or("<missing>");
+        // Review P1-3: iddia "kenar KABUL EDİLDİ + hipotetik coupling ölçüldü +
+        // predicate SAYISAL olarak düştü" — bunu yalnız result.kind kanıtlamaz
+        // (mock tükenmesi de completed-dışı yapar). Kanıt: evidence üçlüsü +
+        // ölçülen coupling pin'i.
+        let e0 = &a["evidence"][0];
+        assert_eq!(
+            e0["gate_decision"], "PassedAll",
+            "{name}: structural gate passed — the represented edge was accepted, \
+             not syntax/rule-rejected"
+        );
+        let x = e0["after"]["x"].as_f64().unwrap_or(f64::NAN);
+        let expected_x = if expect_completed {
+            2.0 / 3.0
+        } else {
+            3.0 / 4.0
+        };
+        assert!(
+            (x - expected_x).abs() < 1e-9,
+            "{name}: measured hypothetical coupling {x}, expected exactly {expected_x}"
+        );
         if expect_completed {
             assert_eq!(
                 kind, "completed",
                 "{name}: control arm completes at 2/3 ≤ 0.7"
             );
+            assert_eq!(e0["predicate_completion"], "Completed", "{name}");
+            assert_eq!(e0["mutation_decision"], "AcceptAsCompleted", "{name}");
+            assert_eq!(a["completion_basis"], "graph", "{name}");
         } else {
-            assert_ne!(
-                kind, "completed",
-                "{name}: edge arm's hypothetical 3/4 = 0.75 > 0.7 must flip the \
-                 threshold decision at the attempt layer (run-18 gap closed)"
+            assert_eq!(
+                e0["predicate_completion"], "NotCompleted",
+                "{name}: predicate failed NUMERICALLY (3/4 = 0.75 > 0.7)"
             );
+            assert_eq!(e0["mutation_decision"], "Reject", "{name}");
+            // Bu kolda result.kind = "llm_error" (tek-önerili mock'un tükenmesi);
+            // semantik karar evidence'da — kind yalnız completed-DIŞI olmalı.
+            assert_ne!(kind, "completed", "{name}");
+        }
+    }
+}
+
+/// #199 review P1-3 — frozen run-18 A/B minyatürü: `removed_edges` +
+/// `AddNode` + mevcut→yeni `AddEdge` kompozisyonunun **eşzamanlı** hali
+/// (gerçek hata sınıfının kendisi). Ölçülü önerme: main.rs ALTI use-import'u
+/// → coupling 6/7; bar **τ = 0.845** = [5/6, 6/7] pencere ortası (run-18'in
+/// τ-midpoint deseni).
+///
+/// - **A kolu** (2 silme + 1 kazanılan yeni-düğüm importu): hipotetik
+///   6−2+1 = 5 import → **5/6 = 0.8333 ≤ 0.845** → kabul.
+/// - **B kolu** (1 silme + 1 kazanım): hipotetik 6 import → **6/7 = 0.8571 >
+///   0.845** → predicate RED.
+///
+/// v2 dünyasında kazanım kenarı temsil edilemezdi: kollar bir import eksik
+/// simüle edilir ve eşik ayrımı attempt'te yaşamazdı (ayrım RealizationGate
+/// re-analysis'e kayardı — issue #199'un tarifi ettiği zayıflık). iddialar
+/// exact-outcome'a bağlı: yapısal gate geçmiş (`PassedAll`), ölçülen hipotetik
+/// coupling birebir 5/6 ve 6/7, predicate kararı Completed/NotCompleted.
+#[test]
+fn run18_ab_miniature_five_sixths_vs_six_sevenths_discriminates_at_attempt() {
+    let fx = HarnessFixture::new_with_six_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run18ab");
+    fs::create_dir_all(&run).unwrap();
+    let baseline = run.join("baseline.json");
+
+    let out = osp_in(&work)
+        .arg("analyze")
+        .arg(fx.repo_path())
+        .arg("--format")
+        .arg("json")
+        .arg("--out")
+        .arg(&baseline)
+        .arg("--require-clean-snapshot")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let b = read_json(&baseline);
+    let imports: Vec<_> = b["edges"]
+        .as_array()
+        .expect("edges")
+        .iter()
+        .filter(|e| e["kind"] == "imports")
+        .collect();
+    assert_eq!(imports.len(), 6, "premise: exactly 6 imports edges");
+    let main_node = b["nodes"]
+        .as_array()
+        .expect("nodes")
+        .iter()
+        .find(|n| n["path"] == "main.rs")
+        .expect("main.rs node");
+    let c = main_node["coupling"]["value"].as_f64().expect("coupling");
+    assert!(
+        (c - 6.0 / 7.0).abs() < 1e-9,
+        "premise: measured 6/7, got {c}"
+    );
+
+    // A-RELOCATE minyatürü: setup-u verdaları (e, f) tamamen çıkar; taşınan
+    // tipler yeni düğümde → kazanılan mevcut→yeni import kenarı temsil edilir.
+    let a_spec = run.join("spec-a.json");
+    fs::write(
+        &a_spec,
+        r#"{"proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "newmod.rs"}],
+            "new_edges": [{"from": "main.rs", "to": "newmod.rs", "kind": "Imports"}],
+            "removed_edges": [
+                {"from": "main.rs", "to": "e.rs", "kind": "Imports"},
+                {"from": "main.rs", "to": "f.rs", "kind": "Imports"}
+            ],
+            "reasoning": "A-RELOCATE miniature: relocate moved types, drop setup imports"
+        }]}"#,
+    )
+    .unwrap();
+    // B-SHARE minyatürü: yalnız bir verdayı paylaşır; kazanılan kenar yine
+    // temsil edilir → import sayısı 6'da kalır (6/7).
+    let b_spec = run.join("spec-b.json");
+    fs::write(
+        &b_spec,
+        r#"{"proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "newmod.rs"}],
+            "new_edges": [{"from": "main.rs", "to": "newmod.rs", "kind": "Imports"}],
+            "removed_edges": [
+                {"from": "main.rs", "to": "e.rs", "kind": "Imports"}
+            ],
+            "reasoning": "B-SHARE miniature: partial sharing, import count stays at six"
+        }]}"#,
+    )
+    .unwrap();
+
+    for (name, spec, expected_x, expect_accept) in [
+        ("a", &a_spec, 5.0 / 6.0, true),
+        ("b", &b_spec, 6.0 / 7.0, false),
+    ] {
+        let task = run.join(format!("task-{name}.json"));
+        let props = run.join(format!("proposals-{name}.json"));
+        let state = run.join(format!("state-{name}"));
+        let out = osp_in(&work)
+            .arg("draft-task")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--target")
+            .arg("main.rs")
+            .arg("--task-id")
+            .arg("1")
+            .arg("--label")
+            .arg(format!("run-18 AB miniature {name}"))
+            .arg("--bar")
+            .arg("0.845")
+            .arg("--baseline")
+            .arg(&baseline)
+            .arg("--operation")
+            .arg("AddNode")
+            .arg("--operation")
+            .arg("AddEdge")
+            .arg("--operation")
+            .arg("RemoveImport")
+            .arg("--proposals-spec")
+            .arg(spec)
+            .arg("--out-task")
+            .arg(&task)
+            .arg("--out-proposals")
+            .arg(&props)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name}: draft-task stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let attempt = run.join(format!("attempt-{name}.json"));
+        let out = fx.run_attempt_no_task(|cmd| {
+            cmd.arg("1")
+                .arg("--repo")
+                .arg(fx.repo_path())
+                .arg("--execution-mode")
+                .arg("harness")
+                .arg("--witness")
+                .arg("harness-auto-approve")
+                .arg("--llm")
+                .arg("mock")
+                .arg("--proposals")
+                .arg(&props)
+                .arg("--task")
+                .arg(&task)
+                .arg("--state-dir")
+                .arg(&state)
+                .arg("--out")
+                .arg(&attempt)
+                .arg("--format")
+                .arg("json")
+        });
+        assert!(
+            attempt.is_file(),
+            "{name}: attempt envelope written. stdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let a = read_json(&attempt);
+        let e0 = &a["evidence"][0];
+        assert_eq!(
+            e0["gate_decision"], "PassedAll",
+            "{name}: composition (removed + AddNode + existing→new AddEdge) passed \
+             the structural gate"
+        );
+        let x = e0["after"]["x"].as_f64().unwrap_or(f64::NAN);
+        assert!(
+            (x - expected_x).abs() < 1e-9,
+            "{name}: v3 hypothetical coupling {x}, expected exactly {expected_x} \
+             (run-18 discrimination restored at the attempt layer)"
+        );
+        if expect_accept {
+            assert_eq!(
+                a["result"]["kind"], "completed",
+                "{name}: 5/6 = 0.8333 ≤ τ=0.845 accepted"
+            );
+            assert_eq!(e0["predicate_completion"], "Completed", "{name}");
+            assert_eq!(e0["mutation_decision"], "AcceptAsCompleted", "{name}");
+        } else {
+            assert_eq!(
+                e0["predicate_completion"], "NotCompleted",
+                "{name}: 6/7 = 0.8571 > τ=0.845 rejected NUMERICALLY"
+            );
+            assert_eq!(e0["mutation_decision"], "Reject", "{name}");
+            assert_ne!(a["result"]["kind"], "completed", "{name}");
         }
     }
 }

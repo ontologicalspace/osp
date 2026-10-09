@@ -142,6 +142,62 @@ impl HarnessFixture {
         self.repo.path()
     }
 
+    /// #199 review P1-3 (run-18 A/B minyatürü): main.rs ALTI use-import'u
+    /// (a..f) → coupling 6/7. Bar 0.845 = [5/6, 6/7] pencere ortası —
+    /// A kolu (2 silme + 1 kazanım) 5/6, B kolu (1 silme + 1 kazanım) 6/7
+    /// hipotetiğini ayırt eder; v2'de iki kol da bir import eksik simüle
+    /// edilirdi ve ayırt etme yalnız gate re-analysis'te yaşardı.
+    pub fn new_with_six_use_edges() -> Self {
+        let fx = Self::new();
+        let r = fx.repo_path();
+        let mods = ["a", "b", "c", "d", "e", "f"];
+        for name in mods {
+            let upper = name.to_uppercase();
+            fs::write(
+                r.join(format!("{name}.rs")),
+                format!("pub struct {upper};\n"),
+            )
+            .expect("write module");
+        }
+        let mut main_rs = String::new();
+        for name in mods {
+            main_rs.push_str(&format!("mod {name};\n"));
+        }
+        for name in mods {
+            let upper = name.to_uppercase();
+            main_rs.push_str(&format!("use crate::{name}::{upper};\n"));
+        }
+        main_rs.push_str("pub fn main() { let _ = (A, B, C, D, E, F); }\n");
+        fs::write(r.join("main.rs"), main_rs).expect("write main.rs");
+        let add = Command::new("git")
+            .args(["-C", r.to_str().unwrap(), "add", "-A"])
+            .status()
+            .expect("git add");
+        assert!(add.success(), "six-use-edges add must succeed");
+        let commit = Command::new("git")
+            .args(["-C", r.to_str().unwrap(), "commit", "-qm", "six-use-edges"])
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z")
+            .status()
+            .expect("git commit (six-use-edges)");
+        assert!(commit.success(), "six-use-edges commit must succeed");
+        let head = String::from_utf8(
+            Command::new("git")
+                .args(["-C", r.to_str().unwrap(), "rev-parse", "HEAD"])
+                .output()
+                .expect("rev-parse")
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        Self {
+            repo: fx.repo,
+            work: fx.work,
+            head,
+        }
+    }
+
     pub fn work_path(&self) -> &std::path::Path {
         self.work.path()
     }

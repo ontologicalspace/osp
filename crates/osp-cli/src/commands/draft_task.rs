@@ -533,9 +533,19 @@ fn translate_spec(
 
     for proposal in spec.proposals {
         // #199 geçiş 1: beyan edilen yeni-düğüm path'lerini topla + doğrula.
+        // Sıra: kanoniklik → baseline gölgeleme → duplicate (review P1-2).
         let mut declared_new: BTreeSet<String> = BTreeSet::new();
         for node in &proposal.new_nodes {
             if let Some(path) = &node.path {
+                anyhow::ensure!(
+                    osp_analyzer::language::RepoRelativePath::from_repo_relative_str(path)
+                        .is_some(),
+                    "new_nodes path {path:?} is not a canonical repo-relative path — \
+                     the measured space's identity axis requires a non-empty, \
+                     forward-slash, repo-relative path without `./`, `../`, empty or \
+                     absolute segments (an alias such as `./main.rs` would count as a \
+                     SECOND node in the hypothetical graph)"
+                );
                 anyhow::ensure!(
                     !node_set.contains(path.as_str()),
                     "new_nodes path {path:?} is already a measured baseline node — \
@@ -961,6 +971,26 @@ mod tests {
         assert!(
             format!("{err}").contains("no new_nodes[].path declares"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_non_canonical_new_node_path_rejected_before_shadow_check() {
+        // Review P1-2: `./a.rs` raw-string gölgeleme kontrolünde `a.rs`'ten farklı
+        // olduğu için yakalanmazdı — kanoniklik reddi DAHA ÖNCE koşar ve alias'ın
+        // hipotetik grafta ikinci düğüm olmasını keser.
+        let spec: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{"new_nodes": [{"kind": "Module", "initial_mass": 1.0,
+                              "path": "./a.rs"}], "reasoning": "alias"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs")]);
+        let err = translate_spec(spec, &view).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("canonical repo-relative"), "{msg}");
+        assert!(
+            !msg.contains("shadow"),
+            "canonicality precedes shadow: {msg}"
         );
     }
 }
