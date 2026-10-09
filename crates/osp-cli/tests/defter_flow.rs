@@ -195,9 +195,9 @@ fn draft_task_roundtrip_produces_validated_task_and_proposals() {
     assert_eq!(t["task"]["status"], "Pending");
     assert_eq!(t["task"]["policy"]["maneuver_limit"], 3);
 
-    // Proposals v2: tam şema; affected_nodes uçlardan türetildi (sıralı-özgün).
+    // Proposals v3 (#199): tam şema; affected_nodes uçlardan türetildi (sıralı-özgün).
     let p = read_json(&props);
-    assert_eq!(p["schema_version"], 2);
+    assert_eq!(p["schema_version"], 3);
     assert_eq!(p["repository_head"], fx.head);
     assert_eq!(
         p["proposals"][0]["removed_edges"][0],
@@ -207,6 +207,136 @@ fn draft_task_roundtrip_produces_validated_task_and_proposals() {
         p["proposals"][0]["affected_nodes"],
         serde_json::json!(["a.rs", "main.rs"])
     );
+}
+
+/// #199 gerileyme — run-18'in minyatürü: mevcut→yeni import kenarı temsil
+/// edilebildiğinde hipotetik eşik kararı ATTEMPT yüzüne döner (v2 dünyasında
+/// iki kol da 2/3 simüle edilir ve eşik farkı görülmezdü).
+///
+/// Ölçülü önerme: fixture main.rs coupling = 2/3 (measured_baseline pini).
+/// Bar 0.7 = [2/3, 3/4] penceresinin ortası (run-18'in τ-midpoint deseni):
+/// - Kontrol kolu (yalnız yeni düğüm, kenar YOK): hipotetik 2/3 ≤ 0.7 →
+///   tamamlanır.
+/// - Deney kolu (newmod.rs path beyanı + main.rs→newmod.rs Imports kenarı):
+///   hipotetik 3/4 = 0.75 > 0.7 → eşik RED — ayırt etme gücü kurtarıldı.
+#[test]
+fn v3_new_node_import_edge_flips_threshold_decision_at_attempt() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let run = work.join("run199");
+    fs::create_dir_all(&run).unwrap();
+    let (baseline, c) = measured_baseline(&fx);
+    assert!(
+        (c - 2.0 / 3.0).abs() < 1e-9,
+        "premise: measured coupling 2/3, got {c}"
+    );
+
+    let control_spec = run.join("spec-control.json");
+    fs::write(
+        &control_spec,
+        r#"{"proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "newmod.rs"}],
+            "reasoning": "control: new node only, no represented edge"}]}"#,
+    )
+    .unwrap();
+    let edge_spec = run.join("spec-edge.json");
+    fs::write(
+        &edge_spec,
+        r#"{"proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "newmod.rs"}],
+            "new_edges": [{"from": "main.rs", "to": "newmod.rs", "kind": "Imports"}],
+            "reasoning": "type-move: main.rs gains import on the new node"}]}"#,
+    )
+    .unwrap();
+
+    for (name, spec, expect_completed) in [
+        ("control", &control_spec, true),
+        ("edge", &edge_spec, false),
+    ] {
+        let task = run.join(format!("task-{name}.json"));
+        let props = run.join(format!("proposals-{name}.json"));
+        let state = run.join(format!("state-{name}"));
+        let out = osp_in(&work)
+            .arg("draft-task")
+            .arg("--repo")
+            .arg(fx.repo_path())
+            .arg("--target")
+            .arg("main.rs")
+            .arg("--task-id")
+            .arg("1")
+            .arg("--label")
+            .arg(format!("199 regression {name}"))
+            .arg("--bar")
+            .arg("0.7")
+            .arg("--baseline")
+            .arg(&baseline)
+            .arg("--operation")
+            .arg("AddNode")
+            .arg("--operation")
+            .arg("AddEdge")
+            .arg("--proposals-spec")
+            .arg(spec)
+            .arg("--out-task")
+            .arg(&task)
+            .arg("--out-proposals")
+            .arg(&props)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{name}: draft-task stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let p = read_json(&props);
+        assert_eq!(p["schema_version"], 3, "{name}: draft-task emits v3");
+        assert_eq!(
+            p["proposals"][0]["new_nodes"][0]["path"], "newmod.rs",
+            "{name}: new-node path carried"
+        );
+
+        let attempt = run.join(format!("attempt-{name}.json"));
+        let out = fx.run_attempt_no_task(|cmd| {
+            cmd.arg("1")
+                .arg("--repo")
+                .arg(fx.repo_path())
+                .arg("--execution-mode")
+                .arg("harness")
+                .arg("--witness")
+                .arg("harness-auto-approve")
+                .arg("--llm")
+                .arg("mock")
+                .arg("--proposals")
+                .arg(&props)
+                .arg("--task")
+                .arg(&task)
+                .arg("--state-dir")
+                .arg(&state)
+                .arg("--out")
+                .arg(&attempt)
+                .arg("--format")
+                .arg("json")
+        });
+        assert!(
+            attempt.is_file(),
+            "{name}: attempt envelope written. stdout={}\nstderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let a = read_json(&attempt);
+        let kind = a["result"]["kind"].as_str().unwrap_or("<missing>");
+        if expect_completed {
+            assert_eq!(
+                kind, "completed",
+                "{name}: control arm completes at 2/3 ≤ 0.7"
+            );
+        } else {
+            assert_ne!(
+                kind, "completed",
+                "{name}: edge arm's hypothetical 3/4 = 0.75 > 0.7 must flip the \
+                 threshold decision at the attempt layer (run-18 gap closed)"
+            );
+        }
+    }
 }
 
 #[test]

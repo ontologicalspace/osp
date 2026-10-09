@@ -558,11 +558,12 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     let after_path = args.run_dir.join("after.json");
     let neighborhood_path = args.run_dir.join("neighborhood.json");
 
-    // K2 (tur-2 P0): proposals varsa v2 zarfı TİPLİ parse ile doğrulanır —
-    // `CliPathKeyedProposalsFileV2` zaten `Deserialize + deny_unknown_fields`
-    // taşıyor; `{"schema_version":2,"repository_head":…}` gibi presence-only
-    // sahte zarflar (proposals alanı eksik / unknown alan) serde'de düşer.
-    // v1 çıplak array state'e bağlanamaz (repository_head fence'i v2'ye özgü).
+    // K2 (tur-2 P0): proposals varsa v2/v3 zarfı TİPLİ parse ile doğrulanır —
+    // her iki zarf da `Deserialize + deny_unknown_fields` taşıyor;
+    // `{"schema_version":2,"repository_head":…}` gibi presence-only sahte
+    // zarflar (proposals alanı eksik / unknown alan) serde'de düşer.
+    // v1 çıplak array state'e bağlanamaz (repository_head fence'i zarfa özgü).
+    // #199: v3 = path'li new_nodes + yeni düğümlere açılan new_edges uçları.
     // #178 tur-4: parse read-once tampondan (path yeniden okunmaz).
     if let Some(props_bytes) = proposals_bytes.as_ref() {
         let proposals_raw: serde_json::Value = serde_json::from_slice(props_bytes)
@@ -570,24 +571,37 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
         anyhow::ensure!(
             proposals_raw.is_object(),
             "proposals.json is a bare JSON array (v1, node-id keyed) — it cannot be \
-             state-bound; finalize-run requires the v2 envelope whose \
+             state-bound; finalize-run requires the v2/v3 envelope whose \
              repository_head fence ties it to the baseline state"
         );
-        let proposals: crate::commands::path_keyed_proposals::CliPathKeyedProposalsFileV2 =
-            serde_json::from_value(proposals_raw).map_err(|e| {
-                anyhow::anyhow!("proposals.json does not match the v2 envelope shape: {e}")
-            })?;
+        let version = proposals_raw.get("schema_version").and_then(|v| v.as_u64());
+        let proposal_head = match version {
+            Some(2) => {
+                let file: crate::commands::path_keyed_proposals::CliPathKeyedProposalsFileV2 =
+                    serde_json::from_value(proposals_raw).map_err(|e| {
+                        anyhow::anyhow!("proposals.json does not match the v2 envelope shape: {e}")
+                    })?;
+                file.repository_head
+            }
+            Some(3) => {
+                let file: crate::commands::path_keyed_proposals::CliPathKeyedProposalsFileV3 =
+                    serde_json::from_value(proposals_raw).map_err(|e| {
+                        anyhow::anyhow!("proposals.json does not match the v3 envelope shape: {e}")
+                    })?;
+                file.repository_head
+            }
+            found => {
+                anyhow::bail!(
+                    "proposals.json envelope requires schema_version 2 or 3 (found {found:?})"
+                )
+            }
+        };
         anyhow::ensure!(
-            proposals.schema_version == 2,
-            "proposals.json envelope requires schema_version 2 (found {})",
-            proposals.schema_version
-        );
-        anyhow::ensure!(
-            proposals.repository_head == baseline_head,
+            proposal_head == baseline_head,
             "head fence: proposals.json was produced on {} but baseline.json \
              measured {baseline_head} — mismatched artifacts cannot share one \
              ledger row",
-            proposals.repository_head
+            proposal_head
         );
     }
 

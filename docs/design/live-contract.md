@@ -78,8 +78,8 @@ Task dosyası şeması = CLI harness formatı (`schema_version: 1`, HEAD-bound;
    | DeltaProposal alanı | Gerekli OpKind | v1 kısıt |
    |---|---|---|
    | `removed_edges` (kind=Imports) | `RemoveImport` | **Imports-only** — diğer `EdgeKind`'ler v1'de reddedilir; generic edge-removal (`OpKind::RemoveEdge`) ayrı tasarımla açılır |
-   | `new_nodes` | `AddNode` | `connected_to` bu alanın parçasıdır (AddNode kapsamında) |
-   | `new_edges` | `AddEdge` | — |
+   | `new_nodes` | `AddNode` | `connected_to` bu alanın parçasıdır (AddNode kapsamında); v3'te opsiyonel `path` yeni düğüme adres verir (#199) |
+   | `new_edges` | `AddEdge` | v3: uçlar beyan edilen yeni-düğüm path'lerine de işaret edebilir (#199) |
    | `modified_entities` | `ModifyEntity` | — |
 
    İzin verilmeyen op / desteklenmeyen kind → `RejectedByRule` (gate katmanı), task'ın
@@ -272,7 +272,7 @@ kanıtlayabildiği şey*.
 
 - **`osp draft-task --repo R --target <path> --task-id N --label … --bar τ
   [--baseline <run>/baseline.json] [--proposals-spec <file>] --out-task …
-  [--out-proposals …]`** — task v2 (+ spec verilirse proposals v2) üretir.
+  [--out-proposals …]`** — task v2 (+ spec verilirse proposals v3) üretir.
   `repository_head`'i `git rev-parse`'ten alır (SHA transcription sınıfı ölür).
   **Baseline revizyona bağlı olmak zorunda (tur-1 P0-1):** artifact yalnız
   `clean_pre_post_equal` binding ile kabul edilir (`osp analyze
@@ -281,7 +281,7 @@ kanıtlayabildiği şey*.
   path'lerin bugün HEAD-tracked/clean olması (#155 fence'leri) uygulanır;
   `--baseline` verilmezse aynı fence ailesiyle canlı analyze koşar.
   `--proposals-spec` insan şekil niyetini (yüz kümeleri + removed/moved kenarlar;
-  `repository_head` YOK, kenar `kind` default `Imports`) tam v2 şemaya çevirir ve
+  `repository_head` YOK, kenar `kind` default `Imports`) tam v3 şemaya çevirir ve
   TÜM temsilcileri ölçülmüş baseline kenar listesine karşı doğrular; uyuşmayan
   kenar hatasında düğümün ölçülmüş çıkış-kenarları listelenir. **Op-matrix
   (tur-1 P1-3):** spec'in yapısal yüzeyinden op gereksinimleri türetilir
@@ -289,7 +289,13 @@ kanıtlayabildiği şey*.
   `modified_entities→ModifyEntity`) ve task'ın izinli operasyonlarına karşı
   denetlenir; analyzer-owned kind'ler (`type_imports`/`same_ns_type`) proposal
   mutasyonunda reddedilir. Çıktılar atomic publish ile yazılır ve birbirinin /
-  girdilerin alias'ı olamaz (P2).
+  girdilerin alias'ı olamaz (P2). **#199 (v3):** `new_nodes[].path` (opsiyonel)
+  yeni düğüme proposal-yerel kimlik verir; `new_edges` uçları ölçülmüş baseline
+  düğümlerine VEYA bu path'lere işaret edebilir (mevcut→yeni / yeni→yeni —
+  run-18'in hipotetik undercount sınıfını kapatır; tip-taşıma refactor'larında
+  eşik kararı attempt yüzüne döner). Yeni-düğüm path'i baseline'ı gölgeleyemez
+  ve tekrar edemez; `connected_to` baseline-only kısaltma olarak kalır;
+  `affected_nodes` türetmesi yalnız ölçülmüş uçlardan birleşir.
 - **`osp suggest-targets --repo R [--baseline …] [--min-coupling x]
   [--exclude-past dogfood/ledger.jsonl] [--limit N] [--format json]`** —
   ölçülmüş c değerinden sıralı aday tablosu; `--exclude-past` ledger
@@ -303,7 +309,7 @@ kanıtlayabildiği şey*.
   (zorunlu `run.task_id`/`execution_mode`/`witness_mode`/`task_source`/
   `repository_head` + `execution_measurement`/`result`/`evidence`); assert
   zinciri `task.id == attempt.run.task_id`, `task.head == baseline.head ==
-  attempt.head`, `task_source == harness_task_file`, `proposals` varsa v2 zarfı
+  attempt.head`, `task_source == harness_task_file`, `proposals` varsa v2/v3 zarfı
   ve `proposals.head == baseline.head` (v1 çıplak array state'e bağlanamaz →
   reddedilir). `--out` tüketilen artifact'lardan herhangi birinin alias'ı
   olamaz ve yazım atomic'tir (P0-3). `osp_revision` build-time gömülür.

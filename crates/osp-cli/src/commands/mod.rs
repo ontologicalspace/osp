@@ -1215,8 +1215,10 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
                 .proposals
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("--proposals required for --llm mock"))?;
-            // #161 (B5): v1 çıplak array (id-keyed) veya v2 object envelope
-            // (path-keyed — HEAD fence + attempt anindeki baseline'a karşı re-bind).
+            // #161 (B5): v1 çıplak array (id-keyed) veya v2/v3 object envelope
+            // (path-keyed — HEAD fence + attempt anindeki baseline'a karşı re-bind;
+            // #199: v3'te new_edges uçları beyan edilen new_nodes[].path'lere de
+            // çözümlenir — mevcut→yeni / yeni→yeni kenarlar).
             // #178 P0-1: read-once — digest ve parse AYNI baytlardan.
             let proposals_bytes = std::fs::read(proposals_path).map_err(|e| {
                 anyhow::anyhow!("failed to read proposals {}: {e}", proposals_path.display())
