@@ -143,7 +143,8 @@ impl HarnessFixture {
     }
 
     /// #199 review P1-3 (run-18 A/B minyatürü): main.rs ALTI use-import'u
-    /// (a..f) → coupling 6/7. Bar 0.845 = [5/6, 6/7] pencere ortası —
+    /// (a..f) → coupling 6/7. Bar 0.845 = [5/6, 6/7] penceresinin YAKLAŞIK
+    /// ortası (yuvarlanmış; tam orta 71/84 ≈ 0.8452) —
     /// A kolu (2 silme + 1 kazanım) 5/6, B kolu (1 silme + 1 kazanım) 6/7
     /// hipotetiğini ayırt eder; v2'de iki kol da bir import eksik simüle
     /// edilirdi ve ayırt etme yalnız gate re-analysis'te yaşardı.

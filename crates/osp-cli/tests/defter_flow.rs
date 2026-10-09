@@ -214,7 +214,8 @@ fn draft_task_roundtrip_produces_validated_task_and_proposals() {
 /// iki kol da 2/3 simüle edilir ve eşik farkı görülmezdü).
 ///
 /// Ölçülü önerme: fixture main.rs coupling = 2/3 (measured_baseline pini).
-/// Bar 0.7 = [2/3, 3/4] penceresinin ortası (run-18'in τ-midpoint deseni):
+/// Bar 0.7 = [2/3, 3/4] penceresinin YAKLAŞIK ortası (yuvarlanmış eşik; tam
+/// orta 17/24 ≈ 0.7083 — run-18'in τ-midpoint deseni):
 /// - Kontrol kolu (yalnız yeni düğüm, kenar YOK): hipotetik 2/3 ≤ 0.7 →
 ///   tamamlanır.
 /// - Deney kolu (newmod.rs path beyanı + main.rs→newmod.rs Imports kenarı):
@@ -368,8 +369,8 @@ fn v3_new_node_import_edge_flips_threshold_decision_at_attempt() {
 /// #199 review P1-3 — frozen run-18 A/B minyatürü: `removed_edges` +
 /// `AddNode` + mevcut→yeni `AddEdge` kompozisyonunun **eşzamanlı** hali
 /// (gerçek hata sınıfının kendisi). Ölçülü önerme: main.rs ALTI use-import'u
-/// → coupling 6/7; bar **τ = 0.845** = [5/6, 6/7] pencere ortası (run-18'in
-/// τ-midpoint deseni).
+/// → coupling 6/7; bar **τ = 0.845** = [5/6, 6/7] penceresinin YAKLAŞIK ortası
+/// (yuvarlanmış eşik; tam orta 71/84 ≈ 0.8452 — run-18'in τ değeri aynen).
 ///
 /// - **A kolu** (2 silme + 1 kazanılan yeni-düğüm importu): hipotetik
 ///   6−2+1 = 5 import → **5/6 = 0.8333 ≤ 0.845** → kabul.
