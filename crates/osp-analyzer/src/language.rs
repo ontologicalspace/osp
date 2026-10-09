@@ -279,6 +279,30 @@ impl RepoRelativePath {
         Some(Self(rel.to_string_lossy().replace('\\', "/")))
     }
 
+    /// #199 (review P1-2): insan-taraflı repo-göreli path METNİNİ kimlik-ekseni
+    /// kurallarına göre doğrular. Ölçülen düğüm path'leri filesystem
+    /// yürüyüşünden kanonik gelir (`from_absolute`); beyan edilen (henüz var
+    /// olmayan) yeni-düğüm path'leri aynı kurallara UYMAK zorunda — aksi halde
+    /// `./main.rs` gibi bir alias hipotetik grafta `main.rs`'ten ayrı ikinci bir
+    /// düğüm olarak sayılabilir ve #199'un onardığı ölçüm doğruluğu başka bir
+    /// kimlik-alias üzerinden yeniden bozulur.
+    ///
+    /// Kurallar (ölçülen tarafın invariant'ının tek-path ifadesi): boş değil;
+    /// yalnız `/` ayracı (`\` yok); absolute değil (`/` ile başlamaz); segmentler
+    /// boş / `.` / `..` değil. Kanonik OLMAYANI normalize ETMEZ — reddeder
+    /// (ölçülen kimlikle birebir eşleşme guarantee'si ancak böyle dürüst olur).
+    pub fn from_repo_relative_str(s: &str) -> Option<Self> {
+        if s.is_empty() || s.contains('\\') || s.starts_with('/') {
+            return None;
+        }
+        if s.split('/')
+            .any(|seg| seg.is_empty() || seg == "." || seg == "..")
+        {
+            return None;
+        }
+        Some(Self(s.to_string()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -510,6 +534,47 @@ mod tests {
         let inside = RepoRelativePath::from_absolute(repo, Path::new("/repo/src/a.py"))
             .expect("under-root path must construct");
         assert_eq!(inside.as_str(), "src/a.py");
+    }
+
+    // ── RepoRelativePath::from_repo_relative_str (#199 review P1-2) ──────────
+
+    #[test]
+    fn repo_relative_str_accepts_canonical_paths() {
+        for ok in [
+            "main.rs",
+            "src/models/user.py",
+            "a.b.c.rs",
+            "deep/nested/dir/x.ts",
+        ] {
+            assert_eq!(
+                RepoRelativePath::from_repo_relative_str(ok)
+                    .expect("canonical")
+                    .as_str(),
+                ok
+            );
+        }
+    }
+
+    #[test]
+    fn repo_relative_str_rejects_identity_aliases() {
+        // #199 review P1-2: beyan edilen yeni-düğüm path'i ölçülen kimlik ekseniyle
+        // AYNI kanonik biçimde olmalı — alias, ikinci bir düğüm olarak sayılırdı.
+        for bad in [
+            "",            // boş
+            "./main.rs",   // nokta-segment alias
+            "main.rs/",    // sondaki ayraç → boş segment
+            "src//x.rs",   // çift ayraç → boş segment
+            "../x.rs",     // traversal
+            "src/../x.rs", // gömülü traversal
+            "/tmp/x.rs",   // absolute
+            "src\\x.rs",   // Windows ayracı
+            ".",           // nokta kökü
+        ] {
+            assert!(
+                RepoRelativePath::from_repo_relative_str(bad).is_none(),
+                "{bad:?} must be rejected as non-canonical"
+            );
+        }
     }
 
     // ── AnalysisCompleteness ─────────────────────────────────────────────────

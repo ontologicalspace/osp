@@ -112,11 +112,20 @@ pub fn build_claim_from_proposal(
 /// sözleşmesi aynen; #96 P1-tur-approve: agent node ID SEÇEMEZ).
 pub fn node_from_spec(spec: &crate::agent::NewNodeSpec, index: usize) -> Node {
     Node {
-        id: (10_000 + index as NodeId), // yeni node ID'leri (mevcut ID'lerle çakışmaması için)
+        id: synthetic_new_node_id(index), // yeni node ID'leri (mevcut ID'lerle çakışmaması için)
         kind: spec.kind,
         mass: spec.initial_mass,
         ..Default::default()
     }
+}
+
+/// #199: yeni düğümün sentezik ID sözleşmesi — tek kaynak. `node_from_spec`
+/// (core claim kurulumu) ile CLI v3 re-bind aynı fonksiyonu çağırır; ajan ID
+/// SEÇMEZ (#96). v3 path-keyed proposals, yeni-düğüm path'lerini bu sözleşmeyle
+/// delta-node kimliğine çözer; core Q4 kenar-uç kuralı (`rule.rs`
+/// EdgeTargetExistenceRule) "space VEYA delta" üyeliğini zaten kabul eder.
+pub fn synthetic_new_node_id(index: usize) -> NodeId {
+    10_000 + index as NodeId
 }
 
 /// **#96 (plan v4 P1-tur2):** Q4 STRUCTURAL validation — engine

@@ -1,9 +1,10 @@
-//! #172: `osp draft-task` — task v2 + proposals v2 üretimi, temsilci doğrulamasıyla.
+//! #172: `osp draft-task` — task v2 + proposals v3 üretimi, temsilci doğrulamasıyla.
 //!
 //! Run 14-16 sürtünme sınıflarını motora taşır: her run için elle yazılan
 //! task.json/proposals.json üretim gen-script'leri (SHA transcription + tırnak
 //! hataları) yerine, komut HEAD'i `git rev-parse`'ten alır ve İNSANIN verdiği
-//! şekil niyetini (`--proposals-spec`) tam v2 şemaya çevirir.
+//! şekil niyetini (`--proposals-spec`) tam v3 şemaya çevirir (#199: path'li
+//! new_nodes + yeni düğümlere açılan new_edges uçları).
 //!
 //! **Epistemik sınır (issue #172 Sınır bölümü):** bu komut YORUM ÜRETMEZ — bar
 //! değeri, şekil seçimi, tercih insanda kalır. Ürettiği şey defter tutma +
@@ -34,8 +35,8 @@ use osp_core::trajectory::{
 
 use crate::commands::baseline::{analyze_live, load_baseline_artifact, BaselineView};
 use crate::commands::path_keyed_proposals::{
-    CliPathKeyedEdgeRef, CliPathKeyedEdgeSpec, CliPathKeyedEntityChange, CliPathKeyedNewNodeSpec,
-    CliPathKeyedProposal, CliPathKeyedProposalsFileV2,
+    CliPathKeyedEdgeRef, CliPathKeyedEdgeSpec, CliPathKeyedEntityChange, CliPathKeyedNewNodeSpecV3,
+    CliPathKeyedProposalV3, CliPathKeyedProposalsFileV3,
 };
 use crate::commands::repo_snapshot::RepositorySnapshot;
 
@@ -73,10 +74,12 @@ pub struct DraftTaskArgs {
     pub baseline: Option<PathBuf>,
     #[arg(long, default_value_t = 1)]
     pub milestone_id: u64,
-    /// İnsan şekil tanımı (yüz kümeleri + removed/moved kenar niyetleri) → proposals v2.
+    /// İnsan şekil tanımı (yüz kümeleri + removed/moved kenar niyetleri) → proposals v3.
     /// Kabul edilen alanlar (deny_unknown_fields): new_nodes, new_edges, removed_edges,
-    /// affected_nodes, modified_entities, reasoning — proposals v2 ÇIKTI zarfının
+    /// affected_nodes, modified_entities, reasoning — proposals ÇIKTI zarfının
     /// schema_version/repository_head/position_hints alanları GİRDİDE YOKTUR (#183).
+    /// #199: new_nodes[].path (opsiyonel) yeni düğüme proposal-yerel kimlik verir;
+    /// new_edges uçları bu path'lere işaret edebilir (mevcut→yeni / yeni→yeni).
     /// Verilirse --out-proposals zorunlu.
     #[arg(long, requires = "out_proposals")]
     pub proposals_spec: Option<PathBuf>,
@@ -95,7 +98,7 @@ pub struct DraftTaskArgs {
     /// Yazılacak task v2 dosyası.
     #[arg(long)]
     pub out_task: PathBuf,
-    /// Yazılacak proposals v2 dosyası (--proposals-spec ile zorunlu).
+    /// Yazılacak proposals v3 dosyası (--proposals-spec ile zorunlu).
     #[arg(long)]
     pub out_proposals: Option<PathBuf>,
 }
@@ -205,7 +208,7 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
                 args.target
             );
             println!(
-                "✓ proposals v2 written to {} (repository_head {}, {} proposals)",
+                "✓ proposals v3 written to {} (repository_head {}, {} proposals)",
                 out.display(),
                 view.head,
                 file.proposals.len()
@@ -441,6 +444,12 @@ struct ProposalSpec {
 struct NewNodeHuman {
     kind: NodeKind,
     initial_mass: f64,
+    /// #199: opsiyonel path — yeni düğüme proposal-yerel kimlik verir;
+    /// `new_edges` uçları bu path'e işaret edebilir (mevcut→yeni / yeni→yeni
+    /// kenar temsili). Path'siz yeni düğümler v2 davranışındadır (yalnız
+    /// `connected_to` ile mevcut düğümlere bağlanır, adreslenemez).
+    #[serde(default)]
+    path: Option<String>,
     #[serde(default)]
     connected_to: Vec<PathOrKinded>,
 }
@@ -481,7 +490,7 @@ impl EdgeHuman {
     }
 }
 
-/// Spec → proposals v2 zarfı + temsilci doğrulaması (ölçüme karşı, fail-closed)
+/// Spec → proposals v3 zarfı + temsilci doğrulaması (ölçüme karşı, fail-closed)
 /// + op-gereksinimleri (tur-1 P1-3):
 ///
 /// - `new_nodes` → `AddNode`
@@ -490,10 +499,17 @@ impl EdgeHuman {
 /// - `modified_entities` → `ModifyEntity`
 ///
 /// Gereksinimler task'ın izinli operasyonlarına karşı denetlenir.
+///
+/// #199: `new_nodes[].path` beyanları proposal-yerel adres alanı kurar —
+/// `new_edges` uçları ölçülmüş baseline düğümlerine VEYA bu path'lere işaret
+/// edebilir (mevcut→yeni / yeni→yeni). Yeni-düğüm path'i baseline'ı
+/// gölgeleyemez ve tekrar edemez; `connected_to` baseline-only kalır
+/// (geri-uyumlu kısaltma). `affected_nodes` türetmesi yalnız ölçülmüş
+/// uçlardan birleşiktir (danışma alanı ölçülmüş gerçekler içindir).
 fn translate_spec(
     spec: ProposalsSpec,
     view: &BaselineView,
-) -> anyhow::Result<(CliPathKeyedProposalsFileV2, DelegateStats, Vec<OpKind>)> {
+) -> anyhow::Result<(CliPathKeyedProposalsFileV3, DelegateStats, Vec<OpKind>)> {
     let node_set = view.node_path_set();
     let mut stats = DelegateStats::default();
     let mut required_ops: Vec<OpKind> = Vec::new();
@@ -516,20 +532,71 @@ fn translate_spec(
     };
 
     for proposal in spec.proposals {
+        // #199 geçiş 1: beyan edilen yeni-düğüm path'lerini topla + doğrula.
+        // Sıra: kanoniklik → baseline gölgeleme → duplicate (review P1-2).
+        let mut declared_new: BTreeSet<String> = BTreeSet::new();
+        for node in &proposal.new_nodes {
+            if let Some(path) = &node.path {
+                anyhow::ensure!(
+                    osp_analyzer::language::RepoRelativePath::from_repo_relative_str(path)
+                        .is_some(),
+                    "new_nodes path {path:?} is not a canonical repo-relative path — \
+                     the measured space's identity axis requires a non-empty, \
+                     forward-slash, repo-relative path without `./`, `../`, empty or \
+                     absolute segments (an alias such as `./main.rs` would count as a \
+                     SECOND node in the hypothetical graph)"
+                );
+                anyhow::ensure!(
+                    !node_set.contains(path.as_str()),
+                    "new_nodes path {path:?} is already a measured baseline node — \
+                     a new node must not shadow an existing path; reference it \
+                     directly instead"
+                );
+                anyhow::ensure!(
+                    declared_new.insert(path.clone()),
+                    "duplicate new_nodes path {path:?} — each declared new node \
+                     must carry a unique path"
+                );
+            }
+        }
+
+        // #199 kenar-uç doğrulaması: ölçülmüş baseline düğümü VEYA aynı
+        // proposal'da path beyan edilen yeni düğüm.
+        let ensure_endpoint = |path: &str, context: &str| -> anyhow::Result<()> {
+            anyhow::ensure!(
+                node_set.contains(path) || declared_new.contains(path),
+                "{context} references unmeasured path {path:?} that no new_nodes[].path \
+                 declares either — endpoints resolve against measured baseline nodes \
+                 or new nodes declared with a path in the same proposal ({} nodes at \
+                 HEAD {})",
+                node_set.len(),
+                view.head
+            );
+            Ok(())
+        };
+
+        // #199 geçiş 2: new_nodes → v3 spec (connected_to baseline-only).
         let mut new_nodes = Vec::with_capacity(proposal.new_nodes.len());
         for node in proposal.new_nodes {
             let mut connected = Vec::with_capacity(node.connected_to.len());
             for entry in node.connected_to {
                 let (path, kind) = entry.into_path_kind();
                 ensure_mutation_kind(kind, "new_nodes.connected_to")?;
+                anyhow::ensure!(
+                    !declared_new.contains(&path),
+                    "new_nodes.connected_to targets new-node path {path:?} — connected_to \
+                     resolves baseline nodes only (back-compat shorthand); express \
+                     new-node edges via new_edges"
+                );
                 ensure_node(&path, "new_nodes.connected_to")?;
                 stats.path_refs += 1;
                 stats.new_node_links += 1;
                 connected.push((path, kind));
             }
-            new_nodes.push(CliPathKeyedNewNodeSpec {
+            new_nodes.push(CliPathKeyedNewNodeSpecV3 {
                 kind: node.kind,
                 initial_mass: node.initial_mass,
+                path: node.path,
                 connected_to: connected,
             });
         }
@@ -541,8 +608,8 @@ fn translate_spec(
         for edge in proposal.new_edges {
             let edge_ref = edge.into_edge_ref();
             ensure_mutation_kind(edge_ref.kind, "new_edges")?;
-            ensure_node(&edge_ref.from, "new_edges.from")?;
-            ensure_node(&edge_ref.to, "new_edges.to")?;
+            ensure_endpoint(&edge_ref.from, "new_edges.from")?;
+            ensure_endpoint(&edge_ref.to, "new_edges.to")?;
             stats.path_refs += 2;
             new_edges.push(CliPathKeyedEdgeSpec {
                 from: edge_ref.from,
@@ -605,8 +672,14 @@ fn translate_spec(
                     union.insert(e.to.clone());
                 }
                 for e in &new_edges {
-                    union.insert(e.from.clone());
-                    union.insert(e.to.clone());
+                    // #199: türetme yalnız ölçülmüş uçlardan — yeni-düğüm path'i
+                    // danışma alanına girmez (affected_nodes re-bind'i baseline-only).
+                    if node_set.contains(e.from.as_str()) {
+                        union.insert(e.from.clone());
+                    }
+                    if node_set.contains(e.to.as_str()) {
+                        union.insert(e.to.clone());
+                    }
                 }
                 union.into_iter().collect()
             }
@@ -622,7 +695,7 @@ fn translate_spec(
             require(OpKind::ModifyEntity);
         }
 
-        out.push(CliPathKeyedProposal {
+        out.push(CliPathKeyedProposalV3 {
             new_nodes,
             new_edges,
             removed_edges,
@@ -634,8 +707,8 @@ fn translate_spec(
     }
 
     Ok((
-        CliPathKeyedProposalsFileV2 {
-            schema_version: 2,
+        CliPathKeyedProposalsFileV3 {
+            schema_version: 3,
             repository_head: view.head.clone(),
             proposals: out,
         },
@@ -813,5 +886,111 @@ mod tests {
             OpKind::RemoveImport
         ));
         assert!(parse_op("add-node").is_err());
+    }
+
+    // ── #199: path'li yeni düğümler + yeni düğümlere açılan kenar uçları ────────
+
+    #[test]
+    fn spec_v3_new_node_path_enables_new_edges_and_derives_measured_only_affected() {
+        // #199: path beyan eden yeni düğüme new_edges ile kenar (mevcut→yeni —
+        // run-18'de temsil edilemeyen desen). affected türetmesi yalnız ölçülmüş
+        // uçtan birleşir (newmod.rs danışma alanına girmez).
+        let spec: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{
+                "new_nodes": [{"kind": "Module", "initial_mass": 5.0, "path": "newmod.rs"}],
+                "new_edges": [{"from": "main.rs", "to": "newmod.rs"}],
+                "reasoning": "type-move: existing gains import on new node"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs"), ("main.rs", "b.rs")]);
+        let (file, _, required_ops) = translate_spec(spec, &view).unwrap();
+        assert_eq!(file.schema_version, 3);
+        assert_eq!(
+            file.proposals[0].new_nodes[0].path.as_deref(),
+            Some("newmod.rs")
+        );
+        assert_eq!(file.proposals[0].new_edges[0].to, "newmod.rs");
+        assert_eq!(file.proposals[0].affected_nodes, vec!["main.rs"]);
+        assert!(required_ops.contains(&OpKind::AddNode), "{required_ops:?}");
+        assert!(required_ops.contains(&OpKind::AddEdge), "{required_ops:?}");
+    }
+
+    #[test]
+    fn spec_new_node_path_shadowing_and_duplicate_rejected() {
+        // Baseline'ı gölgeleyen path → red (yeni düğüm ölçülmüş yolu bastıramaz).
+        let shadow: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{"new_nodes": [{"kind": "Module", "initial_mass": 1.0,
+                              "path": "a.rs"}], "reasoning": "x"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs")]);
+        let err = translate_spec(shadow, &view).unwrap_err();
+        assert!(format!("{err}").contains("shadow"), "{err}");
+
+        // Aynı path iki yeni düğümde → red (adres alanı injective olmalı).
+        let dup: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{"new_nodes": [
+                {"kind": "Module", "initial_mass": 1.0, "path": "n.rs"},
+                {"kind": "Module", "initial_mass": 1.0, "path": "n.rs"}],
+                "reasoning": "x"}]}"#,
+        )
+        .unwrap();
+        let err = translate_spec(dup, &view).unwrap_err();
+        assert!(format!("{err}").contains("unique path"), "{err}");
+    }
+
+    #[test]
+    fn spec_connected_to_new_node_rejected_with_new_edges_guidance() {
+        // connected_to geri-uyumlu kısaltma: baseline-only; yeni düğüme kenar
+        // new_edges üzerinden ifade edilir.
+        let spec: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{"new_nodes": [
+                {"kind": "Module", "initial_mass": 1.0, "path": "n1.rs"},
+                {"kind": "Module", "initial_mass": 1.0, "path": "n2.rs",
+                 "connected_to": ["n1.rs"]}],
+                "reasoning": "x"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs")]);
+        let err = translate_spec(spec, &view).unwrap_err();
+        assert!(format!("{err}").contains("new_edges"), "{err}");
+    }
+
+    #[test]
+    fn spec_edge_endpoint_undeclared_anywhere_fails_closed() {
+        // Ne baseline'ta ne de beyan edilen yeni-düğüm path'lerinde → red.
+        let spec: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{"new_nodes": [{"kind": "Module", "initial_mass": 1.0,
+                              "path": "n.rs"}],
+                "new_edges": [{"from": "main.rs", "to": "ghost.rs"}],
+                "reasoning": "x"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs")]);
+        let err = translate_spec(spec, &view).unwrap_err();
+        assert!(
+            format!("{err}").contains("no new_nodes[].path declares"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn spec_non_canonical_new_node_path_rejected_before_shadow_check() {
+        // Review P1-2: `./a.rs` raw-string gölgeleme kontrolünde `a.rs`'ten farklı
+        // olduğu için yakalanmazdı — kanoniklik reddi DAHA ÖNCE koşar ve alias'ın
+        // hipotetik grafta ikinci düğüm olmasını keser.
+        let spec: ProposalsSpec = serde_json::from_str(
+            r#"{"proposals": [{"new_nodes": [{"kind": "Module", "initial_mass": 1.0,
+                              "path": "./a.rs"}], "reasoning": "alias"}]}"#,
+        )
+        .unwrap();
+        let view = view(&[("main.rs", "a.rs")]);
+        let err = translate_spec(spec, &view).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("canonical repo-relative"), "{msg}");
+        assert!(
+            !msg.contains("shadow"),
+            "canonicality precedes shadow: {msg}"
+        );
     }
 }
