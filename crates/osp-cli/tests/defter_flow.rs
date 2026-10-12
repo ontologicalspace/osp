@@ -2929,3 +2929,915 @@ fn finalize_run_adversarial_canonical_semantics_matrix() {
     assert_eq!(row["schema_version"], "live-ledger-v1");
     assert!(run_ok.join("attempt.json").is_file());
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #203 — witnessed-resume gate girişi: askı → resume → realization-gate zinciri.
+//
+// Karar-0/(b): attempt zarfı awaiting_witnesses kalır (kendi anının doğru
+// kaydı); gate, zarfın result.pending kimliğinden adreslenen kanonik pending +
+// receipt zincirini tüketir (bağlama sözleşmesi). Tur-1/tur-2 review'un
+// adversarial senaryoları burada kanıtlanır: same-task/same-base ikame,
+// çapraz-uzay kimliği, AcceptAsProgress terfisi, receipt yokluk/bütünlük
+// ayrımı, V2 kapsam sabitlemesi, route-uymayan verdict.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// #203: gate'in geçeceği eşikli task (aynı dosya attempt'in tükettiği — task
+/// digest fence'i şartı; sim-sonrası 0.5 ≤ eşik → AcceptAsCompleted → Held).
+fn resumed_gate_task(fx: &HarnessFixture, threshold: f64) -> serde_json::Value {
+    let mut task = task_envelope_v2(&fx.head, "main.rs");
+    task["task"]["target_predicate_set"]["predicates"][0]["predicate"]["threshold"] =
+        serde_json::json!(threshold);
+    task
+}
+
+/// #203: gerçek askı üret (production witness) — belirli proposals'la, --out'lu.
+fn run_suspending_attempt(
+    fx: &HarnessFixture,
+    task_path: &Path,
+    proposals_path: &Path,
+    out: &Path,
+) -> std::process::Output {
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    cmd.current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--execution-mode")
+        .arg("production")
+        .arg("--witness")
+        .arg("production")
+        .arg("--llm")
+        .arg("mock")
+        .arg("--proposals")
+        .arg(proposals_path)
+        .arg("--task")
+        .arg(task_path)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--out")
+        .arg(out);
+    cmd.output().expect("run osp attempt")
+}
+
+/// #203: state-dir'deki bekleyen askı artifact'larını bul (receipt hariç).
+fn pending_artifacts(fx: &HarnessFixture) -> Vec<PathBuf> {
+    let dir = fx.work_path().join(".osp").join("pending-authorizations");
+    let mut artifacts: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("pending-authorizations dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().map(|e| e == "json").unwrap_or(false)
+                && !p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().contains("receipt"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    artifacts.sort();
+    artifacts
+}
+
+/// #203: askı zarfından (attempt.json) result.pending kimliğini oku.
+fn envelope_pending_identity(attempt_path: &Path) -> (u64, u64, String) {
+    let v = read_json(attempt_path);
+    let pending = &v["result"]["pending"];
+    (
+        pending["claim_id"].as_u64().expect("claim_id"),
+        pending["attempt_num"].as_u64().expect("attempt_num"),
+        pending["evidence_digest"]
+            .as_str()
+            .expect("evidence_digest")
+            .to_string(),
+    )
+}
+
+/// #203: witness kanıtı yaz + resume koş (operator-asserted) — exit 0 beklenir.
+fn resume_with_two_witnesses(
+    fx: &HarnessFixture,
+    artifact: &Path,
+    claim_id: u64,
+) -> std::process::Output {
+    let events: Vec<serde_json::Value> = [200u64, 300u64]
+        .iter()
+        .enumerate()
+        .map(|(i, actor)| {
+            serde_json::json!({
+                "id": (i + 1) as u64,
+                "source": format!("gate-evidence-{i}"),
+                "witness_kind": "MergeCommit",
+                "actor": actor,
+                "claim": claim_id,
+            })
+        })
+        .collect();
+    let evidence = fx.work_path().join(format!("witnesses-{claim_id}.json"));
+    fs::write(&evidence, serde_json::to_string_pretty(&events).unwrap()).unwrap();
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("resume")
+        .arg(artifact)
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--witness-evidence")
+        .arg(&evidence)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .args(["--format", "json"])
+        .args(["--evidence-trust", "operator-asserted"])
+        .output()
+        .expect("run osp resume")
+}
+
+/// #203: gate run-dir'i hazırla (baseline/task/proposals/patch) — ritüel düzeni.
+/// attempt.json --out ile zaten yazılmıştır; burada kalan artifact'lar eklenir.
+fn prepare_resumed_gate_run_dir(
+    fx: &HarnessFixture,
+    name: &str,
+    task_path: &Path,
+    proposals_path: &Option<PathBuf>,
+) -> PathBuf {
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(fx);
+    let run = work.join(name);
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::copy(task_path, run.join("task.json")).unwrap();
+    if let Some(p) = proposals_path {
+        fs::copy(p, run.join("proposals.json")).unwrap();
+    }
+    // Fixture main.rs'ine yorum satırı — git apply gerçekten çalışır, coupling
+    // değişmez (2/3 ≈ 0.667 ≤ eşikler).
+    fs::write(
+        run.join("applied.patch"),
+        b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n use crate::a::A;\n",
+    )
+    .unwrap();
+    run
+}
+
+/// #203: insan-beyanlı realization kanıtı (mutlu yol).
+fn declared_evidence_ok(run: &Path) -> PathBuf {
+    let p = run.join("declared-realization.json");
+    fs::write(
+        &p,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":{"passed":271,"failed":0,"skipped":0}}"#,
+    )
+    .unwrap();
+    p
+}
+
+fn run_gate(fx: &HarnessFixture, run: &Path, evidence: &Path) -> std::process::Output {
+    let work = fx.work_path();
+    osp_in(work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg(run)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .arg("--evidence")
+        .arg(evidence)
+        .output()
+        .expect("run osp realization-gate")
+}
+
+/// **#203 uçtan uca:** askı (exit 10, zarf `result.pending` taşır) → resume
+/// (exit 0 + receipt) → realization-gate (**exit 0 RealizedCompleted**,
+/// binding completion_route=witnessed_resume + resume provenance) →
+/// finalize-run (ledger satırı `completion_basis=realized`).
+/// Parite sözleşmesi de burada kanıtlanır: gate'in kendi before-analyze'ı
+/// askının base content digest'ini yeniden üretmezseydi exit ≠ 0 olurdu.
+#[test]
+fn realization_gate_witnessed_resume_end_to_end() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.90));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join("run-resumed-e2e");
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+
+    // 1) Askı — production witness (quorum 2/1.5, boş küme) → Held → exit 10.
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(
+        out.status.code(),
+        Some(10),
+        "suspension exit 10. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Bağlama sözleşmesi m.1 (canlı pin): zarf askı kimliğini TAŞIYOR.
+    let (claim_id, attempt_num, evidence_digest) = envelope_pending_identity(&attempt_path);
+    assert_eq!(attempt_num, 1, "per-invocation sayaç (karar-2: değişmez)");
+    let artifacts = pending_artifacts(&fx);
+    assert_eq!(artifacts.len(), 1, "tam bir askı: {:?}", artifacts);
+    let artifact = artifacts[0].clone();
+    assert!(
+        artifact
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .contains(&evidence_digest),
+        "kanonik askı adı zarfın bildirdiği digest'ı taşır"
+    );
+
+    // 2) Resume — 2× MergeCommit (2.0 ≥ 1.5) → Applied → exit 0 + receipt.
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "resume exit 0. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let receipt_path = artifact.with_extension("json.receipt.json");
+    assert!(receipt_path.is_file(), "receipt askının kardeşi");
+
+    // 3) Gate — witnessed-resume girişinden RealizedCompleted.
+    let run_dir = prepare_resumed_gate_run_dir(
+        &fx,
+        "run-resumed-e2e",
+        &task_path,
+        &Some(proposals_path.clone()),
+    );
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "gate exit 0 (RealizedCompleted). stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let verdict = read_json(&run_dir.join("realization-verdict.json"));
+    assert!(
+        verdict["verdict"]["RealizedCompleted"].is_object(),
+        "{verdict}"
+    );
+    assert_eq!(
+        verdict["binding"]["completion_route"], "witnessed_resume",
+        "{verdict}"
+    );
+    let expected_pending_ref = format!(
+        ".osp/pending-authorizations/{}",
+        artifact.file_name().unwrap().to_string_lossy()
+    );
+    assert_eq!(
+        verdict["binding"]["resume_pending_ref"].as_str(),
+        Some(expected_pending_ref.as_str()),
+        "{verdict}"
+    );
+    assert_eq!(
+        verdict["binding"]["resume_receipt_digest"].as_str(),
+        Some(sha256_of(&receipt_path).as_str()),
+        "receipt digest'i read-once baytlardan bağlandı"
+    );
+    // c_predicted pending basis'inin ölçümünden (sim 0.5); c_observed gate'in
+    // kendi analizi (~0.667) — kanıt E_c ile yaşar.
+    let c_predicted = verdict["gate_context"]["c_predicted"].as_f64().unwrap();
+    assert!(
+        (c_predicted - 0.5).abs() < 1e-9,
+        "c_predicted={c_predicted}"
+    );
+    // Kanonik verdict mağazada da durur (one-attempt/one-verdict).
+    let short: String = sha256_of(&attempt_path)
+        .strip_prefix("sha256:")
+        .unwrap()
+        .chars()
+        .take(16)
+        .collect();
+    assert!(fx
+        .work_path()
+        .join("realizations")
+        .join(format!("realization-{short}.json"))
+        .is_file());
+
+    // 4) Finalize — route-aware projeksiyon: realized.
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run_dir)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(
+        out.status.success(),
+        "finalize exit ok. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert_eq!(row["completion_basis"], "realized", "{row}");
+    assert!(row.get("realization_verdict").is_none(), "{row}");
+}
+
+/// **#203 adversarial A (tur-1 P0-1):** aynı task + aynı base, İKİ farklı askı;
+/// receipt yalnız B'de. A'nın run-dir'inde gate → B'nin receipt'i A'nın devamı
+/// olarak KABUL EDİLMEZ: A'nın kendi askısında receipt yok → temiz NotAttempted
+/// (exit 4), verdict YAZILMAZ. Eski task-taramalı tasarım burada yanlış bağlardı.
+#[test]
+fn realization_gate_resumed_same_task_base_substitution_refused() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.90));
+    // A: main.rs→b.rs import'unu kaldır; B: main.rs→a.rs — farklı delta, aynı base.
+    let proposals_a = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run_a = work.join("run-resumed-adv-a");
+    fs::create_dir_all(&run_a).unwrap();
+    let attempt_a = run_a.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_a, &attempt_a);
+    assert_eq!(out.status.code(), Some(10), "A askı exit 10");
+
+    let proposals_b = fx.write_proposals_v2(&fx.head, "main.rs", "a.rs");
+    let run_b = work.join("run-resumed-adv-b");
+    fs::create_dir_all(&run_b).unwrap();
+    let attempt_b = run_b.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_b, &attempt_b);
+    assert_eq!(out.status.code(), Some(10), "B askı exit 10");
+
+    // İki ayrı askı (farklı evidence digest'leri) + yalnız B resume edilir.
+    let artifacts = pending_artifacts(&fx);
+    assert_eq!(artifacts.len(), 2, "iki ayrı askı: {artifacts:?}");
+    let (claim_b, _, digest_b) = envelope_pending_identity(&attempt_b);
+    let artifact_b = artifacts
+        .iter()
+        .find(|p| p.file_name().unwrap().to_string_lossy().contains(&digest_b))
+        .expect("B'nin askısı zarfının digest'ıyla bulunur")
+        .clone();
+    let out = resume_with_two_witnesses(&fx, &artifact_b, claim_b);
+    assert_eq!(out.status.code(), Some(0), "B resume exit 0");
+
+    // A'nın run-dir'inde gate: A'nın askısında receipt YOK → exit 4 (deterministik
+    // NotAttempted), verdict yazılmaz — B'nin receipt'i DEĞERLENDİRMEYE GİRMEZ.
+    let run_dir = prepare_resumed_gate_run_dir(&fx, "run-resumed-adv-a", &task_path, &None);
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "NotAttempted exit 4 (A uygulanmamış). stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("not yet applied"),
+        "dürüst boşluk mesajı"
+    );
+    assert!(
+        !run_dir.join("realization-verdict.json").exists(),
+        "NotAttempted için verdict YAZILMAZ"
+    );
+}
+
+/// **#203 adversarial B (tur-1 P0-2 eki):** çapraz-uzay ikamesi — uzay-2'nin
+/// TAM kanıt zinciresi (canonical attempt + askı + receipt) uzay-1'in
+/// state-dir'ine sunulur. İçerik aynı olsa bile persisted kimlik farklı →
+/// view_id fence RED.
+#[test]
+fn realization_gate_resumed_cross_space_identity_refused() {
+    let fx1 = HarnessFixture::new_with_use_edges();
+    let fx2 = HarnessFixture::new_with_use_edges();
+    let work2 = fx2.work_path().to_path_buf();
+
+    // Uzay-1'in KENDİ askısı: state-dir'inde gerçek (farklı) bir persisted
+    // kimlik oluşur — fence'in karşılaştıracağı taraf budur.
+    let task1 = fx1.write_task(&resumed_gate_task(&fx1, 0.90));
+    let props1 = fx1.write_proposals_v2(&fx1.head, "main.rs", "b.rs");
+    let run1 = fx1.work_path().join("run-xspace-1");
+    fs::create_dir_all(&run1).unwrap();
+    let out = run_suspending_attempt(&fx1, &task1, &props1, &run1.join("attempt.json"));
+    assert_eq!(out.status.code(), Some(10), "fx1 kendi askısı");
+    assert!(fx1
+        .work_path()
+        .join(".osp")
+        .join("space-identity")
+        .is_file());
+
+    // Uzay-2'de tam döngü: askı + resume.
+    let task2 = fx2.write_task(&resumed_gate_task(&fx2, 0.90));
+    let props2 = fx2.write_proposals_v2(&fx2.head, "main.rs", "b.rs");
+    let run2 = work2.join("run-xspace-2");
+    fs::create_dir_all(&run2).unwrap();
+    let attempt2 = run2.join("attempt.json");
+    let out = run_suspending_attempt(&fx2, &task2, &props2, &attempt2);
+    assert_eq!(out.status.code(), Some(10));
+    let artifacts2 = pending_artifacts(&fx2);
+    assert_eq!(artifacts2.len(), 1);
+    let artifact2 = artifacts2[0].clone();
+    let (claim2, _, _) = envelope_pending_identity(&attempt2);
+    let out = resume_with_two_witnesses(&fx2, &artifact2, claim2);
+    assert_eq!(out.status.code(), Some(0));
+
+    // Uzay-2 zincirini uzay-1'in mağazalarına taşı.
+    let attempt2_bytes = std::fs::read(&attempt2).unwrap();
+    let canonical2 = std::fs::read_dir(work2.join("attempts"))
+        .expect("fx2 attempts")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| {
+            p.extension().map(|e| e == "json").unwrap_or(false)
+                && std::fs::read(p)
+                    .map(|b| b == attempt2_bytes)
+                    .unwrap_or(false)
+        })
+        .expect("fx2 canonical copy");
+    let target_attempts = fx1.work_path().join("attempts");
+    fs::create_dir_all(&target_attempts).unwrap();
+    fs::copy(
+        &canonical2,
+        target_attempts.join(canonical2.file_name().unwrap()),
+    )
+    .unwrap();
+    let target_pending = fx1.work_path().join(".osp").join("pending-authorizations");
+    fs::create_dir_all(&target_pending).unwrap();
+    fs::copy(
+        &artifact2,
+        target_pending.join(artifact2.file_name().unwrap()),
+    )
+    .unwrap();
+    let receipt2 = artifact2.with_extension("json.receipt.json");
+    fs::copy(
+        &receipt2,
+        target_pending.join(receipt2.file_name().unwrap()),
+    )
+    .unwrap();
+
+    // Gate: zarf uzay-2'nin (anchor geçer — kopya kanonik), ama state-dir
+    // uzay-1'in → view_id fence RED, verdict yok.
+    let run_dir = prepare_resumed_gate_run_dir(&fx2, "run-xspace-2", &task2, &None);
+    let ev = declared_evidence_ok(&run_dir);
+    let out = osp_in(&work2)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(fx2.repo_path())
+        .arg(&run_dir)
+        .arg("--state-dir")
+        .arg(fx1.work_path())
+        .arg("--evidence")
+        .arg(&ev)
+        .output()
+        .expect("run osp realization-gate");
+    assert!(!out.status.success(), "çapraz-uzay RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("space-identity fence"),
+        "view_id fence mesajı: {stderr}"
+    );
+    assert!(
+        !run_dir.join("realization-verdict.json").exists(),
+        "verdict yazılmaz"
+    );
+}
+
+/// **#203 adversarial C (tur-2 P0):** AcceptAsProgress yetkili askı resume'la
+/// UYGULANIR ama gate'te tamamlanma kanıtına TERFİ EDİLEMEZ — uygunluk çiti RED.
+/// Gerçek ilerleme-askısı tarifi (probe ile doğrulandı): scope a.rs; öneri a.rs'ye
+/// import EKLER (new_edges → OpKind::AddEdge gerektirir); sim-sonrası coupling
+/// 0.5 > eşik 0.3 → NotCompleted; loss iyileşir (tohum 0.7 → 0.5, preferred
+/// x=0.3) → AcceptImprovement + progress checkpoint → AcceptAsProgress → Held.
+#[test]
+fn realization_gate_resumed_progress_authorization_not_completion() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let mut task = task_envelope_v2(&fx.head, "a.rs");
+    task["task"]["target_predicate_set"]["predicates"][0]["predicate"]["threshold"] =
+        serde_json::json!(0.3);
+    task["task"]["target_predicate_set"]["preferred_vector"] = serde_json::json!({
+        "x": 0.3, "y": 0.5, "z": 0.5, "w": 0.5, "v": 0.3
+    });
+    task["task"]["policy"]["predicate_failure_policy"] = serde_json::json!("AcceptImprovement");
+    task["task"]["policy"]["allow_progress_checkpoint"] = serde_json::json!(true);
+    task["task"]["allowed_operations"] = serde_json::json!(["RemoveImport", "AddEdge"]);
+    let task_path = fx.write_task(&task);
+    let proposals_path = work.join("proposals-add-import.json");
+    fs::write(
+        &proposals_path,
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "proposals": [{
+                "new_nodes": [],
+                "new_edges": [{"from": "a.rs", "to": "b.rs", "kind": "Imports"}],
+                "removed_edges": [],
+                "affected_nodes": ["a.rs"],
+                "reasoning": "progress checkpoint probe"
+            }]
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let run = work.join("run-resumed-progress");
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(
+        out.status.code(),
+        Some(10),
+        "ilerleme askısı da witness bekler. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Askının yetki kararları gerçekten progress-yönlü (test öncüsü).
+    let artifacts = pending_artifacts(&fx);
+    assert_eq!(artifacts.len(), 1);
+    let pending = read_json(&artifacts[0]);
+    assert_eq!(
+        pending["record"]["mutation_decision"], "AcceptAsProgress",
+        "{}",
+        pending["record"]
+    );
+
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifacts[0], claim_id);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "progress yetkisi resume ile uygulanır. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Gate: ResumeApplied ⇏ CompletionAuthorized — RED, verdict yok.
+    let run_dir = prepare_resumed_gate_run_dir(&fx, "run-resumed-progress", &task_path, &None);
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert!(!out.status.success(), "uygunluk çiti RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("completion-eligibility fence"),
+        "uygunluk çiti mesajı: {stderr}"
+    );
+    assert!(
+        stderr.contains("AcceptAsProgress"),
+        "red gerekçesi yetki kararını adlar: {stderr}"
+    );
+    assert!(
+        !run_dir.join("realization-verdict.json").exists(),
+        "verdict yazılmaz"
+    );
+}
+
+/// **#203 (tur-2 P1-3):** receipt YOKLUK (temiz exit 4 — adversarial A'da
+/// kaplandı) ile receipt BÜTÜNLÜK HATASI ayrı: bozuk receipt integrity RED,
+/// "henüz uygulanmamış" olarak yorumlanMAZ.
+#[test]
+fn realization_gate_resumed_corrupt_receipt_is_integrity_red() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.90));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join("run-resumed-corrupt");
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(out.status.code(), Some(10));
+    let artifacts = pending_artifacts(&fx);
+    let artifact = artifacts[0].clone();
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(out.status.code(), Some(0));
+
+    // Receipt'i boz (sequence alanı kurcala → benim sequence fence'im düşer;
+    // verify_against'ın kontrol ETMEDİĞİ alan — fence'in varlığının kanıtı).
+    let receipt_path = artifact.with_extension("json.receipt.json");
+    let mut receipt = read_json(&receipt_path);
+    receipt["resulting_sequence"] = serde_json::json!(99);
+    fs::write(
+        &receipt_path,
+        serde_json::to_string_pretty(&receipt).unwrap(),
+    )
+    .unwrap();
+
+    let run_dir = prepare_resumed_gate_run_dir(&fx, "run-resumed-corrupt", &task_path, &None);
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert!(!out.status.success(), "integrity RED (exit 4 değil)");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("sequence fence"),
+        "bütünlük mesajı: {stderr}"
+    );
+    assert!(
+        !stderr.contains("not yet applied"),
+        "bozuk receipt 'henüz uygulanmamış' sanılmaz: {stderr}"
+    );
+}
+
+/// **#203 (tur-2 P1-2):** V1-only kapsam — V1 adresi boş ama aynı kimlik için
+/// V2 kardeş varsa açık kapsam RED'i (sessiz "askı yok" YOK).
+#[test]
+fn realization_gate_resumed_v2_pending_scope_refused() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    let run = work.join("run-resumed-v2scope");
+    fs::create_dir_all(&run).unwrap();
+    fs::copy(&baseline, run.join("baseline.json")).unwrap();
+    fs::write(
+        run.join("task.json"),
+        serde_json::json!({
+            "schema_version": 2,
+            "repository_head": fx.head,
+            "scope_bindings": [{"path": "main.rs"}],
+            "task": {"id": 7, "target_predicate_set": {"mode": "All", "predicates": [
+                {"predicate": {"metric": "Coupling", "operator": "Le", "threshold": 0.90,
+                               "tolerance": 0.0, "scope": {"Path": "main.rs"}, "required_source": "TreeSitter"},
+                 "weight": null}]}}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        run.join("applied.patch"),
+        b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n use crate::a::A;\n",
+    )
+    .unwrap();
+    // El-yapımı askı zarfı (matrix deseni: anchor'lu — kanonik kopya bayt-özdeş)
+    // + V2 kardeş dosyası. V1 adresi bu digest'te YOK.
+    let task_digest = sha256_of(&run.join("task.json"));
+    let mut env = attempt_envelope(&fx.head, 7);
+    env["completion_basis"] = serde_json::Value::Null;
+    env["run"]["task_digest"] = serde_json::json!(task_digest);
+    env["result"] = serde_json::json!({
+        "kind": "awaiting_witnesses", "attempts": 0,
+        "pending": {"claim_id": 1, "attempt_num": 1, "evidence_digest": "f".repeat(64)}
+    });
+    let bytes = env.to_string();
+    fs::write(run.join("attempt.json"), &bytes).unwrap();
+    let attempts = work.join("attempts");
+    fs::create_dir_all(&attempts).unwrap();
+    fs::write(attempts.join("task-7-990001-1.json"), bytes).unwrap();
+    let pending_dir = work.join(".osp").join("pending-authorizations");
+    fs::create_dir_all(&pending_dir).unwrap();
+    fs::write(
+        pending_dir.join(format!(
+            "task-7--claim-1--attempt-1--v2-{}.json",
+            "e".repeat(64)
+        )),
+        "{}",
+    )
+    .unwrap();
+    let ev = declared_evidence_ok(&run);
+
+    let out = run_gate(&fx, &run, &ev);
+    assert!(!out.status.success(), "V2 kapsam RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("V2 pending artifact exists"),
+        "açık kapsam mesajı: {stderr}"
+    );
+}
+
+/// **#203 (tur-2 P1-1):** çift-yönlü route fence — witnessed-resume akışının
+/// GERÇEK verdict'ini (her iki kopyada da) attempt_direct'e kurcala → bayt-eş
+/// ve binding geçerli kalır ama route/zarf uyuşmazlığı finalize'ta RED.
+#[test]
+fn finalize_run_resumed_route_mismatch_refused() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.90));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join("run-resumed-routefence");
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(out.status.code(), Some(10));
+    let artifacts = pending_artifacts(&fx);
+    let artifact = artifacts[0].clone();
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(out.status.code(), Some(0));
+
+    let run_dir = prepare_resumed_gate_run_dir(
+        &fx,
+        "run-resumed-routefence",
+        &task_path,
+        &Some(proposals_path.clone()),
+    );
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(out.status.code(), Some(0), "gerçek witnessed verdict");
+
+    // İki nushayı da aynı şekilde kurcala (bayt-eşleşme korunur).
+    let tamper = |p: &Path| {
+        let raw = fs::read_to_string(p).unwrap();
+        fs::write(p, raw.replace("\"witnessed_resume\"", "\"attempt_direct\"")).unwrap();
+    };
+    tamper(&run_dir.join("realization-verdict.json"));
+    let short: String = sha256_of(&attempt_path)
+        .strip_prefix("sha256:")
+        .unwrap()
+        .chars()
+        .take(16)
+        .collect();
+    tamper(
+        &work
+            .join("realizations")
+            .join(format!("realization-{short}.json")),
+    );
+
+    let out = osp_in(&work)
+        .arg("finalize-run")
+        .arg(&run_dir)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run");
+    assert!(!out.status.success(), "route mismatch RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("route fence"),
+        "route fence mesajı: {stderr}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #203 — PR #207 kod review kapanışları (P0-1/P0-2/P1-1/P1-2): finalize'ın
+// GÜNCEL kanıt zinciri yeniden doğrulaması (pending + patch), worktree yaşam
+// döngüsü ve truth-surface tutarlılığı (basis raporu).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// #203 review: mutlu-yol öncüsü — askı → resume → gate exit 0. Negatif
+/// testlerin hepsi BU zincirin ÜZERİNE tek bir bozulma enjekte eder (gate
+/// başarısız OLDUKTAN SONRA kanıt zincirinden bir halka çekilir/sakatlanır).
+fn witnessed_resume_happy_path(tag: &str) -> (HarnessFixture, PathBuf, PathBuf) {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.90));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join(tag);
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(out.status.code(), Some(10), "askı exit 10");
+    let artifacts = pending_artifacts(&fx);
+    assert_eq!(artifacts.len(), 1);
+    let artifact = artifacts[0].clone();
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(out.status.code(), Some(0), "resume exit 0");
+    let run_dir = prepare_resumed_gate_run_dir(&fx, tag, &task_path, &Some(proposals_path));
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "gate exit 0. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (fx, run_dir, artifact)
+}
+
+fn run_finalize(fx: &HarnessFixture, run_dir: &Path) -> std::process::Output {
+    osp_in(fx.work_path())
+        .arg("finalize-run")
+        .arg(run_dir)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run")
+}
+
+/// **P0-1 (a):** gate başarılı OLDUKTAN SONRA pending artifact silinirse
+/// finalize RED — receipt digest hâlâ eşleşse de güncel kanıt zinciri
+/// kurulamaz ("gate zaten doğrulamıştı" yeterli DEĞİL).
+#[test]
+fn finalize_run_resumed_pending_deleted_after_gate_refused() {
+    let (fx, run_dir, artifact) = witnessed_resume_happy_path("run-203-pending-deleted");
+    fs::remove_file(&artifact).unwrap();
+
+    let out = run_finalize(&fx, &run_dir);
+    assert!(!out.status.success(), "pending silinmiş → RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pending artifact unreadable"),
+        "mesaj: {stderr}"
+    );
+}
+
+/// **P0-1 (b):** gate sonrası pending baytları bozulursa (strict verify düşer)
+/// finalize RED — integrity hatası, "henüz uygulanmamış" sanılmaz.
+#[test]
+fn finalize_run_resumed_pending_corrupted_after_gate_refused() {
+    let (fx, run_dir, artifact) = witnessed_resume_happy_path("run-203-pending-corrupt");
+    fs::write(&artifact, b"{ not a pending authorization").unwrap();
+
+    let out = run_finalize(&fx, &run_dir);
+    assert!(!out.status.success(), "pending bozuk → RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed strict verification"),
+        "mesaj: {stderr}"
+    );
+}
+
+/// **P0-2:** verdict tüketiliyorsa `applied.patch` ZORUNLU — gate sonrası
+/// patch silinirse finalize RED; "opsiyonel artifact" savunması kalkar (eski
+/// davranışta digest fence sessizce atlanıyordu).
+#[test]
+fn finalize_run_resumed_patch_deleted_after_gate_refused() {
+    let (fx, run_dir, _artifact) = witnessed_resume_happy_path("run-203-patch-deleted");
+    fs::remove_file(run_dir.join("applied.patch")).unwrap();
+
+    let out = run_finalize(&fx, &run_dir);
+    assert!(!out.status.success(), "patch silinmiş → RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("applied.patch is required when a realization verdict is consumed"),
+        "mesaj: {stderr}"
+    );
+}
+
+/// **P1-2:** witnessed-resume başarısız verdictinde (PredicateUnsatisfied,
+/// exit 3) terminal raporu `basis=None` der — `Some(Graph)` DEMEZ (direct
+/// semantiği route'a taşınmadı); finalize satırı da basis taşımaz, yalnız
+/// `realization_verdict` etiketi yazar ("denenmiş ama doğrulanamamış").
+#[test]
+fn realization_gate_failed_witnessed_verdict_reports_no_graph_basis() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    // Eşik 0.5: askı yolu sağlam (sim 0.5 ≤ 0.5 → Completed → Held); gate'in
+    // KENDİ analizi 0.667 > 0.5 → PredicateUnsatisfiedAfterReanalysis (exit 3).
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.50));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join("run-203-basis-report");
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(out.status.code(), Some(10));
+    let artifacts = pending_artifacts(&fx);
+    let artifact = artifacts[0].clone();
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(out.status.code(), Some(0));
+
+    let run_dir = prepare_resumed_gate_run_dir(
+        &fx,
+        "run-203-basis-report",
+        &task_path,
+        &Some(proposals_path),
+    );
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "PredicateUnsatisfied exit 3. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("basis=None"),
+        "route-aware rapor basis=None demeli: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Some(Graph)") && !stdout.contains("Some(\"graph\")"),
+        "witnessed başarısızlıkta Graph basis gösterilMEZ: {stdout}"
+    );
+
+    // Finalize: baz YOK, yalnız etiket — CLI raporuyla aynı önerme.
+    let out = run_finalize(&fx, &run_dir);
+    assert!(out.status.success(), "finalize exit ok");
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        row.get("completion_basis").is_none(),
+        "witnessed başarısız verdict completion_basis KURMAZ: {row}"
+    );
+    assert_eq!(
+        row["realization_verdict"], "predicate_unsatisfied_after_reanalysis",
+        "{row}"
+    );
+}
+
+/// **P1-1:** gate hatası worktree'yi ORTADA BIRAKMAZ. Guard'lı bölge içindeki
+/// herhangi bir hata (burada: apply edilemeyen patch) sonrası `git worktree
+/// list` temiz kalır; before-analyze parity fence'i de aynı guard'ın içinde
+/// koşar (yapısal garanti — geçerli-digestli ama eşleşmeyen base üretmek
+/// entegrasyon düzeyinde kurucu-tutarlılık gerektirdiğinden parity'nin kendi
+/// hatası ayrıca tetiklenemez; guard kapsamı ortaktır).
+#[test]
+fn realization_gate_error_path_leaves_no_worktree() {
+    let (fx, run_dir, _artifact) = witnessed_resume_happy_path("run-203-worktree-leak");
+    fs::write(run_dir.join("applied.patch"), b"not a valid patch\n").unwrap();
+    let ev = declared_evidence_ok(&run_dir);
+
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert!(
+        !out.status.success(),
+        "bozuk patch RED. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = Command::new("git")
+        .args(["-C", p_str(fx.repo_path()), "worktree", "list"])
+        .output()
+        .expect("git worktree list");
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "gate hatası sonrası ek worktree KALMAMALI: {stdout}"
+    );
+}

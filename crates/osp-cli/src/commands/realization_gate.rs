@@ -28,6 +28,15 @@
 //! YOK). Binding: `{base_head, patch_digest, candidate_head, own_after_digest}`
 //! — After = Apply(Base, Patch) **yapı tarafından kanıtlanır**.
 //!
+//! **#203 (karar-0/b) — ikinci giriş sınıfı: witnessed resume.** Askı
+//! (`awaiting_witnesses`) zarfı, kanonik pending-artifact + receipt zinciriyle
+//! bağlanır (`bind_witnessed_resume` — bağlama sözleşmesi): zarfın
+//! `result.pending` kimliğinden adreslenen askı, doğrulanmış receipt ve
+//! attempt-anı tamamlanma-yetki kararlarıyla gate'e GİRER. `c_predicted` bu
+//! yolda zarf evidence'ından DEĞİL, pending basis'inin ölçülmüş coupling'inden
+//! gelir (askı zarfı evidence taşımaz). Verdict'e `completion_route` +
+//! resume provenance'ı bağlanır; attempt zarfı DEĞİŞMEZ (üç-kayıt dürüstlüğü).
+//!
 //! Exit kodları betiklenebilir: 0 = RealizedCompleted, 2 = BuildInvalid,
 //! 3 = PredicateUnsatisfied, 4 = NotAttempted.
 
@@ -188,21 +197,36 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
                 )
             })?,
     };
-    // **P1 (tur-2): GraphCompletionShapeProof** — graph-completed OLMAYAN gerçelerden
-    // proof kurulamaz; gate bağlamı RED ile belli olur (NotAttempted verdict'i yazılmaz).
-    let proof = osp_core::realization::GraphCompletionShapeProof::from_facts(
-        task_id,
-        canonical_attempt_ref.clone(),
-        &result_kind,
-        completion_basis,
-    )
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "realization-gate context: the attempt is not a graph-completed claim \
-             (result.kind={result_kind:?}, completion_basis={completion_basis:?}) — the \
-             gate only runs on graph-completed claims"
+    // **P1 (tur-2) + #203 (karar-0/b): giriş yönlendirmesi** — iki giriş sınıfı.
+    // Direct: graph-completed iddia (mevcut yol). WitnessedResume: askı zarfı +
+    // kanonik pending/receipt zinciri (bağlama sözleşmesi, `bind_witnessed_resume`).
+    // Diğer tüm şekiller RED — graph-completed OLMAYAN VE askı OLMAYAN gerçelerden
+    // proof kurulamaz (NotAttempted verdict'i yazılmaz).
+    let (proof, resumed_binding): (
+        osp_core::realization::GateEntryProof,
+        Option<ResumedBinding>,
+    ) = if result_kind == "completed" && completion_basis == Some(CompletionBasis::Graph) {
+        let direct = osp_core::realization::GraphCompletionShapeProof::from_facts(
+            task_id,
+            canonical_attempt_ref.clone(),
+            &result_kind,
+            completion_basis,
         )
-    })?;
+        .expect("entry routing already matched the from_facts predicate");
+        (osp_core::realization::GateEntryProof::Direct(direct), None)
+    } else if result_kind == "awaiting_witnesses" && completion_basis.is_none() {
+        let binding =
+            bind_witnessed_resume(&envelope, task_id, &canonical_attempt_ref, &state_dir)?;
+        let entry = osp_core::realization::GateEntryProof::WitnessedResume(binding.proof.clone());
+        (entry, Some(binding))
+    } else {
+        anyhow::bail!(
+            "realization-gate context: the attempt is neither a graph-completed claim nor \
+             a witnessed-resume suspension (result.kind={result_kind:?}, \
+             completion_basis={completion_basis:?}) — the gate runs only on these two \
+             entry shapes"
+        );
+    };
 
     // 3) **Artifact identity (P0 fence ailesi — #198 review):** task/after/evidence
     //    read-once tamponlardan okunur ve verdict artifact'ı tükettiği her şeyin
@@ -287,8 +311,40 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // Cleanup guard — worktree her durumda kaldırılır.
+    // Cleanup guard — worktree her durumda kaldırılır. Parity fence'i DE bu
+    // guard'ın İÇİNDE (closure'un başında) koşar: before-analyze hatası veya
+    // digest uyuşmazlığı erken dönüşle worktree'yi ORTADA BIRAKMAZ (PR #207
+    // review P1-1).
     let result = (|| -> anyhow::Result<(f64, String, String)> {
+        // **#203 (bağlama sözleşmesi madde-5b — digest-parity):** witnessed-resume
+        // girişinde gate'in KENDİ before-analyze'ı. Attempt akışıyla BİREBİR aynı
+        // inşaat (analyze_repo_with_config + AnalysisConfig::default + aynı adapter
+        // registry — mod.rs attempt akışının aynısı) → `SpaceDigest::compute`.
+        // Sözleşme: aynı ağaç → aynı kanonik digest; askının `base.content_digest`'i
+        // ancak o zaman BU repo durumunda ölçülmüş sayılır (yanlış-askı bağlanması
+        // ve base değişimi burada ölür). Parite pinned testle sabitlenmiştir.
+        if let Some(binding) = &resumed_binding {
+            let registry = osp_analyzer::language::AdapterRegistry::default_all();
+            let config = osp_analyzer::contract::AnalysisConfig::default();
+            let before = osp_analyzer::pipeline::analyze_repo_with_config(
+                &worktree_path,
+                &registry,
+                &config,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("gate before-analysis failed on base state {base_head}: {e}")
+            })?;
+            let before_digest = osp_core::authorization::SpaceDigest::compute(&before.space)
+                .map_err(|e| anyhow::anyhow!("gate before-analysis digest failed: {e}"))?;
+            anyhow::ensure!(
+                before_digest == binding.base_content_digest,
+                "space-content parity fence: the gate's own before-analysis of base_head does \
+                 not reproduce the pending authorization's base content digest — the \
+                 authorization was measured on a different base than this repo state \
+                 (binding refused)"
+            );
+        }
+
         // (b) Patch'i uygula (MUTLAK yol — git worktree -C ile göreli yolu
         // worktree içinde arar). Canonicalize YOK (Windows UNC \\?\
         // öneki git'i kırar) — absolute join yeterli.
@@ -390,12 +446,19 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         .output();
     let _ = std::fs::remove_dir_all(&worktree_dir);
     let (c_observed, candidate_head, own_after_digest) = result?;
-    let c_predicted = envelope
-        .pointer("/evidence")
-        .and_then(|e| e.as_array())
-        .and_then(|a| a.last())
-        .and_then(|last| last.pointer("/after/x"))
-        .and_then(|x| x.as_f64());
+    // **#203 c_predicted yönlendirmesi:** direct → zarf evidence[]'ının sim-öngörüsü
+    // (mevcut sözleşme). Witnessed-resume → pending basis'inin ölçülmüş coupling'i
+    // (askı zarfı evidence TAŞIMAZ — run-26 gerçeği: `evidence: []`; öngörü değeri
+    // basis'te, digest'ine bağlı olarak yaşar; provenance çiti bind aşamasında kuruldu).
+    let c_predicted = match &resumed_binding {
+        Some(binding) => Some(binding.c_predicted),
+        None => envelope
+            .pointer("/evidence")
+            .and_then(|e| e.as_array())
+            .and_then(|a| a.last())
+            .and_then(|last| last.pointer("/after/x"))
+            .and_then(|x| x.as_f64()),
+    };
     let predicate_after_reanalysis = Some(c_observed <= threshold + tolerance + 1e-12);
 
     // 4) İnsan-beyanlı gerçeler + kanıt (read-once + digest).
@@ -450,6 +513,20 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
             "candidate_head": candidate_head,
             "own_after_digest": own_after_digest,
             "evidence_input_digest": evidence_input_digest,
+            // **#203:** giriş rotası + (witnessed) resume provenance'ı. Missing
+            // `completion_route` yalnız eski direct verdictlerde tolere edilir;
+            // finalize witnessed-resume verdictlerinde alanları ZORUNLU doğrular.
+            "completion_route": if resumed_binding.is_some() {
+                serde_json::json!("witnessed_resume")
+            } else {
+                serde_json::json!("attempt_direct")
+            },
+            "resume_pending_ref": resumed_binding
+                .as_ref()
+                .map(|b| serde_json::json!(b.pending_ref)),
+            "resume_receipt_digest": resumed_binding
+                .as_ref()
+                .map(|b| serde_json::json!(b.receipt_digest)),
         },
         "verdict": serde_json::to_value(&verdict)?,
         "e_c": e_c,
@@ -492,12 +569,291 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         "✓ realization verdict written to {}",
         verdict_path.display()
     );
+    // **#203 (PR review P1-2):** truth-surface tutarlılığı — terminal raporu
+    // route-aware projeksiyondan basılır (finalize'ın ledger projeksiyonuyla TEK
+    // kaynak). `RealizationVerdict::completion_basis()` direct giriş semantiği
+    // taşır (graph-completed iddia girişte kurulmuştu); witnessed-resume'da
+    // başarısız verdict HİÇ graph-completed iddia kurmaz → rapor basis=None
+    // der, Some(Graph) DEMEZ.
+    let ledger_label = match label {
+        "RealizedCompleted" => "realized",
+        "DeclaredRealizationBuildInvalid" => "declared_realization_build_invalid",
+        "PredicateUnsatisfiedAfterReanalysis" => "predicate_unsatisfied_after_reanalysis",
+        _ => "not_attempted",
+    };
+    let (route_basis, _) = crate::commands::finalize_run::ledger_completion_projection(
+        resumed_binding.is_some(),
+        ledger_label,
+    );
     println!(
-        "verdict = {label} (basis={:?}, build_errors={:?}, E_c={e_c:?})",
-        verdict.completion_basis(),
+        "verdict = {label} (basis={route_basis:?}, build_errors={:?}, E_c={e_c:?})",
         verdict.build_error_count(),
     );
     std::process::exit(code);
+}
+
+/// **#203 (karar-0/b):** witnessed-resume bağlamı — pending kaydından, parity
+/// ve c_predicted için gereken kanal. `bind_witnessed_resume`'ın çıktısı.
+struct ResumedBinding {
+    proof: osp_core::realization::ResumedCompletionShapeProof,
+    /// Askının base uzay içeriği (madde-5b parity fence'inin karşılığı).
+    base_content_digest: osp_core::authorization::SpaceDigest,
+    /// Sim-öngörüsü: basis'in ölçülmüş coupling değeri (provenance-doğrulamalı).
+    c_predicted: f64,
+    /// Kanonik pending referansı (state-dir'e göre, ileri-slash).
+    pending_ref: String,
+    /// Bağlanan receipt'in sha256 digest'i (read-once baytlardan).
+    receipt_digest: String,
+}
+
+/// **#203 bağlama sözleşmesi — attempt→pending tam kimlik bağı.** Yalnız
+/// attempt-anında üretilmiş kanonik bilgiyle kurulur (tur-1 P0-1 kapanışı):
+///
+/// 1. Zarfın `result.pending` kimlik üçlüsü (anchor'lu zarfta taşınır; missing ≡
+///    pre-#203 şekli → re-bind YOK, "re-run the attempt").
+/// 2. Kanonik adres tek-kaynak helper'dan türetilir (V1; V2 kardeş varsa açık RED).
+/// 3. Pending baytları read-once; strict parse + digest recompute + kimlik-üçlü
+///    eşleşmesi AYNI tampondan (consumer-side TOCTOU yok).
+/// 4. Receipt: sibling read-once + `verify_against` + `resulting_sequence ==
+///    base.sequence + 1`. YOKLUK (deterministik NotAttempted exit 4, verdict
+///    yazılmaz) ile BÜTÜNLÜK HATASI (integrity RED) bilinçle AYRI (tur-2 P1-3).
+/// 5. Uzay bağlığı: `base.view_id == PersistedSpaceViewId(state-dir)` (load-only;
+///    çapraz-uzay ikamesi reddi). (5b — before-analyze parity — worktree
+///    kurulduktan sonra ana akışta kurulur.)
+///
+/// Ayrıca **tamamlanma-uygunluk çiti** (tur-2 P0): `ResumeApplied ⇏
+/// CompletionAuthorized` — pending'in attempt-anı yetki kararları
+/// (`predicate_completion == Completed ∧ mutation_decision == AcceptAsCompleted
+/// ∧ intended_apply_target == Lane(Mainline)`) doğrulanır; ilerleme-yetkili
+/// askı tamamlanma kanıtına terfi edemez. Resume motorunun kararları DEĞİŞMEZ.
+#[allow(clippy::too_many_lines)]
+fn bind_witnessed_resume(
+    envelope: &serde_json::Value,
+    task_id: u64,
+    canonical_attempt_ref: &str,
+    state_dir: &Path,
+) -> anyhow::Result<ResumedBinding> {
+    use osp_core::authorization::{
+        parse_pending_authorization, pending_authorization_artifact_filename_v1,
+        pending_authorization_artifact_filename_v2_prefix,
+        pending_authorization_receipt_filename_v1, PersistedSpaceViewId, ResumeReceipt,
+        SpaceViewId,
+    };
+    use osp_core::realization::{ResumeEligibilityFacts, ResumedCompletionShapeProof};
+    use osp_core::trajectory::{ApplyTarget, CommitLane, MutationDecision, PredicateCompletion};
+
+    // Madde-1: askı kimliği anchor'lu zarftan. Missing ≡ pre-#203 şekli.
+    let pending_identity = envelope.pointer("/result/pending").ok_or_else(|| {
+        anyhow::anyhow!(
+            "witnessed-resume binding: this awaiting_witnesses envelope predates #203 and \
+             carries no result.pending identity — it cannot be bound to its pending \
+             authorization (re-run the attempt; retroactive identity injection is \
+             refused by design)"
+        )
+    })?;
+    let claim_id = pending_identity
+        .pointer("/claim_id")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("result.pending.claim_id is missing or not a u64"))?;
+    let attempt_num = pending_identity
+        .pointer("/attempt_num")
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("result.pending.attempt_num is missing or not a u64"))?;
+    let evidence_digest_hex = pending_identity
+        .pointer("/evidence_digest")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!("result.pending.evidence_digest is missing or not a string")
+        })?;
+    anyhow::ensure!(
+        evidence_digest_hex.len() == 64
+            && evidence_digest_hex.bytes().all(|b| b.is_ascii_hexdigit()),
+        "result.pending.evidence_digest must be 64 hex chars, found {evidence_digest_hex:?}"
+    );
+
+    // Madde-2: kanonik adres — tek-kaynak helper (drift imkânsız).
+    let pending_dir = state_dir.join(".osp").join("pending-authorizations");
+    let pending_filename = pending_authorization_artifact_filename_v1(
+        task_id,
+        claim_id,
+        attempt_num,
+        evidence_digest_hex,
+    );
+    let pending_path = pending_dir.join(&pending_filename);
+    if !pending_path.exists() {
+        // Tur-2 P1-2: V1-only kapsam sabitlemesi — V2 kardeş varsa yanlış bir
+        // "bu state-dir'de askı yok" yorumu VERİLMEZ, açık kapsam RED'i verilir.
+        let v2_prefix =
+            pending_authorization_artifact_filename_v2_prefix(task_id, claim_id, attempt_num);
+        let v2_sibling = std::fs::read_dir(&pending_dir)
+            .map(|entries| {
+                entries.filter_map(|e| e.ok()).any(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(&v2_prefix) && name.ends_with(".json")
+                })
+            })
+            .unwrap_or(false);
+        anyhow::ensure!(
+            !v2_sibling,
+            "witnessed-resume binding: a V2 pending artifact exists for this identity \
+             ({v2_prefix}…) — the #203 resumed gate binds V1 pending authorizations only \
+             (fail-closed, not a silent 'not applied')"
+        );
+        anyhow::bail!(
+            "witnessed-resume binding: canonical pending artifact not found at the address \
+             the envelope names ({}) — this state dir does not carry the suspension the \
+             attempt produced (cross-artifact substitution or wrong state dir)",
+            pending_path.display()
+        );
+    }
+
+    // Madde-3: read-once + strict verify + kimlik-üçlü eşleşmesi (aynı tampon).
+    let pending_bytes = std::fs::read(&pending_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", pending_path.display()))?;
+    let pending = parse_pending_authorization(&pending_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "pending artifact failed strict verification ({}): {e}",
+            pending_path.display()
+        )
+    })?;
+    let record = pending.record();
+    anyhow::ensure!(
+        record.task_id == task_id
+            && record.claim_id == claim_id
+            && record.attempt_num.get() == attempt_num
+            && record.evidence_digest.to_hex() == evidence_digest_hex,
+        "pending identity fence: the canonical artifact at the derived address carries a \
+         different identity than the envelope claims — cross-artifact substitution refused"
+    );
+
+    // Tamamlanma-uygunluk çiti (tur-2 P0): yetki kararları pending kaydından.
+    let eligibility = ResumeEligibilityFacts {
+        predicate_completion: record.predicate_completion,
+        mutation_decision: record.mutation_decision,
+        intended_apply_target: record.intended_apply_target,
+    };
+    anyhow::ensure!(
+        record.predicate_completion == PredicateCompletion::Completed
+            && record.mutation_decision == MutationDecision::AcceptAsCompleted
+            && record.intended_apply_target == ApplyTarget::Lane(CommitLane::Mainline),
+        "completion-eligibility fence: the suspended authorization was not \
+         completion-directed (predicate_completion={:?}, mutation_decision={:?}, \
+         intended_apply_target={:?}) — a progress/checkpoint authorization cannot be \
+         promoted to a completion claim (ResumeApplied does not imply \
+         CompletionAuthorized); verdict refused",
+        record.predicate_completion,
+        record.mutation_decision,
+        record.intended_apply_target
+    );
+
+    // Madde-4: receipt — yokluk ile bütünlük hatası AYRI (tur-2 P1-3).
+    let receipt_filename = pending_authorization_receipt_filename_v1(
+        task_id,
+        claim_id,
+        attempt_num,
+        evidence_digest_hex,
+    );
+    let receipt_path = pending_dir.join(&receipt_filename);
+    if !receipt_path.exists() {
+        // Dürüst boşluk: askı geçerli ama HENÜZ uygulanmamış. Deterministik
+        // NotAttempted (exit 4) — verdict YAZILMAZ (mevcut disiplin).
+        println!(
+            "NotAttempted: the suspension is valid but not yet applied — no resume \
+             receipt at {} (run `osp trajectory resume` first)",
+            receipt_path.display()
+        );
+        std::process::exit(4);
+    }
+    let receipt_bytes = std::fs::read(&receipt_path)
+        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", receipt_path.display()))?;
+    let receipt = ResumeReceipt::parse_strict_bytes(&receipt_bytes).map_err(|e| {
+        anyhow::anyhow!(
+            "resume receipt at {} is unreadable/corrupt — durable proof-chain \
+             inconsistency (NOT a 'still awaiting' state; operator intervention \
+             required): {e}",
+            receipt_path.display()
+        )
+    })?;
+    receipt.verify_against(record).map_err(|e| {
+        anyhow::anyhow!(
+            "resume receipt integrity RED ({}): {e} — durable proof-chain inconsistency \
+             (NOT a 'still awaiting' state)",
+            receipt_path.display()
+        )
+    })?;
+    // Tur-1 P0-2 eki: apply tam bir adım ilerletir (verify_against'ta yok).
+    anyhow::ensure!(
+        receipt.resulting_sequence == record.base_space_view_revision.sequence + 1,
+        "resume receipt sequence fence: resulting_sequence {} does not equal base \
+         sequence {} + 1 — the apply chain is inconsistent with the recorded base",
+        receipt.resulting_sequence,
+        record.base_space_view_revision.sequence
+    );
+
+    // Madde-5a: view_id — çapraz-uzay ikamesi reddi (load-only; resume disiplini).
+    let persisted = PersistedSpaceViewId::load_existing(state_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "cannot load the persisted space identity for {}: {e} — cross-space binding \
+             cannot be verified",
+            state_dir.display()
+        )
+    })?;
+    anyhow::ensure!(
+        record.base_space_view_revision.view_id == SpaceViewId::Persisted(persisted),
+        "space-identity fence: the pending authorization was issued under a different \
+         persisted space identity than this state dir carries — cross-space substitution \
+         refused (identical content digest would not prove the same persisted space)"
+    );
+
+    // Proof + kalıcı kanallar (5b parity ana akışta, worktree'de).
+    let pending_ref = format!(".osp/pending-authorizations/{pending_filename}");
+    let receipt_digest = crate::commands::finalize_run::sha256_bytes(&receipt_bytes);
+    let proof = ResumedCompletionShapeProof::from_resumed_facts(
+        task_id,
+        canonical_attempt_ref.to_string(),
+        pending_ref.clone(),
+        receipt_digest.clone(),
+        "awaiting_witnesses",
+        None,
+        eligibility,
+    )
+    .ok_or_else(|| {
+        anyhow::anyhow!("internal: eligibility fence passed but from_resumed_facts refused")
+    })?;
+
+    // c_predicted + provenance çiti (tur-1 P1): değer basis'in ölçülmüş
+    // coupling'i; kaynak aynı task predicate eksenine ve pipeline'ın ölçüm
+    // otoritesine (TreeSitter) bağlı olmalı — sim-öngörü uydurulamaz.
+    let basis = pending.authorization_basis();
+    let predicates = &basis.predicate_content.predicates;
+    anyhow::ensure!(
+        predicates.len() == 1
+            && osp_core::trajectory::PredicateAxis::from(predicates[0].axis)
+                == osp_core::trajectory::PredicateAxis::Coupling,
+        "c_predicted provenance fence: the pending basis does not carry exactly one \
+         Coupling predicate ({}) — the sim prediction cannot be sourced for this task",
+        predicates.len()
+    );
+    use osp_core::coords::MetricSource;
+    anyhow::ensure!(
+        MetricSource::from(basis.measured_result.coupling.source) == MetricSource::TreeSitter,
+        "c_predicted provenance fence: the pending basis coupling measurement is not \
+         TreeSitter-sourced — the attempt pipeline authority contract is violated"
+    );
+    let c_predicted = basis.measured_result.coupling.value;
+    anyhow::ensure!(
+        c_predicted.is_finite(),
+        "c_predicted from the pending basis is not finite — corrupt basis"
+    );
+
+    Ok(ResumedBinding {
+        proof,
+        base_content_digest: record.base_space_view_revision.content_digest.clone(),
+        c_predicted,
+        pending_ref,
+        receipt_digest,
+    })
 }
 
 /// **P0-1 + P1-cardinality (tur-3):** canonical verdict **attempt-digest-temelli**

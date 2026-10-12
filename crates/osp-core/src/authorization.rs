@@ -8907,6 +8907,45 @@ impl PendingAuthorizationReceiptV2 {
     }
 }
 
+/// **#203 bağlama sözleşmesi madde-2:** kanonik pending artifact dosya adı (V1)
+/// — TEK KAYNAK. Store türetimi (`artifact_path`) VE realization-gate türetimi
+/// (zarfın `result.pending` kimliğinden adresleme) AYNI fonksiyonu kullanır;
+/// iki ayrı format string'i drift ederse gate yanlış adrese bakar (bağlama
+/// sessizce kopar). Format baytları mevcut sözleşmeyle özdeştir.
+pub fn pending_authorization_artifact_filename_v1(
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    attempt_num: u64,
+    evidence_digest_hex: &str,
+) -> String {
+    format!("task-{task_id}--claim-{claim_id}--attempt-{attempt_num}--{evidence_digest_hex}.json")
+}
+
+/// **#203:** kanonik resume receipt dosya adı (V1) — artifact adının
+/// `.receipt.json` uzantılı kardeşi (R1 P0-1 adres türetiminin tek kaynağı).
+pub fn pending_authorization_receipt_filename_v1(
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    attempt_num: u64,
+    evidence_digest_hex: &str,
+) -> String {
+    format!(
+        "task-{task_id}--claim-{claim_id}--attempt-{attempt_num}--{evidence_digest_hex}.json.receipt.json"
+    )
+}
+
+/// **#203 (tur-2 P1-2):** V2 pending artifact dosya adı öneki —
+/// `task-{t}--claim-{c}--attempt-{n}--v2-`. Gate'in V1-only kapsam sabitlemesi
+/// bu önek üzerinden problanır: V1 adresi boş çıkarsa ve V2 kardeş varsa açık
+/// "V2 out of scope" RED'i (yanlış "henüz uygulanmamış" yorumunun önüne geçer).
+pub fn pending_authorization_artifact_filename_v2_prefix(
+    task_id: crate::trajectory::TaskId,
+    claim_id: ClaimId,
+    attempt_num: u64,
+) -> String {
+    format!("task-{task_id}--claim-{claim_id}--attempt-{attempt_num}--v2-")
+}
+
 /// Dosya tabanlı default implementation.
 ///
 /// **Path (INV-T9 #72 Commit 3):**
@@ -8955,10 +8994,11 @@ impl FilesystemPendingAuthorizationStore {
         attempt_num: AttemptNumber,
         evidence_digest: &SuspendedAttemptEvidenceDigest,
     ) -> std::path::PathBuf {
-        let hex = evidence_digest.to_hex();
-        let filename = format!(
-            "task-{task_id}--claim-{claim_id}--attempt-{}--{hex}.json",
-            attempt_num.get()
+        let filename = pending_authorization_artifact_filename_v1(
+            task_id,
+            claim_id,
+            attempt_num.get(),
+            &evidence_digest.to_hex(),
         );
         self.root
             .join(".osp")
@@ -8974,10 +9014,10 @@ impl FilesystemPendingAuthorizationStore {
         attempt_num: AttemptNumber,
         evidence_digest: &SuspendedAttemptEvidenceDigestV2,
     ) -> std::path::PathBuf {
-        let hex = evidence_digest.to_hex();
         let filename = format!(
-            "task-{task_id}--claim-{claim_id}--attempt-{}--v2-{hex}.json",
-            attempt_num.get()
+            "{}v2-{}.json",
+            pending_authorization_artifact_filename_v2_prefix(task_id, claim_id, attempt_num.get()),
+            evidence_digest.to_hex()
         );
         self.root
             .join(".osp")
@@ -9261,12 +9301,11 @@ impl FilesystemPendingAuthorizationStore {
     /// .receipt.json`, canonical artifact'ın kardeşi). Caller'ın verdiği path'e
     /// BAĞLI DEĞİL (R1 P0-1).
     fn resume_receipt_path_for(&self, record: &PendingAuthorization) -> std::path::PathBuf {
-        let hex = record.evidence_digest.to_hex();
-        let filename = format!(
-            "task-{}--claim-{}--attempt-{}--{hex}.json.receipt.json",
+        let filename = pending_authorization_receipt_filename_v1(
             record.task_id,
             record.claim_id,
-            record.suspended_attempt_evidence.attempt_num().get()
+            record.suspended_attempt_evidence.attempt_num().get(),
+            &record.evidence_digest.to_hex(),
         );
         self.root
             .join(".osp")
@@ -9472,8 +9511,17 @@ impl<'de> serde::Deserialize<'de> for ResumeReceipt {
 
 impl ResumeReceipt {
     /// Strict wire'dan kur (disk baytları → tip).
+    ///
+    /// **#203 (madde-4):** artık pub — realization-gate receipt baytlarını
+    /// read-once tampondan parse eder, `verify_against`'ı ayrıca çağırır
+    /// (`read_resume_receipt` ile aynı doğrulama yüzeyi, mağaza erişimi olmadan).
     fn from_strict_bytes(raw: &[u8]) -> Result<Self, String> {
         serde_json::from_slice(raw).map_err(|e| e.to_string())
+    }
+
+    /// **#203:** read-once bayt tamponundan strict parse (pub yüzey).
+    pub fn parse_strict_bytes(raw: &[u8]) -> Result<Self, String> {
+        Self::from_strict_bytes(raw)
     }
 
     /// **R1 P1-1:** Receipt'i askılı kayda karşı doğrula — tek doğrulama yüzeyi.
@@ -9688,7 +9736,19 @@ pub fn load_pending_authorization(
 ) -> Result<PendingAuthorizationEnvelope, PendingAuthorizationLoadError> {
     let bytes = std::fs::read(path)
         .map_err(|e| PendingAuthorizationLoadError::DeserializationFailed(e.to_string()))?;
-    let envelope: PendingAuthorizationEnvelope = serde_json::from_slice(&bytes)
+    parse_pending_authorization(&bytes)
+}
+
+/// **#203 bağlama sözleşmesi madde-3:** read-once bayt tamponundan strict
+/// parse + verify — `load_pending_authorization`'ın bayt-tabanlı kardeşi.
+/// Gate, pending baytlarını TEK okumada alır; parse, digest recompute ve
+/// kimlik kontrolleri AYNI tampon üzerinden çalışır (consumer-side TOCTOU
+/// yok — parse sonrası diskteki dosya değişse bile doğrulanan baytlar
+/// okunanlardır).
+pub fn parse_pending_authorization(
+    bytes: &[u8],
+) -> Result<PendingAuthorizationEnvelope, PendingAuthorizationLoadError> {
+    let envelope: PendingAuthorizationEnvelope = serde_json::from_slice(bytes)
         .map_err(|e| PendingAuthorizationLoadError::DeserializationFailed(e.to_string()))?;
     envelope.verify()?;
     Ok(envelope)
@@ -12731,6 +12791,52 @@ mod tests {
         assert!(
             matches!(err, PendingAuthorizationStoreError::BasisConflict { .. }),
             "same path + different content must be BasisConflict, got: {err:?}"
+        );
+    }
+
+    /// **#203 bağlama sözleşmesi madde-2 pini:** gate'in adres türetimi ile
+    /// store'un türetimi AYNI tek kaynaktan — helper'lar store formatıyla
+    /// bayt-özdeş ad üretir; drift olsaydı gate yanlış adrese bakardı.
+    #[test]
+    fn pending_filename_helpers_match_store_derivation_contract() {
+        // sample_pending_record fixture'ının kimlik alanlarıyla store türetimi.
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        let envelope = PendingAuthorizationEnvelope::new(record, basis).unwrap();
+        store.persist(&envelope).unwrap();
+        let artifact_path = dir.join(".osp").join("pending-authorizations").join(
+            pending_authorization_artifact_filename_v1(
+                envelope.record().task_id,
+                envelope.record().claim_id,
+                envelope.record().attempt_num.get(),
+                &envelope.record().evidence_digest.to_hex(),
+            ),
+        );
+        assert!(
+            artifact_path.is_file(),
+            "helper-derived address must equal the store-derived artifact path: {}",
+            artifact_path.display()
+        );
+        // Receipt adresi: artifact adının .receipt.json kardeşi (R1 P0-1).
+        let receipt_name = pending_authorization_receipt_filename_v1(
+            envelope.record().task_id,
+            envelope.record().claim_id,
+            envelope.record().attempt_num.get(),
+            &envelope.record().evidence_digest.to_hex(),
+        );
+        assert_eq!(
+            receipt_name,
+            format!(
+                "{}.receipt.json",
+                artifact_path.file_name().unwrap().to_string_lossy()
+            )
+        );
+        // V2 öneki (tur-2 P1-2 probe sabiti).
+        assert_eq!(
+            pending_authorization_artifact_filename_v2_prefix(1, 42, 3),
+            "task-1--claim-42--attempt-3--v2-"
         );
     }
 
