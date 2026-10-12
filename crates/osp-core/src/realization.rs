@@ -347,11 +347,122 @@ impl GraphCompletionShapeProof {
     }
 }
 
+/// **#203 (tur-2 P0 — tamamlanma-uygunluk girdileri):** attempt-anında verilip
+/// pending kaydında korunan yetkilendirme kararları. `ResumeApplied ⇏
+/// CompletionAuthorized` — tamamlanma-lik bu kararlardan türetilir, resume
+/// sonucundan DEĞİL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeEligibilityFacts {
+    pub predicate_completion: crate::trajectory::PredicateCompletion,
+    pub mutation_decision: crate::trajectory::MutationDecision,
+    pub intended_apply_target: crate::trajectory::ApplyTarget,
+}
+
+/// **#203 (karar-0/b): ResumedCompletionShapeProof** — witnessed-resume giriş
+/// şekli. `GraphCompletionShapeProof`'un kardeşi VE AYNI DÜRÜST ADLANDIRMASI:
+/// bu da bir ŞEKİL kanıtıdır — "bu zarf witness-bekleyen bir askıydı, askının
+/// yetkilendirme kararları tamamlanma-yönlüydü ve bu kanıt bir doğrulanmış
+/// resume-receipt'e bağlı" önermesi. Canonical provenance (pending artifact'ın
+/// gerçekten kanonik mağazadan geldiği, receipt'in `verify_against` geçtiği,
+/// uzay bağlığının kurulduğu) CLI zincirinde yaşar — core IO yapamaz.
+///
+/// Kabul koşulları (`from_resumed_facts`):
+/// - `result_kind == "awaiting_witnesses" ∧ completion_basis == None` (askı
+///   zarfının INV-T10 temsili — tamamlanma iddiası attempt-anında YOK);
+/// - uygunluk çiti: `predicate_completion == Completed ∧ mutation_decision ==
+///   AcceptAsCompleted ∧ intended_apply_target == Lane(Mainline)`
+///   (`AcceptAsProgress`/`NotCompleted`/mainline-dışı → proof KURULAMAZ —
+///   ilerleme-yetkili bir mutation tamamlanma yetkisine terfi edilemez).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ResumedCompletionShapeProof {
+    task_id: u64,
+    canonical_attempt_ref: String,
+    /// Kanonik pending-artifact referansı (`.osp/pending-authorizations/…`,
+    /// state-dir'e göre) — bağlama sözleşmesi madde-2'nin türettiği adres.
+    canonical_pending_ref: String,
+    /// Bağlanan resume receipt'inin sha256 digest'i (read-once baytlardan) —
+    /// verdict binding'inde kalıcı taşınır.
+    resume_receipt_digest: String,
+}
+
+impl ResumedCompletionShapeProof {
+    /// Doğrulayan constructor — witnessed-resume şekli ve uygunluk çiti
+    /// tutmayan gerçeler `None` döner (proof kurulamaz, gate RED).
+    pub fn from_resumed_facts(
+        task_id: u64,
+        canonical_attempt_ref: String,
+        canonical_pending_ref: String,
+        resume_receipt_digest: String,
+        result_kind: &str,
+        completion_basis: Option<CompletionBasis>,
+        eligibility: ResumeEligibilityFacts,
+    ) -> Option<Self> {
+        use crate::trajectory::{ApplyTarget, CommitLane, MutationDecision, PredicateCompletion};
+        let shape_ok = result_kind == "awaiting_witnesses" && completion_basis.is_none();
+        let completion_authorized = eligibility.predicate_completion
+            == PredicateCompletion::Completed
+            && eligibility.mutation_decision == MutationDecision::AcceptAsCompleted
+            && eligibility.intended_apply_target == ApplyTarget::Lane(CommitLane::Mainline);
+        (shape_ok && completion_authorized).then_some(Self {
+            task_id,
+            canonical_attempt_ref,
+            canonical_pending_ref,
+            resume_receipt_digest,
+        })
+    }
+
+    pub fn task_id(&self) -> u64 {
+        self.task_id
+    }
+
+    pub fn canonical_attempt_ref(&self) -> &str {
+        &self.canonical_attempt_ref
+    }
+
+    pub fn canonical_pending_ref(&self) -> &str {
+        &self.canonical_pending_ref
+    }
+
+    pub fn resume_receipt_digest(&self) -> &str {
+        &self.resume_receipt_digest
+    }
+}
+
+/// **#203: Gate giriş kanıtı** — direct ve witnessed-resume yollarının tipli
+/// ayrımı. İki giriş sınıfı farklı geçmişlere sahiptir (graph-completed iddia
+/// ↔ witness-bekleyen askı + receipt) ama AYNI realization ölçüm motorunu
+/// (`evaluate_gate`) tüketir: proof'un varlığı giriş garantisi taşır, alanları
+/// karar girdisi olarak tüketilmez.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GateEntryProof {
+    /// Direct: zarf attempt anında graph-completed iddia taşıyordu.
+    Direct(GraphCompletionShapeProof),
+    /// Witnessed resume: askı, doğrulanmış receipt'le bağlandı ve yetki
+    /// kararları tamamlanma-yönlüydü.
+    WitnessedResume(ResumedCompletionShapeProof),
+}
+
+impl GateEntryProof {
+    pub fn task_id(&self) -> u64 {
+        match self {
+            Self::Direct(p) => p.task_id(),
+            Self::WitnessedResume(p) => p.task_id(),
+        }
+    }
+
+    pub fn canonical_attempt_ref(&self) -> &str {
+        match self {
+            Self::Direct(p) => p.canonical_attempt_ref(),
+            Self::WitnessedResume(p) => p.canonical_attempt_ref(),
+        }
+    }
+}
+
 /// **RealizationGate (#196 uygulama-2, karar 2: CLI ritüelinde).** INV-T10
 /// zincirinin kararı üreten çekirdeği:
 ///
 /// ```text
-/// GraphCompletionShapeProof (doğrulanmış şekil-kanıtı) + RealizationEvidence (raw)
+/// GateEntryProof (doğrulanmış giriş-kanıtı: Direct | WitnessedResume) + RealizationEvidence (raw)
 ///         → evaluate_gate → RealizationVerdict
 /// ```
 ///
@@ -360,11 +471,13 @@ impl GraphCompletionShapeProof {
 /// RealizedCompleted yalnız `build == Succeeded ∧ predicate_after_reanalysis ==
 /// Some(true)` ile verilir; `c_observed/c_predicted` (E_c) kanıtta YAŞAR ama
 /// gate'i bağlamaz — graph-genişliği `D_G` toleransı ayrı çalışmadır.
-/// Proof'un **varlığı** garantiyi taşır (`from_facts` graph-completed şeklini
-/// doğrulamadan mühür vermez) — alanları karar girdisi olarak tüketilmez;
-/// kimlik kayıtları verdict kanalında (canonical ref) yaşar.
+/// Proof'un **varlığı** garantiyi taşır (`from_facts`/`from_resumed_facts`
+/// giriş şeklini doğrulamadan mühür vermez) — alanları karar girdisi olarak
+/// tüketilmez; kimlik kayıtları verdict kanalında (canonical ref'ler) yaşar.
+/// #203: iki giriş sınıfı AYNI karar gövdesini tüketir — route farkı yalnız
+/// CLI tarafındaki binding/projeksiyon farkıdır, çekirdek karar matrisi tek.
 pub fn evaluate_gate(
-    _proof: GraphCompletionShapeProof,
+    _proof: GateEntryProof,
     realization: RealizationEvidence,
 ) -> RealizationVerdict {
     match realization.build {
@@ -517,7 +630,7 @@ mod tests {
     /// predicate kanıtı yoksa / build kırıksa seal ÜRETİLEMEZ.
     #[test]
     fn gate_realizes_only_with_verified_predicate() {
-        let v = evaluate_gate(facts(), ok_evidence());
+        let v = evaluate_gate(GateEntryProof::Direct(facts()), ok_evidence());
         assert!(matches!(v, RealizationVerdict::RealizedCompleted { .. }));
         assert_eq!(v.completion_basis(), Some(CompletionBasis::Realized));
         assert!(
@@ -556,7 +669,7 @@ mod tests {
         // Gate de dürüst: eksik verify → NotAttempted (panic değil).
         assert!(matches!(
             evaluate_gate(
-                facts(),
+                GateEntryProof::Direct(facts()),
                 RealizationEvidence {
                     patch_created: false,
                     ..ok_evidence()
@@ -571,7 +684,7 @@ mod tests {
     fn gate_matrix_build_invalid_predicate_unsatisfied_not_attempted() {
         // D5a B-19: E_c = 0 ∧ BuildFailed(122).
         let inv = evaluate_gate(
-            facts(),
+            GateEntryProof::Direct(facts()),
             RealizationEvidence {
                 build: BuildOutcome::Failed { error_count: 122 },
                 c_observed: Some(0.0),
@@ -585,7 +698,7 @@ mod tests {
 
         // D5a A-20: build-geçer ama reanalysis predicate'i düşer (0.9167 > 0.89).
         let unsat = evaluate_gate(
-            facts(),
+            GateEntryProof::Direct(facts()),
             RealizationEvidence {
                 predicate_after_reanalysis: Some(false),
                 c_observed: Some(0.9167),
@@ -600,7 +713,7 @@ mod tests {
 
         // Dürüst boşluk: reanalysis yok → realized iddiası kurulamaz.
         let none = evaluate_gate(
-            facts(),
+            GateEntryProof::Direct(facts()),
             RealizationEvidence {
                 predicate_after_reanalysis: None,
                 ..ok_evidence()
@@ -642,5 +755,186 @@ mod tests {
     #[test]
     fn unsatisfied_seal_requires_false() {
         assert!(UnsatisfiedPredicateEvidence::try_new(ok_evidence()).is_err());
+    }
+
+    // ── #203: ResumedCompletionShapeProof + GateEntryProof ──────────────────
+
+    use crate::trajectory::{ApplyTarget, CommitLane, MutationDecision, PredicateCompletion};
+
+    fn resumed_facts() -> ResumedCompletionShapeProof {
+        ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "attempts/task-27-990-1.json".to_string(),
+            ".osp/pending-authorizations/task-27--claim-1--attempt-1--abcd.json".to_string(),
+            "sha256:receipt-digest".to_string(),
+            "awaiting_witnesses",
+            None,
+            ResumeEligibilityFacts {
+                predicate_completion: PredicateCompletion::Completed,
+                mutation_decision: MutationDecision::AcceptAsCompleted,
+                intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+            },
+        )
+        .expect("uygun askı + receipt + tamamlanma-yönlü kararlar proof mühürler")
+    }
+
+    /// #203 tur-2 P0: uygunluk çiti — `ResumeApplied ⇏ CompletionAuthorized`.
+    /// `AcceptAsProgress` / `NotCompleted` / mainline-dışı hedef proof
+    /// KURAMAZ: ilerleme-yetkili mutation tamamlanma yetkisine terfi edemez.
+    #[test]
+    fn resumed_proof_refuses_non_completion_authorization() {
+        let eligible = ResumeEligibilityFacts {
+            predicate_completion: PredicateCompletion::Completed,
+            mutation_decision: MutationDecision::AcceptAsCompleted,
+            intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+        };
+        // Progress checkpoint yetkisi (INV-T8: asla Mainline).
+        let progress = ResumeEligibilityFacts {
+            predicate_completion: PredicateCompletion::NotCompleted,
+            mutation_decision: MutationDecision::AcceptAsProgress,
+            intended_apply_target: ApplyTarget::Lane(CommitLane::TrajectoryCheckpoint),
+        };
+        assert!(
+            ResumedCompletionShapeProof::from_resumed_facts(
+                27,
+                "a".to_string(),
+                "p".to_string(),
+                "d".to_string(),
+                "awaiting_witnesses",
+                None,
+                progress,
+            )
+            .is_none(),
+            "AcceptAsProgress askısı tamamlanma kanıtına terfi edilemez"
+        );
+        // Karar karışımı: tamamlanma kararı ama hedef lane değil.
+        assert!(ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "a".to_string(),
+            "p".to_string(),
+            "d".to_string(),
+            "awaiting_witnesses",
+            None,
+            ResumeEligibilityFacts {
+                intended_apply_target: ApplyTarget::Lane(CommitLane::Sandbox),
+                ..eligible
+            },
+        )
+        .is_none());
+        // Karar tamamlanma-yönlü ama predicate düşmüş.
+        assert!(ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "a".to_string(),
+            "p".to_string(),
+            "d".to_string(),
+            "awaiting_witnesses",
+            None,
+            ResumeEligibilityFacts {
+                predicate_completion: PredicateCompletion::NotCompleted,
+                ..eligible
+            },
+        )
+        .is_none());
+        // Uygulanmamış hedef.
+        assert!(ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "a".to_string(),
+            "p".to_string(),
+            "d".to_string(),
+            "awaiting_witnesses",
+            None,
+            ResumeEligibilityFacts {
+                intended_apply_target: ApplyTarget::NotApplied,
+                ..eligible
+            },
+        )
+        .is_none());
+    }
+
+    /// #203: giriş ŞEKİLİ — yalnız `awaiting_witnesses ∧ basis=None` kabul;
+    /// direct şekiller (completed+Graph) ve iddia taşıyan kombinasyonlar red.
+    #[test]
+    fn resumed_proof_refuses_non_awaiting_shapes() {
+        let eligible = ResumeEligibilityFacts {
+            predicate_completion: PredicateCompletion::Completed,
+            mutation_decision: MutationDecision::AcceptAsCompleted,
+            intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+        };
+        // Direct şekil — resumed proof'un işi DEĞİL (GraphCompletionShapeProof'un).
+        assert!(ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "a".to_string(),
+            "p".to_string(),
+            "d".to_string(),
+            "completed",
+            Some(CompletionBasis::Graph),
+            eligible,
+        )
+        .is_none());
+        // INV-T10: realized attempt-anında temsil edilemez — bu giriş zaten
+        // CLI'de entry-RED; çekirdek de mühürlemez.
+        assert!(ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "a".to_string(),
+            "p".to_string(),
+            "d".to_string(),
+            "awaiting_witnesses",
+            Some(CompletionBasis::Realized),
+            eligible,
+        )
+        .is_none());
+        // Askı + graph basis tutarsızlığı (üretici asla yazmaz).
+        assert!(ResumedCompletionShapeProof::from_resumed_facts(
+            27,
+            "a".to_string(),
+            "p".to_string(),
+            "d".to_string(),
+            "awaiting_witnesses",
+            Some(CompletionBasis::Graph),
+            eligible,
+        )
+        .is_none());
+        // Mutlu yol: uygun askı proof mühürler (accessor'lar kimliği taşır).
+        let proof = resumed_facts();
+        assert_eq!(proof.task_id(), 27);
+        assert_eq!(proof.canonical_attempt_ref(), "attempts/task-27-990-1.json");
+        assert!(proof
+            .canonical_pending_ref()
+            .starts_with(".osp/pending-authorizations/"));
+        assert_eq!(proof.resume_receipt_digest(), "sha256:receipt-digest");
+    }
+
+    /// #203: witnessed girişli evaluate_gate — direct ile AYNI karar matrisi
+    /// (route farkı binding/projeksiyon katmanıdır, çekirdek kararı değil).
+    #[test]
+    fn witnessed_resume_entry_evaluates_same_verdict_matrix() {
+        let v = evaluate_gate(
+            GateEntryProof::WitnessedResume(resumed_facts()),
+            ok_evidence(),
+        );
+        assert!(matches!(v, RealizationVerdict::RealizedCompleted { .. }));
+        assert_eq!(v.completion_basis(), Some(CompletionBasis::Realized));
+
+        let inv = evaluate_gate(
+            GateEntryProof::WitnessedResume(resumed_facts()),
+            RealizationEvidence {
+                build: BuildOutcome::Failed { error_count: 122 },
+                tests: None,
+                ..ok_evidence()
+            },
+        );
+        assert_eq!(inv.build_error_count(), Some(122));
+
+        let unsat = evaluate_gate(
+            GateEntryProof::WitnessedResume(resumed_facts()),
+            RealizationEvidence {
+                predicate_after_reanalysis: Some(false),
+                ..ok_evidence()
+            },
+        );
+        assert!(matches!(
+            unsat,
+            RealizationVerdict::PredicateUnsatisfiedAfterReanalysis { .. }
+        ));
     }
 }

@@ -304,12 +304,26 @@ struct ExecutionMeasurementRead {
     provenance_native: bool,
 }
 
-/// `CliRunResult` mirror — `kind` üyeliği + `attempts` sayısı.
+/// `CliRunResult` mirror — `kind` üyeliği + `attempts` sayısı + #203 askı
+/// kimliği (route fence girdisi; yalnız awaiting_witnesses taşır, additive).
 #[derive(Debug, serde::Deserialize)]
 struct AttemptResultRead {
     kind: String,
     #[allow(dead_code)]
     attempts: u64,
+    #[serde(default)]
+    pending: Option<PendingIdentityRead>,
+}
+
+/// #203: `result.pending` — awaiting_witnesses askısının kanonik kimliği
+/// (run_envelope::CliPendingAuthorizationIdentity'nin finalize okuma şekli).
+#[derive(Debug, serde::Deserialize)]
+struct PendingIdentityRead {
+    #[allow(dead_code)]
+    claim_id: u64,
+    #[allow(dead_code)]
+    attempt_num: u64,
+    evidence_digest: String,
 }
 
 /// `CliRunResultKind` snake_case wire kümesi (`run_envelope.rs` ile aynı üyeler).
@@ -700,133 +714,162 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     // artifact-identity bağı (attempt/task/after digest) finalize'ın KENDİ
     // read-once tamponlarıyla eşleşir (post-hoc substitution reddi). Başarısız
     // verdict finalization'ı engellemez (veri; kabul insan) ama satıra işlenir.
-    if attempt.completion_basis.as_deref() == Some("graph") {
-        let verdict_path = args.run_dir.join("realization-verdict.json");
-        anyhow::ensure!(
-            verdict_path.is_file(),
-            "realization gate fence: the attempt claims completion_basis=graph but {} is \
-             missing — a graph-completed claim can only be finalized through its \
-             realization verdict (run `osp realization-gate` first)",
-            verdict_path.display()
-        );
-        let verdict_bytes = read_artifact_bytes(&verdict_path)?;
-        // **P0-1 (tur-2): canonical verdict provenance** — run-dir kopyası
-        // caller-owned'dır; kanonik mağazada (`<state-dir>/realizations/`) bu
-        // attempt'e bağlı (binding.attempt_digest eşleşen) TAM OLARAK BİR
-        // nüsha aranır ve bayt-eşleşmesi zorlanır. Elle yazılmış verdict'in
-        // canonical nüshası yoktur → RED; birden çok nüsha → ambiguity RED
-        // (#190 dersi: content identity ≠ artifact identity).
-        let attempt_digest = sha256_bytes(&attempt_bytes);
-        let realizations_dir = match args.state_dir.as_deref() {
-            Some(p) => p.join("realizations"),
-            None => args
-                .run_dir
-                .parent()
-                .and_then(|p| p.parent())
-                .map(|p| p.join("state").join("realizations"))
-                .unwrap_or_else(|| PathBuf::from("realizations")),
-        };
-        anyhow::ensure!(
-            realizations_dir.is_dir(),
-            "verdict provenance fence: canonical realizations store not found ({}) — \
-             the gate publishes there; a hand-written run-dir verdict has no canonical \
-             provenance",
-            realizations_dir.display()
-        );
-        let mut canonical_matches: Vec<PathBuf> = std::fs::read_dir(&realizations_dir)
-            .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", realizations_dir.display()))?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.extension().map(|x| x == "json").unwrap_or(false)
-                    && p.file_name()
-                        .map(|n| n.to_string_lossy().starts_with("realization-"))
-                        .unwrap_or(false)
-            })
-            .filter(|p| match std::fs::read(p) {
-                Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
-                    .ok()
-                    .and_then(|v| {
-                        v.pointer("/binding/attempt_digest")
-                            .and_then(|d| d.as_str())
-                            .map(|d| d == attempt_digest)
-                    })
-                    .unwrap_or(false),
-                Err(_) => false,
-            })
-            .collect();
-        canonical_matches.sort();
-        anyhow::ensure!(
-            canonical_matches.len() == 1,
-            "verdict provenance fence: expected exactly ONE canonical realization \
-             verdict bound to this attempt in {} (found {}) — 0 = hand-written verdict \
-             (no gate execution proof); >1 = ambiguous artifact identity",
-            realizations_dir.display(),
-            canonical_matches.len()
-        );
-        let canonical_bytes = read_artifact_bytes(&canonical_matches[0])?;
-        anyhow::ensure!(
-            canonical_bytes == verdict_bytes,
-            "verdict provenance fence: the run-dir realization-verdict.json does not \
-             byte-match its canonical store copy — the caller-owned copy was modified"
-        );
-        let verdict: serde_json::Value = serde_json::from_slice(&verdict_bytes)
-            .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", verdict_path.display()))?;
-        let binding = verdict.get("binding").ok_or_else(|| {
-            anyhow::anyhow!("{} is missing its binding block", verdict_path.display())
-        })?;
-        let bound = |key: &str| binding.get(key).and_then(|v| v.as_str());
-        anyhow::ensure!(
-            bound("attempt_digest") == Some(sha256_bytes(&attempt_bytes).as_str()),
-            "verdict binding fence: realization-verdict.json was produced for different \
-             attempt bytes — the attempt changed after the gate ran"
-        );
-        anyhow::ensure!(
-            bound("task_digest") == Some(sha256_bytes(&task_bytes).as_str()),
-            "verdict binding fence: realization-verdict.json was produced for different \
-             task bytes — the task changed after the gate ran"
-        );
-        // P0 (tur-3): after.json fence KALDIRILDI — gate kendi analizini
-        // yapar (own_after_digest binding'de); run-dir after.json sadece
-        // insan-mutfağı artifact'ıdır, trust zincirine GİRMEZ.
-        // P0-2 (tur-2): realized delta kimliği — verdict'ün patch_digest'i
-        // finalize'ın KENDİ read-once patch tamponuyla eşleşmeli.
-        if let Some(patch_digest) = &patch_digest {
+    // #198 + #203: **route-aware completion consumption.** Zarf gerçeği ↔
+    // verdict rotası ÇİFT YÖNLÜ doğrulanır (tur-2 P1-1): `completed+graph ↔
+    // attempt_direct`; `awaiting_witnesses+null(+result.pending) ↔
+    // witnessed_resume`; diğer kombinasyonlar RED.
+    let verdict_path = args.run_dir.join("realization-verdict.json");
+    match (
+        attempt.completion_basis.as_deref(),
+        attempt.result.kind.as_str(),
+    ) {
+        (Some("graph"), "completed") => {
             anyhow::ensure!(
-                bound("patch_digest") == Some(patch_digest.as_str()),
-                "verdict binding fence: realization-verdict.json was produced for \
-                 different applied.patch bytes — the realized delta changed after \
-                 the gate ran"
+                verdict_path.is_file(),
+                "realization gate fence: the attempt claims completion_basis=graph but {} is \
+                 missing — a graph-completed claim can only be finalized through its \
+                 realization verdict (run `osp realization-gate` first)",
+                verdict_path.display()
+            );
+            let verdict = verify_verdict_provenance(
+                &verdict_path,
+                &args.run_dir,
+                args.state_dir.as_deref(),
+                &attempt_bytes,
+                &task_bytes,
+                patch_digest.as_deref(),
+            )?;
+            let label = verdict_label(&verdict, &verdict_path)?;
+            let route = verdict_route(&verdict);
+            anyhow::ensure!(
+                route
+                    .as_deref()
+                    .map(|r| r == "attempt_direct")
+                    .unwrap_or(true),
+                "route fence: a graph-completed (direct) attempt carries completion_route=\
+                 {:?} — a direct envelope cannot be finalized through a witnessed-resume \
+                 verdict (route/envelope mismatch refused)",
+                route.as_deref().unwrap_or_default()
+            );
+            let (basis, vlabel) = ledger_completion_projection(false, &label);
+            if let Some(basis) = basis {
+                row["completion_basis"] = serde_json::json!(basis);
+            }
+            if let Some(vlabel) = vlabel {
+                row["realization_verdict"] = serde_json::json!(vlabel);
+            }
+        }
+        (None, "awaiting_witnesses") => {
+            // #203: askı zarfı — verdict OPSİYONEL (uygulanmamış/koşulmamış
+            // işler dürüstçe basis'siz kalır). Verdict VARSA kanıt zinciri +
+            // resume binding'i GÜNCEL kanonik baytlara karşı doğrulanır.
+            if verdict_path.is_file() {
+                let verdict = verify_verdict_provenance(
+                    &verdict_path,
+                    &args.run_dir,
+                    args.state_dir.as_deref(),
+                    &attempt_bytes,
+                    &task_bytes,
+                    patch_digest.as_deref(),
+                )?;
+                let label = verdict_label(&verdict, &verdict_path)?;
+                let route = verdict_route(&verdict);
+                anyhow::ensure!(
+                    route.as_deref() == Some("witnessed_resume"),
+                    "route fence: an awaiting_witnesses envelope requires a \
+                     completion_route=witnessed_resume verdict (found {:?}) — missing \
+                     route fields are tolerated only on legacy direct verdicts; an \
+                     attempt_direct verdict cannot finalize a suspension",
+                    route
+                );
+                // Resume binding ↔ GÜNCEL kanonik receipt baytları (tur-2 P1):
+                // verdict'in bağladığı receipt, bugün state-dir'de duran (ve
+                // gate'in doğruladığı) baytlarla aynı olmalı.
+                let pending = attempt.result.pending.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "route fence: the verdict claims witnessed_resume but the \
+                         envelope carries no result.pending identity — pre-#203 \
+                         envelopes cannot be resumed-finalized"
+                    )
+                })?;
+                let state_dir_root: PathBuf = match args.state_dir.as_deref() {
+                    Some(p) => p.to_path_buf(),
+                    None => args
+                        .run_dir
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .map(|p| p.join("state"))
+                        .ok_or_else(|| anyhow::anyhow!("cannot resolve the canonical state dir"))?,
+                };
+                let pending_dir = state_dir_root.join(".osp").join("pending-authorizations");
+                let artifact_filename =
+                    osp_core::authorization::pending_authorization_artifact_filename_v1(
+                        attempt.run.task_id,
+                        pending.claim_id,
+                        pending.attempt_num,
+                        &pending.evidence_digest,
+                    );
+                let receipt_path = pending_dir.join(
+                    osp_core::authorization::pending_authorization_receipt_filename_v1(
+                        attempt.run.task_id,
+                        pending.claim_id,
+                        pending.attempt_num,
+                        &pending.evidence_digest,
+                    ),
+                );
+                let receipt_bytes = std::fs::read(&receipt_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "resume receipt unreadable at the address the envelope names \
+                         ({}): {e} — the proof chain the verdict bound is no longer \
+                         intact",
+                        receipt_path.display()
+                    )
+                })?;
+                let bound = |key: &str| {
+                    verdict
+                        .pointer("/binding")
+                        .and_then(|b| b.get(key))
+                        .and_then(|v| v.as_str())
+                };
+                anyhow::ensure!(
+                    bound("resume_receipt_digest") == Some(sha256_bytes(&receipt_bytes).as_str()),
+                    "resume binding fence: the verdict's resume_receipt_digest does not \
+                     match the current canonical receipt bytes — the receipt changed \
+                     after the gate ran"
+                );
+                anyhow::ensure!(
+                    bound("resume_pending_ref")
+                        == Some(
+                            format!(".osp/pending-authorizations/{artifact_filename}").as_str()
+                        ),
+                    "resume binding fence: the verdict's resume_pending_ref does not \
+                     match the canonical pending artifact address derived from the \
+                     envelope's pending identity"
+                );
+                let (basis, vlabel) = ledger_completion_projection(true, &label);
+                if let Some(basis) = basis {
+                    row["completion_basis"] = serde_json::json!(basis);
+                }
+                if let Some(vlabel) = vlabel {
+                    row["realization_verdict"] = serde_json::json!(vlabel);
+                }
+            }
+            // Verdict yok → bugünkü dürüst davranış: basis'siz satır (iddia yok).
+        }
+        (Some(other), _) => {
+            // INV-T10 (tur-2 P1-1 çift-yönlü fence): "graph" dışı basis
+            // attempt-anında temsil edilemez — realized YALNIZ verdict ile kurulur.
+            anyhow::bail!(
+                "INV-T10 completion_basis fence: attempt.json carries \
+                 completion_basis={other:?} — only \"graph\" is representable at \
+                 attempt time; \"realized\" is established solely through a gate \
+                 verdict and cannot be claimed by an envelope"
             );
         }
-        let verdict_obj = verdict
-            .get("verdict")
-            .and_then(|v| v.as_object())
-            .ok_or_else(|| anyhow::anyhow!("{} is missing its verdict", verdict_path.display()))?;
-        let variant = verdict_obj
-            .keys()
-            .next()
-            .ok_or_else(|| anyhow::anyhow!("{} verdict is empty", verdict_path.display()))?;
-        let label = match variant.as_str() {
-            "RealizedCompleted" => "realized",
-            "DeclaredRealizationBuildInvalid" => "declared_realization_build_invalid",
-            "PredicateUnsatisfiedAfterReanalysis" => "predicate_unsatisfied_after_reanalysis",
-            "NotAttempted" => "not_attempted",
-            other => anyhow::bail!(
-                "{} carries unknown verdict variant {other:?}",
-                verdict_path.display()
-            ),
-        };
-        if label == "realized" {
-            row["completion_basis"] = serde_json::json!("realized");
-        } else {
-            row["completion_basis"] = serde_json::json!("graph");
-            row["realization_verdict"] = serde_json::json!(label);
+        (None, _) => {
+            // İddia-yok zarflar (llm_error, awaiting_cold_start_approval, …):
+            // basis taşımaz, verdict tüketime girmez (bugünkü davranış).
         }
-    } else if let Some(basis) = &attempt.completion_basis {
-        // İddia-yok (null) zarflar basis taşımaz; "graph" dışı değer zaten üstte
-        // parse sırasında geçersiz kılındı (serde enum).
-        row["completion_basis"] = serde_json::json!(basis);
     }
 
     let json = serde_json::to_string_pretty(&row)?;
@@ -987,9 +1030,206 @@ fn make_ref(run_dir: &Path, file: &str) -> String {
     format!("{dir}{file}")
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// #203 — verdict provenance zinciri (paylaşılan yüzey) + route-aware projeksiyon
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// **P0-1 (tur-2): canonical verdict provenance** — run-dir kopyası
+/// caller-owned'dır; kanonik mağazada (`<state-dir>/realizations/`) bu
+/// attempt'e bağlı (binding.attempt_digest eşleşen) TAM OLARAK BİR nüsha
+/// aranır ve bayt-eşleşmesi zorlanır. Elle yazılmış verdict'in canonical
+/// nüshası yoktur → RED; birden çok nüsha → ambiguity RED (#190 dersi:
+/// content identity ≠ artifact identity). Binding fence'leri (attempt/task/
+/// patch digest'leri) read-once tamponlara karşı. #203: direct VE witnessed-
+/// resume tüketicilerinin paylaştığı TEK yüzeye çıkarıldı.
+fn verify_verdict_provenance(
+    verdict_path: &Path,
+    run_dir: &Path,
+    state_dir_arg: Option<&Path>,
+    attempt_bytes: &[u8],
+    task_bytes: &[u8],
+    patch_digest: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let verdict_bytes = read_artifact_bytes(verdict_path)?;
+    let attempt_digest = sha256_bytes(attempt_bytes);
+    let realizations_dir = match state_dir_arg {
+        Some(p) => p.join("realizations"),
+        None => run_dir
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("state").join("realizations"))
+            .unwrap_or_else(|| PathBuf::from("realizations")),
+    };
+    anyhow::ensure!(
+        realizations_dir.is_dir(),
+        "verdict provenance fence: canonical realizations store not found ({}) — \
+         the gate publishes there; a hand-written run-dir verdict has no canonical \
+         provenance",
+        realizations_dir.display()
+    );
+    let mut canonical_matches: Vec<PathBuf> = std::fs::read_dir(&realizations_dir)
+        .map_err(|e| anyhow::anyhow!("cannot read {}: {e}", realizations_dir.display()))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().map(|x| x == "json").unwrap_or(false)
+                && p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("realization-"))
+                    .unwrap_or(false)
+        })
+        .filter(|p| match std::fs::read(p) {
+            Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/binding/attempt_digest")
+                        .and_then(|d| d.as_str())
+                        .map(|d| d == attempt_digest)
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        })
+        .collect();
+    canonical_matches.sort();
+    anyhow::ensure!(
+        canonical_matches.len() == 1,
+        "verdict provenance fence: expected exactly ONE canonical realization \
+         verdict bound to this attempt in {} (found {}) — 0 = hand-written verdict \
+         (no gate execution proof); >1 = ambiguous artifact identity",
+        realizations_dir.display(),
+        canonical_matches.len()
+    );
+    let canonical_bytes = read_artifact_bytes(&canonical_matches[0])?;
+    anyhow::ensure!(
+        canonical_bytes == verdict_bytes,
+        "verdict provenance fence: the run-dir realization-verdict.json does not \
+         byte-match its canonical store copy — the caller-owned copy was modified"
+    );
+    let verdict: serde_json::Value = serde_json::from_slice(&verdict_bytes)
+        .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", verdict_path.display()))?;
+    let binding = verdict.get("binding").ok_or_else(|| {
+        anyhow::anyhow!("{} is missing its binding block", verdict_path.display())
+    })?;
+    let bound = |key: &str| binding.get(key).and_then(|v| v.as_str());
+    anyhow::ensure!(
+        bound("attempt_digest") == Some(sha256_bytes(attempt_bytes).as_str()),
+        "verdict binding fence: realization-verdict.json was produced for different \
+         attempt bytes — the attempt changed after the gate ran"
+    );
+    anyhow::ensure!(
+        bound("task_digest") == Some(sha256_bytes(task_bytes).as_str()),
+        "verdict binding fence: realization-verdict.json was produced for different \
+         task bytes — the task changed after the gate ran"
+    );
+    // P0 (tur-3): after.json fence KALDIRILDI — gate kendi analizini yapar
+    // (own_after_digest binding'de); run-dir after.json trust zincirine GİRMEZ.
+    // P0-2 (tur-2): realized delta kimliği — verdict'ün patch_digest'i
+    // finalize'ın KENDİ read-once patch tamponuyla eşleşmeli.
+    if let Some(patch_digest) = patch_digest {
+        anyhow::ensure!(
+            bound("patch_digest") == Some(patch_digest),
+            "verdict binding fence: realization-verdict.json was produced for \
+             different applied.patch bytes — the realized delta changed after \
+             the gate ran"
+        );
+    }
+    Ok(verdict)
+}
+
+/// Verdict varyantından ledger etiketi (`RealizedCompleted` → `realized`, …).
+fn verdict_label(verdict: &serde_json::Value, verdict_path: &Path) -> anyhow::Result<String> {
+    let variant = verdict
+        .get("verdict")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow::anyhow!("{} is missing its verdict", verdict_path.display()))?
+        .keys()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("{} verdict is empty", verdict_path.display()))?
+        .clone();
+    match variant.as_str() {
+        "RealizedCompleted" => Ok("realized".to_string()),
+        "DeclaredRealizationBuildInvalid" => Ok("declared_realization_build_invalid".to_string()),
+        "PredicateUnsatisfiedAfterReanalysis" => {
+            Ok("predicate_unsatisfied_after_reanalysis".to_string())
+        }
+        "NotAttempted" => Ok("not_attempted".to_string()),
+        other => anyhow::bail!(
+            "{} carries unknown verdict variant {other:?}",
+            verdict_path.display()
+        ),
+    }
+}
+
+/// #203: verdict'in `binding.completion_route` alanı (`attempt_direct` |
+/// `witnessed_resume`); eski (pre-#203) direct verdictlerde YOK → `None`.
+fn verdict_route(verdict: &serde_json::Value) -> Option<String> {
+    verdict
+        .pointer("/binding/completion_route")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// **#203: route-aware completion projeksiyonu — TEK kaynak (ünite testli).**
+///
+/// Direct girişte başarısız verdict graph-completed iddiayı ayakta BIRAKIR
+/// (baz `"graph"` — gate'in GraphCompletionShapeProof-pini sayesinde iddia
+/// kurulmuştu; build/predicate başarısızlığı onu geri almaz). Witnessed-resume
+/// girişinde graph-completed iddia HİÇ kurulmadı (#197: iddia yoksa zemin yok)
+/// → başarısız verdict yalnızca `realization_verdict` etiketi yazar: "denenmiş
+/// ama doğrulanamamış" ile "henüz denenmemiş" (verdict yok, alan yok) ayrık
+/// kalır. `RealizedCompleted` iki rotada da `realized` kurar (ölçüm aynı motor).
+pub(crate) fn ledger_completion_projection(
+    witnessed_resume: bool,
+    label: &str,
+) -> (Option<&'static str>, Option<&str>) {
+    match (witnessed_resume, label) {
+        (_, "realized") => (Some("realized"), None),
+        (true, other) => (None, Some(other)),
+        (false, other) => (Some("graph"), Some(other)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #203 tur-2 review matrisi — route-aware completion projeksiyonu (tek kaynak).
+    /// Direct'te başarısız verdict graph iddiayı ayakta bırakır ("graph");
+    /// witnessed'da graph-completed iddia HİÇ kurulmadı → yalnız etiket (baz YOK).
+    #[test]
+    fn ledger_completion_projection_matrix() {
+        // Direct + RealizedCompleted → realized.
+        assert_eq!(
+            ledger_completion_projection(false, "realized"),
+            (Some("realized"), None)
+        );
+        // Direct + başarısız verdict → graph iddiası ayakta + etiket.
+        assert_eq!(
+            ledger_completion_projection(false, "declared_realization_build_invalid"),
+            (Some("graph"), Some("declared_realization_build_invalid"))
+        );
+        assert_eq!(
+            ledger_completion_projection(false, "predicate_unsatisfied_after_reanalysis"),
+            (
+                Some("graph"),
+                Some("predicate_unsatisfied_after_reanalysis")
+            )
+        );
+        // Witnessed resume + RealizedCompleted → realized (ölçüm aynı motor).
+        assert_eq!(
+            ledger_completion_projection(true, "realized"),
+            (Some("realized"), None)
+        );
+        // Witnessed resume + başarısız verdict → baz YOK, yalnız etiket
+        // ("denenmiş ama doğrulanamamış" ≠ "henüz denenmemiş").
+        assert_eq!(
+            ledger_completion_projection(true, "declared_realization_build_invalid"),
+            (None, Some("declared_realization_build_invalid"))
+        );
+        assert_eq!(
+            ledger_completion_projection(true, "not_attempted"),
+            (None, Some("not_attempted"))
+        );
+    }
 
     #[test]
     fn sha256_file_pins_known_vector() {

@@ -43,39 +43,78 @@ pub enum CliRunResultKind {
     LlmError,
 }
 
+/// **#203 bağlama sözleşmesi madde-1:** awaiting_witnesses askısının kanonik
+/// kimliği — attempt ANINDA üretilir ve anchor'lu (kanonik mağazayla bayt-eşleşen)
+/// zarfın `result` bloğunda taşınır. Realization-gate, pending artifact'ı bu
+/// kimlikten türetilen kanonik adreste arar (`pending_authorization_artifact_
+/// filename_v1`) — task-id taraması YOK: aynı task'ın başka bir askısı yanlışlıkla
+/// bağlanamaz (tur-1 P0-1 adversarial senaryosu yapısal olarak kapanır).
+///
+/// **missing ≡ pre-#203 zarf şekli:** bu alanı taşımayan askı zarfı re-bind
+/// EDİLEMEZ (gate RED: "re-run the attempt") — geriye dönük kimlik enjeksiyonu,
+/// geçmişi yeniden yorumlamak olurdu (backfill YOK ilkesi).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CliPendingAuthorizationIdentity {
+    pub claim_id: u64,
+    pub attempt_num: u64,
+    /// `SuspendedAttemptEvidenceDigest` (V1) hex — kanonik dosya adının parçası.
+    pub evidence_digest: String,
+}
+
 /// Serializable run result (mirror of NavigatorResult's user-relevant fields).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CliRunResult {
     pub kind: CliRunResultKind,
     pub attempts: usize,
+    /// **#203:** yalnız `AwaitingWitnesses` için `Some` — askının kanonik kimliği.
+    /// `skip_serializing_if` sayesinde diğer kind'ların zarf baytları DEĞİŞMEZ
+    /// (golden test pinler).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<CliPendingAuthorizationIdentity>,
 }
 
 impl CliRunResult {
     pub fn from_navigator(result: &NavigatorResult) -> Self {
-        let (kind, attempts) = match result {
-            NavigatorResult::Completed { attempts, .. } => (CliRunResultKind::Completed, *attempts),
-            NavigatorResult::AwaitingWitnesses { .. } => (CliRunResultKind::AwaitingWitnesses, 0),
-            NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
-                (CliRunResultKind::ExceededManeuverLimit, *attempts)
+        let (kind, attempts, pending) = match result {
+            NavigatorResult::Completed { attempts, .. } => {
+                (CliRunResultKind::Completed, *attempts, None)
             }
-            NavigatorResult::RequiresRevision(_) => (CliRunResultKind::RequiresRevision, 0),
+            NavigatorResult::AwaitingWitnesses { pending, .. } => (
+                CliRunResultKind::AwaitingWitnesses,
+                0,
+                Some(CliPendingAuthorizationIdentity {
+                    claim_id: pending.claim_id,
+                    attempt_num: pending.attempt_num.get(),
+                    evidence_digest: pending.evidence_digest.to_hex(),
+                }),
+            ),
+            NavigatorResult::ExceededManeuverLimit { attempts, .. } => {
+                (CliRunResultKind::ExceededManeuverLimit, *attempts, None)
+            }
+            NavigatorResult::RequiresRevision(_) => (CliRunResultKind::RequiresRevision, 0, None),
             NavigatorResult::AwaitingColdStartApproval { attempts, .. } => {
-                (CliRunResultKind::AwaitingColdStartApproval, *attempts)
+                (CliRunResultKind::AwaitingColdStartApproval, *attempts, None)
             }
             NavigatorResult::RequiresOperatorApproval { attempts, .. } => {
-                (CliRunResultKind::RequiresOperatorApproval, *attempts)
+                (CliRunResultKind::RequiresOperatorApproval, *attempts, None)
             }
-            NavigatorResult::TaskNotFound => (CliRunResultKind::TaskNotFound, 0),
+            NavigatorResult::TaskNotFound => (CliRunResultKind::TaskNotFound, 0, None),
             NavigatorResult::WitnessEvaluationError(_) => {
-                (CliRunResultKind::WitnessEvaluationError, 0)
+                (CliRunResultKind::WitnessEvaluationError, 0, None)
             }
-            NavigatorResult::PendingAuthorizationPersistenceFailure { .. } => {
-                (CliRunResultKind::PendingAuthorizationPersistenceFailure, 0)
-            }
-            NavigatorResult::SystemFailure(_) => (CliRunResultKind::SystemFailure, 0),
-            NavigatorResult::LlmError(_) => (CliRunResultKind::LlmError, 0),
+            NavigatorResult::PendingAuthorizationPersistenceFailure { .. } => (
+                CliRunResultKind::PendingAuthorizationPersistenceFailure,
+                0,
+                None,
+            ),
+            NavigatorResult::SystemFailure(_) => (CliRunResultKind::SystemFailure, 0, None),
+            NavigatorResult::LlmError(_) => (CliRunResultKind::LlmError, 0, None),
         };
-        Self { kind, attempts }
+        Self {
+            kind,
+            attempts,
+            pending,
+        }
     }
 }
 
@@ -314,6 +353,52 @@ mod tests {
             serialized,
             ["completed", "awaiting_witnesses", "exceeded_maneuver_limit"]
         );
+    }
+
+    /// #203 golden (tur-2 P2): `pending` alanı `skip_serializing_if` sayesinde
+    /// askı-DIŞI result türlerinin wire baytlarını DEĞİŞTİRMEZ — mevcut canonical
+    /// artifact'ler ve byte-eşleşme anchor'ları geçerli kalır.
+    #[test]
+    fn pending_field_absent_for_non_awaiting_kinds_golden() {
+        let completed = CliRunResult {
+            kind: CliRunResultKind::Completed,
+            attempts: 1,
+            pending: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&completed).unwrap(),
+            r#"{"kind":"completed","attempts":1}"#
+        );
+        let llm_error = CliRunResult {
+            kind: CliRunResultKind::LlmError,
+            attempts: 0,
+            pending: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&llm_error).unwrap(),
+            r#"{"kind":"llm_error","attempts":0}"#
+        );
+    }
+
+    /// #203: askı kimliği yalnız awaiting_witnesses'te `result.pending` olarak
+    /// çıkar — gate'in adres türetimi bu üçlüden yapılır (bağlama sözleşmesi m.1).
+    #[test]
+    fn pending_identity_serializes_under_result_for_awaiting() {
+        let awaiting = CliRunResult {
+            kind: CliRunResultKind::AwaitingWitnesses,
+            attempts: 0,
+            pending: Some(CliPendingAuthorizationIdentity {
+                claim_id: 1,
+                attempt_num: 1,
+                evidence_digest: "ab".repeat(32),
+            }),
+        };
+        let wire = serde_json::to_string(&awaiting).unwrap();
+        assert!(
+            wire.contains(r#""pending":{"claim_id":1,"attempt_num":1,"evidence_digest":""#),
+            "{wire}"
+        );
+        assert!(wire.contains(&"ab".repeat(32)), "{wire}");
     }
 
     #[test]
