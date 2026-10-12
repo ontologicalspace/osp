@@ -283,6 +283,14 @@ impl RealizationVerdict {
     /// predicate-failure kanıtı tek başına graph-completion'ı kanıtlamaz,
     /// yapısal bağlam gate girişidir); `NotAttempted → None` (verdict tek
     /// başına hiçbir iddia kurulduğunu söyleyemez).
+    ///
+    /// **#203 (PR #207 review P1-2 — semantik kapsamı):** `Some(Graph)` dalı
+    /// **direct giriş bağlamını** varsayar (graph-completed iddia girişte
+    /// kurulmuştu). Witnessed-resume girişinde graph-completed iddia HİÇ
+    /// kurulmaz — başarısız verdict herhangi bir completion basis KURMAZ.
+    /// Route-aware tüketim (finalize ledger projeksiyonu, CLI terminal
+    /// raporu) bu metodu doğrudan KULLANMAZ; tek kaynak
+    /// `ledger_completion_projection`.
     pub fn completion_basis(&self) -> Option<CompletionBasis> {
         match self {
             Self::RealizedCompleted { .. } => Some(CompletionBasis::Realized),

@@ -3652,3 +3652,192 @@ fn finalize_run_resumed_route_mismatch_refused() {
         "route fence mesajı: {stderr}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #203 — PR #207 kod review kapanışları (P0-1/P0-2/P1-1/P1-2): finalize'ın
+// GÜNCEL kanıt zinciri yeniden doğrulaması (pending + patch), worktree yaşam
+// döngüsü ve truth-surface tutarlılığı (basis raporu).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// #203 review: mutlu-yol öncüsü — askı → resume → gate exit 0. Negatif
+/// testlerin hepsi BU zincirin ÜZERİNE tek bir bozulma enjekte eder (gate
+/// başarısız OLDUKTAN SONRA kanıt zincirinden bir halka çekilir/sakatlanır).
+fn witnessed_resume_happy_path(tag: &str) -> (HarnessFixture, PathBuf, PathBuf) {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.90));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join(tag);
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(out.status.code(), Some(10), "askı exit 10");
+    let artifacts = pending_artifacts(&fx);
+    assert_eq!(artifacts.len(), 1);
+    let artifact = artifacts[0].clone();
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(out.status.code(), Some(0), "resume exit 0");
+    let run_dir = prepare_resumed_gate_run_dir(&fx, tag, &task_path, &Some(proposals_path));
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "gate exit 0. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    (fx, run_dir, artifact)
+}
+
+fn run_finalize(fx: &HarnessFixture, run_dir: &Path) -> std::process::Output {
+    osp_in(fx.work_path())
+        .arg("finalize-run")
+        .arg(run_dir)
+        .arg("--state-dir")
+        .arg(fx.work_path())
+        .output()
+        .expect("run osp finalize-run")
+}
+
+/// **P0-1 (a):** gate başarılı OLDUKTAN SONRA pending artifact silinirse
+/// finalize RED — receipt digest hâlâ eşleşse de güncel kanıt zinciri
+/// kurulamaz ("gate zaten doğrulamıştı" yeterli DEĞİL).
+#[test]
+fn finalize_run_resumed_pending_deleted_after_gate_refused() {
+    let (fx, run_dir, artifact) = witnessed_resume_happy_path("run-203-pending-deleted");
+    fs::remove_file(&artifact).unwrap();
+
+    let out = run_finalize(&fx, &run_dir);
+    assert!(!out.status.success(), "pending silinmiş → RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pending artifact unreadable"),
+        "mesaj: {stderr}"
+    );
+}
+
+/// **P0-1 (b):** gate sonrası pending baytları bozulursa (strict verify düşer)
+/// finalize RED — integrity hatası, "henüz uygulanmamış" sanılmaz.
+#[test]
+fn finalize_run_resumed_pending_corrupted_after_gate_refused() {
+    let (fx, run_dir, artifact) = witnessed_resume_happy_path("run-203-pending-corrupt");
+    fs::write(&artifact, b"{ not a pending authorization").unwrap();
+
+    let out = run_finalize(&fx, &run_dir);
+    assert!(!out.status.success(), "pending bozuk → RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("failed strict verification"),
+        "mesaj: {stderr}"
+    );
+}
+
+/// **P0-2:** verdict tüketiliyorsa `applied.patch` ZORUNLU — gate sonrası
+/// patch silinirse finalize RED; "opsiyonel artifact" savunması kalkar (eski
+/// davranışta digest fence sessizce atlanıyordu).
+#[test]
+fn finalize_run_resumed_patch_deleted_after_gate_refused() {
+    let (fx, run_dir, _artifact) = witnessed_resume_happy_path("run-203-patch-deleted");
+    fs::remove_file(run_dir.join("applied.patch")).unwrap();
+
+    let out = run_finalize(&fx, &run_dir);
+    assert!(!out.status.success(), "patch silinmiş → RED");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("applied.patch is required when a realization verdict is consumed"),
+        "mesaj: {stderr}"
+    );
+}
+
+/// **P1-2:** witnessed-resume başarısız verdictinde (PredicateUnsatisfied,
+/// exit 3) terminal raporu `basis=None` der — `Some(Graph)` DEMEZ (direct
+/// semantiği route'a taşınmadı); finalize satırı da basis taşımaz, yalnız
+/// `realization_verdict` etiketi yazar ("denenmiş ama doğrulanamamış").
+#[test]
+fn realization_gate_failed_witnessed_verdict_reports_no_graph_basis() {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    // Eşik 0.5: askı yolu sağlam (sim 0.5 ≤ 0.5 → Completed → Held); gate'in
+    // KENDİ analizi 0.667 > 0.5 → PredicateUnsatisfiedAfterReanalysis (exit 3).
+    let task_path = fx.write_task(&resumed_gate_task(&fx, 0.50));
+    let proposals_path = fx.write_proposals_v2(&fx.head, "main.rs", "b.rs");
+    let run = work.join("run-203-basis-report");
+    fs::create_dir_all(&run).unwrap();
+    let attempt_path = run.join("attempt.json");
+    let out = run_suspending_attempt(&fx, &task_path, &proposals_path, &attempt_path);
+    assert_eq!(out.status.code(), Some(10));
+    let artifacts = pending_artifacts(&fx);
+    let artifact = artifacts[0].clone();
+    let (claim_id, _, _) = envelope_pending_identity(&attempt_path);
+    let out = resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(out.status.code(), Some(0));
+
+    let run_dir = prepare_resumed_gate_run_dir(
+        &fx,
+        "run-203-basis-report",
+        &task_path,
+        &Some(proposals_path),
+    );
+    let ev = declared_evidence_ok(&run_dir);
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "PredicateUnsatisfied exit 3. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("basis=None"),
+        "route-aware rapor basis=None demeli: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Some(Graph)") && !stdout.contains("Some(\"graph\")"),
+        "witnessed başarısızlıkta Graph basis gösterilMEZ: {stdout}"
+    );
+
+    // Finalize: baz YOK, yalnız etiket — CLI raporuyla aynı önerme.
+    let out = run_finalize(&fx, &run_dir);
+    assert!(out.status.success(), "finalize exit ok");
+    let row: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&out.stdout).trim()).unwrap();
+    assert!(
+        row.get("completion_basis").is_none(),
+        "witnessed başarısız verdict completion_basis KURMAZ: {row}"
+    );
+    assert_eq!(
+        row["realization_verdict"], "predicate_unsatisfied_after_reanalysis",
+        "{row}"
+    );
+}
+
+/// **P1-1:** gate hatası worktree'yi ORTADA BIRAKMAZ. Guard'lı bölge içindeki
+/// herhangi bir hata (burada: apply edilemeyen patch) sonrası `git worktree
+/// list` temiz kalır; before-analyze parity fence'i de aynı guard'ın içinde
+/// koşar (yapısal garanti — geçerli-digestli ama eşleşmeyen base üretmek
+/// entegrasyon düzeyinde kurucu-tutarlılık gerektirdiğinden parity'nin kendi
+/// hatası ayrıca tetiklenemez; guard kapsamı ortaktır).
+#[test]
+fn realization_gate_error_path_leaves_no_worktree() {
+    let (fx, run_dir, _artifact) = witnessed_resume_happy_path("run-203-worktree-leak");
+    fs::write(run_dir.join("applied.patch"), b"not a valid patch\n").unwrap();
+    let ev = declared_evidence_ok(&run_dir);
+
+    let out = run_gate(&fx, &run_dir, &ev);
+    assert!(
+        !out.status.success(),
+        "bozuk patch RED. stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let list = Command::new("git")
+        .args(["-C", p_str(fx.repo_path()), "worktree", "list"])
+        .output()
+        .expect("git worktree list");
+    let stdout = String::from_utf8_lossy(&list.stdout);
+    assert_eq!(
+        stdout.lines().count(),
+        1,
+        "gate hatası sonrası ek worktree KALMAMALI: {stdout}"
+    );
+}

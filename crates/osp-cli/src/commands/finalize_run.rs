@@ -737,7 +737,7 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                 args.state_dir.as_deref(),
                 &attempt_bytes,
                 &task_bytes,
-                patch_digest.as_deref(),
+                patch_bytes.as_deref(),
             )?;
             let label = verdict_label(&verdict, &verdict_path)?;
             let route = verdict_route(&verdict);
@@ -770,7 +770,7 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                     args.state_dir.as_deref(),
                     &attempt_bytes,
                     &task_bytes,
-                    patch_digest.as_deref(),
+                    patch_bytes.as_deref(),
                 )?;
                 let label = verdict_label(&verdict, &verdict_path)?;
                 let route = verdict_route(&verdict);
@@ -809,6 +809,7 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                         pending.attempt_num,
                         &pending.evidence_digest,
                     );
+                let artifact_path = pending_dir.join(&artifact_filename);
                 let receipt_path = pending_dir.join(
                     osp_core::authorization::pending_authorization_receipt_filename_v1(
                         attempt.run.task_id,
@@ -816,6 +817,41 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                         pending.attempt_num,
                         &pending.evidence_digest,
                     ),
+                );
+                // **PR #207 review P0-1:** pending artifact'ın KENDİSİ read-once
+                // okunur ve strict doğrulanır — gate'in GEÇMİŞTE doğrulamış
+                // olması yetmez; finalize'ın güncel kanıt zincirini yeniden
+                // kurması gerekir (gate'in `bind_witnessed_resume`'ı ile aynı
+                // doğrulama yüzeyi, aynı tamponlardan).
+                let pending_bytes = std::fs::read(&artifact_path).map_err(|e| {
+                    anyhow::anyhow!(
+                        "pending artifact unreadable at the address the envelope names \
+                         ({}): {e} — the proof chain the verdict bound is no longer \
+                         intact; deleting the suspension after the gate ran cannot \
+                         un-bind it",
+                        artifact_path.display()
+                    )
+                })?;
+                let pending_envelope = osp_core::authorization::parse_pending_authorization(
+                    &pending_bytes,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "pending artifact failed strict verification ({}): {e} — \
+                                 durable proof-chain inconsistency (NOT a 'still \
+                                 awaiting' state)",
+                        artifact_path.display()
+                    )
+                })?;
+                let record = pending_envelope.record();
+                anyhow::ensure!(
+                    record.task_id == attempt.run.task_id
+                        && record.claim_id == pending.claim_id
+                        && record.attempt_num.get() == pending.attempt_num
+                        && record.evidence_digest.to_hex() == pending.evidence_digest,
+                    "pending identity fence: the canonical artifact at the derived \
+                     address carries a different identity than the envelope claims — \
+                     cross-artifact substitution refused"
                 );
                 let receipt_bytes = std::fs::read(&receipt_path).map_err(|e| {
                     anyhow::anyhow!(
@@ -825,6 +861,32 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                         receipt_path.display()
                     )
                 })?;
+                // Receipt ↔ doğrulanmış record (aynı read-once tamponlardan —
+                // gate'in fence'lerinin finalize tarafındaki karşılığı).
+                let receipt =
+                    osp_core::authorization::ResumeReceipt::parse_strict_bytes(&receipt_bytes)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "resume receipt is unreadable/corrupt ({}): {e} — durable \
+                         proof-chain inconsistency (NOT a 'still awaiting' state)",
+                                receipt_path.display()
+                            )
+                        })?;
+                receipt.verify_against(record).map_err(|e| {
+                    anyhow::anyhow!(
+                        "resume receipt integrity RED ({}): {e} — durable proof-chain \
+                         inconsistency",
+                        receipt_path.display()
+                    )
+                })?;
+                anyhow::ensure!(
+                    receipt.resulting_sequence == record.base_space_view_revision.sequence + 1,
+                    "resume receipt sequence fence: resulting_sequence {} does not equal \
+                     base sequence {} + 1 — the apply chain is inconsistent with the \
+                     recorded base",
+                    receipt.resulting_sequence,
+                    record.base_space_view_revision.sequence
+                );
                 let bound = |key: &str| {
                     verdict
                         .pointer("/binding")
@@ -1042,13 +1104,19 @@ fn make_ref(run_dir: &Path, file: &str) -> String {
 /// content identity ≠ artifact identity). Binding fence'leri (attempt/task/
 /// patch digest'leri) read-once tamponlara karşı. #203: direct VE witnessed-
 /// resume tüketicilerinin paylaştığı TEK yüzeye çıkarıldı.
+///
+/// **PR #207 review P0-2:** bir realization verdict tüketiliyorsa
+/// `applied.patch` ZORUNLUDUR — gate her verdict'ine `binding.patch_digest`
+/// bağlar; dosyanın yokluğu "meşru opsiyonellik" DEĞİL, kanıt zincirinden
+/// realized delta'nın çıkarılmasıdır (RED). Eski davranış (Some ise kontrol)
+/// verdict'ten sonra patch silinmesine izin veriyordu.
 fn verify_verdict_provenance(
     verdict_path: &Path,
     run_dir: &Path,
     state_dir_arg: Option<&Path>,
     attempt_bytes: &[u8],
     task_bytes: &[u8],
-    patch_digest: Option<&str>,
+    patch_bytes: Option<&[u8]>,
 ) -> anyhow::Result<serde_json::Value> {
     let verdict_bytes = read_artifact_bytes(verdict_path)?;
     let attempt_digest = sha256_bytes(attempt_bytes);
@@ -1122,16 +1190,31 @@ fn verify_verdict_provenance(
     );
     // P0 (tur-3): after.json fence KALDIRILDI — gate kendi analizini yapar
     // (own_after_digest binding'de); run-dir after.json trust zincirine GİRMEZ.
-    // P0-2 (tur-2): realized delta kimliği — verdict'ün patch_digest'i
-    // finalize'ın KENDİ read-once patch tamponuyla eşleşmeli.
-    if let Some(patch_digest) = patch_digest {
-        anyhow::ensure!(
-            bound("patch_digest") == Some(patch_digest),
-            "verdict binding fence: realization-verdict.json was produced for \
-             different applied.patch bytes — the realized delta changed after \
-             the gate ran"
-        );
-    }
+    // P0-2 (tur-2 + PR #207 review P0-2): realized delta kimliği — verdict'in
+    // patch_digest'i ZORUNLU olarak mevcut olmalı ve finalize'ın KENDİ
+    // read-once patch tamponuyla eşleşmeli. Verdict tüketimi patch'i opsiyonel
+    // yapMAZ: silinmiş patch = kanıt zincirinden realized delta'nın çıkarılması.
+    let bound_patch = bound("patch_digest").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} is missing binding.patch_digest — every gate verdict binds its \
+                 realized delta; a verdict without it cannot be consumed",
+            verdict_path.display()
+        )
+    })?;
+    let patch_bytes = patch_bytes.ok_or_else(|| {
+        anyhow::anyhow!(
+            "applied.patch is required when a realization verdict is consumed — {} is \
+             missing; deleting the realized delta after the gate ran cannot un-consume \
+             the bytes the verdict bound",
+            run_dir.join("applied.patch").display()
+        )
+    })?;
+    anyhow::ensure!(
+        bound_patch == sha256_bytes(patch_bytes),
+        "verdict binding fence: realization-verdict.json was produced for \
+         different applied.patch bytes — the realized delta changed after \
+         the gate ran"
+    );
     Ok(verdict)
 }
 

@@ -311,34 +311,40 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         String::from_utf8_lossy(&out.stderr)
     );
 
-    // **#203 (bağlama sözleşmesi madde-5b — digest-parity):** witnessed-resume
-    // girişinde gate'in KENDİ before-analyze'ı. Attempt akışıyla BİREBİR aynı
-    // inşaat (analyze_repo_with_config + AnalysisConfig::default + aynı adapter
-    // registry — mod.rs attempt akışının aynısı) → `SpaceDigest::compute`.
-    // Sözleşme: aynı ağaç → aynı kanonik digest; askının `base.content_digest`'i
-    // ancak o zaman BU repo durumunda ölçülmüş sayılır (yanlış-askı bağlanması
-    // ve base değişimi burada ölür). Parite pinned testle sabitlenmiştir.
-    if let Some(binding) = &resumed_binding {
-        let registry = osp_analyzer::language::AdapterRegistry::default_all();
-        let config = osp_analyzer::contract::AnalysisConfig::default();
-        let before =
-            osp_analyzer::pipeline::analyze_repo_with_config(&worktree_path, &registry, &config)
-                .map_err(|e| {
-                    anyhow::anyhow!("gate before-analysis failed on base state {base_head}: {e}")
-                })?;
-        let before_digest = osp_core::authorization::SpaceDigest::compute(&before.space)
-            .map_err(|e| anyhow::anyhow!("gate before-analysis digest failed: {e}"))?;
-        anyhow::ensure!(
-            before_digest == binding.base_content_digest,
-            "space-content parity fence: the gate's own before-analysis of base_head does \
-             not reproduce the pending authorization's base content digest — the \
-             authorization was measured on a different base than this repo state \
-             (binding refused)"
-        );
-    }
-
-    // Cleanup guard — worktree her durumda kaldırılır.
+    // Cleanup guard — worktree her durumda kaldırılır. Parity fence'i DE bu
+    // guard'ın İÇİNDE (closure'un başında) koşar: before-analyze hatası veya
+    // digest uyuşmazlığı erken dönüşle worktree'yi ORTADA BIRAKMAZ (PR #207
+    // review P1-1).
     let result = (|| -> anyhow::Result<(f64, String, String)> {
+        // **#203 (bağlama sözleşmesi madde-5b — digest-parity):** witnessed-resume
+        // girişinde gate'in KENDİ before-analyze'ı. Attempt akışıyla BİREBİR aynı
+        // inşaat (analyze_repo_with_config + AnalysisConfig::default + aynı adapter
+        // registry — mod.rs attempt akışının aynısı) → `SpaceDigest::compute`.
+        // Sözleşme: aynı ağaç → aynı kanonik digest; askının `base.content_digest`'i
+        // ancak o zaman BU repo durumunda ölçülmüş sayılır (yanlış-askı bağlanması
+        // ve base değişimi burada ölür). Parite pinned testle sabitlenmiştir.
+        if let Some(binding) = &resumed_binding {
+            let registry = osp_analyzer::language::AdapterRegistry::default_all();
+            let config = osp_analyzer::contract::AnalysisConfig::default();
+            let before = osp_analyzer::pipeline::analyze_repo_with_config(
+                &worktree_path,
+                &registry,
+                &config,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("gate before-analysis failed on base state {base_head}: {e}")
+            })?;
+            let before_digest = osp_core::authorization::SpaceDigest::compute(&before.space)
+                .map_err(|e| anyhow::anyhow!("gate before-analysis digest failed: {e}"))?;
+            anyhow::ensure!(
+                before_digest == binding.base_content_digest,
+                "space-content parity fence: the gate's own before-analysis of base_head does \
+                 not reproduce the pending authorization's base content digest — the \
+                 authorization was measured on a different base than this repo state \
+                 (binding refused)"
+            );
+        }
+
         // (b) Patch'i uygula (MUTLAK yol — git worktree -C ile göreli yolu
         // worktree içinde arar). Canonicalize YOK (Windows UNC \\?\
         // öneki git'i kırar) — absolute join yeterli.
@@ -563,9 +569,24 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         "✓ realization verdict written to {}",
         verdict_path.display()
     );
+    // **#203 (PR review P1-2):** truth-surface tutarlılığı — terminal raporu
+    // route-aware projeksiyondan basılır (finalize'ın ledger projeksiyonuyla TEK
+    // kaynak). `RealizationVerdict::completion_basis()` direct giriş semantiği
+    // taşır (graph-completed iddia girişte kurulmuştu); witnessed-resume'da
+    // başarısız verdict HİÇ graph-completed iddia kurmaz → rapor basis=None
+    // der, Some(Graph) DEMEZ.
+    let ledger_label = match label {
+        "RealizedCompleted" => "realized",
+        "DeclaredRealizationBuildInvalid" => "declared_realization_build_invalid",
+        "PredicateUnsatisfiedAfterReanalysis" => "predicate_unsatisfied_after_reanalysis",
+        _ => "not_attempted",
+    };
+    let (route_basis, _) = crate::commands::finalize_run::ledger_completion_projection(
+        resumed_binding.is_some(),
+        ledger_label,
+    );
     println!(
-        "verdict = {label} (basis={:?}, build_errors={:?}, E_c={e_c:?})",
-        verdict.completion_basis(),
+        "verdict = {label} (basis={route_basis:?}, build_errors={:?}, E_c={e_c:?})",
         verdict.build_error_count(),
     );
     std::process::exit(code);
