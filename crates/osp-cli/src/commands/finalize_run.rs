@@ -740,7 +740,7 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                 patch_bytes.as_deref(),
             )?;
             let label = verdict_label(&verdict, &verdict_path)?;
-            let route = verdict_route(&verdict);
+            let route = verdict_route(&verdict, &verdict_path)?;
             anyhow::ensure!(
                 route
                     .as_deref()
@@ -773,7 +773,7 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
                     patch_bytes.as_deref(),
                 )?;
                 let label = verdict_label(&verdict, &verdict_path)?;
-                let route = verdict_route(&verdict);
+                let route = verdict_route(&verdict, &verdict_path)?;
                 anyhow::ensure!(
                     route.as_deref() == Some("witnessed_resume"),
                     "route fence: an awaiting_witnesses envelope requires a \
@@ -1242,13 +1242,27 @@ fn verdict_label(verdict: &serde_json::Value, verdict_path: &Path) -> anyhow::Re
     }
 }
 
-/// #203: verdict'in `binding.completion_route` alanı (`attempt_direct` |
-/// `witnessed_resume`); eski (pre-#203) direct verdictlerde YOK → `None`.
-fn verdict_route(verdict: &serde_json::Value) -> Option<String> {
-    verdict
-        .pointer("/binding/completion_route")
-        .and_then(|v| v.as_str())
-        .map(String::from)
+/// #203 (+re-review P2 — presence-aware): verdict'in `binding.completion_route`
+/// alanı (`attempt_direct` | `witnessed_resume`). Alan YOK (eski pre-#203
+/// direct verdictler) → `Ok(None)` — legacy toleransı YALNIZ gerçek eksikliğe.
+/// Alan VAR ama `null`/sayı/nesne → `Err` (RED): açıkça verilmiş hatalı-tür
+/// değer, sessizce legacy-eksiklik sanılmaz (missing ≠ present-but-malformed —
+/// #178 presence-aware disiplini). Bilinmeyen STRING değerleri burada değil,
+/// route fence'lerinde RED'lenir (burada türlü kalan tek şey TÜR'dür).
+fn verdict_route(
+    verdict: &serde_json::Value,
+    verdict_path: &Path,
+) -> anyhow::Result<Option<String>> {
+    match verdict.pointer("/binding/completion_route") {
+        None => Ok(None),
+        Some(serde_json::Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => anyhow::bail!(
+            "{} binding.completion_route must be a string (\"attempt_direct\" | \
+             \"witnessed_resume\") when present, found {other} — an explicitly \
+             malformed route is not a legacy-missing field",
+            verdict_path.display()
+        ),
+    }
 }
 
 /// **#203: route-aware completion projeksiyonu — TEK kaynak (ünite testli).**
@@ -1274,6 +1288,37 @@ pub(crate) fn ledger_completion_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **#203 re-review P2 (presence-aware):** `verdict_route` üç durumu AYIRIR —
+    /// alan YOK → `Ok(None)` (legacy toleransı YALNIZ gerçek eksikliğe); alan
+    /// VAR-ama-null/sayı/nesne → `Err` (açık hatalı tür legacy-eksik sanılmaz;
+    /// missing ≠ present-but-malformed — #178 disiplini).
+    #[test]
+    fn verdict_route_is_presence_aware() {
+        let path = Path::new("verdict.json");
+        // Gerçek eksiklik: legacy direct verdict — toleranslı.
+        let missing = serde_json::json!({"binding": {"attempt_digest": "x"}});
+        assert_eq!(verdict_route(&missing, path).unwrap(), None);
+        // Geçerli string.
+        let direct = serde_json::json!({"binding": {"completion_route": "attempt_direct"}});
+        assert_eq!(
+            verdict_route(&direct, path).unwrap().as_deref(),
+            Some("attempt_direct")
+        );
+        // Açıkça hatalı TÜR — üçü de RED (None'e çökertilMEZ).
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!(7),
+            serde_json::json!({}),
+        ] {
+            let v = serde_json::json!({"binding": {"completion_route": bad}});
+            let err = verdict_route(&v, path).expect_err("present-but-malformed route RED olmalı");
+            assert!(
+                err.to_string().contains("not a legacy-missing field"),
+                "mesaj: {err}"
+            );
+        }
+    }
 
     /// #203 tur-2 review matrisi — route-aware completion projeksiyonu (tek kaynak).
     /// Direct'te başarısız verdict graph iddiayı ayakta bırakır ("graph");
