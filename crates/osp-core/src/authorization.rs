@@ -5672,7 +5672,11 @@ pub struct PendingAuthorization {
     /// **INV-T9 #72:** Evidence'ın domain-separated digest'i. `verify()` tekrar
     /// hesaplayıp karşılaştırır (tamper detection).
     pub evidence_digest: SuspendedAttemptEvidenceDigest,
-    /// Clock trait'inden — digest'e DAHİL DEĞİL.
+    /// Clock trait'inden — digest'e DAHİL DEĞİL. **#203 uygulama-2:** bilinçli
+    /// dışarıda kalış bu yüzden aynı kanıtın farklı-zamanlı yeniden-suspend'ini
+    /// `BasisConflict` kılar (baytlar farklı, adres aynı) — resume edin,
+    /// yeniden-suspend etmeyin (digest girdi-uzayı tablosu: store sözleşme
+    /// dokümanı).
     pub created_at: u64,
 }
 
@@ -8960,6 +8964,29 @@ pub fn pending_authorization_artifact_filename_v2_prefix(
 /// **Idempotent:** aynı evidence digest + aynı içerik → success; aynı evidence path +
 /// farklı içerik → integrity error; aynı basis + farklı evidence digest → ayrı artifact.
 ///
+/// **#203 uygulama-2 — digest girdi-uzayı sözleşmesi (karar-2/3, donmuş
+/// [issuecomment-6126716868]):** V1 evidence digest'e GİRENLER: `schema_version`,
+/// `task_id`, `claim_id`, basis digest (dolaylıyla: structural delta, predicate
+/// içerik + değerlendirme, ölçülmüş sonuç, **`base_space_view_revision`
+/// [view_id + sequence + content_digest]**, `evaluation_context_digest`,
+/// witness policy), `attempt_num`, disposition (Held/Rejected + snapshot +
+/// reason/reasons). GİRMEYENLER: `created_at` (bilinçli — Clock kaydı, kanıt
+/// kimliği değil).
+///
+/// **Üç-katman ayrımı (PR #208 review P1):** kanıt KİMLİĞİ canonical digest'tir;
+/// artifact TEMSİLİ persist edilen JSON baytlarıdır; yazım KARARI "aynı adres +
+/// farklı bayt → `BasisConflict`"tir. Aynı digest adresine karşılık farklı baytlar
+/// YALNIZ `created_at` farkından doğmaz — canonical digest kodlaması ile persisted
+/// JSON kodlaması arasında farklı temsilleri eşdeğer sayan normalizasyonlar da aynı
+/// sınıfa düşer (örn. `-0.0` ↔ `+0.0`: digest katmanı normalize eder, serde bayt
+/// üretimi etmez → kimlik aynı, temsil farklı —
+/// `negative_zero_same_address_different_bytes_is_conflict`). `created_at`, bu
+/// sınıfın BİLİNEN açık metadata üyesidir (aynı kanıtın farklı-zamanlı
+/// yeniden-suspend reddi; operatörün yolu resume'dur — run-26'nın apply-sonrası
+/// ad-çakışmasının sınıfı budur). Farklı base sequence / eval-context ise FARKLI
+/// digest → FARKLI artifact (karar-3: öncül düzeltmesi — bunlar zaten dolaylı
+/// bağlıydı; `different_evaluation_context_yields_different_evidence_digest_and_address`).
+///
 /// **Crash-consistent publish:** same-dir temp → write_all → sync_all → atomic no-clobber
 /// publish/rename → parent-dir sync where supported.
 ///
@@ -12150,6 +12177,58 @@ mod tests {
     // #164 — Resume flow tests (engine resume API + restore + receipt)
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /// **#203 uygulama-2:** tam-basis-parametreli sample envelope — record↔basis↔
+    /// evidence zinciri verilen basis'la TUTARLI kurulur (gömülü evidence'ın
+    /// basis-digest bağı ve record'un `evaluation_context_digest` kopyası basis'ten
+    /// alınır; `created_at` sabit — digest-dışı fark testleri deterministik).
+    /// `sample_envelope_with_base`'in genelleştirilmiş hâli.
+    fn sample_envelope_with_basis(basis: AuthorizationBasis) -> PendingAuthorizationEnvelope {
+        let basis_digest = AuthorizationBasisDigest::compute(&basis).unwrap();
+        let hold_reason = WitnessHoldReason::MinApproversNotMet {
+            distinct: 0,
+            required: 2,
+        };
+        let snapshot = WitnessQuorumSnapshot {
+            approvers: 0,
+            required_approvers: 2,
+            support: 0.0,
+            required_support: 1.5,
+        };
+        let evidence = SuspendedAttemptEvidence::try_new(
+            TaskId::from(1u64),
+            ClaimId::from(42u64),
+            basis_digest.clone(),
+            AttemptNumber::try_from(1u64).unwrap(),
+            SuspendedAttemptDisposition::Held {
+                hold_reason: hold_reason.clone(),
+                snapshot: snapshot.clone(),
+            },
+        )
+        .unwrap();
+        let evidence_digest = SuspendedAttemptEvidenceDigest::compute(&evidence).unwrap();
+        let record = PendingAuthorization {
+            task_id: TaskId::from(1u64),
+            claim_id: ClaimId::from(42u64),
+            predicate_completion: PredicateCompletion::Completed,
+            mutation_decision: MutationDecision::AcceptAsCompleted,
+            intended_apply_target: ApplyTarget::Lane(CommitLane::Mainline),
+            authorization_basis_digest: basis_digest,
+            base_space_view_revision: basis.base_space_view_revision.clone(),
+            evaluation_context_digest: basis.evaluation_context_digest.clone(),
+            witness_requirement: WitnessRequirement {
+                min_approvers: 2,
+                quorum_threshold: 1.5,
+            },
+            witness_hold_reason: hold_reason,
+            witness_snapshot: snapshot,
+            attempt_num: AttemptNumber::try_from(1u64).unwrap(),
+            suspended_attempt_evidence: evidence,
+            evidence_digest,
+            created_at: 1_700_000_000,
+        };
+        PendingAuthorizationEnvelope::new(record, basis).unwrap()
+    }
+
     /// sample_basis/record türevi — base revision motorun GERÇEK current revision'ı.
     /// (Evidence basis-digest'i de yeni basis'ten türetilir — Envelope::new cross-check.)
     fn sample_envelope_with_base(base: SpaceViewRevision) -> PendingAuthorizationEnvelope {
@@ -12791,6 +12870,181 @@ mod tests {
         assert!(
             matches!(err, PendingAuthorizationStoreError::BasisConflict { .. }),
             "same path + different content must be BasisConflict, got: {err:?}"
+        );
+    }
+
+    /// **#203 uygulama-2 / karar-2 pini:** aynı evidence kimliği (digest'e
+    /// giren HER alan özdeş) + farklı `created_at` → `BasisConflict` —
+    /// bilinçli sonuç. `created_at` digest'e DAHİL DEĞİL (tasarım: Clock
+    /// kaydı, kanıt kimliği değil) ama zarf BAYTLARINA dâhil; no-clobber
+    /// idempotentliği bayt-eşitlik ister → aynı kimliğin yeniden-suspend'i
+    /// RED. Operatörün yolu resume'dır, yeniden-suspend değil (run-26'nın
+    /// apply-sonrası ad-çakışması tam bu sınıftı).
+    #[test]
+    fn same_evidence_identity_with_different_created_at_is_conscious_conflict() {
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        let envelope = PendingAuthorizationEnvelope::new(record, basis).unwrap();
+        store.persist(&envelope).expect("first persist");
+
+        // Aynı kanıt (created_at hariç her alan) → AYNI digest → AYNI adres;
+        // ama zarf baytları farklı (zaman damgası) → BasisConflict.
+        let mut later_record = envelope.record().clone();
+        later_record.created_at += 1;
+        let later =
+            PendingAuthorizationEnvelope::new(later_record, envelope.authorization_basis().clone())
+                .unwrap();
+        assert_eq!(
+            later.record().evidence_digest,
+            envelope.record().evidence_digest,
+            "created_at digest'e DAHİL DEĞİL — kanıt kimliği aynı kalır (girdi-uzayı tablosu)"
+        );
+        let err = store.persist(&later).unwrap_err();
+        assert!(
+            matches!(err, PendingAuthorizationStoreError::BasisConflict { .. }),
+            "same identity + different timestamp → bilinçli BasisConflict, got: {err:?}"
+        );
+    }
+
+    /// **#203 uygulama-2 / karar-3 pini (öncül düzeltmesi):** V1 evidence
+    /// digest, space sequence'i basis digest üzerinden DOLAYLI bağlar —
+    /// farklı `base_space_view_revision.sequence` → farklı basis digest →
+    /// farklı evidence digest → farklı dosya adı. "Aynı ad + farklı içerik"
+    /// yalnız digest-dışı farklar sınıfında kurulabilir (`created_at`; ayrıca
+    /// digest normalizasyonları — ±0.0, bkz.
+    /// `negative_zero_same_address_different_bytes_is_conflict`); sequence /
+    /// evaluation-context ASLA o sınıfa düşmez — onlar FARKLI kimlik üretir.
+    #[test]
+    fn different_base_sequence_yields_different_evidence_digest() {
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        let envelope = PendingAuthorizationEnvelope::new(record, basis).unwrap();
+
+        let mut bumped_basis = envelope.authorization_basis().clone();
+        bumped_basis.base_space_view_revision.sequence += 1;
+        // Envelope'un record↔basis↔evidence zinciri katı: record'un revision
+        // kopyası VE gömülü evidence'ın basis-digest bağı da yeni bazla
+        // mühürlenmeli (`new()` her şeyi yeniden hesaplar ama gömülü kanıtın
+        // İÇİNDEKİ basis digest referansı çağıranın sorumluluğundadır).
+        let bumped_basis_digest = AuthorizationBasisDigest::compute(&bumped_basis).unwrap();
+        let old_evidence = &envelope.record().suspended_attempt_evidence;
+        let bumped_evidence = SuspendedAttemptEvidence::try_new(
+            old_evidence.task_id(),
+            old_evidence.claim_id(),
+            bumped_basis_digest,
+            old_evidence.attempt_num(),
+            old_evidence.disposition().clone(),
+        )
+        .unwrap();
+        let mut bumped_record = envelope.record().clone();
+        bumped_record.base_space_view_revision.sequence += 1;
+        bumped_record.suspended_attempt_evidence = bumped_evidence;
+        let bumped = PendingAuthorizationEnvelope::new(bumped_record, bumped_basis).unwrap();
+        assert_ne!(
+            bumped.record().authorization_basis_digest,
+            envelope.record().authorization_basis_digest,
+            "base sequence basis digest'ine girer (view_id + sequence + content_digest)"
+        );
+        assert_ne!(
+            bumped.record().evidence_digest,
+            envelope.record().evidence_digest,
+            "evidence digest basis'i bağlar → sequence dolaylı DAHİL (karar-3)"
+        );
+        // Ve sonuç: iki AYRI artifact — "aynı adda iki nüsha" görünümü doğmaz.
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+        let r1 = store.persist(&envelope).unwrap();
+        let r2 = store.persist(&bumped).unwrap();
+        assert_ne!(
+            r1.artifact_path, r2.artifact_path,
+            "farklı baz → farklı kimlik → farklı adres"
+        );
+    }
+
+    /// **PR #208 review P1:** digest kodlaması `-0.0`'ı `+0.0`'a normalize eder
+    /// ama persist edilen JSON baytları etmez → `created_at` SABİTken bile aynı
+    /// digest adresi + farklı bayt kurulabilir. Üç katman ayrık kalır: kanıt
+    /// KİMLİĞİ (canonical digest) ≠ artifact TEMSİLİ (persist edilen JSON
+    /// baytları) ≠ yazım KARARI (aynı adres + farklı bayt → BasisConflict).
+    /// Ontolojik olarak eşdeğer iki ölçüm temsili, depolama katmanında
+    /// bayt-bakımından farklı olabilir.
+    #[test]
+    fn negative_zero_same_address_different_bytes_is_conflict() {
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+
+        let mut basis_pos = sample_basis();
+        set_axis(&mut basis_pos, "coupling", 0.0f64);
+        let envelope_pos = sample_envelope_with_basis(basis_pos);
+        store.persist(&envelope_pos).expect("+0.0 kolu persist");
+
+        let mut basis_neg = sample_basis();
+        set_axis(&mut basis_neg, "coupling", -0.0f64);
+        let envelope_neg = sample_envelope_with_basis(basis_neg);
+
+        // Kimlik katmanı: digest normalizasyonu — zaman damgası SABİT, kanıt
+        // kimliği VE adres aynı.
+        assert_eq!(
+            envelope_neg.record().created_at,
+            envelope_pos.record().created_at,
+            "çakışma created_at'ten DEĞİL — sınıf normalizasyonlardan da doğar"
+        );
+        assert_eq!(
+            envelope_neg.record().authorization_basis_digest,
+            envelope_pos.record().authorization_basis_digest,
+            "digest katmanı -0.0'ı normalize eder"
+        );
+        assert_eq!(
+            envelope_neg.record().evidence_digest,
+            envelope_pos.record().evidence_digest,
+            "evidence digest — ve dosya adı — aynı kalır"
+        );
+        // Temsil katmanı: JSON baytları farklı (serde -0.0'ı ayrı yazar).
+        let bytes_pos = serde_json::to_vec_pretty(&envelope_pos).unwrap();
+        let bytes_neg = serde_json::to_vec_pretty(&envelope_neg).unwrap();
+        assert_ne!(bytes_pos, bytes_neg, "temsil katmanı farklıdır");
+        // Yazım kararı: aynı adres + farklı bayt → BasisConflict.
+        let err = store.persist(&envelope_neg).unwrap_err();
+        assert!(
+            matches!(err, PendingAuthorizationStoreError::BasisConflict { .. }),
+            "same address + different bytes (±0.0, created_at eşit) → BasisConflict, got: {err:?}"
+        );
+    }
+
+    /// **PR #208 review P2:** karar-3 zincirini evaluation-context eksenine de
+    /// ucuca açar — farklı `evaluation_context_digest` → farklı basis digest →
+    /// farklı evidence digest → farklı artifact adresi (mevcut
+    /// `authorization_basis_digest_changes_when_rule_set_context_changes`
+    /// yalnız basis düzeyindeydi; burada adres zinciriyle birlikte pinlenir).
+    #[test]
+    fn different_evaluation_context_yields_different_evidence_digest_and_address() {
+        let basis = sample_basis();
+        let record = sample_pending_record();
+        let envelope = PendingAuthorizationEnvelope::new(record, basis).unwrap();
+
+        let mut ctx_basis = sample_basis();
+        ctx_basis.evaluation_context_digest = EvaluationContextDigest::from_bytes([0xff; 32]);
+        let ctx_envelope = sample_envelope_with_basis(ctx_basis);
+
+        assert_ne!(
+            ctx_envelope.record().authorization_basis_digest,
+            envelope.record().authorization_basis_digest,
+            "evaluation-context basis digest'ine girer"
+        );
+        assert_ne!(
+            ctx_envelope.record().evidence_digest,
+            envelope.record().evidence_digest,
+            "evidence digest basis'i bağlar → eval-context dolaylı DAHİL"
+        );
+        let dir = temp_dir();
+        let mut store = FilesystemPendingAuthorizationStore::new(&dir);
+        let r1 = store.persist(&envelope).unwrap();
+        let r2 = store.persist(&ctx_envelope).unwrap();
+        assert_ne!(
+            r1.artifact_path, r2.artifact_path,
+            "farklı bağlam → farklı kimlik → farklı adres"
         );
     }
 
