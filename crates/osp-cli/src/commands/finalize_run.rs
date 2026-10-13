@@ -95,35 +95,35 @@ pub struct FinalizeRunArgs {
 /// üretemeyeceği değerler burada düşer. `deny_unknown_fields` bilinçli YOK:
 /// envelope evrimi (additive alanlar) missing≡null felsefesiyle uyumlu kalsın.
 #[derive(Debug, serde::Deserialize)]
-struct AttemptEnvelopeRead {
-    schema_version: u32,
-    run: AttemptRunRead,
-    execution_measurement: ExecutionMeasurementRead,
+pub(crate) struct AttemptEnvelopeRead {
+    pub(crate) schema_version: u32,
+    pub(crate) run: AttemptRunRead,
+    pub(crate) execution_measurement: ExecutionMeasurementRead,
     /// INV-T10 (#197/#198): zarfın tamam-iddia kanıt zemini — `"graph"` yalnız
     /// `result.kind == completed` iken; `null`/missing = iddia yok / pre-#197.
     /// Finalize bu değeri ledger satırına TAŞIR (canonical consumer bağlaması —
     /// #196 uygulama-2): downstream eski "completed" semantiğiyle yaşamaz.
     #[serde(default)]
-    completion_basis: Option<String>,
-    result: AttemptResultRead,
-    evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
+    pub(crate) completion_basis: Option<String>,
+    pub(crate) result: AttemptResultRead,
+    pub(crate) evidence: Vec<osp_core::trajectory::TrajectoryEvidence>,
 }
 
 #[derive(Debug, serde::Deserialize)]
-struct AttemptRunRead {
-    task_id: u64,
-    execution_mode: String,
-    witness_mode: String,
-    task_source: String,
-    repository_head: String,
+pub(crate) struct AttemptRunRead {
+    pub(crate) task_id: u64,
+    pub(crate) execution_mode: String,
+    pub(crate) witness_mode: String,
+    pub(crate) task_source: String,
+    pub(crate) repository_head: String,
     /// #178 review P0-2: presence-aware — alan YOK (legacy zarf → fence atlanır,
     /// backward-compat) ≠ alan NULL (yeni producer'ın "bu artifact TÜKETİLMEDİ"
     /// beyanı) ≠ değer ("bu baytlar tüketildi" beyanı — dosya zorunlu + hash eşit).
     /// `Option<Option<String>>` + double_option bu üçü serde'de ayırır.
     #[serde(default, deserialize_with = "double_option")]
-    task_digest: Option<Option<String>>,
+    pub(crate) task_digest: Option<Option<String>>,
     #[serde(default, deserialize_with = "double_option")]
-    proposals_digest: Option<Option<String>>,
+    pub(crate) proposals_digest: Option<Option<String>>,
 }
 
 /// double_option: missing → None, present-null → Some(None), value → Some(Some(v)).
@@ -296,34 +296,32 @@ pub(crate) fn verify_attempt_against_canonical_store(
 /// #96 MD-2 iki-eksen authority vocabulary — üyelik doğrulaması (exact değer
 /// pinlemek değil; bilinen kanonik sözlük dışı değer red).
 #[derive(Debug, serde::Deserialize)]
-struct ExecutionMeasurementRead {
-    subject_authority: String,
-    provenance_authority: String,
+pub(crate) struct ExecutionMeasurementRead {
+    pub(crate) subject_authority: String,
+    pub(crate) provenance_authority: String,
     /// Şekil-doğrulama amaçlı (bool tipi serde'de zorlanır).
     #[allow(dead_code)]
-    provenance_native: bool,
+    pub(crate) provenance_native: bool,
 }
 
 /// `CliRunResult` mirror — `kind` üyeliği + `attempts` sayısı + #203 askı
 /// kimliği (route fence girdisi; yalnız awaiting_witnesses taşır, additive).
 #[derive(Debug, serde::Deserialize)]
-struct AttemptResultRead {
-    kind: String,
+pub(crate) struct AttemptResultRead {
+    pub(crate) kind: String,
     #[allow(dead_code)]
-    attempts: u64,
+    pub(crate) attempts: u64,
     #[serde(default)]
-    pending: Option<PendingIdentityRead>,
+    pub(crate) pending: Option<PendingIdentityRead>,
 }
 
 /// #203: `result.pending` — awaiting_witnesses askısının kanonik kimliği
-/// (run_envelope::CliPendingAuthorizationIdentity'nin finalize okuma şekli).
+/// (`run_envelope::CliPendingAuthorizationIdentity'nin finalize okuma şekli).
 #[derive(Debug, serde::Deserialize)]
-struct PendingIdentityRead {
-    #[allow(dead_code)]
-    claim_id: u64,
-    #[allow(dead_code)]
-    attempt_num: u64,
-    evidence_digest: String,
+pub(crate) struct PendingIdentityRead {
+    pub(crate) claim_id: u64,
+    pub(crate) attempt_num: u64,
+    pub(crate) evidence_digest: String,
 }
 
 /// `CliRunResultKind` snake_case wire kümesi (`run_envelope.rs` ile aynı üyeler).
@@ -344,6 +342,98 @@ const RESULT_KINDS: &[&str] = &[
 /// #96 MD-2 authority vocabulary (tarihsel değerler dahil — üyelik seti).
 const SUBJECT_AUTHORITIES: &[&str] = &["task_scope", "affected_nodes"];
 const PROVENANCE_AUTHORITIES: &[&str] = &["engine_native_per_axis", "legacy_projected_v1"];
+
+/// #204 (re-review tur-2 P1-1): kanonik attempt zarfının TİPLİ okuma + üyelik
+/// doğrulaması — **paylaşılan TEK sözleşme**. `finalize-run` (tüketim) ve
+/// `trajectory resume` (originating-kanıt taraması) aynı fonksiyonu kullanır;
+/// iki yüzey zaman içinde birbirinden ayrı kanonik zarf tanımlarına sahip
+/// OLAMAZ. Alan VARLIĞI yetmez: iç şekiller TİPLİ (`run.repository_head`
+/// string, `execution_measurement.provenance_native` bool, `evidence[]`
+/// core'un kapalı tipleriyle), karar alanları sözlük üyeliğiyle doğrulanır.
+/// Bağlamsal çitler (task.json↔run id, baseline↔head, digest'ler) burada DEĞİL
+/// — çağıran kendi bağlamına ekler.
+pub(crate) fn validate_canonical_attempt_envelope(
+    value: &serde_json::Value,
+) -> Result<AttemptEnvelopeRead, String> {
+    let attempt: AttemptEnvelopeRead = serde_json::from_value(value.clone()).map_err(|e| {
+        format!(
+            "does not match the #166 run envelope shape (missing or mistyped \
+             required fields in run/execution_measurement/result/evidence[]): {e}"
+        )
+    })?;
+    if attempt.schema_version != 1 {
+        return Err(format!(
+            "schema_version must be 1 (#166 run envelope), found {}",
+            attempt.schema_version
+        ));
+    }
+    if !RESULT_KINDS.contains(&attempt.result.kind.as_str()) {
+        return Err(format!(
+            "result.kind {:?} is not a canonical CliRunResultKind wire value",
+            attempt.result.kind
+        ));
+    }
+    if !SUBJECT_AUTHORITIES.contains(&attempt.execution_measurement.subject_authority.as_str()) {
+        return Err(format!(
+            "execution_measurement.subject_authority {:?} is not in the #96 MD-2 vocabulary",
+            attempt.execution_measurement.subject_authority
+        ));
+    }
+    if !PROVENANCE_AUTHORITIES
+        .contains(&attempt.execution_measurement.provenance_authority.as_str())
+    {
+        return Err(format!(
+            "execution_measurement.provenance_authority {:?} is not in the #96 MD-2 vocabulary",
+            attempt.execution_measurement.provenance_authority
+        ));
+    }
+    if attempt.run.execution_mode != "harness" && attempt.run.execution_mode != "production" {
+        return Err(format!(
+            "run.execution_mode has an unknown value {:?}",
+            attempt.run.execution_mode
+        ));
+    }
+    if attempt.run.witness_mode != "harness_auto_approve"
+        && attempt.run.witness_mode != "production"
+    {
+        return Err(format!(
+            "run.witness_mode has an unknown value {:?}",
+            attempt.run.witness_mode
+        ));
+    }
+    // Tur-3 P0: producer'ın kendi guard'ı mirror'lanır — üyelikler ayrı ayrı
+    // geçse bile production + harness_auto_approve kombinasyonu canonical
+    // producer tarafından üretilmez.
+    if attempt.run.witness_mode == "harness_auto_approve" && attempt.run.execution_mode != "harness"
+    {
+        return Err(
+            "run mode combination is not canonical: witness harness_auto_approve requires \
+             execution harness (the producer guard rejects this combination at emit time)"
+                .to_string(),
+        );
+    }
+    if attempt.run.task_source != "harness_task_file"
+        && attempt.run.task_source != "legacy_hardcoded"
+    {
+        return Err(format!(
+            "run.task_source {:?} is not a canonical producer value",
+            attempt.run.task_source
+        ));
+    }
+    // Tur-3 P0: run envelope'un KENDİ evidence'ı run task'ına bağlanır —
+    // task.json↔run bağını geçen bir artifact, içine yabancı task'ın
+    // evidence'ını taşıyamaz (zarf-iç tutarlılık; bağlamsal değildir).
+    for evidence in &attempt.evidence {
+        if evidence.task_id != attempt.run.task_id {
+            return Err(format!(
+                "evidence fence: evidence entry carries task_id {} but the run is \
+                 task_id {} — foreign evidence cannot share this envelope",
+                evidence.task_id, attempt.run.task_id
+            ));
+        }
+    }
+    Ok(attempt)
+}
 
 pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
     anyhow::ensure!(
@@ -412,56 +502,12 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
          attempt with --out",
         shape_name(&attempt_raw)
     );
-    let attempt: AttemptEnvelopeRead = serde_json::from_value(attempt_raw).map_err(|e| {
-        anyhow::anyhow!(
-            "attempt.json does not match the #166 run envelope shape (missing or \
-             mistyped required fields in run/execution_measurement/result/evidence[]): {e}"
-        )
-    })?;
-    anyhow::ensure!(
-        attempt.schema_version == 1,
-        "attempt.json schema_version must be 1 (#166 run envelope), found {}",
-        attempt.schema_version
-    );
-    anyhow::ensure!(
-        RESULT_KINDS.contains(&attempt.result.kind.as_str()),
-        "attempt.json result.kind {:?} is not a canonical CliRunResultKind wire value",
-        attempt.result.kind
-    );
-    anyhow::ensure!(
-        SUBJECT_AUTHORITIES.contains(&attempt.execution_measurement.subject_authority.as_str()),
-        "attempt.json execution_measurement.subject_authority {:?} is not in the \
-         #96 MD-2 vocabulary",
-        attempt.execution_measurement.subject_authority
-    );
-    anyhow::ensure!(
-        PROVENANCE_AUTHORITIES
-            .contains(&attempt.execution_measurement.provenance_authority.as_str()),
-        "attempt.json execution_measurement.provenance_authority {:?} is not in the \
-         #96 MD-2 vocabulary",
-        attempt.execution_measurement.provenance_authority
-    );
-    anyhow::ensure!(
-        attempt.run.execution_mode == "harness" || attempt.run.execution_mode == "production",
-        "attempt.json run.execution_mode has an unknown value {:?}",
-        attempt.run.execution_mode
-    );
-    anyhow::ensure!(
-        attempt.run.witness_mode == "harness_auto_approve"
-            || attempt.run.witness_mode == "production",
-        "attempt.json run.witness_mode has an unknown value {:?}",
-        attempt.run.witness_mode
-    );
-    // Tur-3 P0: producer'ın kendi guard'ı mirror'lanır (validate_execution_
-    // witness_combination) — üyelikler ayrı ayrı geçse bile production +
-    // harness_auto_approve kombinasyonu canonical producer tarafından üretilmez.
-    anyhow::ensure!(
-        !(attempt.run.witness_mode == "harness_auto_approve"
-            && attempt.run.execution_mode != "harness"),
-        "attempt.json run mode combination is not canonical: witness \
-         harness_auto_approve requires execution harness (Paper 2 scoped \
-         relaxation — the producer guard rejects this combination at emit time)"
-    );
+    // #204 (re-review tur-2 P1-1): format + üyelik doğrulaması PAYLAŞILAN tek
+    // sözleşmeden (`validate_canonical_attempt_envelope`) — resume'un
+    // originating-kanıt taramasıyla AYNI tanım; finalize'a özgü bağlam çitleri
+    // (task-file ritüeli, task.json↔run id, baseline↔head) aşağıda sürer.
+    let attempt = validate_canonical_attempt_envelope(&attempt_raw)
+        .map_err(|detail| anyhow::anyhow!("attempt.json {detail}"))?;
     anyhow::ensure!(
         attempt.run.task_source == "harness_task_file",
         "attempt.json run.task_source = {:?} — finalize-run consumes the \
@@ -474,18 +520,8 @@ pub fn run_finalize_run(args: FinalizeRunArgs) -> anyhow::Result<()> {
          task_id {} — mismatched artifacts cannot share one ledger row",
         attempt.run.task_id
     );
-    // Tur-3 P0: run envelope'un KENDİ evidence'ı run task'ına bağlanır —
-    // task.json↔run bağını geçen bir artifact, içine yabancı task'ın
-    // evidence'ını taşıyabilir.
-    for evidence in &attempt.evidence {
-        anyhow::ensure!(
-            evidence.task_id == attempt.run.task_id,
-            "evidence fence: evidence entry carries task_id {} but the run is \
-             task_id {} — foreign evidence cannot share this envelope",
-            evidence.task_id,
-            attempt.run.task_id
-        );
-    }
+    // (evidence task-binding zarf-iç tutarlılığı paylaşılan
+    // `validate_canonical_attempt_envelope` içinde koşar.)
     anyhow::ensure!(
         attempt.run.repository_head == baseline_head,
         "head fence: attempt.json ran on {} but baseline.json measured \

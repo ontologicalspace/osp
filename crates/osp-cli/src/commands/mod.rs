@@ -298,39 +298,6 @@ enum OriginatingDirtyPolicy {
     },
 }
 
-/// #204 (re-review P1-1): kanonik attempt zarfının ŞEKİL sözleşmesi —
-/// `CliRunEnvelopeV1` zorunlu alanları (`run{task_id,repository_head}` /
-/// `execution_measurement` / `result` / `evidence`). Kimlik eşleşmesi ŞEKİLDEN
-/// SONRA koşar: beklenen pending kimliğini taşıyan ama zarf sözleşmesini
-/// taşımayan bir JSON originating kanıt SAYILMAZ (testin `c.json` sınıfı).
-fn canonical_attempt_envelope_shape(value: &serde_json::Value) -> Result<(), String> {
-    let missing = |field: &'static str| format!("missing required field `{field}`");
-    let run = value
-        .get("run")
-        .and_then(|v| v.as_object())
-        .ok_or_else(|| missing("run"))?;
-    if !run.contains_key("task_id") {
-        return Err(missing("run.task_id"));
-    }
-    if !run.contains_key("repository_head") {
-        return Err(missing("run.repository_head"));
-    }
-    if value
-        .get("execution_measurement")
-        .and_then(|v| v.as_object())
-        .is_none()
-    {
-        return Err(missing("execution_measurement"));
-    }
-    if value.get("result").and_then(|v| v.as_object()).is_none() {
-        return Err(missing("result"));
-    }
-    if value.get("evidence").and_then(|v| v.as_array()).is_none() {
-        return Err(missing("evidence"));
-    }
-    Ok(())
-}
-
 /// #204 (tur-2 P0 + tur-3 P1-2): kanonik attempts mağazasında pending kimliğini
 /// bağlayan ORIGINATING zarfı ara + fence kaydını typed doğrula.
 ///
@@ -342,14 +309,17 @@ fn canonical_attempt_envelope_shape(value: &serde_json::Value) -> Result<(), Str
 ///
 /// **Re-review P1-1:** ad + şekil sözleşmesi. Yalnız kanonik üretici adres
 /// biçimi (`task-<task_id>-…​.json`, `publish_no_clobber_attempt_artifact`)
-/// dosyaları adaydır; aday ZARF SÖZLEŞMESİNİ taşımalıdır (şekil reddi =
-/// fail-closed red, sessiz atlama değil). Kimlik tablosu: `schema_version`
-/// desteklenen · `run.task_id` == pending · `result.kind ==
-/// "awaiting_witnesses"` · `result.pending` == (claim, attempt,
-/// evidence-digest). Fence tablosu (kayıt VARSA): `mode == "declared_dirty"` ·
-/// `result == "passed"` · `observed ⊆ declared` · `source_kind ==
-/// "detached_head"` · `measurement.head == run.repository_head` ·
-/// `space_digest` kanonik 64-hex. 0 eşleşme → "re-run the attempt" red; >1 →
+/// dosyaları adaydır; aday ZARF SÖZLEŞMESİNİ taşımalıdır — doğrulama
+/// finalize-run ile PAYLAŞILAN typed okuyucudan
+/// (`validate_canonical_attempt_envelope`; tipler + sözlük üyelikleri +
+/// evidence↔task bağları) — resume ve finalize ayrı kanonik zarf tanımlarına
+/// sahip olamaz. Şekil reddi fail-closed'dur (sessiz atlama değil). Kimlik
+/// tablosu: `run.task_id` == pending · `result.kind == "awaiting_witnesses"` ·
+/// `result.pending` == (claim, attempt, evidence-digest). Fence tablosu (kayıt
+/// VARSA): `mode ==
+/// "declared_dirty"` · `result == "passed"` · `observed ⊆ declared` ·
+/// `source_kind == "detached_head"` · `measurement.head == run.repository_head`
+/// · `space_digest` kanonik 64-hex. 0 eşleşme → "re-run the attempt" red; >1 →
 /// ambiguity red (#190). Zarf doğrulaması makine-üretimini İSPATLAMAZ — o
 /// güven canonical store'un koruma sınırındadır (karar kaydı dürüst notu).
 fn find_originating_attempt_envelope(
@@ -399,31 +369,27 @@ fn find_originating_attempt_envelope(
             )
         })?;
         scanned += 1;
-        // P1-1: şekil sözleşmesi kimlik eşleşmesinden ÖNCE.
-        canonical_attempt_envelope_shape(&value).map_err(|detail| {
-            format!(
-                "canonical attempt file {} does not carry the envelope contract: \
-                 {detail} — a shape-invalid file is not originating evidence",
-                path.display()
-            )
-        })?;
-        let schema_ok = value.get("schema_version").and_then(|v| v.as_u64()) == Some(1);
-        let task_ok = value.pointer("/run/task_id").and_then(|v| v.as_u64()) == Some(task_id);
-        let kind_ok =
-            value.pointer("/result/kind").and_then(|v| v.as_str()) == Some("awaiting_witnesses");
-        let pending_ok = value
-            .pointer("/result/pending/claim_id")
-            .and_then(|v| v.as_u64())
-            == Some(claim_id)
-            && value
-                .pointer("/result/pending/attempt_num")
-                .and_then(|v| v.as_u64())
-                == Some(attempt_num)
-            && value
-                .pointer("/result/pending/evidence_digest")
-                .and_then(|v| v.as_str())
-                == Some(expected_digest.as_str());
-        if schema_ok && task_ok && kind_ok && pending_ok {
+        // P1-1 (re-review tur-2): şekil doğrulaması FINALIZE-RUN ile paylaşılan
+        // typed okuyucudan — kimlik eşleşmesinden ÖNCE; alan varlığı yetmez,
+        // tipler/sözlük üyelikleri/evidence bağları da doğrulanır.
+        let typed = crate::commands::finalize_run::validate_canonical_attempt_envelope(&value)
+            .map_err(|detail| {
+                format!(
+                    "canonical attempt file {} {detail} — a shape-invalid file is \
+                     not originating evidence",
+                    path.display()
+                )
+            })?;
+        // Kimlik tablosu — typed okuyucudan (schema==1 ve alan tipleri zaten
+        // doğrulandı).
+        let task_ok = typed.run.task_id == task_id;
+        let kind_ok = typed.result.kind == "awaiting_witnesses";
+        let pending_ok = typed.result.pending.as_ref().is_some_and(|p| {
+            p.claim_id == claim_id
+                && p.attempt_num == attempt_num
+                && p.evidence_digest == expected_digest
+        });
+        if task_ok && kind_ok && pending_ok {
             matches.push((path, value));
         }
     }
@@ -492,14 +458,31 @@ fn originating_fence_policy(
             .map(|v| v.as_str().map(str::to_string))
             .collect()
     };
-    let declared: std::collections::BTreeSet<String> = strings("declared_paths")
-        .ok_or("fence.declared_paths is not a string array")?
-        .into_iter()
-        .collect();
-    let observed: std::collections::BTreeSet<String> = strings("observed_dirty_paths")
-        .ok_or("fence.observed_dirty_paths is not a string array")?
-        .into_iter()
-        .collect();
+    // Re-review P2: producer BTreeSet→Vec yazar — kümeler kanonik SIRALI ve
+    // tekrarsızdır. Sırasız/tekrarlı kayıt üretici şeklinde DEĞİLDİR (üyelik
+    // kontrolü matematiksel olarak doğru kalsa da, serialized canonical form
+    // doğrulanır: kayıt yalnız üyeliği değil, üretici biçimini de taşımalı).
+    let canonical_order = |key: &str, raw: &[String]| -> Result<(), String> {
+        let mut sorted = raw.to_vec();
+        sorted.sort();
+        sorted.dedup();
+        if raw != sorted {
+            return Err(format!(
+                "fence.{key} is not canonically ordered (sorted, duplicate-free) — \
+                 the producer writes a sorted set; an unordered record is not \
+                 producer-shaped"
+            ));
+        }
+        Ok(())
+    };
+    let raw_declared =
+        strings("declared_paths").ok_or("fence.declared_paths is not a string array")?;
+    canonical_order("declared_paths", &raw_declared)?;
+    let declared: std::collections::BTreeSet<String> = raw_declared.into_iter().collect();
+    let raw_observed = strings("observed_dirty_paths")
+        .ok_or("fence.observed_dirty_paths is not a string array")?;
+    canonical_order("observed_dirty_paths", &raw_observed)?;
+    let observed: std::collections::BTreeSet<String> = raw_observed.into_iter().collect();
     let undeclared: Vec<&str> = observed.difference(&declared).map(|s| s.as_str()).collect();
     if !undeclared.is_empty() {
         return Err(format!(
@@ -3559,10 +3542,22 @@ mod originating_attempt_fence_tests {
         if let Some(fence) = fence {
             result["fence"] = fence;
         }
+        // Tam kanonik üretici şekli — paylaşılan typed okuyucunun
+        // (`validate_canonical_attempt_envelope`) zorunlu alanlarını taşır.
         serde_json::json!({
             "schema_version": 1,
-            "run": {"task_id": 7, "repository_head": HEAD},
-            "execution_measurement": {"subject_authority": "task_scope"},
+            "run": {
+                "task_id": 7,
+                "execution_mode": "production",
+                "witness_mode": "production",
+                "task_source": "harness_task_file",
+                "repository_head": HEAD
+            },
+            "execution_measurement": {
+                "subject_authority": "task_scope",
+                "provenance_authority": "engine_native_per_axis",
+                "provenance_native": true
+            },
             "result": result,
             "evidence": []
         })
@@ -3631,9 +3626,11 @@ mod originating_attempt_fence_tests {
         let err = originating_fence_policy(&envelope_json(Some(not_passed))).unwrap_err();
         assert!(err.contains("not \"passed\""), "{err}");
 
+        // (sıralı kalır — P2 sıralama kontrolünden GEÇİP üyelik ihlalinde
+        // patlamalı: "notes/..." < "src/..." sözlükbilimsel sıradadır.)
         let mut inconsistent = valid_fence();
         inconsistent["observed_dirty_paths"] =
-            serde_json::json!(["src/a.rs", "notes/undeclared.md"]);
+            serde_json::json!(["notes/undeclared.md", "src/a.rs"]);
         let err = originating_fence_policy(&envelope_json(Some(inconsistent))).unwrap_err();
         assert!(err.contains("internally inconsistent"), "{err}");
 
@@ -3656,6 +3653,17 @@ mod originating_attempt_fence_tests {
                 "{bad}: {err}"
             );
         }
+
+        // Re-review P2: producer kanonik SIRALI yazar — sırasız/tekrarlı küme
+        // üretici şeklinde değildir (üyelik doğru olsa bile).
+        let mut unsorted = valid_fence();
+        unsorted["declared_paths"] = serde_json::json!(["src/b.rs", "src/a.rs"]);
+        let err = originating_fence_policy(&envelope_json(Some(unsorted))).unwrap_err();
+        assert!(err.contains("canonically ordered"), "{err}");
+        let mut duplicated = valid_fence();
+        duplicated["observed_dirty_paths"] = serde_json::json!(["src/a.rs", "src/a.rs"]);
+        let err = originating_fence_policy(&envelope_json(Some(duplicated))).unwrap_err();
+        assert!(err.contains("canonically ordered"), "{err}");
     }
 
     /// Mağaza taraması: kimlik tablosu (task/kind/pending-üçlü) eşleşmeyen
@@ -3713,7 +3721,7 @@ mod originating_attempt_fence_tests {
         );
 
         // (b) Kanonik ad VAR, zarf sözleşmesi EKSİK → fail-closed red (red'in
-        // kendisi; sessiz atlama değil).
+        // kendisi; sessiz atlama değil) — paylaşılan typed okuyucunun sözleşmesi.
         let mut shapeless = envelope_json(None);
         shapeless
             .as_object_mut()
@@ -3723,8 +3731,49 @@ mod originating_attempt_fence_tests {
         let err =
             find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
         assert!(
-            err.contains("envelope contract") && err.contains("execution_measurement"),
+            err.contains("#166 run envelope shape") && err.contains("not originating evidence"),
             "shape-invalid canonical file must refuse, not pass: {err}"
+        );
+    }
+
+    /// **Re-review tur-2 P1-1 regresyonu (reviewer'ın karşı-örneği):** alan
+    /// VAR ama tipli sözleşme TAŞIMIYOR — boş `execution_measurement` ya da
+    /// sayı-tipli `repository_head` (123). Kanonik ad + doğru pending üçlüsü
+    /// bile olsa originating kanıt SAYILMAZ (typed okuyucu RED'i).
+    #[test]
+    fn find_originating_rejects_present_but_invalid_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = dir.path().join("attempts");
+        std::fs::create_dir_all(&attempts).unwrap();
+
+        // (a) execution_measurement BOŞ nesne — subject_authority yok.
+        let mut empty_measurement = envelope_json(None);
+        empty_measurement["execution_measurement"] = serde_json::json!({});
+        std::fs::write(
+            attempts.join("task-7-400-1.json"),
+            empty_measurement.to_string(),
+        )
+        .unwrap();
+        let err =
+            find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
+        assert!(
+            err.contains("#166 run envelope shape"),
+            "empty execution_measurement must be refused by the shared typed reader: {err}"
+        );
+
+        // (b) repository_head YANLIŞ TİP (sayı) — string zorunlu.
+        let mut wrong_head_type = envelope_json(None);
+        wrong_head_type["run"]["repository_head"] = serde_json::json!(123);
+        std::fs::write(
+            attempts.join("task-7-500-1.json"),
+            wrong_head_type.to_string(),
+        )
+        .unwrap();
+        let err =
+            find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
+        assert!(
+            err.contains("#166 run envelope shape"),
+            "numeric repository_head must be refused by the shared typed reader: {err}"
         );
     }
 
