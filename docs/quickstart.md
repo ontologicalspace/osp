@@ -300,6 +300,15 @@ execution mode** (production default is the current working directory — if
 that is the repo root, the attempt asks for an explicit external
 `--state-dir`).
 
+Since #210, every attempt/resume (strict mode included) measures a
+**canonical detached checkout of the pinned HEAD** — submodules are
+initialized at their pinned gitlinks in a temporary worktree. Operationally
+this means the first checkout of large or private submodules may need network
+access and git authentication, and each attempt/resume/gate pass pays a
+worktree-preparation cost; a missing network/cache is a fail-closed refusal,
+never a degraded measurement. The caller's own `git submodule init` state no
+longer affects what gets measured.
+
 ### Resuming a suspension with witness evidence
 
 Since [#164](https://github.com/ontologicalspace/osp/issues/164), a suspension

@@ -161,7 +161,60 @@ pub fn prepare_detached_worktree(repo: &Path, sha: &str) -> anyhow::Result<Detac
     // (b)+(c) Submodule hazırlığı — guard'ın İÇİNDE: herhangi bir adım patlarsa
     // Drop worktree'yi kaldırır (kullanıcı çalışma ağacına dokunulmaz).
     initialize_and_verify_submodules(&worktree_path, sha)?;
+    // (d) #215 review P1: hazırlık-sonrası TEMİZLİK — `git worktree add` bir
+    // checkout'tur ve post-checkout hook'u (veya bir filtre) tracked içeriği
+    // değiştirebilir; submodule init'i de içerik yazabilir. Bir commit'e
+    // BAĞLANMAK ile o commit'in İÇERİĞİNİ ölçmek farklı garantilerdir: kirli
+    // checkout'tan üretilen SpaceDigest pinned HEAD'in değil, hook'un
+    // ürettiğidir. TÜM tüketiciler (attempt/resume/gate) bu güvenceyi alır.
+    verify_canonical_checkout_clean(&worktree_path, sha, "after prepare")?;
     Ok(guard)
+}
+
+/// #215 review P1: kanonik checkout temizlik doğrulaması — `sha`'da HEAD + boş
+/// dirty kümesi (submodule girdileri dahil; dirty-capture ile aynı bayraklar).
+fn verify_canonical_checkout_clean(worktree: &Path, sha: &str, phase: &str) -> anyhow::Result<()> {
+    let head = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .map_err(|e| anyhow::anyhow!("git rev-parse failed to spawn: {e}"))?;
+    anyhow::ensure!(
+        head.status.success(),
+        "rev-parse HEAD failed in the canonical worktree {phase}: {}",
+        String::from_utf8_lossy(&head.stderr)
+    );
+    anyhow::ensure!(
+        String::from_utf8_lossy(&head.stdout).trim() == sha,
+        "canonical worktree HEAD drifted {phase}: expected {sha}, measured {}",
+        String::from_utf8_lossy(&head.stdout).trim()
+    );
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .arg("status")
+        .arg("--porcelain")
+        .arg("--untracked-files=all")
+        .arg("--ignore-submodules=none")
+        .output()
+        .map_err(|e| anyhow::anyhow!("git status failed to spawn: {e}"))?;
+    anyhow::ensure!(
+        status.status.success(),
+        "git status failed in the canonical worktree {phase}: {}",
+        String::from_utf8_lossy(&status.stderr)
+    );
+    let porcelain = String::from_utf8_lossy(&status.stdout);
+    anyhow::ensure!(
+        porcelain.trim().is_empty(),
+        "canonical checkout is dirty {phase} at {sha} — tracked content does not match \
+         the pinned HEAD tree; a post-checkout hook or filter modified the checkout \
+         (measure: {}); refusing to measure from a tree that is not the commit it \
+         claims to be",
+        porcelain.trim()
+    );
+    Ok(())
 }
 
 /// Submodule'leri pinned gitlink'lerde aç ve durumlarını doğrula (tur-3 P1-1).
@@ -251,7 +304,8 @@ pub struct CanonicalMeasurement {
     pub tracked_paths: std::collections::BTreeSet<String>,
 }
 
-/// #210 (N1): kanonik ölçüm — prepare → tracked-set capture → analiz → bırak.
+/// #210 (N1) + #215 review P1: kanonik ölçüm — prepare (temizlik doğrulamalı)
+/// → tracked-set capture → analiz → pencere-drift doğrulaması → bırak.
 pub fn measure_canonical(repo: &Path, sha: &str) -> anyhow::Result<CanonicalMeasurement> {
     let mut guard = prepare_detached_worktree(repo, sha)?;
     let tracked_paths = crate::commands::repo_snapshot::capture_tracked_paths(guard.path())
@@ -262,6 +316,9 @@ pub fn measure_canonical(repo: &Path, sha: &str) -> anyhow::Result<CanonicalMeas
     let config = AnalysisConfig::default();
     let result = analyze_repo_with_config(guard.path(), &registry, &config)
         .map_err(|e| anyhow::anyhow!("detached analysis failed at pinned HEAD {sha}: {e}"))?;
+    // #215 review P1 (pencere): analiz sırasında içerik kirletildiyse ölçüm
+    // penceresi drift etmiştir — HEAD hâlâ `sha` ve dirty küme boş olmalı.
+    verify_canonical_checkout_clean(guard.path(), sha, "after analysis")?;
     guard.remove();
     Ok(CanonicalMeasurement {
         result,
@@ -411,6 +468,64 @@ mod tests {
             .output()
             .unwrap();
         assert!(prune.status.success());
+    }
+
+    /// #215 review P1: post-checkout hook'u tracked içeriği değiştirirse
+    /// hazırlık TEMİZLİK RED'i verir — bir commit'e BAĞLANMAK ile o commit'in
+    /// İÇERİĞİNİ ölçmek farklı garantilerdir; hook'un ürettiği içerikten
+    /// SpaceDigest üretilemez. Çağırıcının ağacı kirletilmez (hook yalnız
+    /// detached worktree'de koşar).
+    #[test]
+    fn post_checkout_hook_dirtiness_fails_closed() {
+        let (dir, head) = git_repo();
+        let hooks = dir.path().join(".git").join("hooks");
+        std::fs::create_dir_all(&hooks).expect("hooks dir");
+        let hook = hooks.join("post-checkout");
+        std::fs::write(
+            &hook,
+            "#!/bin/sh\nprintf '// injected by hook\\n' >> a.rs\n",
+        )
+        .expect("write hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod +x hook");
+        }
+
+        let err = prepare_detached_worktree(dir.path(), &head)
+            .expect_err("dirty canonical checkout must fail closed");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("canonical checkout is dirty"),
+            "RED names the cleanliness failure: {msg}"
+        );
+        assert!(
+            msg.contains("post-checkout hook"),
+            "RED points at the likely cause: {msg}"
+        );
+        // Hook yalnız detached worktree'de koştu — çağırıcının ağacı temiz.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.rs")).unwrap(),
+            "fn main() {}\n",
+            "caller worktree content is untouched"
+        );
+    }
+
+    /// #215 review P1 (pencere): analiz penceresi içinde içerik kirletildiyse
+    /// doğrulayıcı RED verir (measure_canonical'ın "after analysis" adımı).
+    #[test]
+    fn measurement_window_dirtiness_fails_closed() {
+        let (dir, head) = git_repo();
+        let mut guard = prepare_detached_worktree(dir.path(), &head).unwrap();
+        std::fs::write(guard.path().join("a.rs"), "fn main() { /* mutated */ }\n").unwrap();
+        let err = verify_canonical_checkout_clean(guard.path(), &head, "after analysis")
+            .expect_err("in-window mutation must fail closed");
+        assert!(
+            format!("{err}").contains("canonical checkout is dirty"),
+            "{err}"
+        );
+        guard.remove();
     }
 
     // NOT (bilinçli test-kapsamı kararı): "detached == init'li canlı analiz"

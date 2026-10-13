@@ -1647,7 +1647,8 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // 5.5 #204 (Karar-C): opt-in fence kaydı — post-fence'ten SONRA, persist'ten
     // ÖNCE kanonik zarfa yapıştırılır. Kayıt ZORUNLUDUR: flag var + kayıt yok →
     // RED (opt-in sessiz başarıya dönüşemez; gelecekteki refactor'lara karşı
-    // yapısal güvence). Default koşuların baytları değişmez (skip_serializing_if).
+    // yapısal güvence). Zarf ALANLARI değişmez (skip_serializing_if; şema aynı) —
+    // #210 N1 ile default koşunun ölçtüğü kapsam/digest değişebilir (kanonik ağaç).
     if args.allow_declared_dirty {
         let universe = declared_universe
             .as_ref()
