@@ -15,6 +15,7 @@ pub mod realization_gate;
 pub mod repo_snapshot;
 pub mod run_envelope;
 pub mod suggest_targets;
+pub mod witness_evidence;
 
 use std::path::{Path, PathBuf};
 
@@ -546,6 +547,9 @@ fn originating_fence_policy(
 /// değerlendirmesi + kayıtlı delta'nın uygulanmasını yapar. Quorum parametreleri
 /// artifact'tan gelir (operator düşüremez).
 #[derive(Args, Debug)]
+// #205 (karar-2): tür/ağırlık tablosu + worked-example'lar sabitlerden RUNTIME
+// üretilir (elle metin YOK) — wiring'i gerçek binary üzerinde test kanıtlar.
+#[command(after_help = witness_evidence::witness_resume_after_help())]
 pub struct TrajectoryResumeArgs {
     /// Pending authorization artifact path'i (`<state-dir>/.osp/pending-authorizations/…`).
     pub artifact: PathBuf,
@@ -1679,9 +1683,13 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
 
 /// Witness kanıt wire'ı (strict) — operator ağırlık SEÇEMEZ: `weight`
 /// `witness_kind`'ın kalibre ağırlığından türetilir (`EvidenceEvent::new`).
-#[derive(Debug, serde::Deserialize)]
+///
+/// #205 karar-4: hem strict parse hem şablon/örnek üretimi (commands/
+/// witness_evidence.rs) BU tip üzerinden serde ile yapılır — ikinci bir JSON
+/// şeması tanımlanmaz; tablo/örnek wire ile yapısal olarak senkrondur.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WitnessEvidenceWireV1 {
+pub(crate) struct WitnessEvidenceWireV1 {
     id: u64,
     source: String,
     witness_kind: osp_core::witness::WitnessKind,
@@ -1696,10 +1704,17 @@ fn load_witness_evidence(
     let raw = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("witness evidence file {}: {e}", path.display()))?;
     let wire: Vec<WitnessEvidenceWireV1> = serde_json::from_str(&raw).map_err(|e| {
+        // #205 (kriter 3): tipli alan listesi + kök-form örnek satırı — üç run-26
+        // denemesi (string id / string actor / bilinmeyen kind) tek yüzeyden
+        // açıklanır; örnek ve isim listesi witness_evidence üreticilerinden
+        // (wire tipiyle aynı kaynak), serde'nin kendi detayı korunur.
         anyhow::anyhow!(
             "witness evidence file {} is not a valid EvidenceEvent array (strict wire — \
-             fields: id, source, witness_kind, actor, claim): {e}",
-            path.display()
+             fields: id: u64, source: string, witness_kind: one of {}, actor: u64, \
+             claim: u64; e.g. {}; see `osp witness-evidence --template`): {e}",
+            path.display(),
+            witness_evidence::witness_kind_names_joined(),
+            witness_evidence::witness_evidence_example_line()
         )
     })?;
     Ok(wire

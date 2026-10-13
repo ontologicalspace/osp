@@ -64,6 +64,10 @@ enum Commands {
     },
     /// Evidence ledger export.
     Evidence(commands::EvidenceArgs),
+    /// #205: witness kanıt şablonu — strict wire iskeletini basar (stdout saf
+    /// JSON; rehberlik stderr). Şablon quorum SAĞLAMAZ — biçimi öğretir,
+    /// kanıt üretmez. `--artifact` verilirse `claim` gerçek askıdan bağlanır.
+    WitnessEvidence(commands::witness_evidence::WitnessEvidenceArgs),
     /// Concept graph işlemleri (init, status, validate) — Candidate-only bootstrap.
     Graph {
         #[command(subcommand)]
@@ -145,6 +149,7 @@ fn main() -> anyhow::Result<()> {
             TaskAction::View(args) => commands::run_task_view(args),
         },
         Commands::Evidence(args) => commands::run_evidence_export(args),
+        Commands::WitnessEvidence(args) => commands::witness_evidence::run_witness_evidence(args),
         Commands::Graph { action } => match action {
             GraphAction::Init(args) => commands::graph::run_graph_init(args),
             GraphAction::Status(args) => commands::graph::run_graph_status(args),

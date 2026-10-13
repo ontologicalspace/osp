@@ -317,7 +317,12 @@ osp trajectory resume <state-dir>/.osp/pending-authorizations/task-...json \
 ```
 
 `witnesses.json` is a strict-wire array of evidence events
-(`{ "id", "source", "witness_kind", "actor", "claim" }`). The event weight is
+(`{ "id", "source", "witness_kind", "actor", "claim" }`). A starting skeleton can
+be generated with `osp witness-evidence --template --artifact <state-dir>/.osp/pending-authorizations/<artifact>.json > witnesses.json`
+(stdout carries only the strict-parse-passing template; guidance, the
+witness-kind weight table, and worked examples are printed to stderr). The
+template's single placeholder event does not by itself satisfy quorum — every
+field must be replaced with real evidence. The event weight is
 derived from `witness_kind` — but note that `witness_kind` itself is
 caller-chosen, so the weight is only as trustworthy as the file; every event's
 `claim` must match the artifact's claim id. A defective evidence file is an
