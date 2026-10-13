@@ -1523,6 +1523,309 @@ fn production_resume_forged_receipt_fails_closed_exit_70() {
     fx.assert_repo_clean();
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// #205 — `osp witness-evidence --template`: biçim keşfedilebilirliği.
+// Protokol kanıtın nasıl İFADE edileceğini öğretir; kanıt üretmez (karar-5).
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// #205: `osp witness-evidence --template [--artifact …]` subprocess.
+fn run_witness_evidence(
+    cwd: &std::path::Path,
+    artifact: Option<&std::path::Path>,
+) -> std::process::Output {
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    cmd.current_dir(cwd)
+        .arg("witness-evidence")
+        .arg("--template");
+    if let Some(path) = artifact {
+        cmd.arg("--artifact").arg(path);
+    }
+    cmd.output().expect("run osp witness-evidence")
+}
+
+/// #205 testleri için CWD olarak kullanılacak boş temp dizini (komut yazmaz;
+/// fixture'sız vakalar için yeterli izolasyon).
+fn template_cwd(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("osp205-{name}-{}", std::process::id()));
+    fs::create_dir_all(&dir).expect("template test cwd");
+    dir
+}
+
+#[test]
+fn witness_evidence_template_without_artifact_uses_claim_zero() {
+    // Karar-3: artifact'siz şablon claim 0 placeholder'ı basar + uyarı;
+    // stdout saf JSON (parse edilen tek yüzey), rehberlik stderr'de.
+    let cwd = template_cwd("t6");
+    let output = run_witness_evidence(&cwd, None);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "template print succeeds. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim())
+        .expect("stdout is pure parseable JSON (redirect-ready)");
+    let arr = v.as_array().expect("root is an array");
+    assert_eq!(arr.len(), 1, "template carries a single event");
+    assert_eq!(arr[0]["claim"].as_u64(), Some(0), "no artifact → claim 0");
+    let mut keys: Vec<&str> = arr[0]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(keys, vec!["actor", "claim", "id", "source", "witness_kind"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("claim 0"),
+        "stderr warns about the placeholder: {stderr}"
+    );
+    assert!(
+        stderr.contains("1.0"),
+        "stderr shows the weight table: {stderr}"
+    );
+    assert!(
+        stderr.contains("does NOT satisfy quorum"),
+        "stderr states the non-authorizing nature: {stderr}"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn witness_evidence_requires_explicit_template_flag() {
+    // Tur-3 notu A / tur-1 P2-2: `--template` ZORUNLU — bare komut ve
+    // yalnız-`--artifact` çağrısı clap usage hatası (exit 2), çıktı yok.
+    let cwd = template_cwd("t8");
+    let dummy_artifact = cwd.join("dummy.json");
+    fs::write(&dummy_artifact, "{}").expect("dummy artifact");
+
+    let bare = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(&cwd)
+        .arg("witness-evidence")
+        .output()
+        .expect("bare invocation");
+    assert_eq!(
+        bare.status.code(),
+        Some(2),
+        "bare `osp witness-evidence` → usage error. stderr={}",
+        String::from_utf8_lossy(&bare.stderr)
+    );
+    assert!(
+        bare.stdout.is_empty(),
+        "no template without the explicit flag"
+    );
+
+    let artifact_only = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .current_dir(&cwd)
+        .arg("witness-evidence")
+        .arg("--artifact")
+        .arg(&dummy_artifact)
+        .output()
+        .expect("artifact-only invocation");
+    assert_eq!(
+        artifact_only.status.code(),
+        Some(2),
+        "`--artifact` alone is not enough. stderr={}",
+        String::from_utf8_lossy(&artifact_only.stderr)
+    );
+    assert!(artifact_only.stdout.is_empty());
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn witness_evidence_corrupt_artifact_fails_closed_exit_70() {
+    // Karar-3: artifact yüklenemez → SYSTEM_FAILURE (resume'un artifact-yükleme
+    // moduyla tutarlı); stdout boş kalır (saf-JSON sözleşmesi bozulmaz).
+    let cwd = template_cwd("t9");
+    let garbage = cwd.join("garbage-artifact.json");
+    fs::write(&garbage, "{ not a pending authorization envelope").expect("garbage artifact");
+
+    let output = run_witness_evidence(&cwd, Some(&garbage));
+    assert_eq!(
+        output.status.code(),
+        Some(70),
+        "corrupt artifact fails closed. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        output.stdout.is_empty(),
+        "no template JSON on system failure"
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("System failure"),
+        "stderr names the failure mode"
+    );
+    let _ = fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn witness_evidence_template_with_artifact_binds_claim_and_changes_nothing() {
+    // Karar-3 + tur-1 P2-5 (read-only): claim GERÇEK artifact'tan bağlanır;
+    // artifact bayt-eşitliği korunur, receipt YOK, pending dizin dosya kümesi
+    // değişmez — komut kalıcı hiçbir etki üretmez.
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+    let pending_dir = artifact.parent().expect("pending dir");
+    let dir_snapshot = |d: &std::path::Path| -> std::collections::BTreeSet<String> {
+        fs::read_dir(d)
+            .expect("pending dir readable")
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect()
+    };
+    let before_bytes = fs::read(&artifact).expect("artifact bytes before");
+    let before_set = dir_snapshot(pending_dir);
+
+    let output = run_witness_evidence(fx.work_path(), Some(&artifact));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "template with a valid artifact succeeds. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).expect("pure JSON stdout");
+    assert_eq!(
+        v[0]["claim"].as_u64(),
+        Some(claim_id),
+        "claim bound to the artifact's real claim id"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!("claim {claim_id}")),
+        "stderr shows the suspension identity: {stderr}"
+    );
+    assert!(
+        stderr.contains("PLACEHOLDER"),
+        "stderr marks actor values as placeholders: {stderr}"
+    );
+
+    assert_eq!(
+        fs::read(&artifact).expect("artifact bytes after"),
+        before_bytes,
+        "artifact is byte-identical (read-only)"
+    );
+    assert!(
+        !artifact.with_extension("json.receipt.json").exists(),
+        "no receipt is created"
+    );
+    assert_eq!(
+        dir_snapshot(pending_dir),
+        before_set,
+        "pending-authorizations file set is unchanged"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn witness_evidence_template_alone_cannot_authorize_resume() {
+    // Karar-5 integration kilidi: şablon TEK olay taşır. Fixture invariant'ı:
+    // askının author'ı navigator agent 1'dir, placeholder actor 2 ≠ 1 → RED
+    // DEĞİL Held: production-default Q1 (1 < 2 distinct approver) → exit 10,
+    // receipt YOK. (Actor == author olsaydı sonuç exit 20 AuthorSelf olurdu —
+    // Held DEĞİL; o ayrım production_resume_defective_evidence_exit_20'de
+    // kanıtlı. Kayıt author taşımadığından şablon çakışmayı önleyemez.)
+    let (fx, artifact, _claim_id) = suspend_and_locate_artifact();
+    let output = run_witness_evidence(fx.work_path(), Some(&artifact));
+    assert_eq!(output.status.code(), Some(0), "template prints");
+
+    let template_path = fx.work_path().join("template-witnesses.json");
+    fs::write(
+        &template_path,
+        String::from_utf8_lossy(&output.stdout).as_bytes(),
+    )
+    .expect("redirect template to a file");
+
+    let resume = run_resume(&fx, &artifact, &template_path, "human");
+    assert_eq!(
+        resume.status.code(),
+        Some(10),
+        "template alone → still awaiting witnesses (not applied). stderr={}",
+        String::from_utf8_lossy(&resume.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&resume.stdout).contains("Still awaiting witnesses"),
+        "human output explains the hold"
+    );
+    assert!(
+        !artifact.with_extension("json.receipt.json").exists(),
+        "no receipt on template-only evidence"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn resume_applies_with_worked_example_witness_pair() {
+    // Yardım/rehberdeki worked-example GERÇEK kanıtla maddeleştirildiğinde:
+    // MergeCommit + TrailerReviewed (1.7 ≥ 1.5), iki bağımsız author-dışı
+    // actor → uygular. Kanıtı fixture üretir — şablonun kendisi değil.
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+    let events = serde_json::json!([
+        { "id": 1, "source": "merge-commit-sha", "witness_kind": "MergeCommit",
+          "actor": 200, "claim": claim_id },
+        { "id": 2, "source": "trailer:Reviewed-by:300", "witness_kind": "TrailerReviewed",
+          "actor": 300, "claim": claim_id },
+    ]);
+    let evidence = fx.work_path().join("witnesses-worked-example.json");
+    fs::write(&evidence, serde_json::to_string_pretty(&events).unwrap())
+        .expect("write worked-example evidence");
+
+    let output = run_resume(&fx, &artifact, &evidence, "json");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "worked-example pair applies. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim())
+        .expect("resume JSON envelope");
+    assert_eq!(v["result"]["kind"], "applied");
+    assert_eq!(v["result"]["witness"]["approvers"], 2);
+    assert!(
+        artifact.with_extension("json.receipt.json").exists(),
+        "receipt persisted on apply"
+    );
+    fx.assert_repo_clean();
+}
+
+#[test]
+fn resume_help_lists_witness_weight_table() {
+    // Karar-2 wiring: tablo runtime üretilir VE gerçek binary'nin
+    // `trajectory resume --help` çıktısında görünür (derleme başarısı yetmez).
+    let output = Command::cargo_bin("osp")
+        .expect("osp binary")
+        .args(["trajectory", "resume", "--help"])
+        .output()
+        .expect("render resume help");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for fragment in [
+        "MergeCommit",
+        "PRMerged",
+        "TrailerReviewed",
+        "CoAuthored",
+        "1.0",
+        "0.8",
+        "0.7",
+        "0.4",
+        "1.5",
+        "production default",
+        "witness-evidence --template",
+    ] {
+        assert!(
+            text.contains(fragment),
+            "resume --help must contain {fragment}; got:\n{text}"
+        );
+    }
+}
+
 #[test]
 fn production_resume_stale_after_repo_change_exit_15() {
     // #164 staleness fence: askıdan sonra analyzed kapsam İÇERİĞİ değişirse
