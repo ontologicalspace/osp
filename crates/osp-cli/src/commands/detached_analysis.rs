@@ -6,12 +6,14 @@
 //! Kirli çalışma ağacında üretilen ölçüm koşu başında capture edilen **sabit
 //! commit SHA**'dan açılan detached worktree'den gelir; aday içeriği (worktree'deki
 //! kirli dosyalar + untracked yeni dosyalar) ölçüme ASLA sızmaz. Bu modül ölçüm
-//! hazırlığını TEK yerde tutar ve üç tüketici aynı yolu kullanır:
+//! hazırlığını TEK yerde tutar ve tüketici aynı yolu kullanır:
 //!
-//! - `trajectory attempt` (opt-in `--allow-declared-dirty`) — baseline analizi,
-//! - `trajectory resume` (originating fence `mode=declared_dirty` devralması),
-//! - `realization_gate` — kendi candidate worktree'i (tur-4 P0: gate'in
-//!   before/after analizi submodule-aware olmadan #203 m.5b digest-parity geçerli
+//! - `trajectory attempt` (TÜM modlar — #204 opt-in `--allow-declared-dirty` +
+//!   #210 N1 default/strict) ve `trajectory resume` (originating politikası
+//!   ne olursa): `measure_canonical` (analiz + kanonik tracked set),
+//! - `realization_gate` — kendi candidate worktree'i (`prepare_detached_worktree`
+//!   iki fazlı: before-analyze + patch/candidate; tur-4 P0: gate'in before/after
+//!   analizi submodule-aware olmadan #203 m.5b digest-parity geçerli
 //!   witnessed-resume'u yanlış RED'lerdi).
 //!
 //! **Submodule sözleşmesi (tur-3 P1-1 + tur-4 P1-1):** worktree checkout'u
@@ -236,20 +238,35 @@ pub(crate) fn classify_submodule_status_line(line: &str) -> Result<(), String> {
     }
 }
 
-/// #204: detached ölçüm — sabit SHA worktree'inde, attempt akışıyla BİREBİR aynı
-/// inşaatla analiz (mod.rs canlı-analiz akışının aynısı; #203 m.5b parite
-/// sözleşmesinin #204 karşılığı). Uzay belleğe alındıktan sonra worktree bırakılır.
-pub fn analyze_detached(
-    repo: &Path,
-    sha: &str,
-) -> anyhow::Result<osp_analyzer::contract::AnalysisResult> {
+/// #210 (N1): kanonik ölçüm — analiz + kanonik tracked set, AYNI worktree
+/// penceresinde. Default (strict) attempt/resume ölçümü de kanonik ağaçtan
+/// gelir: çağırıcının worktree init tesadüfü (submodule init'siz base worktree)
+/// ölçüm kapsamını belirleyemez — run-27'de pending `32e8…` vs gate `a3b5…`
+/// ayrışması bu tesadüfi bağımlılıktı. Kapsam fence'i (analyzed ⊆ tracked) aynı
+/// kanonik kümeyle koşar (`validate_analyzed_paths_canonical`).
+pub struct CanonicalMeasurement {
+    /// Ölçülmüş uzay (detached worktree @ `sha`, submodule'ler pinned gitlink'lerde).
+    pub result: osp_analyzer::contract::AnalysisResult,
+    /// Aynı worktree'den capture edilen kanonik tracked set (analizle tutarlı).
+    pub tracked_paths: std::collections::BTreeSet<String>,
+}
+
+/// #210 (N1): kanonik ölçüm — prepare → tracked-set capture → analiz → bırak.
+pub fn measure_canonical(repo: &Path, sha: &str) -> anyhow::Result<CanonicalMeasurement> {
     let mut guard = prepare_detached_worktree(repo, sha)?;
+    let tracked_paths = crate::commands::repo_snapshot::capture_tracked_paths(guard.path())
+        .map_err(|e| {
+            anyhow::anyhow!("canonical tracked-set capture at pinned HEAD {sha} failed: {e}")
+        })?;
     let registry = AdapterRegistry::default_all();
     let config = AnalysisConfig::default();
     let result = analyze_repo_with_config(guard.path(), &registry, &config)
         .map_err(|e| anyhow::anyhow!("detached analysis failed at pinned HEAD {sha}: {e}"))?;
     guard.remove();
-    Ok(result)
+    Ok(CanonicalMeasurement {
+        result,
+        tracked_paths,
+    })
 }
 
 #[cfg(test)]

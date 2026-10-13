@@ -1417,18 +1417,20 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     };
 
     // 1. Analyze -> space.
-    // #204 (Karar-A): opt-in modda ölçüm SABİT HEAD'den açılan detached worktree'den
-    // gelir — `MeasuredBaseline = Analyze(Checkout(SHA_base))`; aday içeriği (kirli
+    // #204 (Karar-A): ölçüm SABİT HEAD'den açılan detached worktree'den gelir —
+    // `MeasuredBaseline = Analyze(Checkout(SHA_base))`; aday içeriği (kirli
     // dosyalar + untracked yeni dosyalar) ölçüme ASLA sızmaz (run-26'nın "hipotetik
-    // birebir" özelliği ancak böyle korunur; canlı-analiz döngüsel olurdu). Default
-    // mod canlı analizi aynen sürdürür.
-    let result = if args.allow_declared_dirty {
-        detached_analysis::analyze_detached(&args.repo, snapshot_before.head.as_str())?
-    } else {
-        let registry = AdapterRegistry::default_all();
-        let config = AnalysisConfig::default();
-        analyze_repo_with_config(&args.repo, &registry, &config)?
-    };
+    // birebir" özelliği ancak böyle korunur; canlı-analiz döngüsel olurdu).
+    // #210 (N1): DEFAULT (strict) yol da kanonik ağacı ölçer — submodule'ler
+    // pinned gitlink'lerde init'li. Çağırıcının worktree init tesadüfü ölçüm
+    // kapsamını belirleyemez: run-27'de submodule'siz base worktree pending'i
+    // `32e8…` özetiyle bağlarken gate'in kanonik before-analizi `a3b5…` üretip
+    // #203 m.5b parite çidini YANLIŞ RED'liyordu. Strict dirty fence'leri canlı
+    // snapshot'ta aynen kalır (kirli worktree zaten yasak — kanonikleşme bilgi
+    // kaybı değil, tesadüfi kapsam bağımlılığının kaldırılması).
+    let measurement =
+        detached_analysis::measure_canonical(&args.repo, snapshot_before.head.as_str())?;
+    let result = measurement.result;
 
     // #204: fence kaydının ölçüm provenans digest'i (yalnız opt-in; default yol
     // hesaba dokunmaz). Aynı inşaat → aynı kanonik digest (#203 m.5b sözleşmesi).
@@ -1441,9 +1443,14 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         None
     };
 
-    // P1-2: analyzed path ⊆ HEAD tracked-path invariant (fail-closed for untracked files).
-    repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    // P1-2 + #210 (N1): analyzed path ⊆ HEAD tracked invariant — küme kaynağı
+    // ölçümle AYNI kanonik worktree (çağırıcıda submodule init'sizken kanonik
+    // ölçüm nested içerik görür; canlı-snapshot kümesi yanlış-RED üretirdi).
+    repo_snapshot::validate_analyzed_paths_canonical(
+        &result.node_paths,
+        &measurement.tracked_paths,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     // #155 + #204: pre dirty fence — politika Strict'te analyzed-scope clean
     // (mevcut davranış), DeclaredUniverse'de global `D ⊆ A` (yukarıda koşuldu;
@@ -1880,20 +1887,19 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             repo_snapshot::DirtyPolicy::DeclaredUniverse(declared_paths)
         }
     };
-    // #204 (Karar-A): declared-dirty resume ölçümü de originating pinned HEAD'den
-    // detached-worktree analizle gelir — attempt ile BİREBİR aynı inşaat (farklı
-    // kurulum farklı digest üretirdi → motorun kendi staleness/basis fence'i
-    // [resume_held_authorization → StaleBaseRevision] yanıltırdı; parity otomatik).
-    let result = match &originating {
-        OriginatingDirtyPolicy::Declared { measured_head, .. } => {
-            detached_analysis::analyze_detached(&args.repo, measured_head)?
-        }
-        OriginatingDirtyPolicy::Strict => {
-            let registry = AdapterRegistry::default_all();
-            let config = AnalysisConfig::default();
-            analyze_repo_with_config(&args.repo, &registry, &config)?
-        }
-    };
+    // #204 (Karar-A) + #210 (N1): resume ölçümü de kanonik ağaçtan — declared
+    // originating pinned HEAD'den, strict originating canlı HEAD'den (attempt'in
+    // strict koluyla birebir simetri; farklı kurulum farklı digest üretirdi →
+    // motorun kendi staleness/basis fence'i [resume_held_authorization →
+    // StaleBaseRevision] yanıltırdı; parity otomatik).
+    let measurement = detached_analysis::measure_canonical(
+        &args.repo,
+        match &originating {
+            OriginatingDirtyPolicy::Declared { measured_head, .. } => measured_head.as_str(),
+            OriginatingDirtyPolicy::Strict => snapshot_before.head.as_str(),
+        },
+    )?;
+    let result = measurement.result;
     // Re-review P1-2: originating ölçüm PROVENANSI DOĞRULANIR — fence kaydının
     // bildirdiği space digest'i resume'un kendi detached ölçümünden YENİDEN
     // üretilir: Digest(ResumedBaseline) == Digest(OriginatingMeasurement).
@@ -1913,8 +1919,11 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             std::process::exit(exit_codes::RESUME_REFUSED_BASE);
         }
     }
-    repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
-        .map_err(|e| anyhow::anyhow!(e))?;
+    repo_snapshot::validate_analyzed_paths_canonical(
+        &result.node_paths,
+        &measurement.tracked_paths,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     repo_snapshot::enforce_dirty_policy(
         &result.node_paths,
         &snapshot_before,
