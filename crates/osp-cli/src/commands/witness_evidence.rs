@@ -128,20 +128,29 @@ pub(super) fn witness_weight_table_text() -> String {
 
 /// İki worked-example — toplamlar VE karşılaştırma sonuçları (≥ / <) sabitlerden
 /// runtime hesaplanır; ✓/✗ biçimindeki hüküm hardcoded DEĞİL (tur-1 P2-4).
+/// Approver sayısı da sabitten: örnekler kasıtlı olarak minimal quorum setidir
+/// (min_approvers olay, hepsi distinct actor) — kod-review P2-1.
 pub(super) fn witness_worked_examples_text() -> String {
     fn pair(a: WitnessKind, b: WitnessKind) -> String {
-        let theta = WitnessSet::new(vec![]).quorum_threshold;
+        let defaults = WitnessSet::new(vec![]); // production default (§4.2)
         let sum = a.default_weight() + b.default_weight();
-        let (cmp, verdict) = if sum >= theta {
+        let (cmp, verdict) = if sum >= defaults.quorum_threshold {
             (
                 ">=",
-                "meets the production-default support threshold (with 2 distinct approvers)",
+                format!(
+                    "meets the production-default support threshold (with {} distinct \
+                     approvers)",
+                    defaults.min_approvers
+                ),
             )
         } else {
             (
                 "<",
-                "held: insufficient support (2 distinct approvers, weights sum below the \
-                 threshold)",
+                format!(
+                    "held: insufficient support ({} distinct approvers, weights sum below \
+                     the threshold)",
+                    defaults.min_approvers
+                ),
             )
         };
         format!(
@@ -150,7 +159,7 @@ pub(super) fn witness_worked_examples_text() -> String {
             witness_kind_wire_name(b),
             sum,
             cmp,
-            theta,
+            defaults.quorum_threshold,
             verdict
         )
     }
@@ -353,11 +362,17 @@ mod tests {
         let table = witness_weight_table_text();
         for (i, kind) in WITNESS_KINDS.iter().enumerate() {
             assert_eq!(_witness_kind_index(*kind), i, "dizi ↔ bekçi pozisyonu");
+            // Kod-review P2-2: ad ↔ ağırlık AYNI SATIRDA doğrulanır — ayrı
+            // contains kontrolleri türün adını bir satırda, ağırlığını başka
+            // satırda bulup yanlış eşleşmeyi geçirirdi.
             let name = witness_kind_wire_name(*kind);
-            assert!(table.contains(&name), "tablo {name} adını listelemeli");
+            let row = table
+                .lines()
+                .find(|l| l.contains(&name))
+                .unwrap_or_else(|| panic!("tablo {name} satırını listelemeli:\n{table}"));
             assert!(
-                table.contains(&format!("{:.1}", kind.default_weight())),
-                "tablo {name} ağırlığını sabitten göstermeli"
+                row.contains(&format!("{:.1}", kind.default_weight())),
+                "{name} satırı KENDİ ağırlığını taşımalı (satır: {row})"
             );
         }
         let defaults = WitnessSet::new(vec![]);
@@ -403,6 +418,14 @@ mod tests {
                 "worked-example runtime aritmetikle birebir olmalı: {expected} ∈ {text}"
             );
         }
+        // Kod-review P2-1: approver sayısı da min_approvers sabitinden türetilir.
+        assert!(
+            text.contains(&format!(
+                "{} distinct approvers",
+                WitnessSet::new(vec![]).min_approvers
+            )),
+            "worked-example approver sayısı sabitten gelmeli: {text}"
+        );
     }
 
     // (5) Kabul kriteri 3 — run-26'nın üç denemesi (string id / string actor /
