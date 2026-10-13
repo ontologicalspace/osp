@@ -365,18 +365,15 @@ fn strict_default_run_envelope_has_no_fence_key() {
     );
 }
 
-/// Kirli-beyanlı askı → tanık → AYNI kirli worktree üzerinde resume Applied
-/// (tur-2 P0: stash ritüeli resume'a taşınmaz; politika originating zarftan
-/// devralınır — resume'a bayrak YOK).
-#[test]
-fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
+/// Kirli-beyanlı askı kur (production witness) → (fixture, askı artifact'ı,
+/// claim_id). Askıyı üreten koşu `--out` kullanmaz; kanonik zarf state-dir'dedir.
+fn declared_dirty_suspension() -> (HarnessFixture, PathBuf, u64) {
     let fx = HarnessFixture::new_with_use_edges();
     let head = commit_third_module(&fx);
     let task_path = renewal_task(&fx, &head);
     let proposals_path = write_v3_declared_proposals(&fx, &head);
     dirty_renewal_state(&fx);
 
-    // 1) Askı — production witness (quorum 2/1.5, boş küme) → exit 10.
     let output = attempt_cmd(&fx)
         .args(["--execution-mode", "production"])
         .args(["--witness", "production"])
@@ -394,7 +391,6 @@ fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Askı artifact'ı + claim kimliği.
     let pending_dir = fx.work_path().join(".osp").join("pending-authorizations");
     let mut artifacts: Vec<PathBuf> = std::fs::read_dir(&pending_dir)
         .expect("pending-authorizations dir")
@@ -413,8 +409,15 @@ fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
     let claim_id = read_json(&artifact)["record"]["claim_id"]
         .as_u64()
         .expect("claim_id") as u64;
+    (fx, artifact, claim_id)
+}
 
-    // 2) Resume — AYNI kirli worktree üzerinde (stash YOK), 2× MergeCommit.
+/// 2× MergeCommit kanıtıyla resume koş (operator-asserted).
+fn run_resume_with_two_witnesses(
+    fx: &HarnessFixture,
+    artifact: &Path,
+    claim_id: u64,
+) -> std::process::Output {
     let events: Vec<serde_json::Value> = [200u64, 300u64]
         .iter()
         .enumerate()
@@ -428,16 +431,16 @@ fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
             })
         })
         .collect();
-    let evidence = fx.work_path().join("witnesses.json");
+    let evidence = fx.work_path().join(format!("witnesses-{claim_id}.json"));
     std::fs::write(&evidence, serde_json::to_string_pretty(&events).unwrap()).unwrap();
 
     let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let resume_output = Command::cargo_bin("osp")
+    Command::cargo_bin("osp")
         .expect("osp binary")
         .current_dir(fx.work_path())
         .arg("trajectory")
         .arg("resume")
-        .arg(&artifact)
+        .arg(artifact)
         .arg("--repo")
         .arg(fx.repo_path())
         .arg("--witness-evidence")
@@ -447,7 +450,16 @@ fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
         .args(["--format", "json"])
         .args(["--evidence-trust", "operator-asserted"])
         .output()
-        .expect("run osp resume");
+        .expect("run osp resume")
+}
+
+/// Kirli-beyanlı askı → tanık → AYNI kirli worktree üzerinde resume Applied
+/// (tur-2 P0: stash ritüeli resume'a taşınmaz; politika originating zarftan
+/// devralınır — resume'a bayrak YOK).
+#[test]
+fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
+    let (fx, artifact, claim_id) = declared_dirty_suspension();
+    let resume_output = run_resume_with_two_witnesses(&fx, &artifact, claim_id);
     let stderr = String::from_utf8_lossy(&resume_output.stderr);
     assert_eq!(
         resume_output.status.code(),
@@ -457,6 +469,55 @@ fn declared_dirty_witnessed_resume_applies_on_dirty_worktree() {
     assert!(
         stderr.contains("declared-dirty resume"),
         "inheritance line must be visible: {stderr}"
+    );
+}
+
+/// **Re-review P1-2:** originating fence kaydının ölçüm digest'i bozulmuşsa
+/// (biçimsel olarak geçerli 64-hex kalsa bile) resume RED — kayıt provenans
+/// iddiasını DOĞRULATMAK zorundadır:
+/// `Digest(ResumedBaseline) == Digest(OriginatingMeasurement)`.
+#[test]
+fn resume_rejects_tampered_originating_measurement_digest() {
+    let (fx, artifact, claim_id) = declared_dirty_suspension();
+
+    // Kanonik zarfı bul ve fence ölçüm digest'ini BAŞKA bir geçerli 64-hex'le
+    // değiştir (shape + typed fence kontrolleri hâlâ geçer — yalnız özünde
+    // yanlış olan provenans iddiası kalır).
+    let attempts_dir = fx.work_path().join("attempts");
+    let mut envelopes: Vec<PathBuf> = std::fs::read_dir(&attempts_dir)
+        .expect("attempts dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.file_name()
+                .map(|n| n.to_string_lossy().starts_with("task-7-"))
+                .unwrap_or(false)
+        })
+        .collect();
+    envelopes.sort();
+    assert_eq!(envelopes.len(), 1, "tam bir kanonik zarf: {envelopes:?}");
+    let envelope_path = envelopes.pop().unwrap();
+    let mut envelope = read_json(&envelope_path);
+    assert_eq!(
+        envelope["result"]["fence"]["mode"], "declared_dirty",
+        "{envelope}"
+    );
+    envelope["result"]["fence"]["measurement"]["space_digest"] = serde_json::json!("ff".repeat(32));
+    std::fs::write(
+        &envelope_path,
+        serde_json::to_string_pretty(&envelope).unwrap(),
+    )
+    .unwrap();
+
+    let resume_output = run_resume_with_two_witnesses(&fx, &artifact, claim_id);
+    assert_eq!(
+        resume_output.status.code(),
+        Some(15),
+        "tampered originating measurement digest must refuse the resume"
+    );
+    let stderr = String::from_utf8_lossy(&resume_output.stderr);
+    assert!(
+        stderr.contains("does not describe this space"),
+        "digest-parity refusal must be explicit: {stderr}"
     );
 }
 

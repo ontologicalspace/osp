@@ -287,11 +287,48 @@ impl CliEvidenceTrustMode {
 enum OriginatingDirtyPolicy {
     /// Kanonik zarf fence kaydı taşımıyor (default strict koşu) — mevcut davranış.
     Strict,
-    /// `mode=declared_dirty` koşusu — beyan evreni + pinned ölçüm HEAD'i.
+    /// `mode=declared_dirty` koşusu — beyan evreni + pinned ölçüm HEAD'i +
+    /// originating ölçümün SpaceDigest'i (re-review P1-2: resume kendi detached
+    /// ölçümünün digest'ını bu değerle DOĞRULAR — kayıt provenans iddiasını
+    /// taşıyorsa, doğrulanmak zorundadır).
     Declared {
         declared_paths: std::collections::BTreeSet<String>,
         measured_head: String,
+        space_digest: String,
     },
+}
+
+/// #204 (re-review P1-1): kanonik attempt zarfının ŞEKİL sözleşmesi —
+/// `CliRunEnvelopeV1` zorunlu alanları (`run{task_id,repository_head}` /
+/// `execution_measurement` / `result` / `evidence`). Kimlik eşleşmesi ŞEKİLDEN
+/// SONRA koşar: beklenen pending kimliğini taşıyan ama zarf sözleşmesini
+/// taşımayan bir JSON originating kanıt SAYILMAZ (testin `c.json` sınıfı).
+fn canonical_attempt_envelope_shape(value: &serde_json::Value) -> Result<(), String> {
+    let missing = |field: &'static str| format!("missing required field `{field}`");
+    let run = value
+        .get("run")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| missing("run"))?;
+    if !run.contains_key("task_id") {
+        return Err(missing("run.task_id"));
+    }
+    if !run.contains_key("repository_head") {
+        return Err(missing("run.repository_head"));
+    }
+    if value
+        .get("execution_measurement")
+        .and_then(|v| v.as_object())
+        .is_none()
+    {
+        return Err(missing("execution_measurement"));
+    }
+    if value.get("result").and_then(|v| v.as_object()).is_none() {
+        return Err(missing("result"));
+    }
+    if value.get("evidence").and_then(|v| v.as_array()).is_none() {
+        return Err(missing("evidence"));
+    }
+    Ok(())
 }
 
 /// #204 (tur-2 P0 + tur-3 P1-2): kanonik attempts mağazasında pending kimliğini
@@ -303,14 +340,18 @@ enum OriginatingDirtyPolicy {
 /// authorization'ı sonradan tüketilemez. Bu şart TÜM resume'larda zorunludur
 /// (bilinçli migration kararı, issue #204 karar kaydı).
 ///
-/// Kimlik tablosu: `schema_version` desteklenen · `run.task_id` == pending ·
-/// `result.kind == "awaiting_witnesses"` · `result.pending` == (claim, attempt,
+/// **Re-review P1-1:** ad + şekil sözleşmesi. Yalnız kanonik üretici adres
+/// biçimi (`task-<task_id>-…​.json`, `publish_no_clobber_attempt_artifact`)
+/// dosyaları adaydır; aday ZARF SÖZLEŞMESİNİ taşımalıdır (şekil reddi =
+/// fail-closed red, sessiz atlama değil). Kimlik tablosu: `schema_version`
+/// desteklenen · `run.task_id` == pending · `result.kind ==
+/// "awaiting_witnesses"` · `result.pending` == (claim, attempt,
 /// evidence-digest). Fence tablosu (kayıt VARSA): `mode == "declared_dirty"` ·
 /// `result == "passed"` · `observed ⊆ declared` · `source_kind ==
-/// "detached_head"` · `measurement.head == run.repository_head` · `space_digest`
-/// geçerli-hex. 0 eşleşme → "re-run the attempt" red; >1 → ambiguity red
-/// (#190). Zarf doğrulaması makine-üretimini İSPATLAMAZ — o güven canonical
-/// store'un koruma sınırındadır (karar kaydı dürüst notu).
+/// "detached_head"` · `measurement.head == run.repository_head` ·
+/// `space_digest` kanonik 64-hex. 0 eşleşme → "re-run the attempt" red; >1 →
+/// ambiguity red (#190). Zarf doğrulaması makine-üretimini İSPATLAMAZ — o
+/// güven canonical store'un koruma sınırındadır (karar kaydı dürüst notu).
 fn find_originating_attempt_envelope(
     state_dir: &std::path::Path,
     task_id: u64,
@@ -327,20 +368,45 @@ fn find_originating_attempt_envelope(
         )
     })?;
     let expected_digest = evidence_digest_hex.to_string();
+    let canonical_prefix = format!("task-{task_id}-");
     let mut scanned = 0u32;
     let mut matches: Vec<(std::path::PathBuf, serde_json::Value)> = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        // P1-1: kanonik ad sözleşmesi — bu task'ın mağaza girdileri dışındakiler
+        // (başka task'lar, ilgisiz dosyalar) aday DEĞİLDİR.
+        if !file_name.starts_with(&canonical_prefix) || !file_name.ends_with(".json") {
             continue;
         }
-        let Ok(raw) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-            continue;
-        };
+        // P1-1: kanonik adlı dosya okunamıyorsa/parse edilemiyorsa store
+        // bütünlüğü şüphelidir — sessiz atlama YOK (fail-closed).
+        let raw = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "canonical attempt file {} cannot be read: {e} — refusing to verify \
+                 the originating attempt against a suspect store",
+                path.display()
+            )
+        })?;
+        let value = serde_json::from_str::<serde_json::Value>(&raw).map_err(|e| {
+            format!(
+                "canonical attempt file {} does not parse: {e} — refusing to verify \
+                 the originating attempt against a suspect store",
+                path.display()
+            )
+        })?;
         scanned += 1;
+        // P1-1: şekil sözleşmesi kimlik eşleşmesinden ÖNCE.
+        canonical_attempt_envelope_shape(&value).map_err(|detail| {
+            format!(
+                "canonical attempt file {} does not carry the envelope contract: \
+                 {detail} — a shape-invalid file is not originating evidence",
+                path.display()
+            )
+        })?;
         let schema_ok = value.get("schema_version").and_then(|v| v.as_u64()) == Some(1);
         let task_ok = value.pointer("/run/task_id").and_then(|v| v.as_u64()) == Some(task_id);
         let kind_ok =
@@ -468,18 +534,24 @@ fn originating_fence_policy(
         .get("space_digest")
         .and_then(|v| v.as_str())
         .ok_or("fence measurement.space_digest is missing")?;
-    if digest.is_empty()
+    // Re-review P1-2: yalnız hex-şekli değil UZUNLUK da — SpaceDigest kanonik
+    // 32-bayt blake3 → 64 küçük-hex (`SpaceDigest::to_hex`); `"a"` gibi değerler
+    // geçemez. Digest Declared'e TAŞINIR: resume kendi detached ölçümünü bu
+    // değerle doğrular (aşağıda).
+    if digest.len() != 64
         || !digest
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
         return Err(format!(
-            "fence measurement.space_digest {digest:?} is not valid hex"
+            "fence measurement.space_digest {digest:?} is not a canonical 64-hex \
+             space digest"
         ));
     }
     Ok(OriginatingDirtyPolicy::Declared {
         declared_paths: declared,
         measured_head: head.to_string(),
+        space_digest: digest.to_string(),
     })
 }
 
@@ -1776,6 +1848,7 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         OriginatingDirtyPolicy::Declared {
             declared_paths,
             measured_head,
+            ..
         } => {
             // Katı HEAD fence'i (tur-3 P1-2): originating attempt'in pinned ölçüm
             // HEAD'i == canlı HEAD. Mevcut stale-base disiplini zayıflamaz —
@@ -1823,6 +1896,25 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             analyze_repo_with_config(&args.repo, &registry, &config)?
         }
     };
+    // Re-review P1-2: originating ölçüm PROVENANSI DOĞRULANIR — fence kaydının
+    // bildirdiği space digest'i resume'un kendi detached ölçümünden YENİDEN
+    // üretilir: Digest(ResumedBaseline) == Digest(OriginatingMeasurement).
+    // Motorun pending-basis staleness kontrolüne EK ve tamamlayıcıdır: bu bağ
+    // zarftaki provenans iddiasının KENDİSİNİ kapatır (bozulmuş-ama-hex kalan
+    // bir digest resume yetkisine dönüşmez).
+    if let OriginatingDirtyPolicy::Declared { space_digest, .. } = &originating {
+        let resumed_digest = osp_core::authorization::SpaceDigest::compute(&result.space)
+            .map_err(|e| anyhow::anyhow!("resume space digest: {e}"))?;
+        if resumed_digest.to_hex() != *space_digest {
+            eprintln!(
+                "✗ Resume refused: the originating attempt's fence record claims \
+                 measurement digest {space_digest} but this state measures {} — the \
+                 fence record does not describe this space; re-run the attempt",
+                resumed_digest.to_hex()
+            );
+            std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+        }
+    }
     repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
         .map_err(|e| anyhow::anyhow!(e))?;
     repo_snapshot::enforce_dirty_policy(
@@ -3470,6 +3562,7 @@ mod originating_attempt_fence_tests {
         serde_json::json!({
             "schema_version": 1,
             "run": {"task_id": 7, "repository_head": HEAD},
+            "execution_measurement": {"subject_authority": "task_scope"},
             "result": result,
             "evidence": []
         })
@@ -3498,13 +3591,15 @@ mod originating_attempt_fence_tests {
         ));
     }
 
-    /// Geçerli declared fence → evren + pinned ölçüm HEAD'i devralınır.
+    /// Geçerli declared fence → evren + pinned ölçüm HEAD'i + ölçüm digest'i
+    /// devralınır (re-review P1-2: digest resume'ta doğrulanmak üzere taşınır).
     #[test]
-    fn valid_declared_fence_inherits_universe_and_pinned_head() {
+    fn valid_declared_fence_inherits_universe_head_and_digest() {
         match originating_fence_policy(&envelope_json(Some(valid_fence()))).unwrap() {
             OriginatingDirtyPolicy::Declared {
                 declared_paths,
                 measured_head,
+                space_digest,
             } => {
                 assert_eq!(
                     declared_paths,
@@ -3514,6 +3609,7 @@ mod originating_attempt_fence_tests {
                     ])
                 );
                 assert_eq!(measured_head, HEAD);
+                assert_eq!(space_digest, "cd".repeat(32));
             }
             other => panic!("expected Declared, got {other:?}"),
         }
@@ -3521,6 +3617,8 @@ mod originating_attempt_fence_tests {
 
     /// Typed red matrisi: bilinmeyen mod / passed-dışı sonuç / küme-ihlali /
     /// yanlış source_kind / head-uyumsuzluğu / bozuk digest → yetki YOK.
+    /// Re-review P1-2: digest yalnız hex değil KANONİK 64-hex olmalı ("a",
+    /// "NOT-HEX", 63-karakter hepsi RED).
     #[test]
     fn invalid_fence_records_refuse_resume_authority() {
         let mut unknown_mode = valid_fence();
@@ -3549,10 +3647,15 @@ mod originating_attempt_fence_tests {
         let err = originating_fence_policy(&envelope_json(Some(wrong_head))).unwrap_err();
         assert!(err.contains("run.repository_head"), "{err}");
 
-        let mut bad_digest = valid_fence();
-        bad_digest["measurement"]["space_digest"] = serde_json::json!("NOT-HEX");
-        let err = originating_fence_policy(&envelope_json(Some(bad_digest))).unwrap_err();
-        assert!(err.contains("valid hex"), "{err}");
+        for bad in ["NOT-HEX", "a", "cd".repeat(31).as_str()] {
+            let mut bad_digest = valid_fence();
+            bad_digest["measurement"]["space_digest"] = serde_json::json!(bad);
+            let err = originating_fence_policy(&envelope_json(Some(bad_digest))).unwrap_err();
+            assert!(
+                err.contains("canonical 64-hex space digest"),
+                "{bad}: {err}"
+            );
+        }
     }
 
     /// Mağaza taraması: kimlik tablosu (task/kind/pending-üçlü) eşleşmeyen
@@ -3563,27 +3666,66 @@ mod originating_attempt_fence_tests {
         let dir = tempfile::tempdir().unwrap();
         let attempts = dir.path().join("attempts");
         std::fs::create_dir_all(&attempts).unwrap();
-        // Yanlış task-id.
+        // Başka task (kanonik ad task-9-* — ad filtresi dışında kalır).
         let mut wrong_task = envelope_json(Some(valid_fence()));
         wrong_task["run"]["task_id"] = serde_json::json!(9);
-        std::fs::write(attempts.join("a.json"), wrong_task.to_string()).unwrap();
-        // Yanlış result-kind (completed).
+        std::fs::write(attempts.join("task-9-1-1.json"), wrong_task.to_string()).unwrap();
+        // Bu task'ın ama yanlış result-kind'ı (completed).
         let mut wrong_kind = envelope_json(None);
         wrong_kind["result"]["kind"] = serde_json::json!("completed");
-        std::fs::write(attempts.join("b.json"), wrong_kind.to_string()).unwrap();
-        // Geçerli eşleşme (fence'siz → Strict).
-        std::fs::write(attempts.join("c.json"), envelope_json(None).to_string()).unwrap();
+        std::fs::write(attempts.join("task-7-100-1.json"), wrong_kind.to_string()).unwrap();
+        // Geçerli eşleşme (fence'siz → Strict) — kanonik üretici ad biçimi.
+        std::fs::write(
+            attempts.join("task-7-200-2.json"),
+            envelope_json(None).to_string(),
+        )
+        .unwrap();
 
         match find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap() {
             OriginatingDirtyPolicy::Strict => {}
             other => panic!("expected Strict from the matching envelope, got {other:?}"),
         }
 
-        // 0 eşleşme (yanlış evidence digest) → red.
+        // 0 eşleşme (yanlış evidence digest) → red. task-7-* iki aday tarandı
+        // (task-9-* ad filtresiyle kapsam dışı).
         let err =
             find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ff".repeat(32)).unwrap_err();
         assert!(err.contains("re-run the attempt"), "{err}");
-        assert!(err.contains("3 envelope(s) scanned"), "{err}");
+        assert!(err.contains("2 envelope(s) scanned"), "{err}");
+    }
+
+    /// **Re-review P1-1 regresyonu:** beklenen pending kimliğini taşıyan ama
+    /// (a) kanonik üretici ADI olmayan (`c.json`) veya (b) zarf sözleşmesi
+    /// eksik (execution_measurement yok) dosya originating kanıt SAYILMAZ.
+    #[test]
+    fn find_originating_rejects_shape_and_name_invalid_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = dir.path().join("attempts");
+        std::fs::create_dir_all(&attempts).unwrap();
+
+        // (a) Reviewer'ın c.json sınıfı: kimlik ÜÇLÜSÜ eşleşiyor, kanonik ad YOK.
+        std::fs::write(attempts.join("c.json"), envelope_json(None).to_string()).unwrap();
+        let err =
+            find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
+        assert!(
+            err.contains("re-run the attempt"),
+            "non-canonical file names must not be originating evidence: {err}"
+        );
+
+        // (b) Kanonik ad VAR, zarf sözleşmesi EKSİK → fail-closed red (red'in
+        // kendisi; sessiz atlama değil).
+        let mut shapeless = envelope_json(None);
+        shapeless
+            .as_object_mut()
+            .unwrap()
+            .remove("execution_measurement");
+        std::fs::write(attempts.join("task-7-300-3.json"), shapeless.to_string()).unwrap();
+        let err =
+            find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
+        assert!(
+            err.contains("envelope contract") && err.contains("execution_measurement"),
+            "shape-invalid canonical file must refuse, not pass: {err}"
+        );
     }
 
     /// Aynı kimliği bağlayan İKİ zarf → ambiguity red'ı (#190 dersi).
@@ -3592,8 +3734,16 @@ mod originating_attempt_fence_tests {
         let dir = tempfile::tempdir().unwrap();
         let attempts = dir.path().join("attempts");
         std::fs::create_dir_all(&attempts).unwrap();
-        std::fs::write(attempts.join("a.json"), envelope_json(None).to_string()).unwrap();
-        std::fs::write(attempts.join("b.json"), envelope_json(None).to_string()).unwrap();
+        std::fs::write(
+            attempts.join("task-7-1-1.json"),
+            envelope_json(None).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            attempts.join("task-7-2-2.json"),
+            envelope_json(None).to_string(),
+        )
+        .unwrap();
         let err =
             find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
         assert!(err.contains("ambiguous originating attempt"), "{err}");

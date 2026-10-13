@@ -879,4 +879,118 @@ mod analyzed_scope_fence_tests {
             "rename ends must both stay dirty: parsed = {parsed:?}"
         );
     }
+
+    /// #204 (tur-4 P1-1 / re-review P2): İKİ SEVİYELİ gerçek submodule —
+    /// recursive gitlink traversal'ın doğrudan regresyonu. Temiz zincirde
+    /// (parent→mod1→mod2, her seviyede HEAD==gitlink) nested yaprak tracked
+    /// sete girer; nested HEAD gitlink'ten sapınca o seviyenin path'leri yetkili
+    /// KABUL EDİLMEZ (setten düşer).
+    #[test]
+    fn nested_gitlinks_tracked_two_levels_real_git() {
+        let parent = tempfile::tempdir().unwrap();
+        let mod1_src = tempfile::tempdir().unwrap();
+        let mod2_src = tempfile::tempdir().unwrap();
+        let git = |cwd: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .env("GIT_AUTHOR_NAME", "t")
+                .env("GIT_AUTHOR_EMAIL", "t@t")
+                .env("GIT_COMMITTER_NAME", "t")
+                .env("GIT_COMMITTER_EMAIL", "t@t")
+                .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+                .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                // file:// submodule kurulumu (git 2.38+ protokol kısıtı) —
+                // test ortamı açar; capture kendisi yalnız okur.
+                .env("GIT_CONFIG_COUNT", "1")
+                .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+                .env("GIT_CONFIG_VALUE_0", "always")
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} in {} failed: {}",
+                cwd.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let init = |cwd: &std::path::Path| {
+            git(cwd, &["init", "-q"]);
+            git(cwd, &["config", "user.email", "t@t"]);
+            git(cwd, &["config", "user.name", "t"]);
+        };
+        let file_url =
+            |p: &std::path::Path| format!("file:///{}", p.to_str().unwrap().replace('\\', "/"));
+
+        // En iç: mod2 (src/leaf.cs).
+        init(mod2_src.path());
+        std::fs::create_dir_all(mod2_src.path().join("src")).unwrap();
+        std::fs::write(mod2_src.path().join("src/leaf.cs"), "class Leaf {}\n").unwrap();
+        git(mod2_src.path(), &["add", "-A"]);
+        git(mod2_src.path(), &["commit", "-qm", "mod2 init"]);
+        // Orta: mod1 (src/a.ts + İÇİNDE mod2 submodule).
+        init(mod1_src.path());
+        std::fs::create_dir_all(mod1_src.path().join("src")).unwrap();
+        std::fs::write(mod1_src.path().join("src/a.ts"), "export const a = 1;\n").unwrap();
+        git(mod1_src.path(), &["add", "-A"]);
+        git(
+            mod1_src.path(),
+            &["submodule", "add", &file_url(mod2_src.path()), "mod2"],
+        );
+        git(mod1_src.path(), &["add", "-A"]);
+        git(mod1_src.path(), &["commit", "-qm", "mod1 init"]);
+        // Parent: main.rs + İÇİNDE mod1 submodule; recursive init.
+        init(parent.path());
+        std::fs::write(parent.path().join("main.rs"), "fn main() {}\n").unwrap();
+        git(parent.path(), &["add", "-A"]);
+        git(
+            parent.path(),
+            &["submodule", "add", &file_url(mod1_src.path()), "mod1"],
+        );
+        git(
+            parent.path(),
+            &["submodule", "update", "--init", "--recursive"],
+        );
+        git(parent.path(), &["add", "-A"]);
+        git(parent.path(), &["commit", "-qm", "parent init"]);
+        assert!(
+            parent.path().join("mod1/mod2/src/leaf.cs").exists(),
+            "two-level recursive init expected"
+        );
+
+        // Temiz zincir: İKİ seviye de açılır — nested yaprak tracked sette.
+        let snap = RepositorySnapshot::capture(parent.path()).expect("clean capture");
+        assert!(
+            snap.tracked_paths.contains("mod1/mod2/src/leaf.cs"),
+            "two-level nested leaf must be tracked: {:?}",
+            snap.tracked_paths
+        );
+        assert!(snap.tracked_paths.contains("mod1/src/a.ts"));
+
+        // Sapma: mod2'yi parent worktree'inde ileri taşı (yeni commit) →
+        // mod2 HEAD ≠ mod1'in bağladığı gitlink → o seviyenin nested path'leri
+        // yetkili kabul EDİLMEZ (recursive expansion o düğümde durur).
+        std::fs::write(
+            parent.path().join("mod1/mod2/src/leaf2.cs"),
+            "class L2 {}\n",
+        )
+        .unwrap();
+        git(parent.path().join("mod1/mod2").as_path(), &["add", "-A"]);
+        git(
+            parent.path().join("mod1/mod2").as_path(),
+            &["commit", "-qm", "mod2 drift"],
+        );
+        let drifted = RepositorySnapshot::capture(parent.path()).expect("drifted capture");
+        assert!(
+            !drifted.tracked_paths.contains("mod1/mod2/src/leaf.cs"),
+            "drifted nested level must lose tracked authority: {:?}",
+            drifted.tracked_paths
+        );
+        assert!(
+            drifted.tracked_paths.contains("mod1/src/a.ts"),
+            "temiz üst seviye yetkili kalır"
+        );
+    }
 }
