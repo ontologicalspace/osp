@@ -17,7 +17,7 @@
 
 #![allow(dead_code, reason = "#161: wired incrementally across commits")]
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use osp_core::agent::{
@@ -204,6 +204,12 @@ pub enum PathKeyedProposalError {
          such as `./main.rs` would count as a SECOND node in the hypothetical graph)"
     )]
     InvalidNewNodePath { path: String },
+    #[error(
+        "declared universe path {path:?} is not a canonical repo-relative path — the \
+         declared-dirty fence compares exact forward-slash repo-relative paths; an alias \
+         such as `./main.rs` would silently bypass the declared universe (#204)"
+    )]
+    InvalidDeclaredPath { path: String },
 }
 
 /// Proposals dosyası yükle + re-bind → `Vec<DeltaProposal>`.
@@ -261,6 +267,82 @@ pub fn load_proposals_str(
                         .into_iter()
                         .map(|p| rebind_proposal_v3(p, &path_to_id))
                         .collect()
+                }
+                Some(v) => Err(PathKeyedProposalError::UnsupportedEnvelopeVersion {
+                    found: v.to_string(),
+                }),
+                None => Err(PathKeyedProposalError::MissingEnvelopeVersion),
+            }
+        }
+        other => Err(PathKeyedProposalError::UnexpectedTopLevelShape {
+            found: other.to_string(),
+        }),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #204: beyan edilen evren çıkarıcı — opt-in declared-dirty fence girdisi.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ortak kanonik toplama (#204 tur-2 P1-1): iki wire biçimi (draft-task insan
+/// spec'i / proposals v2-v3 zarfı) aynı tek kurala katılır — beyan yolunun
+/// `RepoRelativePath` kanonikliği (rebind_proposal_v3 ile AYNI kural; `./main.rs`
+/// takma adı fence'de ikinci bir "node" sayılırdı ve evren üyeliğini sessizce
+/// yanlış çevirirdi).
+pub fn insert_canonical_declared_path(
+    universe: &mut BTreeSet<String>,
+    path: &str,
+) -> Result<(), PathKeyedProposalError> {
+    if osp_analyzer::language::RepoRelativePath::from_repo_relative_str(path).is_none() {
+        return Err(PathKeyedProposalError::InvalidDeclaredPath {
+            path: path.to_string(),
+        });
+    }
+    universe.insert(path.to_string());
+    Ok(())
+}
+
+/// #204 (tur-2 P1-1): proposals zarfından (v2/v3) beyan edilen evreni çıkar —
+/// `new_nodes[].path` (yalnız `Some` olanlar; v3) ∪ `modified_entities[].path`
+/// (v2+v3). v1 çıplak array → BOŞ küme (node-id temelli eski biçim path beyanı
+/// taşımaz; boş evren + kirli yol = red — "temiz ağaç" özel hâli).
+///
+/// Koşu-ÖNCESİ fence girdisi olarak `load_proposals_str`'den BAĞIMSIZ ve ondan
+/// ÖNCE koşar: tam re-bind analiz-sonrası olduğu için evren çıkarımı kendi hafif
+/// parse'ını yapar; HEAD fence ve path-çözümleme sözleşmesi load yolunda aynen
+/// kalır. Parse/kanoniklik hatası fail-closed döner — bozuk beyanla fence
+/// kurulamaz.
+pub fn extract_declared_universe(raw: &str) -> Result<BTreeSet<String>, PathKeyedProposalError> {
+    let value: serde_json::Value = serde_json::from_str(raw)?;
+    match &value {
+        serde_json::Value::Array(_) => Ok(BTreeSet::new()),
+        serde_json::Value::Object(_) => {
+            let version = value.get("schema_version").and_then(|v| v.as_u64());
+            match version {
+                Some(2) => {
+                    let file: CliPathKeyedProposalsFileV2 = serde_json::from_value(value.clone())?;
+                    let mut universe = BTreeSet::new();
+                    for p in &file.proposals {
+                        for m in &p.modified_entities {
+                            insert_canonical_declared_path(&mut universe, &m.path)?;
+                        }
+                    }
+                    Ok(universe)
+                }
+                Some(3) => {
+                    let file: CliPathKeyedProposalsFileV3 = serde_json::from_value(value.clone())?;
+                    let mut universe = BTreeSet::new();
+                    for p in &file.proposals {
+                        for m in &p.modified_entities {
+                            insert_canonical_declared_path(&mut universe, &m.path)?;
+                        }
+                        for n in &p.new_nodes {
+                            if let Some(path) = &n.path {
+                                insert_canonical_declared_path(&mut universe, path)?;
+                            }
+                        }
+                    }
+                    Ok(universe)
                 }
                 Some(v) => Err(PathKeyedProposalError::UnsupportedEnvelopeVersion {
                     found: v.to_string(),
@@ -966,5 +1048,109 @@ mod tests {
                 "{bad:?} must be rejected as non-canonical"
             );
         }
+    }
+
+    // ── #204: beyan edilen evren çıkarıcı (opt-in declared-dirty fence girdisi) ──
+
+    /// v3: `new_nodes[].path` (yalnız `Some` olanlar) ∪ `modified_entities[].path`;
+    /// birden çok proposal birleşir; tekrarlar kümede erir.
+    #[test]
+    fn extract_declared_universe_v3_unions_new_node_paths_and_modified_entities() {
+        let raw = serde_json::json!({
+            "schema_version": 3,
+            "repository_head": V2_HEAD,
+            "proposals": [
+                {
+                    "new_nodes": [
+                        {"kind": "Module", "initial_mass": 10.0, "path": "src/new_a.cs"},
+                        {"kind": "Module", "initial_mass": 5.0}
+                    ],
+                    "new_edges": [],
+                    "removed_edges": [],
+                    "affected_nodes": ["a.rs"],
+                    "modified_entities": [{"path": "a.rs"}, {"path": "b.rs"}],
+                    "reasoning": "x"
+                },
+                {
+                    "new_nodes": [
+                        {"kind": "Module", "initial_mass": 1.0, "path": "gen/new_b.cs"}
+                    ],
+                    "new_edges": [],
+                    "removed_edges": [],
+                    "affected_nodes": [],
+                    "modified_entities": [{"path": "a.rs"}],
+                    "reasoning": "y"
+                }
+            ]
+        })
+        .to_string();
+        let universe = extract_declared_universe(&raw).expect("v3 universe must extract");
+        assert_eq!(
+            universe,
+            BTreeSet::from([
+                "a.rs".to_string(),
+                "b.rs".to_string(),
+                "src/new_a.cs".to_string(),
+                "gen/new_b.cs".to_string(),
+            ])
+        );
+    }
+
+    /// v2: new_nodes path alanı taşımaz — evren yalnız `modified_entities`.
+    #[test]
+    fn extract_declared_universe_v2_takes_modified_entities_only() {
+        let raw = serde_json::json!({
+            "schema_version": 2,
+            "repository_head": V2_HEAD,
+            "proposals": [
+                {
+                    "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "connected_to": []}],
+                    "new_edges": [],
+                    "removed_edges": [],
+                    "affected_nodes": ["a.rs"],
+                    "modified_entities": [{"path": "b.rs"}],
+                    "reasoning": "x"
+                }
+            ]
+        })
+        .to_string();
+        let universe = extract_declared_universe(&raw).expect("v2 universe must extract");
+        assert_eq!(universe, BTreeSet::from(["b.rs".to_string()]));
+    }
+
+    /// v1 (çıplak array): path beyanı YOK → boş evren ("temiz ağaç" özel hâli —
+    /// opt-in modda her kirli yol RED'ler).
+    #[test]
+    fn extract_declared_universe_v1_bare_array_is_empty() {
+        let raw = r#"[{"new_nodes": [], "new_edges": [], "removed_edges": [], "affected_nodes": [], "modified_entities": [], "reasoning": ""}]"#;
+        let universe = extract_declared_universe(raw).expect("v1 must parse to an empty universe");
+        assert!(universe.is_empty());
+    }
+
+    /// Kanonik olmayan beyan yolu → fail-closed (`./a.rs` takma adı evren
+    /// üyeliğini sessizce yanlış çevirirdi).
+    #[test]
+    fn extract_declared_universe_rejects_non_canonical_paths() {
+        let raw = serde_json::json!({
+            "schema_version": 3,
+            "repository_head": V2_HEAD,
+            "proposals": [
+                {
+                    "new_nodes": [],
+                    "new_edges": [],
+                    "removed_edges": [],
+                    "affected_nodes": [],
+                    "modified_entities": [{"path": "./a.rs"}],
+                    "reasoning": "x"
+                }
+            ]
+        })
+        .to_string();
+        let err = extract_declared_universe(&raw).expect_err("non-canonical path must reject");
+        assert!(
+            matches!(err, PathKeyedProposalError::InvalidDeclaredPath { .. }),
+            "{err}"
+        );
+        assert!(format!("{err}").contains("canonical"), "{err}");
     }
 }

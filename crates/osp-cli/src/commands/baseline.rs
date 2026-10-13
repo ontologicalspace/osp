@@ -35,7 +35,8 @@ use osp_core::space::EdgeKind;
 
 use crate::commands::analyze_provenance::{CliAnalyzeNode, CliEdge, CliEdgeKind};
 use crate::commands::repo_snapshot::{
-    validate_analyzed_paths_clean, validate_analyzed_paths_tracked, GitCommitId, RepositorySnapshot,
+    enforce_dirty_policy, validate_analyzed_paths_clean, validate_analyzed_paths_tracked,
+    DirtyPolicy, GitCommitId, RepositorySnapshot,
 };
 
 /// Ölçülmüş baseline kenarı — path-keyed (artifact kenarları id-keyed gelir;
@@ -92,9 +93,15 @@ fn kind_name(kind: EdgeKind) -> &'static str {
 /// `observed_worktree_unbound` çıktısı ölçülen içeriğin HEAD içeriği OLDUĞUNU
 /// iddia edemez. Ardından head-drift fence'i ve #155 analyzed-scope fence'leri
 /// (ölçülen path'ler bugün HEAD-tracked + clean) uygulanır.
+///
+/// #204: `dirty_policy` — Strict'te katman 3 mevcut hâliyle (analyzed-scope
+/// clean); `DeclaredUniverse`'te global `D ⊆ A` (opt-in `--allow-declared-dirty`;
+/// ölçüm artifact'tan okunduğu için epistemik güvenlik değişmez, fence yalnız
+/// beyan-worktree dürüstlüğünü denetler).
 pub(crate) fn load_baseline_artifact(
     path: &Path,
     snapshot: &RepositorySnapshot,
+    dirty_policy: &DirtyPolicy<'_>,
 ) -> anyhow::Result<BaselineView> {
     let live_head = snapshot.head.as_str();
     let raw = std::fs::read_to_string(path)
@@ -154,13 +161,19 @@ pub(crate) fn load_baseline_artifact(
     )
     .map_err(|e| anyhow::anyhow!("baseline artifact edges do not parse: {e}"))?;
 
-    // P0-1 katman 3: ölçülen path'ler bugün HEAD-tracked + clean (#155 fence'leri —
-    // artifact üretiminden bu yana ölçülen dosyalar değişmedi).
+    // P0-1 katman 3: ölçülen path'ler bugün HEAD-tracked + dirty-fence politikaya
+    // göre (#155 Strict / #204 DeclaredUniverse global `D ⊆ A`) — artifact
+    // üretiminden bu yana ölçülen dosyalar değişmedi / beyan dışı kirli yok.
     let node_paths: HashMap<u64, String> =
         nodes.iter().map(|n| (n.node_id, n.path.clone())).collect();
     validate_analyzed_paths_tracked(&node_paths, snapshot).map_err(|e| anyhow::anyhow!(e))?;
-    validate_analyzed_paths_clean(&node_paths, snapshot, "draft-time baseline fence")
-        .map_err(|e| anyhow::anyhow!(e))?;
+    enforce_dirty_policy(
+        &node_paths,
+        snapshot,
+        "draft-time baseline fence",
+        dirty_policy,
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     build_view(nodes, edges, artifact_head.to_string())
 }
@@ -299,8 +312,12 @@ mod tests {
             dir.path(),
             serde_json::json!({"head": "a".repeat(40), "clean": false, "binding": "observed_worktree_unbound"}),
         );
-        let err =
-            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
+        let err = load_baseline_artifact(
+            &artifact,
+            &snapshot_at_head(&"a".repeat(40)),
+            &DirtyPolicy::Strict,
+        )
+        .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("not revision-bound"), "{msg}");
         assert!(msg.contains("--require-clean-snapshot"), "{msg}");
@@ -314,8 +331,12 @@ mod tests {
             dir.path(),
             serde_json::json!({"head": "a".repeat(40), "clean": false, "binding": "clean_pre_post_equal"}),
         );
-        let err =
-            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
+        let err = load_baseline_artifact(
+            &artifact,
+            &snapshot_at_head(&"a".repeat(40)),
+            &DirtyPolicy::Strict,
+        )
+        .unwrap_err();
         assert!(format!("{err}").contains("dirty repository"), "{err}");
     }
 
@@ -328,8 +349,12 @@ mod tests {
             dir.path(),
             serde_json::json!({"head": "b".repeat(40), "clean": true, "binding": "clean_pre_post_equal"}),
         );
-        let err =
-            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
+        let err = load_baseline_artifact(
+            &artifact,
+            &snapshot_at_head(&"a".repeat(40)),
+            &DirtyPolicy::Strict,
+        )
+        .unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("HEAD drift"), "{msg}");
         assert!(msg.contains(&"b".repeat(40)), "{msg}");
@@ -359,7 +384,7 @@ mod tests {
         let mut snapshot = snapshot_at_head(&"a".repeat(40));
         snapshot.tracked_paths.insert("src/main.cs".to_string());
         snapshot.dirty_paths.insert("src/main.cs".to_string());
-        let err = load_baseline_artifact(&artifact, &snapshot).unwrap_err();
+        let err = load_baseline_artifact(&artifact, &snapshot, &DirtyPolicy::Strict).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("modified or untracked"), "{msg}");
         assert!(msg.contains("draft-time"), "{msg}");
@@ -380,8 +405,12 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let err =
-            load_baseline_artifact(&artifact, &snapshot_at_head(&"a".repeat(40))).unwrap_err();
+        let err = load_baseline_artifact(
+            &artifact,
+            &snapshot_at_head(&"a".repeat(40)),
+            &DirtyPolicy::Strict,
+        )
+        .unwrap_err();
         assert!(format!("{err}").contains("schema_version 2"), "{err}");
     }
 

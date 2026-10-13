@@ -61,6 +61,44 @@ pub struct CliPendingAuthorizationIdentity {
     pub evidence_digest: String,
 }
 
+/// #204 (Karar-C): opt-in declared-dirty koşusunun fence kanıtı — yalnız
+/// `--allow-declared-dirty` koşularında taşınır (`skip_serializing_if`: default
+/// koşuların zarf baytları DEĞİŞMEZ — #203 `pending` alanı kalıbı, golden pinli).
+///
+/// Dar sözleşme (issue #204 karar kaydı): kayıt YOL-ÜYELİĞİ fence kararını
+/// (`observed ⊆ declared`) ve ölçümün SABİT-SHA detached checkout'tan
+/// geldiğini belgeler; kirli dosya İÇERİĞİNİN koşu penceresinde kararlılığını
+/// iddia ETMEZ (aday içerik kimliği realization zincirinin patch-digest +
+/// candidate-head alanındadır). `trajectory resume` politikasını bu kayıttan
+/// DEVRALIR (resume'a ayrı bayrak yok — ResumeAuthority invariant'ı).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CliDeclaredDirtyFenceRecord {
+    /// Sabit `"declared_dirty"` — resume tarafı bilinmeyen modu typed reddeder.
+    pub mode: &'static str,
+    /// Beyan edilen evren (`new_nodes[].path ∪ modified_entities`; kanonik-sıralı).
+    pub declared_paths: Vec<String>,
+    /// Koşu BAŞINDA gözlemlenen kirli yollar (pre-snapshot; kanonik-sıralı).
+    pub observed_dirty_paths: Vec<String>,
+    /// Sabit `"passed"` — persist edilen kanonik zarf yalnız fence'leri geçmiş
+    /// koşuda yazılır; alan kaydın KOŞULDUĞUNU belgeler (typed doğrulamada
+    /// `failed`/`unknown`/malformed değerler resume yetkisine dönüşmez).
+    pub result: &'static str,
+    /// Ölçüm provenansı (Karar-A şart-2: source_kind + SHA + space digest).
+    pub measurement: CliFenceMeasurementProvenance,
+}
+
+/// #204: fence kaydının ölçüm provenans bloğu.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct CliFenceMeasurementProvenance {
+    /// Sabit `"detached_head"` — bu modda canlı-ağaç analizi yoktur.
+    pub source_kind: &'static str,
+    /// Ölçümün yapıldığı pinned commit (tam 40-hex; == zarf `repository_head`).
+    pub head: String,
+    /// Ölçülen uzayın `SpaceDigest`'i (hex) — ölçümün hangi uzay durumuna ait
+    /// olduğunu sonraki zincir (resume parity / gate) doğrulayabilir.
+    pub space_digest: String,
+}
+
 /// Serializable run result (mirror of NavigatorResult's user-relevant fields).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CliRunResult {
@@ -71,6 +109,11 @@ pub struct CliRunResult {
     /// (golden test pinler).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<CliPendingAuthorizationIdentity>,
+    /// **#204:** yalnız opt-in `--allow-declared-dirty` koşuları için `Some` —
+    /// fence kararı + ölçüm provenansı. Default koşuların baytları değişmez;
+    /// opt-in'de kayıt ZORUNLUDUR (flag var + kayıt yok → persist öncesi RED).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fence: Option<CliDeclaredDirtyFenceRecord>,
 }
 
 impl CliRunResult {
@@ -114,6 +157,9 @@ impl CliRunResult {
             kind,
             attempts,
             pending,
+            // #204: fence kaydı CLI katmanında yapıştırılır (navigator bunu
+            // bilemez); from_navigator daima None üretir.
+            fence: None,
         }
     }
 }
@@ -364,6 +410,7 @@ mod tests {
             kind: CliRunResultKind::Completed,
             attempts: 1,
             pending: None,
+            fence: None,
         };
         assert_eq!(
             serde_json::to_string(&completed).unwrap(),
@@ -373,6 +420,7 @@ mod tests {
             kind: CliRunResultKind::LlmError,
             attempts: 0,
             pending: None,
+            fence: None,
         };
         assert_eq!(
             serde_json::to_string(&llm_error).unwrap(),
@@ -392,6 +440,7 @@ mod tests {
                 attempt_num: 1,
                 evidence_digest: "ab".repeat(32),
             }),
+            fence: None,
         };
         let wire = serde_json::to_string(&awaiting).unwrap();
         assert!(

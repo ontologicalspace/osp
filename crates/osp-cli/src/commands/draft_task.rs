@@ -35,10 +35,13 @@ use osp_core::trajectory::{
 
 use crate::commands::baseline::{analyze_live, load_baseline_artifact, BaselineView};
 use crate::commands::path_keyed_proposals::{
-    CliPathKeyedEdgeRef, CliPathKeyedEdgeSpec, CliPathKeyedEntityChange, CliPathKeyedNewNodeSpecV3,
-    CliPathKeyedProposalV3, CliPathKeyedProposalsFileV3,
+    insert_canonical_declared_path, CliPathKeyedEdgeRef, CliPathKeyedEdgeSpec,
+    CliPathKeyedEntityChange, CliPathKeyedNewNodeSpecV3, CliPathKeyedProposalV3,
+    CliPathKeyedProposalsFileV3,
 };
-use crate::commands::repo_snapshot::RepositorySnapshot;
+use crate::commands::repo_snapshot::{
+    validate_dirty_paths_declared, DirtyPolicy, RepositorySnapshot,
+};
 
 /// Ritüel-standard preferred vector (dogfood task dosyalarının değişmezi).
 const PREFERRED_VECTOR: RawPosition = RawPosition {
@@ -101,12 +104,75 @@ pub struct DraftTaskArgs {
     /// Yazılacak proposals v3 dosyası (--proposals-spec ile zorunlu).
     #[arg(long)]
     pub out_proposals: Option<PathBuf>,
+    /// #204 (opt-in): "kirli yollar ⊆ beyan edilen evren" fence'i — kod-sonrası
+    /// dürüst spec yenilemesi stash'siz tek komut olur. Ölçüm daima temiz-bound
+    /// `--baseline` artifact'ından okunur (HEAD fence aynen); worktree'deki TÜM
+    /// kirli yolların `new_nodes[].path ∪ modified_entities` beyanının içinde
+    /// olması gerekir (beyan dışı tek kirli yol RED, yol listeli). Default
+    /// davranış (bayraksız) değişmez. NOT: çıktılar repo İÇİNE yazılırsa sonraki
+    /// attempt'in fence'inde beyan isterler — repo dışına yazmak ritüel-standard.
+    #[arg(
+        long,
+        requires = "baseline",
+        requires = "proposals_spec",
+        default_value_t = false
+    )]
+    pub allow_declared_dirty: bool,
 }
 
 pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
     let snapshot = RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+
+    // #204 (opt-in): spec'İ ÖNCE oku — read-once (tur-2 P1-1): fence'in beyan
+    // evreni ve translate_spec AYNI parse'tan beslenir. Clap `requires`
+    // --baseline + --proposals-spec'i garanti eder; bayraksız akışın okuma
+    // sırası değişmez (spec view'dan SONRA okunmaya devam eder).
+    let early_spec: Option<ProposalsSpec> = if args.allow_declared_dirty {
+        let spec_path = args
+            .proposals_spec
+            .as_ref()
+            .expect("clap `requires` guarantees proposals_spec with the opt-in flag");
+        let raw = std::fs::read_to_string(spec_path).map_err(|e| {
+            anyhow::anyhow!("failed to read proposals spec {}: {e}", spec_path.display())
+        })?;
+        let spec: ProposalsSpec = serde_json::from_str(&raw).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to parse proposals spec {}: {}",
+                spec_path.display(),
+                annotate_output_only_field(&e)
+            )
+        })?;
+        Some(spec)
+    } else {
+        None
+    };
+    let declared_universe: Option<BTreeSet<String>> = match &early_spec {
+        Some(spec) => {
+            let universe = extract_declared_from_draft_spec(spec)?;
+            validate_dirty_paths_declared(
+                &snapshot.dirty_paths,
+                &universe,
+                "draft-time declared-dirty fence",
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            eprintln!(
+                "declared-dirty mode: {} dirty path(s) ⊆ declared universe ({} declared) — \
+                 the baseline measurement comes from the clean-bound --baseline artifact \
+                 (HEAD fence unchanged)",
+                snapshot.dirty_paths.len(),
+                universe.len()
+            );
+            Some(universe)
+        }
+        None => None,
+    };
+    let dirty_policy = match &declared_universe {
+        Some(universe) => DirtyPolicy::DeclaredUniverse(universe),
+        None => DirtyPolicy::Strict,
+    };
+
     let view = match &args.baseline {
-        Some(path) => load_baseline_artifact(path, &snapshot)?,
+        Some(path) => load_baseline_artifact(path, &snapshot, &dirty_policy)?,
         None => analyze_live(&args.repo)?,
     };
 
@@ -132,8 +198,10 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
     // Tur-1 P1-3: üretilen proposal'ın op-gereksinimleri task'ın izinli
     // operasyonlarına karşı denetlenir — attempt'te reddedilecek bir çifti
     // generation-time yakalamak bu komutun varlık sebebi.
-    let proposals = match &args.proposals_spec {
-        Some(spec_path) => {
+    // #204: opt-in'de spec yukarıda ERKEN parse edildi (read-once); default
+    // akışta burada okunur — mevcut sıra değişmez.
+    let parsed_spec: Option<ProposalsSpec> = match (&args.proposals_spec, early_spec) {
+        (Some(spec_path), None) => {
             let raw = std::fs::read_to_string(spec_path).map_err(|e| {
                 anyhow::anyhow!("failed to read proposals spec {}: {e}", spec_path.display())
             })?;
@@ -144,6 +212,12 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
                     annotate_output_only_field(&e)
                 )
             })?;
+            Some(spec)
+        }
+        (_, early) => early,
+    };
+    let proposals = match parsed_spec {
+        Some(spec) => {
             let (file, stats, required_ops) = translate_spec(spec, &view)?;
             let missing: Vec<&str> = required_ops
                 .iter()
@@ -183,6 +257,20 @@ pub fn run_draft_task(args: DraftTaskArgs) -> anyhow::Result<()> {
     // Tam iki-dosya filesystem transaction'ı değil; rename aşaması dosya-başına
     // atomik (atomic_write_replace_staged dokümanunda dürüstçe yazılı).
     preflight_output_aliases(&args)?;
+
+    // #204 (tur-2 P1-3): opt-in draft post-fence — çıktı publish'inden HEMEN önce
+    // ikinci snapshot: HEAD/tracked değişimi RED + global `D ⊆ A` yeniden (attempt
+    // post-fence'iyle simetrik epistemik sınır; draft penceresinde doğan beyan-dışı
+    // kirli yol, yayımlanacak task'ın bağlandığı worktree dürüstlüğünü ihlal eder).
+    if args.allow_declared_dirty {
+        let snapshot_after =
+            RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
+        let universe = declared_universe
+            .as_ref()
+            .expect("allow_declared_dirty implies the universe was extracted");
+        validate_post_draft_snapshot(&snapshot, &snapshot_after, universe)?;
+    }
+
     let task_payload = serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 2,
         "repository_head": view.head,
@@ -460,6 +548,53 @@ struct NewNodeHuman {
 enum PathOrKinded {
     Plain(String),
     Kinded(String, EdgeKind),
+}
+
+/// #204 (tur-2 P1-3): opt-in draft post-fence — ikinci snapshot karşılaştırması
+/// (saf, test edilebilir): HEAD/tracked eşitliği + global `D ⊆ A` yeniden.
+/// Deterministik E2E enjeksiyonu mümkün olmadığından (koşu penceresi kısa)
+/// sözleşme birim testle pinlenir.
+fn validate_post_draft_snapshot(
+    before: &RepositorySnapshot,
+    after: &RepositorySnapshot,
+    universe: &BTreeSet<String>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        after.head == before.head,
+        "repository HEAD moved during draft-task ({} -> {}) — the task cannot bind \
+         to a moving state; retry",
+        before.head,
+        after.head
+    );
+    anyhow::ensure!(
+        after.tracked_paths == before.tracked_paths,
+        "repository tracked-path set changed during draft-task — the task cannot \
+         bind to a state whose file set is moving; retry"
+    );
+    validate_dirty_paths_declared(&after.dirty_paths, universe, "after draft-task")
+        .map_err(|e| anyhow::anyhow!(e))
+}
+
+/// #204 (tur-2 P1-1): draft-task insan spec'inden beyan edilen evren —
+/// `new_nodes[].path` (yalnız `Some` olanlar) ∪ `modified_entities`. Proposals
+/// v2/v3 çıkarıcısı (`extract_declared_universe`) ile AYNI kanonik toplama
+/// (`insert_canonical_declared_path`); wire biçimleri ayrı, evren sözleşmesi
+/// TEK — draft spec'ten ve onun ürettiği v3 proposals dosyasından özdeş evren
+/// çıkar (parity testi pinler).
+fn extract_declared_from_draft_spec(spec: &ProposalsSpec) -> anyhow::Result<BTreeSet<String>> {
+    let mut universe = BTreeSet::new();
+    for proposal in &spec.proposals {
+        for path in &proposal.modified_entities {
+            insert_canonical_declared_path(&mut universe, path).map_err(|e| anyhow::anyhow!(e))?;
+        }
+        for node in &proposal.new_nodes {
+            if let Some(path) = &node.path {
+                insert_canonical_declared_path(&mut universe, path)
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            }
+        }
+    }
+    Ok(universe)
 }
 
 impl PathOrKinded {
@@ -992,5 +1127,94 @@ mod tests {
             !msg.contains("shadow"),
             "canonicality precedes shadow: {msg}"
         );
+    }
+
+    /// #204 (tur-2 P1-1) parity: draft insan spec'i ve onun ürettiği v3 proposals
+    /// dosyası ÖZDEŞ beyan evreni çıkarmalı (iki çıkarıcı, tek sözleşme).
+    #[test]
+    fn draft_spec_and_v3_proposals_extract_identical_universes() {
+        let spec_json = r#"{"proposals": [{"new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "src/new.cs", "connected_to": []}], "new_edges": [], "removed_edges": [], "modified_entities": ["a.rs"], "reasoning": "x"}]}"#;
+        let spec: ProposalsSpec = serde_json::from_str(spec_json).unwrap();
+        let draft_universe = extract_declared_from_draft_spec(&spec).unwrap();
+
+        let v3 = serde_json::json!({
+            "schema_version": 3,
+            "repository_head": "0".repeat(40),
+            "proposals": [
+                {
+                    "new_nodes": [{"kind": "Module", "initial_mass": 1.0, "path": "src/new.cs"}],
+                    "new_edges": [],
+                    "removed_edges": [],
+                    "affected_nodes": [],
+                    "modified_entities": [{"path": "a.rs"}],
+                    "reasoning": "x"
+                }
+            ]
+        })
+        .to_string();
+        let v3_universe =
+            crate::commands::path_keyed_proposals::extract_declared_universe(&v3).unwrap();
+        assert_eq!(
+            draft_universe, v3_universe,
+            "draft spec and its v3 output must declare the same universe"
+        );
+    }
+
+    /// #204 (tur-2 P1-3): draft post-fence — pencerede HEAD hareketi / tracked
+    /// değişimi / beyan-dışı yeni kirli yol → RED; aynı durum → geçer.
+    #[test]
+    fn draft_post_fence_rejects_window_drift_and_undeclared_growth() {
+        let set = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<BTreeSet<_>>();
+        let mk = |head: &str, tracked: &[&str], dirty: &[&str]| RepositorySnapshot {
+            head: crate::commands::repo_snapshot::GitCommitId::try_from(head.to_string()).unwrap(),
+            tracked_paths: set(tracked),
+            dirty_paths: set(dirty),
+        };
+        let h1 = "a".repeat(40);
+        let h2 = "b".repeat(40);
+        let universe = set(&["main.rs", "src/new.rs"]);
+
+        // Aynı durum → geçer.
+        let before = mk(&h1, &["main.rs"], &["main.rs", "src/new.rs"]);
+        let after = mk(&h1, &["main.rs"], &["main.rs", "src/new.rs"]);
+        validate_post_draft_snapshot(&before, &after, &universe)
+            .expect("unchanged window must pass");
+
+        // HEAD hareketi → red.
+        let err = validate_post_draft_snapshot(
+            &before,
+            &mk(&h2, &["main.rs"], &["main.rs", "src/new.rs"]),
+            &universe,
+        )
+        .unwrap_err();
+        assert!(format!("{err}").contains("HEAD moved"), "{err}");
+
+        // Tracked set değişimi → red.
+        let err = validate_post_draft_snapshot(
+            &before,
+            &mk(&h1, &["main.rs", "c.rs"], &["main.rs", "src/new.rs"]),
+            &universe,
+        )
+        .unwrap_err();
+        assert!(
+            format!("{err}").contains("tracked-path set changed"),
+            "{err}"
+        );
+
+        // Beyan-dışı yeni kirli yol → red (yol listeli).
+        let err = validate_post_draft_snapshot(
+            &before,
+            &mk(
+                &h1,
+                &["main.rs"],
+                &["main.rs", "src/new.rs", "scratch/late.md"],
+            ),
+            &universe,
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("undeclared dirty path"), "{msg}");
+        assert!(msg.contains("scratch/late.md"), "{msg}");
+        assert!(msg.contains("after draft-task"), "{msg}");
     }
 }
