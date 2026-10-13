@@ -29,10 +29,16 @@
 //! penceresi bilinçle açık kalır (dürüst sınır; otomatik temizlik iddiası yok).
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use osp_analyzer::contract::AnalysisConfig;
 use osp_analyzer::language::AdapterRegistry;
 use osp_analyzer::pipeline::analyze_repo_with_config;
+
+/// Aynı süreçte eşzamanlı hazırlıkların temp dizini ÇAKIŞTIRMAMASI için
+/// process-global sayaç (CI: iki paralel test aynı pid+millis'e düştü →
+/// `git worktree add` "already exists" ile patladı).
+static WORKTREE_DIR_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Detached worktree RAII guard'ı — `prepare_detached_worktree` üretir.
 ///
@@ -109,8 +115,9 @@ fn remove_worktree(repo: &Path, worktree: &Path, dir: &Path) -> Result<(), Strin
 /// (hareketli ref DEĞİL): başka bir süreç branch'i ilerletse bile ölçüm kaynağı
 /// değişmez; HEAD hareketi post-fence'in HEAD-eşitlik kontrolünde RED'lenir.
 pub fn prepare_detached_worktree(repo: &Path, sha: &str) -> anyhow::Result<DetachedWorktreeGuard> {
+    let seq = WORKTREE_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
     let worktree_dir = std::env::temp_dir().join(format!(
-        "osp-detached-{}-{}",
+        "osp-detached-{}-{}-{seq}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
