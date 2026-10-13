@@ -45,8 +45,13 @@ pub struct SuggestTargetsArgs {
 pub fn run_suggest_targets(args: SuggestTargetsArgs) -> anyhow::Result<()> {
     let snapshot = RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
     let (view, source) = match &args.baseline {
+        // #204: suggest-targets'ta opt-in yok — dirty fence daima Strict.
         Some(path) => (
-            load_baseline_artifact(path, &snapshot)?,
+            load_baseline_artifact(
+                path,
+                &snapshot,
+                &crate::commands::repo_snapshot::DirtyPolicy::Strict,
+            )?,
             "baseline-artifact",
         ),
         None => (analyze_live(&args.repo)?, "live-analysis"),

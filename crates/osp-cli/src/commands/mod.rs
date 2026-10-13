@@ -5,6 +5,7 @@
 
 pub mod analyze_provenance;
 pub mod baseline;
+pub mod detached_analysis;
 pub mod draft_task;
 pub mod finalize_run;
 pub mod harness_task;
@@ -245,6 +246,16 @@ pub struct TrajectoryAttemptArgs {
     /// Yalnız `--llm real` ile (scripted mock bar elicite edilemez).
     #[arg(long, default_value_t = false)]
     pub bar_elicitation: bool,
+    /// #204 (opt-in): "kirli yollar ⊆ beyan edilen evren" fence'i. Ölçüm koşu
+    /// başında pinlenen SABİT HEAD'den açılan detached worktree'den gelir
+    /// (aday içeriği — kirli/untracked dosyalar — ölçüme sızmaz). Worktree'deki
+    /// TÜM kirli yolların `new_nodes[].path ∪ modified_entities` beyanının
+    /// içinde olması gerekir; beyan dışı TEK kirli yol RED (yol listeli).
+    /// Default davranış (bayraksız) bayt-bayt aynı kalır. Kanonik zarfa fence
+    /// kaydı YAZILIR (zorunlu); `trajectory resume` politikasını o kayıttan
+    /// devralır. `--proposals` (mock) şart; `--llm real` ile RED.
+    #[arg(long, requires = "proposals", default_value_t = false)]
+    pub allow_declared_dirty: bool,
 }
 
 /// **#164 R2 P0:** Kanıt güven sınırı modu — resume'un kanıt kaynağına dair AÇIK
@@ -268,6 +279,208 @@ impl CliEvidenceTrustMode {
             Self::OperatorAsserted => osp_core::authorization::EvidenceTrustMode::OperatorAsserted,
         }
     }
+}
+
+/// #204: originating attempt zarfının fence-yüzeyi — resume politikası buradan
+/// DEVRALINIR (resume'a ayrı bayrak yok; operatör yeniden beyan vermez).
+#[derive(Debug)]
+enum OriginatingDirtyPolicy {
+    /// Kanonik zarf fence kaydı taşımıyor (default strict koşu) — mevcut davranış.
+    Strict,
+    /// `mode=declared_dirty` koşusu — beyan evreni + pinned ölçüm HEAD'i.
+    Declared {
+        declared_paths: std::collections::BTreeSet<String>,
+        measured_head: String,
+    },
+}
+
+/// #204 (tur-2 P0 + tur-3 P1-2): kanonik attempts mağazasında pending kimliğini
+/// bağlayan ORIGINATING zarfı ara + fence kaydını typed doğrula.
+///
+/// Neden: pending artifact navigator içinde (CLI final fence'inden ÖNCE)
+/// kalıcılaşabildiğinden, askıyı ÜRETEN koşunun final fence'ini geçtiği ancak
+/// kanonik zarfın varlığıyla kanıtlanır — fence-RED'li bir koşunun
+/// authorization'ı sonradan tüketilemez. Bu şart TÜM resume'larda zorunludur
+/// (bilinçli migration kararı, issue #204 karar kaydı).
+///
+/// Kimlik tablosu: `schema_version` desteklenen · `run.task_id` == pending ·
+/// `result.kind == "awaiting_witnesses"` · `result.pending` == (claim, attempt,
+/// evidence-digest). Fence tablosu (kayıt VARSA): `mode == "declared_dirty"` ·
+/// `result == "passed"` · `observed ⊆ declared` · `source_kind ==
+/// "detached_head"` · `measurement.head == run.repository_head` · `space_digest`
+/// geçerli-hex. 0 eşleşme → "re-run the attempt" red; >1 → ambiguity red
+/// (#190). Zarf doğrulaması makine-üretimini İSPATLAMAZ — o güven canonical
+/// store'un koruma sınırındadır (karar kaydı dürüst notu).
+fn find_originating_attempt_envelope(
+    state_dir: &std::path::Path,
+    task_id: u64,
+    claim_id: u64,
+    attempt_num: u64,
+    evidence_digest_hex: &str,
+) -> Result<OriginatingDirtyPolicy, String> {
+    let attempts_dir = state_dir.join("attempts");
+    let entries = std::fs::read_dir(&attempts_dir).map_err(|e| {
+        format!(
+            "cannot read the canonical attempts store {}: {e} — the originating \
+             attempt cannot be verified; re-run the attempt",
+            attempts_dir.display()
+        )
+    })?;
+    let expected_digest = evidence_digest_hex.to_string();
+    let mut scanned = 0u32;
+    let mut matches: Vec<(std::path::PathBuf, serde_json::Value)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        scanned += 1;
+        let schema_ok = value.get("schema_version").and_then(|v| v.as_u64()) == Some(1);
+        let task_ok = value.pointer("/run/task_id").and_then(|v| v.as_u64()) == Some(task_id);
+        let kind_ok =
+            value.pointer("/result/kind").and_then(|v| v.as_str()) == Some("awaiting_witnesses");
+        let pending_ok = value
+            .pointer("/result/pending/claim_id")
+            .and_then(|v| v.as_u64())
+            == Some(claim_id)
+            && value
+                .pointer("/result/pending/attempt_num")
+                .and_then(|v| v.as_u64())
+                == Some(attempt_num)
+            && value
+                .pointer("/result/pending/evidence_digest")
+                .and_then(|v| v.as_str())
+                == Some(expected_digest.as_str());
+        if schema_ok && task_ok && kind_ok && pending_ok {
+            matches.push((path, value));
+        }
+    }
+    match matches.len() {
+        0 => Err(format!(
+            "no canonical attempt envelope in {} binds the pending identity \
+             (task {task_id} / claim {claim_id} / attempt {attempt_num} / evidence \
+             {expected_digest}) — the originating attempt did not pass its final \
+             fence, or its canonical record is gone; re-run the attempt \
+             ({scanned} envelope(s) scanned)",
+            attempts_dir.display()
+        )),
+        1 => {
+            let (path, envelope) = matches.pop().expect("len == 1");
+            originating_fence_policy(&envelope).map_err(|detail| {
+                format!(
+                    "originating attempt envelope {} has an invalid fence record: {detail}",
+                    path.display()
+                )
+            })
+        }
+        n => {
+            let paths: Vec<String> = matches
+                .iter()
+                .map(|(p, _)| p.display().to_string())
+                .collect();
+            Err(format!(
+                "ambiguous originating attempt: {n} canonical envelopes bind the same \
+                 pending identity (task {task_id} / claim {claim_id} / attempt \
+                 {attempt_num} / evidence {expected_digest}) — {paths:?}; ambiguity is \
+                 a protocol violation, resolve manually"
+            ))
+        }
+    }
+}
+
+/// Originating zarfın fence kaydını typed doğrula → resume politikası.
+/// Kayıt YOK → Strict (default koşu; mevcut davranış). Kayıt VAR ama mode/result/
+/// küme/provenans tutarsız → red (failed/unknown/malformed değerler resume
+/// yetkisine dönüşmez — tur-3 P2-2).
+fn originating_fence_policy(
+    envelope: &serde_json::Value,
+) -> Result<OriginatingDirtyPolicy, String> {
+    let Some(fence) = envelope.pointer("/result/fence") else {
+        return Ok(OriginatingDirtyPolicy::Strict);
+    };
+    let mode = fence.get("mode").and_then(|v| v.as_str());
+    if mode != Some("declared_dirty") {
+        return Err(format!(
+            "unknown fence mode {mode:?} — only \"declared_dirty\" is a recognized \
+             declared-dirty fence record"
+        ));
+    }
+    let result = fence.get("result").and_then(|v| v.as_str());
+    if result != Some("passed") {
+        return Err(format!(
+            "fence result is {result:?}, not \"passed\" — a non-passed fence cannot \
+             authorize a resume"
+        ));
+    }
+    let strings = |key: &str| -> Option<Vec<String>> {
+        fence
+            .get(key)?
+            .as_array()?
+            .iter()
+            .map(|v| v.as_str().map(str::to_string))
+            .collect()
+    };
+    let declared: std::collections::BTreeSet<String> = strings("declared_paths")
+        .ok_or("fence.declared_paths is not a string array")?
+        .into_iter()
+        .collect();
+    let observed: std::collections::BTreeSet<String> = strings("observed_dirty_paths")
+        .ok_or("fence.observed_dirty_paths is not a string array")?
+        .into_iter()
+        .collect();
+    let undeclared: Vec<&str> = observed.difference(&declared).map(|s| s.as_str()).collect();
+    if !undeclared.is_empty() {
+        return Err(format!(
+            "fence record is internally inconsistent: observed_dirty_paths exceed \
+             declared_paths ({undeclared:?}) — the recorded check contradicts itself"
+        ));
+    }
+    let measurement = fence
+        .get("measurement")
+        .ok_or("fence record is missing the measurement provenance block")?;
+    let source_kind = measurement.get("source_kind").and_then(|v| v.as_str());
+    if source_kind != Some("detached_head") {
+        return Err(format!(
+            "fence measurement source_kind is {source_kind:?}, not \"detached_head\""
+        ));
+    }
+    let head = measurement
+        .get("head")
+        .and_then(|v| v.as_str())
+        .ok_or("fence measurement.head is missing")?;
+    let envelope_head = envelope
+        .pointer("/run/repository_head")
+        .and_then(|v| v.as_str())
+        .ok_or("envelope run.repository_head is missing")?;
+    if head != envelope_head {
+        return Err(format!(
+            "fence measurement.head {head} != envelope run.repository_head \
+             {envelope_head} — the fence does not describe this envelope's measurement"
+        ));
+    }
+    let digest = measurement
+        .get("space_digest")
+        .and_then(|v| v.as_str())
+        .ok_or("fence measurement.space_digest is missing")?;
+    if digest.is_empty()
+        || !digest
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(format!(
+            "fence measurement.space_digest {digest:?} is not valid hex"
+        ));
+    }
+    Ok(OriginatingDirtyPolicy::Declared {
+        declared_paths: declared,
+        measured_head: head.to_string(),
+    })
 }
 
 /// `osp trajectory resume <artifact>` — #164: askılı (exit 10 / AwaitingWitnesses)
@@ -1076,6 +1289,19 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // #171: llm-real kanıt dizini + bayrak kombinasyonları — analyze'den ÖNCE.
     let llm_artifacts_dir = validate_llm_real_guards(&args, &state_dir)?;
 
+    // #204: opt-in kombinatorik guard — beyan evreni koşu-ÖNCESİ bilinmeli.
+    // Evren yalnız --proposals (mock) taşır; --llm real önerileri koşu ANINDA
+    // üretir → ön-beyan imkânsız → opt-in reddedilir (clap `requires` bayraksız
+    // proposals'sız kullanımı zaten kapatır).
+    if args.allow_declared_dirty && args.llm == "real" {
+        anyhow::bail!(
+            "--allow-declared-dirty requires the mock proposals path (--proposals): the \
+             declared universe (new_nodes[].path ∪ modified_entities) must be knowable \
+             before the run — a real-LLM run generates its proposals mid-run and cannot \
+             pre-declare them"
+        );
+    }
+
     // Faz 8 test-project (review v6-v7): snapshot-bound controlled harness.
     // Pre-capture repository snapshot (HEAD + tracked paths + dirty-path set).
     // #155 (analyzed-scope clean semantics): global clean-worktree pre-fence KALDIRILDI —
@@ -1084,21 +1310,90 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     let snapshot_before =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
 
+    // #204 (opt-in yolu): proposals baytları ERKEN read-once (digest+parse aynı
+    // tampon — #178 P0-1) → beyan evreni çıkarımı → GLOBAL pre-fence `D ⊆ A`.
+    // Fence her side-effect'ten (worktree açma, analiz) ÖNCE koşar: hızlı red.
+    let mut early_proposals_input: Option<(String, String)> = None;
+    let declared_universe: Option<std::collections::BTreeSet<String>> = if args.allow_declared_dirty
+    {
+        let proposals_path = args
+            .proposals
+            .as_ref()
+            .expect("clap `requires` guarantees proposals with --allow-declared-dirty");
+        let bytes = std::fs::read(proposals_path).map_err(|e| {
+            anyhow::anyhow!("failed to read proposals {}: {e}", proposals_path.display())
+        })?;
+        let digest = crate::commands::finalize_run::sha256_bytes(&bytes);
+        let raw = String::from_utf8(bytes).map_err(|e| {
+            anyhow::anyhow!(
+                "proposals file {} is not valid UTF-8: {e}",
+                proposals_path.display()
+            )
+        })?;
+        let universe = path_keyed_proposals::extract_declared_universe(&raw)
+            .map_err(|e| anyhow::anyhow!("--allow-declared-dirty: {e}"))?;
+        repo_snapshot::validate_dirty_paths_declared(
+            &snapshot_before.dirty_paths,
+            &universe,
+            "before attempt",
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+        eprintln!(
+            "declared-dirty mode: {} dirty path(s) ⊆ declared universe ({} declared) — \
+                 baseline measurement comes from a detached checkout of pinned HEAD {}; \
+                 dirty content is EXCLUDED from the measurement (not silently — it is \
+                 recorded in the envelope fence block)",
+            snapshot_before.dirty_paths.len(),
+            universe.len(),
+            snapshot_before.head
+        );
+        early_proposals_input = Some((raw, digest));
+        Some(universe)
+    } else {
+        None
+    };
+    let dirty_policy = match &declared_universe {
+        Some(universe) => repo_snapshot::DirtyPolicy::DeclaredUniverse(universe),
+        None => repo_snapshot::DirtyPolicy::Strict,
+    };
+
     // 1. Analyze -> space.
-    let registry = AdapterRegistry::default_all();
-    let config = AnalysisConfig::default();
-    let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
+    // #204 (Karar-A): opt-in modda ölçüm SABİT HEAD'den açılan detached worktree'den
+    // gelir — `MeasuredBaseline = Analyze(Checkout(SHA_base))`; aday içeriği (kirli
+    // dosyalar + untracked yeni dosyalar) ölçüme ASLA sızmaz (run-26'nın "hipotetik
+    // birebir" özelliği ancak böyle korunur; canlı-analiz döngüsel olurdu). Default
+    // mod canlı analizi aynen sürdürür.
+    let result = if args.allow_declared_dirty {
+        detached_analysis::analyze_detached(&args.repo, snapshot_before.head.as_str())?
+    } else {
+        let registry = AdapterRegistry::default_all();
+        let config = AnalysisConfig::default();
+        analyze_repo_with_config(&args.repo, &registry, &config)?
+    };
+
+    // #204: fence kaydının ölçüm provenans digest'i (yalnız opt-in; default yol
+    // hesaba dokunmaz). Aynı inşaat → aynı kanonik digest (#203 m.5b sözleşmesi).
+    let fence_space_digest = if args.allow_declared_dirty {
+        Some(
+            osp_core::authorization::SpaceDigest::compute(&result.space)
+                .map_err(|e| anyhow::anyhow!("space digest for the fence record: {e}"))?,
+        )
+    } else {
+        None
+    };
 
     // P1-2: analyzed path ⊆ HEAD tracked-path invariant (fail-closed for untracked files).
     repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    // #155: analyzed-scope pre-fence — ölçülen dosyalar dirty/untracked olamaz
-    // (modified veya submodule-altı kapsam etkilenmişse educational red).
-    repo_snapshot::validate_analyzed_paths_clean(
+    // #155 + #204: pre dirty fence — politika Strict'te analyzed-scope clean
+    // (mevcut davranış), DeclaredUniverse'de global `D ⊆ A` (yukarıda koşuldu;
+    // burada tek kod yolundan idempotent teyit).
+    repo_snapshot::enforce_dirty_policy(
         &result.node_paths,
         &snapshot_before,
         "before attempt",
+        &dirty_policy,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -1168,7 +1463,7 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
     // 4. LLM seçimi: mock (FileMockLlm) veya real (RuntimeLlmClient, GPT-4o-mini).
     // #166 P1-1: navigator YAYIM YAPMAZ — AttemptExecution döndürür; fence +
     // canonical persist + emit + exit aşağıda, TÜM navigator sonuçları için.
-    let execution = match args.llm.as_str() {
+    let mut execution = match args.llm.as_str() {
         "real" => {
             let artifacts_dir = llm_artifacts_dir
                 .as_deref()
@@ -1219,17 +1514,27 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
             // (path-keyed — HEAD fence + attempt anindeki baseline'a karşı re-bind;
             // #199: v3'te new_edges uçları beyan edilen new_nodes[].path'lere de
             // çözümlenir — mevcut→yeni / yeni→yeni kenarlar).
-            // #178 P0-1: read-once — digest ve parse AYNI baytlardan.
-            let proposals_bytes = std::fs::read(proposals_path).map_err(|e| {
-                anyhow::anyhow!("failed to read proposals {}: {e}", proposals_path.display())
-            })?;
-            let proposals_digest = crate::commands::finalize_run::sha256_bytes(&proposals_bytes);
-            let proposals_raw = String::from_utf8(proposals_bytes).map_err(|e| {
-                anyhow::anyhow!(
-                    "proposals file {} is not valid UTF-8: {e}",
-                    proposals_path.display()
-                )
-            })?;
+            // #178 P0-1 + #204: read-once — opt-in declared-dirty modunda baytlar
+            // koşu başında (fence'ten önce) okundu; burada TEKRAR OKUNMAZ.
+            let (proposals_raw, proposals_digest) = match early_proposals_input.take() {
+                Some((raw, digest)) => (raw, digest),
+                None => {
+                    let proposals_bytes = std::fs::read(proposals_path).map_err(|e| {
+                        anyhow::anyhow!(
+                            "failed to read proposals {}: {e}",
+                            proposals_path.display()
+                        )
+                    })?;
+                    let digest = crate::commands::finalize_run::sha256_bytes(&proposals_bytes);
+                    let raw = String::from_utf8(proposals_bytes).map_err(|e| {
+                        anyhow::anyhow!(
+                            "proposals file {} is not valid UTF-8: {e}",
+                            proposals_path.display()
+                        )
+                    })?;
+                    (raw, digest)
+                }
+            };
             let proposals: Vec<osp_core::agent::DeltaProposal> =
                 path_keyed_proposals::load_proposals_str(
                     &proposals_raw,
@@ -1256,6 +1561,9 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
 
     // 5. Post-capture drift fence (review P0-3). #155: HEAD + tracked-set eşitliği
     //    global, içerik drift'i analyzed-scope'ta (saf fonksiyon — exact matrix testli).
+    //    #204: opt-in modda içerik fence'i global `D ⊆ A` ile değişir (kirli set
+    //    pencerede beyanı aşarsa RED — çalışma-ağacı bütünlüğü); HEAD/tracked
+    //    eşitliği her iki modda koşar.
     //    #166 P1-1: fence ARTIK HER navigator sonucu için koşar (Completed dışı
     //    sonuçlarda eskiden process::exit atlıyordu). Canonical artifact bu
     //    fence'İ GEÇTİKTEN SONRA yazılır — fence başarısızsa kanıt "canonical"
@@ -1266,8 +1574,39 @@ pub fn run_trajectory_attempt(args: TrajectoryAttemptArgs) -> anyhow::Result<()>
         &snapshot_before,
         &snapshot_after,
         &result.node_paths,
+        &dirty_policy,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
+
+    // 5.5 #204 (Karar-C): opt-in fence kaydı — post-fence'ten SONRA, persist'ten
+    // ÖNCE kanonik zarfa yapıştırılır. Kayıt ZORUNLUDUR: flag var + kayıt yok →
+    // RED (opt-in sessiz başarıya dönüşemez; gelecekteki refactor'lara karşı
+    // yapısal güvence). Default koşuların baytları değişmez (skip_serializing_if).
+    if args.allow_declared_dirty {
+        let universe = declared_universe
+            .as_ref()
+            .expect("allow_declared_dirty implies the universe was extracted");
+        let space_digest = fence_space_digest
+            .as_ref()
+            .expect("allow_declared_dirty implies the fence space digest");
+        execution.envelope.result.fence = Some(run_envelope::CliDeclaredDirtyFenceRecord {
+            mode: "declared_dirty",
+            declared_paths: universe.iter().cloned().collect(),
+            observed_dirty_paths: snapshot_before.dirty_paths.iter().cloned().collect(),
+            result: "passed",
+            measurement: run_envelope::CliFenceMeasurementProvenance {
+                source_kind: "detached_head",
+                head: snapshot_before.head.as_str().to_string(),
+                space_digest: space_digest.to_hex(),
+            },
+        });
+    }
+    anyhow::ensure!(
+        !args.allow_declared_dirty || execution.envelope.result.fence.is_some(),
+        "--allow-declared-dirty run must carry its fence record in the canonical envelope \
+         (mode + declared/observed path sets + measurement provenance) — refusing to \
+         persist a silent opt-in run"
+    );
 
     // 6. #166: canonical publish (no-clobber atomic) → emit (json envelope /
     //    human: progress stderr + stdout evidence[]) → exit.
@@ -1396,6 +1735,25 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
             }
         };
 
+    // 2.5 #204: ORIGINATING kanonik attempt doğrulaması — ResumeAuthority =
+    // VerifiedOriginatingAttempt + ValidPendingEvidence + CurrentStateConsistency.
+    // Yukarıdaki adımlar pending kanıtını doğruladı; bu adım askıyı ÜRETEN koşunun
+    // final fence'ini geçtiğini kanonik zarfla kanıtlar ve resume'un dirty-policy
+    // modunu O zarftan devralır (operatör yeniden beyan vermez; resume'a bayrak yok).
+    let originating = match find_originating_attempt_envelope(
+        &state_dir,
+        record.task_id,
+        record.claim_id,
+        record.attempt_num.get(),
+        &record.evidence_digest.to_hex(),
+    ) {
+        Ok(policy) => policy,
+        Err(detail) => {
+            eprintln!("✗ Resume refused: {detail}");
+            std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+        }
+    };
+
     // 4. Witness kanıtı — strict wire parse; → 20 (operational fault).
     //    (Kanıt provenance'ı — digest + actors — motordan TEK değer olarak
     //    döner; CLI ayrı liste TÜRETMEZ — R3 P1.)
@@ -1407,18 +1765,71 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
         }
     };
 
-    // 5. Snapshot + analyze + analyzed-scope fence'ler (attempt ile aynı).
+    // 5. Snapshot + analyze + fence'ler — politika ORIGINATING zarftan devralınır
+    //    (#204 tur-2 P0): opt-in koşumadan gelen askı AYNI kirli worktree'de
+    //    resume'lanabilmelidir (stash ritüeli resume'a taşınmaz). Default (strict)
+    //    originating → mevcut canlı-analiz + analyzed-scope fence'ler (değişmez).
     let snapshot_before =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
-    let registry = AdapterRegistry::default_all();
-    let config = AnalysisConfig::default();
-    let result = analyze_repo_with_config(&args.repo, &registry, &config)?;
+    let dirty_policy = match &originating {
+        OriginatingDirtyPolicy::Strict => repo_snapshot::DirtyPolicy::Strict,
+        OriginatingDirtyPolicy::Declared {
+            declared_paths,
+            measured_head,
+        } => {
+            // Katı HEAD fence'i (tur-3 P1-2): originating attempt'in pinned ölçüm
+            // HEAD'i == canlı HEAD. Mevcut stale-base disiplini zayıflamaz —
+            // ilerlemiş HEAD'de eski ölçüm güncel state gibi gösterilmez; merge
+            // sonrası akışta TAZE attempt yeni baz bağlar.
+            if snapshot_before.head.as_str() != measured_head {
+                eprintln!(
+                    "✗ Resume refused: repository HEAD {} does not match the originating \
+                     attempt's pinned measurement HEAD {measured_head} — the declared-dirty \
+                     authorization was measured on a different revision; re-run the attempt \
+                     on the current state",
+                    snapshot_before.head
+                );
+                std::process::exit(exit_codes::RESUME_REFUSED_BASE);
+            }
+            // Devralınan evrenle global `D ⊆ A` — koşu anındaki beyanın AYNISI;
+            // pencerede doğan beyan-dışı kirli yol resume'u reddeder.
+            repo_snapshot::validate_dirty_paths_declared(
+                &snapshot_before.dirty_paths,
+                declared_paths,
+                "before resume",
+            )
+            .map_err(|e| anyhow::anyhow!(e))?;
+            eprintln!(
+                "declared-dirty resume: fence policy inherited from the originating \
+                 attempt ({} declared path(s), pinned HEAD {measured_head}); {} dirty \
+                 path(s) ⊆ declared universe",
+                declared_paths.len(),
+                snapshot_before.dirty_paths.len()
+            );
+            repo_snapshot::DirtyPolicy::DeclaredUniverse(declared_paths)
+        }
+    };
+    // #204 (Karar-A): declared-dirty resume ölçümü de originating pinned HEAD'den
+    // detached-worktree analizle gelir — attempt ile BİREBİR aynı inşaat (farklı
+    // kurulum farklı digest üretirdi → motorun kendi staleness/basis fence'i
+    // [resume_held_authorization → StaleBaseRevision] yanıltırdı; parity otomatik).
+    let result = match &originating {
+        OriginatingDirtyPolicy::Declared { measured_head, .. } => {
+            detached_analysis::analyze_detached(&args.repo, measured_head)?
+        }
+        OriginatingDirtyPolicy::Strict => {
+            let registry = AdapterRegistry::default_all();
+            let config = AnalysisConfig::default();
+            analyze_repo_with_config(&args.repo, &registry, &config)?
+        }
+    };
     repo_snapshot::validate_analyzed_paths_tracked(&result.node_paths, &snapshot_before)
         .map_err(|e| anyhow::anyhow!(e))?;
-    repo_snapshot::validate_analyzed_paths_clean(
+    repo_snapshot::enforce_dirty_policy(
         &result.node_paths,
         &snapshot_before,
         "before resume",
+        &dirty_policy,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -1442,13 +1853,15 @@ pub fn run_trajectory_resume(args: TrajectoryResumeArgs) -> anyhow::Result<()> {
     // 7. Post-capture drift fence — SON doğruluk fence'i (R1 P0-2). Resume repo
     //    dokunmaz; pre/post eşitliği analiz penceresinde dış drift olmadığını
     //    kanıtlar. Bu noktadan sonra fallible doğruluk kontrolü YOKTUR — yalnız
-    //    commit (apply + receipt) + raporlama kalır.
+    //    commit (apply + receipt) + raporlama kalır. #204: dirty fence politika
+    //    parametreli (strict → analyzed-scope; declared → global D ⊆ A).
     let snapshot_after =
         repo_snapshot::RepositorySnapshot::capture(&args.repo).map_err(|e| anyhow::anyhow!(e))?;
     repo_snapshot::validate_post_attempt_snapshot(
         &snapshot_before,
         &snapshot_after,
         &result.node_paths,
+        &dirty_policy,
     )
     .map_err(|e| anyhow::anyhow!(e))?;
 
@@ -2323,6 +2736,7 @@ mod mode_matrix_tests {
             state_dir: None,
             llm_artifacts: None,
             bar_elicitation: false,
+            allow_declared_dirty: false,
         }
     }
 
@@ -2895,6 +3309,7 @@ mod llm_real_guard_tests {
             state_dir: None,
             llm_artifacts,
             bar_elicitation,
+            allow_declared_dirty: false,
         }
     }
 
@@ -3026,5 +3441,161 @@ mod llm_real_guard_tests {
             err.to_string().contains("parent directory does not exist"),
             "message: {err}"
         );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #204 — originating attempt fence'i: resume'un kanıt-devralma yüzeyi (unit)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod originating_attempt_fence_tests {
+    use super::*;
+
+    const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn envelope_json(fence: Option<serde_json::Value>) -> serde_json::Value {
+        let mut result = serde_json::json!({
+            "kind": "awaiting_witnesses",
+            "attempts": 0,
+            "pending": {
+                "claim_id": 3,
+                "attempt_num": 2,
+                "evidence_digest": "ab".repeat(32)
+            }
+        });
+        if let Some(fence) = fence {
+            result["fence"] = fence;
+        }
+        serde_json::json!({
+            "schema_version": 1,
+            "run": {"task_id": 7, "repository_head": HEAD},
+            "result": result,
+            "evidence": []
+        })
+    }
+
+    fn valid_fence() -> serde_json::Value {
+        serde_json::json!({
+            "mode": "declared_dirty",
+            "declared_paths": ["src/a.rs", "src/b.rs"],
+            "observed_dirty_paths": ["src/a.rs"],
+            "result": "passed",
+            "measurement": {
+                "source_kind": "detached_head",
+                "head": HEAD,
+                "space_digest": "cd".repeat(32)
+            }
+        })
+    }
+
+    /// Fence kaydı yok → Strict (default koşu; mevcut resume davranışı).
+    #[test]
+    fn missing_fence_record_is_strict() {
+        assert!(matches!(
+            originating_fence_policy(&envelope_json(None)).unwrap(),
+            OriginatingDirtyPolicy::Strict
+        ));
+    }
+
+    /// Geçerli declared fence → evren + pinned ölçüm HEAD'i devralınır.
+    #[test]
+    fn valid_declared_fence_inherits_universe_and_pinned_head() {
+        match originating_fence_policy(&envelope_json(Some(valid_fence()))).unwrap() {
+            OriginatingDirtyPolicy::Declared {
+                declared_paths,
+                measured_head,
+            } => {
+                assert_eq!(
+                    declared_paths,
+                    std::collections::BTreeSet::from([
+                        "src/a.rs".to_string(),
+                        "src/b.rs".to_string()
+                    ])
+                );
+                assert_eq!(measured_head, HEAD);
+            }
+            other => panic!("expected Declared, got {other:?}"),
+        }
+    }
+
+    /// Typed red matrisi: bilinmeyen mod / passed-dışı sonuç / küme-ihlali /
+    /// yanlış source_kind / head-uyumsuzluğu / bozuk digest → yetki YOK.
+    #[test]
+    fn invalid_fence_records_refuse_resume_authority() {
+        let mut unknown_mode = valid_fence();
+        unknown_mode["mode"] = serde_json::json!("strict_dirty");
+        let err = originating_fence_policy(&envelope_json(Some(unknown_mode))).unwrap_err();
+        assert!(err.contains("unknown fence mode"), "{err}");
+
+        let mut not_passed = valid_fence();
+        not_passed["result"] = serde_json::json!("failed");
+        let err = originating_fence_policy(&envelope_json(Some(not_passed))).unwrap_err();
+        assert!(err.contains("not \"passed\""), "{err}");
+
+        let mut inconsistent = valid_fence();
+        inconsistent["observed_dirty_paths"] =
+            serde_json::json!(["src/a.rs", "notes/undeclared.md"]);
+        let err = originating_fence_policy(&envelope_json(Some(inconsistent))).unwrap_err();
+        assert!(err.contains("internally inconsistent"), "{err}");
+
+        let mut wrong_source = valid_fence();
+        wrong_source["measurement"]["source_kind"] = serde_json::json!("live_worktree");
+        let err = originating_fence_policy(&envelope_json(Some(wrong_source))).unwrap_err();
+        assert!(err.contains("source_kind"), "{err}");
+
+        let mut wrong_head = valid_fence();
+        wrong_head["measurement"]["head"] = serde_json::json!("f".repeat(40));
+        let err = originating_fence_policy(&envelope_json(Some(wrong_head))).unwrap_err();
+        assert!(err.contains("run.repository_head"), "{err}");
+
+        let mut bad_digest = valid_fence();
+        bad_digest["measurement"]["space_digest"] = serde_json::json!("NOT-HEX");
+        let err = originating_fence_policy(&envelope_json(Some(bad_digest))).unwrap_err();
+        assert!(err.contains("valid hex"), "{err}");
+    }
+
+    /// Mağaza taraması: kimlik tablosu (task/kind/pending-üçlü) eşleşmeyen
+    /// zarflar atlanır; eşleşen bulunur → fence politikası döner. 0 eşleşme →
+    /// "re-run the attempt" red'ı (migration kancası).
+    #[test]
+    fn find_originating_scans_the_canonical_store_by_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = dir.path().join("attempts");
+        std::fs::create_dir_all(&attempts).unwrap();
+        // Yanlış task-id.
+        let mut wrong_task = envelope_json(Some(valid_fence()));
+        wrong_task["run"]["task_id"] = serde_json::json!(9);
+        std::fs::write(attempts.join("a.json"), wrong_task.to_string()).unwrap();
+        // Yanlış result-kind (completed).
+        let mut wrong_kind = envelope_json(None);
+        wrong_kind["result"]["kind"] = serde_json::json!("completed");
+        std::fs::write(attempts.join("b.json"), wrong_kind.to_string()).unwrap();
+        // Geçerli eşleşme (fence'siz → Strict).
+        std::fs::write(attempts.join("c.json"), envelope_json(None).to_string()).unwrap();
+
+        match find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap() {
+            OriginatingDirtyPolicy::Strict => {}
+            other => panic!("expected Strict from the matching envelope, got {other:?}"),
+        }
+
+        // 0 eşleşme (yanlış evidence digest) → red.
+        let err =
+            find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ff".repeat(32)).unwrap_err();
+        assert!(err.contains("re-run the attempt"), "{err}");
+        assert!(err.contains("3 envelope(s) scanned"), "{err}");
+    }
+
+    /// Aynı kimliği bağlayan İKİ zarf → ambiguity red'ı (#190 dersi).
+    #[test]
+    fn find_originating_rejects_ambiguous_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let attempts = dir.path().join("attempts");
+        std::fs::create_dir_all(&attempts).unwrap();
+        std::fs::write(attempts.join("a.json"), envelope_json(None).to_string()).unwrap();
+        std::fs::write(attempts.join("b.json"), envelope_json(None).to_string()).unwrap();
+        let err =
+            find_originating_attempt_envelope(dir.path(), 7, 3, 2, &"ab".repeat(32)).unwrap_err();
+        assert!(err.contains("ambiguous originating attempt"), "{err}");
     }
 }

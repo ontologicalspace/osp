@@ -737,6 +737,9 @@ fn analyzed_scope_fence_rejects_modified_analyzed_path() {
 struct SubmoduleFixture {
     parent: HarnessFixture,
     sub_nested: std::path::PathBuf,
+    /// #204: submodule KAYNAK repo'su canlı tutulur — detached worktree'ler
+    /// .gitmodules URL'sinden yeniden klonlar (tempdir düşerse kaynak gider).
+    _sub_source: tempfile::TempDir,
 }
 
 impl SubmoduleFixture {
@@ -802,7 +805,11 @@ impl SubmoduleFixture {
         .expect("utf8 head");
         let sub_nested = parent.repo_path().join("clients/fe/src/main.ts");
         parent.head = new_head.trim().to_string();
-        Self { parent, sub_nested }
+        Self {
+            parent,
+            sub_nested,
+            _sub_source: sub_repo,
+        }
     }
 }
 
@@ -2098,5 +2105,223 @@ fn attempt_drift_after_navigator_leaves_no_canonical_artifact() {
     assert!(
         !out_path.exists(),
         "--out copy must not be written on fence failure"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #204 (tur-4 P0) — submodule'li declared-dirty zinciri: attempt → resume → gate
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// file:// submodule init'i (git 2.38+ protokol kısıtı) için ortam —
+/// CAĞIRANDAN gelir; araç kendi güvenlik varsayınını sessizce gevşETMEZ
+/// (init başarısızlığı bilinçli, fail-closed bir RED'dir).
+fn file_protocol_env(cmd: &mut Command) -> &mut Command {
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+        .env("GIT_CONFIG_VALUE_0", "always")
+}
+
+fn read_json_value(path: &std::path::Path) -> serde_json::Value {
+    let raw = fs::read_to_string(path).expect("read json");
+    serde_json::from_str(&raw).expect("parse json")
+}
+
+/// **Tur-4 P0 merge-blocker regresyonu:** submodule içeren repoda opt-in
+/// attempt (kirli-beyanlı) → resume (AYNI kirli worktree) → realization-gate.
+/// Gate'in #203 m.5b digest-parity fence'i, before-analyze'ını KENDİ
+/// worktree'inde (paylaşılan hazırlıkla submodule init'li) koşar: gate'in
+/// ölçümü attempt'in detached ölçümüyle eşdeğer DEĞİLSE bu zincir RED'lerdi.
+/// `RealizedCompleted` = submodule-aware ölçümün uçtan-uca eşdeğerliğinin
+/// canlı kanıtı. Attempt ayrıca nested kapsamın korunduğunu dolaylı kanıtlar
+/// (recursive init olmadan detached analiz nested node'u görmezdi; buradaki
+/// scope main.rs olsa da digest-parity tüm uzayı bağlar).
+#[test]
+fn submodule_declared_dirty_chain_attempt_resume_gate() {
+    let fx = SubmoduleFixture::new();
+    let parent = &fx.parent;
+    let work = parent.work_path().to_path_buf();
+
+    // Kirli yenileme durumu: ölçülen main.rs modify + yeni untracked dosya.
+    let main = fs::read_to_string(parent.repo_path().join("main.rs")).unwrap();
+    fs::write(
+        parent.repo_path().join("main.rs"),
+        format!("{main}// renewal edit\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(parent.repo_path().join("src2")).unwrap();
+    fs::write(parent.repo_path().join("src2/new.rs"), "pub struct New;\n").unwrap();
+
+    // Task: main.rs, path-kapsamlı v2 (gate predicate-scope sözleşmesi),
+    // AddNode+ModifyEntity (op-matrix).
+    let mut task_env = task_envelope_v2(&parent.head, "main.rs");
+    task_env["task"]["allowed_operations"] = serde_json::json!(["AddNode", "ModifyEntity"]);
+    let task_path = parent.write_task(&task_env);
+
+    // v3 proposals: new_node src2/new.rs + modified main.rs (beyan evreni).
+    let proposals = serde_json::json!({
+        "schema_version": 3,
+        "repository_head": parent.head,
+        "proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 5.0, "path": "src2/new.rs"}],
+            "new_edges": [],
+            "removed_edges": [],
+            "affected_nodes": ["main.rs"],
+            "modified_entities": [{"path": "main.rs"}],
+            "reasoning": "submodule repo honest renewal"
+        }]
+    });
+    let proposals_path = work.join("proposals-204-sub.json");
+    fs::write(
+        &proposals_path,
+        serde_json::to_string_pretty(&proposals).unwrap(),
+    )
+    .unwrap();
+
+    // 1) Opt-in askı (production witness, kirli-beyanlı ağaç) → exit 10.
+    let run_dir = work.join("run-204-submodule");
+    fs::create_dir_all(&run_dir).unwrap();
+    let attempt_path = run_dir.join("attempt.json");
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .args(["--execution-mode", "production"])
+        .args(["--witness", "production"])
+        .args(["--llm", "mock"])
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg(&work)
+        .arg("--out")
+        .arg(&attempt_path)
+        .arg("--allow-declared-dirty")
+        .output()
+        .expect("run osp attempt");
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "declared-dirty suspension on the submodule fixture. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let attempt = read_json_value(&attempt_path);
+    assert_eq!(
+        attempt["result"]["fence"]["mode"], "declared_dirty",
+        "{attempt}"
+    );
+    assert_eq!(
+        attempt["run"]["repository_head"].as_str(),
+        Some(parent.head.as_str()),
+        "{attempt}"
+    );
+    let claim_id = attempt["result"]["pending"]["claim_id"].as_u64().unwrap();
+
+    // 2) Resume — AYNI kirli worktree üzerinde (politika originating zarftan).
+    let pending_dir = work.join(".osp").join("pending-authorizations");
+    let mut artifacts: Vec<std::path::PathBuf> = fs::read_dir(&pending_dir)
+        .expect("pending-authorizations dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().map(|e| e == "json").unwrap_or(false)
+                && !p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().contains("receipt"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    artifacts.sort();
+    assert_eq!(artifacts.len(), 1, "tam bir askı: {artifacts:?}");
+    let artifact = artifacts.pop().unwrap();
+
+    let events: Vec<serde_json::Value> = [200u64, 300u64]
+        .iter()
+        .enumerate()
+        .map(|(i, actor)| {
+            serde_json::json!({
+                "id": (i + 1) as u64,
+                "source": format!("sub-chain-{i}"),
+                "witness_kind": "MergeCommit",
+                "actor": actor,
+                "claim": claim_id,
+            })
+        })
+        .collect();
+    let evidence = work.join("witnesses-204-sub.json");
+    fs::write(&evidence, serde_json::to_string_pretty(&events).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("trajectory")
+        .arg("resume")
+        .arg(&artifact)
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .arg("--witness-evidence")
+        .arg(&evidence)
+        .arg("--state-dir")
+        .arg(&work)
+        .args(["--format", "json"])
+        .args(["--evidence-trust", "operator-asserted"])
+        .output()
+        .expect("run osp resume");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "declared-dirty resume on the SAME dirty submodule worktree. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 3) Gate — paylaşılan hazırlık (submodule init + pinned gitlink doğrulama)
+    //    olmadan before-analyze digest'i pending basisinden AYRILIRDI → RED.
+    fs::copy(&task_path, run_dir.join("task.json")).unwrap();
+    fs::write(
+        run_dir.join("applied.patch"),
+        b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n pub fn main() { a::a(); b::b(); }\n",
+    )
+    .unwrap();
+    let gate_evidence = run_dir.join("declared-realization.json");
+    fs::write(
+        &gate_evidence,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":{"passed":1,"failed":0,"skipped":0}}"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .arg(&run_dir)
+        .arg("--state-dir")
+        .arg(&work)
+        .arg("--evidence")
+        .arg(&gate_evidence)
+        .output()
+        .expect("run osp realization-gate");
+    let gate_stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gate must realize on the submodule fixture (digest parity holds). stderr={gate_stderr}"
+    );
+    let verdict = read_json_value(&run_dir.join("realization-verdict.json"));
+    assert!(
+        verdict["verdict"]["RealizedCompleted"].is_object(),
+        "{verdict}"
+    );
+    assert_eq!(
+        verdict["binding"]["completion_route"], "witnessed_resume",
+        "{verdict}"
     );
 }

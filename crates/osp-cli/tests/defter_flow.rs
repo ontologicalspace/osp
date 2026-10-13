@@ -3841,3 +3841,179 @@ fn realization_gate_error_path_leaves_no_worktree() {
         "gate hatası sonrası ek worktree KALMAMALI: {stdout}"
     );
 }
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// #204 — draft-task opt-in declared-dirty: stash'siz dürüst spec yenilemesi
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// #204 ortak kurulum: kirli yenileme durumu (ölçülen main.rs modify + yeni
+/// untracked + intent-to-add) + beyan spec'i + baseline artifact'ı.
+fn renewal_draft_fixture() -> (HarnessFixture, PathBuf, PathBuf) {
+    let fx = HarnessFixture::new_with_use_edges();
+    let work = fx.work_path().to_path_buf();
+    let (baseline, _) = measured_baseline(&fx);
+    // Kod-sonrası durum: main.rs'e yorum (ölçülen dosya modify), yeni dosyalar.
+    let main = fs::read_to_string(fx.repo_path().join("main.rs")).unwrap();
+    fs::write(
+        fx.repo_path().join("main.rs"),
+        format!("{main}// renewal edit\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(fx.repo_path().join("src")).unwrap();
+    fs::write(fx.repo_path().join("src/new.rs"), "pub struct New;\n").unwrap();
+    fs::create_dir_all(fx.repo_path().join("gen")).unwrap();
+    fs::write(fx.repo_path().join("gen/g.rs"), "pub struct G;\n").unwrap();
+    Command::new("git")
+        .args(["-C", p_str(fx.repo_path()), "add", "-N", "gen/g.rs"])
+        .status()
+        .expect("git add -N");
+    // İnsan spec'i: koda göre dürüstçe yenilenmiş beyan.
+    let spec = work.join("spec-renewal.json");
+    fs::write(
+        &spec,
+        r#"{"proposals": [{
+            "new_nodes": [
+                {"kind": "Module", "initial_mass": 5.0, "path": "src/new.rs"},
+                {"kind": "Module", "initial_mass": 1.0, "path": "gen/g.rs"}
+            ],
+            "removed_edges": [{"from": "main.rs", "to": "a.rs"}],
+            "modified_entities": ["main.rs"],
+            "reasoning": "honest renewal after coding"
+        }]}"#,
+    )
+    .unwrap();
+    (fx, baseline, spec)
+}
+
+fn run_renewal_draft(fx: &HarnessFixture, baseline: &Path, spec: &Path) -> std::process::Output {
+    let work = fx.work_path();
+    osp_in(work)
+        .arg("draft-task")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--target")
+        .arg("main.rs")
+        .arg("--task-id")
+        .arg("7")
+        .arg("--label")
+        .arg("204 renewal")
+        .arg("--bar")
+        .arg("0.55")
+        .arg("--baseline")
+        .arg(baseline)
+        .arg("--operation")
+        .arg("AddNode")
+        .arg("--operation")
+        .arg("RemoveImport")
+        .arg("--operation")
+        .arg("ModifyEntity")
+        .arg("--proposals-spec")
+        .arg(spec)
+        .arg("--out-task")
+        .arg(work.join("task-204.json"))
+        .arg("--out-proposals")
+        .arg(work.join("proposals-204.json"))
+        .arg("--allow-declared-dirty")
+        .output()
+        .expect("run osp draft-task")
+}
+
+/// Kabul: dirty ⊆ declared → stash'siz draft koşar; task v2 + proposals v3
+/// yayımlanır; ölçüm clean-bound baseline artifact'ından (HEAD fence aynen).
+#[test]
+fn draft_task_declared_dirty_renews_spec_stashfree() {
+    let (fx, baseline, spec) = renewal_draft_fixture();
+    let out = run_renewal_draft(&fx, &baseline, &spec);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "stash-free renewal draft must succeed. stderr={stderr}"
+    );
+    assert!(stderr.contains("declared-dirty mode"), "{stderr}");
+    let work = fx.work_path();
+    assert!(work.join("task-204.json").is_file(), "task published");
+    let proposals = read_json(&work.join("proposals-204.json"));
+    assert_eq!(proposals["schema_version"], 3, "v3 output");
+    // Ürettiği v3 evreni beyanla özdeş (çıkarıcı parity sözleşmesinin canlı hâli).
+    let new_paths: Vec<&str> = proposals["proposals"][0]["new_nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|n| n["path"].as_str())
+        .collect();
+    assert!(
+        new_paths.contains(&"src/new.rs") && new_paths.contains(&"gen/g.rs"),
+        "{proposals}"
+    );
+}
+
+/// Beyan dışı tek kirli yol → RED + yol listeli (global fence).
+#[test]
+fn draft_task_declared_dirty_rejects_undeclared_path() {
+    let (fx, baseline, spec) = renewal_draft_fixture();
+    fs::write(fx.repo_path().join("scratch-notes.md"), "todo\n").unwrap();
+    let out = run_renewal_draft(&fx, &baseline, &spec);
+    assert!(!out.status.success(), "undeclared dirty path must reject");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("undeclared dirty path") && stderr.contains("scratch-notes.md"),
+        "offending path listed: {stderr}"
+    );
+    assert!(
+        !fx.work_path().join("task-204.json").exists(),
+        "RED'de çıktı yayımlanmaz"
+    );
+}
+
+/// clap `requires`: bayrak --baseline ve --proposals-spec olmadan kırmızı.
+#[test]
+fn draft_task_declared_dirty_flag_requires_baseline_and_spec() {
+    let (fx, baseline, _spec) = renewal_draft_fixture();
+    let work = fx.work_path();
+    // (a) --proposals-spec'siz.
+    let out = osp_in(work)
+        .arg("draft-task")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--target")
+        .arg("main.rs")
+        .arg("--task-id")
+        .arg("7")
+        .arg("--label")
+        .arg("x")
+        .arg("--bar")
+        .arg("0.55")
+        .arg("--baseline")
+        .arg(&baseline)
+        .arg("--out-task")
+        .arg(work.join("t.json"))
+        .arg("--allow-declared-dirty")
+        .output()
+        .expect("run osp draft-task");
+    assert!(
+        !out.status.success(),
+        "flag without spec must be a clap error"
+    );
+    // (b) --baseline'sız.
+    let out = osp_in(work)
+        .arg("draft-task")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .arg("--target")
+        .arg("main.rs")
+        .arg("--task-id")
+        .arg("7")
+        .arg("--label")
+        .arg("x")
+        .arg("--bar")
+        .arg("0.55")
+        .arg("--out-task")
+        .arg(work.join("t.json"))
+        .arg("--allow-declared-dirty")
+        .output()
+        .expect("run osp draft-task");
+    assert!(
+        !out.status.success(),
+        "flag without --baseline must be a clap error"
+    );
+}

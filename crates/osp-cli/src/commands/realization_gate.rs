@@ -277,39 +277,23 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
     // Run-dir after.json'a güven TAMAMEN YOK — After = Apply(Base, Patch)
     // YAPI TARAFINDAN kanıtlanır (review tur-3 P0: "artifact identity ≠
     // state identity" kapanışı).
+    // P0-2 (tur-3 — **self-sufficient realization**) + #204 (tur-4 P0 — **ortak
+    // ölçüm-hazırlama yolu**): gate worktree'ini açma + submodule hazırlığını
+    // `detached_analysis::prepare_detached_worktree` YAPAR (attempt/resume ile
+    // AYNI yol): pinned gitlink'lerde recursive init + status tam-doğrulama.
+    // Submodule'li bir repada gate'in kendi analizi submodule'siz kalsaydı
+    // SpaceDigest attempt'in ölçümünden ayrışır, #203 m.5b digest-parity geçerli
+    // witnessed-resume'u yanlış RED'lerdi. Cleanup: RAII guard (her çıkış yolunda
+    // worktree kalkar; erken `remove` + Drop güvenlik ağı).
     let base_head = envelope_run_head(&envelope);
     let patch_bytes = std::fs::read(&patch_path)
         .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", patch_path.display()))?;
     let patch_digest = crate::commands::finalize_run::sha256_bytes(&patch_bytes);
 
-    let worktree_dir = std::env::temp_dir().join(format!(
-        "osp-gate-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    ));
-    std::fs::create_dir_all(&worktree_dir)
-        .map_err(|e| anyhow::anyhow!("cannot create gate worktree tempdir: {e}"))?;
-    let worktree_path = worktree_dir.join("candidate");
-
-    // (a) Worktree at base_head.
-    let out = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&args.repo)
-        .arg("worktree")
-        .arg("add")
-        .arg("--detach")
-        .arg(&worktree_path)
-        .arg(&base_head)
-        .output()
-        .map_err(|e| anyhow::anyhow!("git worktree add failed to spawn: {e}"))?;
-    anyhow::ensure!(
-        out.status.success(),
-        "gate worktree creation failed at {base_head}: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    let mut worktree_guard =
+        crate::commands::detached_analysis::prepare_detached_worktree(&args.repo, &base_head)?;
+    let worktree_dir = worktree_guard.worktree_dir.clone();
+    let worktree_path = worktree_guard.path().to_path_buf();
 
     // Cleanup guard — worktree her durumda kaldırılır. Parity fence'i DE bu
     // guard'ın İÇİNDE (closure'un başında) koşar: before-analyze hatası veya
@@ -435,16 +419,9 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
         let c_observed = read_observed_coupling(&own_after_bytes, &own_after, &scope_path)?;
         Ok((c_observed, candidate_head, own_after_digest))
     })();
-    // Cleanup worktree + temp dir regardless of result.
-    let _ = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&args.repo)
-        .arg("worktree")
-        .arg("remove")
-        .arg("--force")
-        .arg(&worktree_path)
-        .output();
-    let _ = std::fs::remove_dir_all(&worktree_dir);
+    // Cleanup worktree + temp dir regardless of result (#204: paylaşılan
+    // guard'ın erken bırakması — Drop güvenlik ağı olarak arkada kalır).
+    worktree_guard.remove();
     let (c_observed, candidate_head, own_after_digest) = result?;
     // **#203 c_predicted yönlendirmesi:** direct → zarf evidence[]'ının sim-öngörüsü
     // (mevcut sözleşme). Witnessed-resume → pending basis'inin ölçülmüş coupling'i
