@@ -12394,8 +12394,8 @@ mod tests {
             "got {err:?}"
         );
 
-        // (b) Duplicate actor (200, iki kaynak) — triple-dedup tek başına
-        // yakalamaz; yüzey doğrulaması reddeder.
+        // (b) Duplicate actor (200, iki kaynak) — #212'den beri çekirdek
+        // actor-eksenli seçer; wire yüzeyi yine de dosya kusuru olarak reddeder.
         let mut dup_source = resume_event(2, 200, 42);
         dup_source.source = "another-source".to_string();
         let err = engine
@@ -12406,8 +12406,8 @@ mod tests {
             "got {err:?}"
         );
 
-        // (c) Aynı dedup anahtarı (source, actor, claim) iki kez — farklı id,
-        //     aynı içerik (inv #2 triple'i).
+        // (c) Aynı wire dedup anahtarı (source, actor, claim) iki kez — farklı id,
+        //     aynı içerik (#212'den beri core INV #2 ile özdeş değil; wire politikası).
         let same_key = crate::witness::EvidenceEvent::new(
             2,
             "s1",

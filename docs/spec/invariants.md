@@ -36,11 +36,12 @@ Agent'ın kendi çalışmasını onaylaması ontolojik olarak imkânsız (typle-
 **Test:** `author_excluded_from_approvers`.
 **İhlal örneği:** Agent kendi PR'ini onaylar → self-dealing.
 
-### INV #2 — EvidenceEvent dedup
-**Tanım:** Kanıt dedup birimi `(source, actor, claim)` üçlüsüdür.
-**Yapısal garanti:** `EvidenceEvent` dedup key bu üçlü; HashSet ile otomatik.
-**Test:** `duplicate_evidence_collapsed`.
-**İhlal örneği:** Aynı CI run iki kez sayılır → quorum şişer.
+### INV #2 — Actor-unique canonical witness evidence (#212)
+**Tanım:** Bir claim için kanonik witness set, author hariç her actor için en fazla bir pozitif evidence olayı içerir. Aynı actor'e ait birden fazla gözlem arasından en güçlü olay, deterministik seçim kuralıyla korunur: weight DESC → id ASC → source ASC → claim ASC → witness_kind canonical-rank ASC (girdi sırasından bağımsız). Q1 benzersiz actor sayısını, Q2 her benzersiz actor'ün korunan olayının ağırlığını kullanır.
+**Yapısal garanti:** `CanonicalWitnessSet::canonicalize_for` actor-eksenli dedup — küme actor-unique, `approver_count() == events.len()` yapısal olarak distinct non-author approver.
+**Test:** `dedup_same_actor_different_source_collapses_to_strongest` + determinism pini (`actor_axis_dedup_is_input_order_independent`).
+**İhlal örneği:** Aynı tanık iki kaynakla (PR kaydı + trailer) iki onaycı sayılır → quorum tek kişiyle şişer.
+**Sınır (bilinçli):** seçim claim'e göre filtrelemez — yabancı-claim kanıtının değerlendirmeye girmesi ayrı şerittir (#216); wire yüzeyi kendi sıkılığıyla `(source, actor, claim)` ve `actor` anahtarlı kusurları RED der (`DuplicateKey`/`DuplicateActor` — core INV #2 ile özdeş değildir).
 
 ### INV #3 — Tri-state witness classification
 **Tanım:** Bir Claim'in ontolojik durumu 3'ten fazladır değil: Unobservable-locally /

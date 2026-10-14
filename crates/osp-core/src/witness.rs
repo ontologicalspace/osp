@@ -2,12 +2,14 @@
 //!
 //! **Faz 1.5:** Workflow-agnostik witness modeli.
 //! - **inv #1** author-witness rejection → `canonicalize_for(author)` author'ı çıkarır
-//! - **inv #2** EvidenceEvent dedup → `(source, actor, claim)` HashMap, max-weight
+//! - **inv #2** actor-eksenli dedup (#212) → her tanık için en güçlü gözlem kalır
 //! - **inv #3** tri-state `WitnessStatus::{Witnessed, Unwitnessed, UnobservableLocally}`
 //! - **inv #9** WitnessSet tabanlı `W(C, Ω)` → `evaluate(claim, &WitnessSet) -> WitnessResult`
 //!
-//! `CanonicalWitnessSet` (parse-don't-validate): dedup + author-filter yapısal garanti.
-//! `support()` / `approver_count()` yalnızca canonicalized set üzerinde → "dedup'i unutma" imkânsız.
+//! `CanonicalWitnessSet` (parse-don't-validate): actor-eksenli dedup + author-filter
+//! yapısal garanti. `support()` / `approver_count()` yalnızca canonicalized set üzerinde
+//! → "dedup'i unutma" imkânsız; küme actor-unique olduğundan `approver_count()`
+//! yapısal olarak distinct non-author approver sayısıdır (#212).
 
 use crate::coords::RawPosition;
 use crate::space::{Edge, Node};
@@ -55,11 +57,12 @@ impl WitnessKind {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// EvidenceEvent (inv #2 dedup birimi)
+// EvidenceEvent (gözlem — inv #2'nin girdi birimi)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Tek gözlemlenen kanıt. Pozitif evidence (approval). Dedup anahtarı:
-/// `(source, actor, claim)` üçlüsü (inv #2).
+/// Tek gözlemlenen kanıt. Pozitif evidence (approval). **Gözlem birimi, tanık
+/// kimliği DEĞİL (#212):** bir actor'ün N gözlemi N bağımsız onaycı yaratmaz;
+/// `canonicalize_for` actor başına en güçlü gözlemi kanonik kümeye taşır (inv #2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EvidenceEvent {
     pub id: EvidenceId,
@@ -121,29 +124,37 @@ impl WitnessSet {
         self
     }
 
-    /// **inv #1 + #2 — tek giriş noktası.** Author'ı çıkar + `(source, actor, claim)`
-    /// dedup (en güçlü kalır) → `CanonicalWitnessSet`.
+    /// **inv #1 + #2 — tek giriş noktası.** Author'ı çıkar + actor-eksenli dedup
+    /// (her tanık için en güçlü gözlem kalır) → `CanonicalWitnessSet`.
     ///
     /// "dedup'i unutma" hatası imkânsız: `support()`/`approver_count()` sadece
     /// `CanonicalWitnessSet`'te, o da sadece bu metodla oluşur.
+    ///
+    /// **#212 seçim sözleşmesi (girdi sırasından bağımsız):** aynı actor'e ait
+    /// olaylar arasında hayatta kalan, 5-anahtarlı total sırayla belirlenir —
+    /// weight DESC (`total_cmp`) → id ASC → source ASC → claim ASC →
+    /// witness_kind canonical-rank ASC. Bu beşi eşit iki ayrı olay olamaz
+    /// (actor sabitken fark yaratan tek kalan alan weight'tir) → seçim her
+    /// zaman tam deterministik. NaN/∞ determinizmi `total_cmp` ile çözülür;
+    /// sayısal **geçerlilik** ayrı sözleşmedir (#217).
     pub fn canonicalize_for(&self, author: AgentId) -> CanonicalWitnessSet {
         use std::collections::HashMap;
-        let mut deduped: HashMap<(EvidenceSource, AgentId, ClaimId), EvidenceEvent> =
-            HashMap::new();
+        let mut deduped: HashMap<AgentId, EvidenceEvent> = HashMap::new();
         for e in &self.events {
             if e.actor == author {
                 continue; // inv #1 — author witness rejection
             }
-            let key = (e.source.clone(), e.actor, e.claim);
-            match deduped.get(&key) {
-                Some(existing) if existing.weight >= e.weight => {} // inv #2 — strongest stays
+            match deduped.get(&e.actor) {
+                Some(existing) if actor_axis_prefers(existing, e) => {} // inv #2 — strongest per actor stays
                 _ => {
-                    deduped.insert(key, e.clone());
+                    deduped.insert(e.actor, e.clone());
                 }
             }
         }
         let mut events: Vec<EvidenceEvent> = deduped.into_values().collect();
-        events.sort_by_key(|e| e.id); // stable ordering for deterministic tests
+        // (id, actor): farklı actor'lerde aynı event-id HashMap iterasyon sırasını
+        // sızdıramaz; tek başına id bu garantiyi vermez (#212 tur-1 P1-1).
+        events.sort_by_key(|e| (e.id, e.actor));
         CanonicalWitnessSet {
             events,
             min_approvers: self.min_approvers,
@@ -152,13 +163,47 @@ impl WitnessSet {
     }
 }
 
+/// **#212:** `WitnessKind` canonical rank — enum deklarasyon sırası
+/// (MergeCommit < PRMerged < TrailerReviewed < CoAuthored). Seçim
+/// sözleşmesinin son tie-break anahtarı.
+fn witness_kind_rank(kind: WitnessKind) -> u8 {
+    match kind {
+        WitnessKind::MergeCommit => 0,
+        WitnessKind::PRMerged => 1,
+        WitnessKind::TrailerReviewed => 2,
+        WitnessKind::CoAuthored => 3,
+    }
+}
+
+/// **#212:** actor-eksenli seçim karşılaştırması — `incumbent` hayatta kalır mı?
+/// Sıra: weight DESC → id ASC → source ASC → claim ASC → kind-rank ASC.
+/// ASC anahtarları `challenger.cmp(incumbent)` ile yazılır (küçük olan kazanır);
+/// weight DESC `incumbent.total_cmp(challenger)` (büyük olan kazanır). Girdi
+/// sırasından bağımsız: anahtarlar actor sabitken olayın tüm kalan alanlarını
+/// kapsar.
+fn actor_axis_prefers(incumbent: &EvidenceEvent, challenger: &EvidenceEvent) -> bool {
+    incumbent
+        .weight
+        .total_cmp(&challenger.weight)
+        .then_with(|| challenger.id.cmp(&incumbent.id))
+        .then_with(|| challenger.source.cmp(&incumbent.source))
+        .then_with(|| challenger.claim.cmp(&incumbent.claim))
+        .then_with(|| {
+            witness_kind_rank(challenger.witness_kind)
+                .cmp(&witness_kind_rank(incumbent.witness_kind))
+        })
+        != std::cmp::Ordering::Less
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CanonicalWitnessSet (dedup'lı + author-filtered — yapısal garanti)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Dedup'lı + author-filtered witness set. Sadece `WitnessSet::canonicalize_for` ile
-/// oluşur → inv #1 (author excluded) ve inv #2 (dedup) **yapısal garantili**
-/// (runtime-check değil, type-level).
+/// oluşur → inv #1 (author excluded) ve inv #2 (actor-eksenli dedup) **yapısal
+/// garantili** (runtime-check değil, type-level). #212: küme actor-uniquedır —
+/// her actor en fazla bir olay taşır → `approver_count() == events.len()` yapısal
+/// olarak distinct non-author approver sayısıdır.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanonicalWitnessSet {
     events: Vec<EvidenceEvent>,
@@ -167,12 +212,14 @@ pub struct CanonicalWitnessSet {
 }
 
 impl CanonicalWitnessSet {
-    /// Q1: distinct non-author approver sayısı.
+    /// Q1: distinct non-author approver sayısı (#212'den beri yapısal garanti:
+    /// küme actor-unique, yani `events.len()` == distinct actor).
     pub fn approver_count(&self) -> usize {
         self.events.len()
     }
 
-    /// Q2: Σ weight (zaten dedup'lı — ekstra çağrı gerekmez).
+    /// Q2: Σ weight — her benzersiz actor'ün korunan (en güçlü) olayı üzerinden
+    /// (#212: aynı actor'ün zayıf gözlemleri desteğe eklenmez).
     pub fn support(&self) -> f64 {
         self.events.iter().map(|e| e.weight).sum()
     }
@@ -575,13 +622,23 @@ pub fn classify_status(
 // tarafından üretilmiyordu. Resume wire'ı bu sözleşmenin İLK production
 // tüketicisidir: operatör kanıt dosyası temiz değilse BAŞTAN reddedilir.
 //
-// İki katmanın ayrımı (bilinçli): motorun iç kanonikleştirme invariant'ları
-// (inv #1 author-dışlama, inv #2 triple-dedup) TOPLANMIŞ kanıt kümelerinin
-// hesapsal doğruluğunu korur — örn. `gh pr list` çıktısında author'un kendi
-// commit'i legitimately görünebilir ve sayılmaz. Operatör wire'ı ise bir askıyı
-// çözmek için bilinçli listelenmiş kanıttır: author-self veya duplicate giriş
-// dosya kusurudur; sessiz dışlama/dedup, quorum eksikliğini beklenmedik bir
-// StillHeld olarak maskeler. Yüzey sıkı, çekirdek tolerant.
+// İki katmanın ayrımı (bilinçli — #212 ile netleştirildi): farklı güven
+// sınırları, farklı anahtarlar, ÇELİŞMEYEN politikalar:
+//
+// | Katman               | Anahtar                  | Davranış              |
+// |----------------------|--------------------------|-----------------------|
+// | Core canonicalization| `actor`                  | en güçlü olay kalır   |
+// | Wire exact-duplicate | `(source, actor, claim)` | `DuplicateKey` RED    |
+// | Wire actor tekliği   | `actor`                  | `DuplicateActor` RED  |
+//
+// Çekirdek TOPLANMIŞ kanıt kümelerinden hesaplama için tekil actor temsili
+// üretir (inv #1 author-dışlama + inv #2 actor-eksenli seçim) — örn. `gh pr
+// list` çıktısında author'un kendi commit'i legitimately görünebilir ve
+// sayılmaz; aynı tanığın iki gözlemi tek temsile iner. Operatör wire'ı ise
+// bir askıyı çözmek için bilinçli listelenmiş kanıttır: author-self veya
+// duplicate giriş DOSYA KUSURUDUR; sessiz düzeltme/dedup, quorum eksikliğini
+// beklenmedik bir StillHeld olarak maskeler. Yüzey kusuru RED der; çekirdek
+// tekil temsil üretir.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// **#164 (R1 P1-2):** Dış kanıt yüzeyi doğrulama hatası — operational fault.
@@ -593,7 +650,9 @@ pub enum ExternalEvidenceError {
         event_id: EvidenceId,
         actor: AgentId,
     },
-    /// inv #2 dedup anahtarı `(source, actor, claim)` dosyada iki kez göründü.
+    /// Wire-surface exact-duplicate politikası: `(source, actor, claim)` üçlüsü
+    /// dosyada iki kez göründü. #212'den beri core INV #2 ile ÖZDEŞ DEĞİL —
+    /// core'un seçim anahtarı `actor`; bu anahtar wire'ın kendi sıkıdır.
     #[error(
         "duplicate evidence: events {first_id} and {second_id} share dedup key \
          (source={evidence_source:?}, actor={actor}, claim={claim})"
@@ -607,7 +666,9 @@ pub enum ExternalEvidenceError {
     },
     /// Aynı actor iki ayrı olayla geldi — Q1 "distinct non-author approvers"
     /// semantiği wire yüzeyinde zorlanır (tek actor iki kaynakla çift-onaycı
-    /// olamaz; `canonicalize_for` triple-dedup'u bunu tek başına yakalamaz).
+    /// olamaz). #212'den beri çekirdek de actor-eksenli seçer (tek olay kalır);
+    /// wire yine de RED der — bilinçli listelenmiş kanıtta bu bir dosya kusurudur,
+    /// sessiz collapse quorum eksikliğini StillHeld olarak maskeler.
     #[error(
         "duplicate actor: actor {actor} appears in events {first_id} and {second_id} — \
          each witness contributes exactly one event"
@@ -694,6 +755,21 @@ mod tests {
         EvidenceEvent::new(id, source, kind, actor, 1)
     }
 
+    /// #212: claim + weight açık — seçim sözleşmesi testleri eş-ağırlık kurmak için
+    /// weight'i elle eşitler (default ağırlıklar türlere göre farklıdır).
+    fn ev_w(
+        id: EvidenceId,
+        source: &str,
+        kind: WitnessKind,
+        actor: AgentId,
+        claim: ClaimId,
+        weight: f64,
+    ) -> EvidenceEvent {
+        let mut e = EvidenceEvent::new(id, source, kind, actor, claim);
+        e.weight = weight;
+        e
+    }
+
     // --- inv #1: author exclusion ---
 
     #[test]
@@ -727,6 +803,39 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn single_actor_multi_source_cannot_satisfy_quorum() {
+        // #212 asıl ihlali: aynı actor iki MergeCommit kaynağıyla eskiden 2 approver
+        // sayılıp min_approvers=2 eşiği TEK kişiyle geçilebiliyordu. Actor-eksenli
+        // seçimle 1 tanık → Held; snapshot OLAY TOPLAMI değil en-güçlü-oyu taşır.
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![
+            ev(1, "PR#42", WitnessKind::MergeCommit, 200),
+            ev(2, "commit-abc", WitnessKind::MergeCommit, 200),
+        ]);
+        match evaluate(&claim, &omega) {
+            WitnessDisposition::Held { reason, snapshot } => {
+                assert!(matches!(
+                    reason,
+                    WitnessHoldReason::MinApproversNotMet {
+                        distinct: 1,
+                        required: 2
+                    }
+                ));
+                assert_eq!(
+                    snapshot,
+                    WitnessQuorumSnapshot {
+                        approvers: 1,
+                        required_approvers: 2,
+                        support: 1.0, // en güçlü olay — olaylar toplamı (2.0) DEĞİL
+                        required_support: 1.5,
+                    }
+                );
+            }
+            other => panic!("Held bekleniyordu: {other:?}"),
+        }
+    }
+
     // --- inv #2: dedup ---
 
     #[test]
@@ -745,8 +854,10 @@ mod tests {
     }
 
     #[test]
-    fn dedup_different_source_kept() {
-        // Farklı source → distinct evidence → ikisi de kalır
+    fn dedup_same_actor_different_source_collapses_to_strongest() {
+        // #212 bilinçli değişim: öncülü `dedup_different_source_kept` üçlü-dedup
+        // çağında farklı source'un İKİ olay bıraktığını pinliyordu. Actor-eksenli
+        // sözleşmede aynı actor tek temsile iner — en güçlü gözlem kalır.
         let omega = WitnessSet::new(vec![
             ev(1, "PR#42", WitnessKind::PRMerged, 200),
             ev(
@@ -757,7 +868,113 @@ mod tests {
             ),
         ]);
         let canon = omega.canonicalize_for(999);
-        assert_eq!(canon.approver_count(), 2, "farklı source → 2 event");
+        assert_eq!(canon.approver_count(), 1, "aynı actor → 1 olay");
+        assert!(
+            (canon.support() - 0.8).abs() < 1e-9,
+            "en güçlü (PRMerged 0.8) kalmalı"
+        );
+    }
+
+    #[test]
+    fn support_counts_strongest_per_actor() {
+        // #212: Q2 actor-tutarlı — aynı actor'ün zayıf gözlemi desteğe EkLENMEZ.
+        let omega = WitnessSet::new(vec![
+            ev(1, "PR#1", WitnessKind::MergeCommit, 200),
+            ev(
+                2,
+                "trailer: Co-authored-by:200",
+                WitnessKind::CoAuthored,
+                200,
+            ),
+        ]);
+        let canon = omega.canonicalize_for(999);
+        assert_eq!(canon.approver_count(), 1);
+        assert!(
+            (canon.support() - 1.0).abs() < 1e-9,
+            "1.0 + 0.4 = 1.4 DEĞİL — en güçlü 1.0"
+        );
+    }
+
+    #[test]
+    fn actor_axis_dedup_is_input_order_independent() {
+        // #212 tur-1 P1-1: 5-anahtarlı seçim sözleşmesinin HER dalı — girdi sırası
+        // sonucu etkileyemez ve doğru dal kazandırır. Eş ağırlıklar ev_w ile elle
+        // kurulur (default ağırlıklar türlere göre farklı olduğundan kind satırında
+        // canonical-rank'ın kendisi — weight değil — karar verir).
+        let rows: Vec<(&str, EvidenceEvent, EvidenceEvent, EvidenceEvent)> = vec![
+            (
+                "weight_desc",
+                ev_w(1, "PR#1", WitnessKind::CoAuthored, 200, 1, 0.4),
+                ev_w(2, "PR#2", WitnessKind::MergeCommit, 200, 1, 1.0),
+                ev_w(2, "PR#2", WitnessKind::MergeCommit, 200, 1, 1.0),
+            ),
+            (
+                "id_asc",
+                ev_w(5, "PR#5", WitnessKind::MergeCommit, 200, 1, 1.0),
+                ev_w(3, "PR#3", WitnessKind::MergeCommit, 200, 1, 1.0),
+                ev_w(3, "PR#3", WitnessKind::MergeCommit, 200, 1, 1.0),
+            ),
+            (
+                "source_asc",
+                ev_w(7, "trailer:B", WitnessKind::MergeCommit, 200, 1, 1.0),
+                ev_w(7, "PR#A", WitnessKind::MergeCommit, 200, 1, 1.0),
+                ev_w(7, "PR#A", WitnessKind::MergeCommit, 200, 1, 1.0),
+            ),
+            (
+                "claim_asc",
+                ev_w(7, "PR#9", WitnessKind::MergeCommit, 200, 2, 1.0),
+                ev_w(7, "PR#9", WitnessKind::MergeCommit, 200, 1, 1.0),
+                ev_w(7, "PR#9", WitnessKind::MergeCommit, 200, 1, 1.0),
+            ),
+            (
+                "kind_rank_asc",
+                ev_w(7, "PR#9", WitnessKind::CoAuthored, 200, 1, 0.7),
+                ev_w(7, "PR#9", WitnessKind::TrailerReviewed, 200, 1, 0.7),
+                ev_w(7, "PR#9", WitnessKind::TrailerReviewed, 200, 1, 0.7),
+            ),
+        ];
+        for (name, a, b, winner) in rows {
+            let fwd = WitnessSet::new(vec![a.clone(), b.clone()]).canonicalize_for(999);
+            let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999);
+            assert_eq!(fwd, rev, "{name}: girdi sırası sonucu değiştirdi");
+            assert_eq!(fwd.events(), &[winner], "{name}: yanlış olay hayatta kaldı");
+        }
+    }
+
+    #[test]
+    fn actor_axis_equal_weight_equal_id_is_deterministic() {
+        // #212 tur-1 P1-1'in dar pini: eş ağırlık + eş id + farklı source →
+        // source ASC kazanır; her iki girdi sırası aynı kümeyi verir.
+        let a = ev_w(7, "trailer:Z", WitnessKind::MergeCommit, 200, 1, 1.0);
+        let b = ev_w(7, "PR#A", WitnessKind::MergeCommit, 200, 1, 1.0);
+        let expected = b.clone();
+        let fwd = WitnessSet::new(vec![a.clone(), b.clone()]).canonicalize_for(999);
+        let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999);
+        assert_eq!(fwd, rev);
+        assert_eq!(
+            fwd.events(),
+            &[expected],
+            "source ASC kazanmalı (PR#A < trailer:Z)"
+        );
+    }
+
+    #[test]
+    fn actor_axis_keeps_all_distinct_actors() {
+        // #212: eksen actor — FARKLI actor'ler birbirini asla elemez
+        // (aynı source kullanmaları bile eleme yaratmaz).
+        let omega = WitnessSet::new(vec![
+            ev(1, "PR#42", WitnessKind::MergeCommit, 200),
+            ev(2, "PR#42", WitnessKind::MergeCommit, 300), // aynı source, farklı actor
+            ev(
+                3,
+                "trailer: Reviewed-by:400",
+                WitnessKind::TrailerReviewed,
+                400,
+            ),
+        ]);
+        let canon = omega.canonicalize_for(999);
+        assert_eq!(canon.approver_count(), 3);
+        assert!((canon.support() - (1.0 + 1.0 + 0.7)).abs() < 1e-9);
     }
 
     #[test]
@@ -1012,7 +1229,8 @@ mod tests {
 
     #[test]
     fn validate_external_evidence_rejects_duplicate_actor() {
-        // Aynı actor, FARKLI source — triple-dedup bunu yakalamaz; yüzey reddeder.
+        // Aynı actor, FARKLI source — çekirdek bunu tekil temsile indirger (#212);
+        // wire yüzeyi yine de dosya kusuru olarak RED der.
         let events = vec![
             ev(1, "PR#1", WitnessKind::MergeCommit, 200),
             ev(2, "commit-abc", WitnessKind::MergeCommit, 200),
@@ -1029,6 +1247,31 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn wire_and_core_same_shape_different_policy() {
+        // #212 iki-katman pini: AYNI girdi şekli (aynı actor, iki kaynak) wire'da
+        // dosya kusuru (DuplicateActor RED), çekirdekte tekil actor temsili (1 olay).
+        // Kabul kriteri 4: wire sözleşmesi actor-eksenli çekirdekLE zayıflamaz.
+        let events = vec![
+            ev(1, "PR#1", WitnessKind::MergeCommit, 200),
+            ev(2, "commit-abc", WitnessKind::MergeCommit, 200),
+        ];
+        let err = validate_external_evidence(&events, 999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ExternalEvidenceError::DuplicateActor {
+                    actor: 200,
+                    first_id: 1,
+                    second_id: 2
+                }
+            ),
+            "got {err:?}"
+        );
+        let canon = WitnessSet::new(events).canonicalize_for(999);
+        assert_eq!(canon.approver_count(), 1, "çekirdek tekil temsil üretir");
     }
 
     #[test]
