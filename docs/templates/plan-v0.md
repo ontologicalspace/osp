@@ -19,9 +19,11 @@
 **Digest kuralı (döngüsellik yasağı):** Bu dosya KENDİ digest'ini **taşımaz** —
 `plan-v0` originating digest DAHİL hiçbir digest alanı içermez (v0'nın
 originating digest'i kendi digest'i olurdu). `plan-vN` (N ≥ 1) yalnız
-`previous_digest` + `originating_digest` taşıyabilir. Tüm digest kimlikleri ÜÇ
-dış kayıtta yaşar: (1) NOTES freeze kaydı, (2) `plans.jsonl` satırı,
-(3) CompletionClaim. Bkz. `docs/spec/plans-stratum.md`.
+`previous_digest` + `originating_digest` taşıyabilir — bunlar ÖNCEKİ
+sürümlerin kimlikleridir; yasak bir sürümün KENDİ digest'ini içermesine
+dairdir. Bir sürümün kendi digest'i yalnız ÜÇ dış kayıtta yaşar:
+(1) NOTES freeze kaydı, (2) `plans.jsonl` satırı, (3) CompletionClaim.
+Bkz. `docs/spec/plans-stratum.md`.
 
 ## Amendment zinciri (yalnız N ≥ 1 sürümlerde doldurulur)
 
@@ -56,8 +58,14 @@ ALMAZ (D8): pozisyon/koordinat beyanı RED.>
   - *measurement_scope:* <doğrulama NEYİ kapsıyor? kapsam dışı kalan ne? (deadline/bütçe/sayfa-tamlığı)>
 - **KARŞI-ÖRNEKLER** (her biri "bu kriter hangi ZAYIF kanıtla YANLIŞ geçer?"):
   1. `<yanlış-kimlik | eksik-kardinalite | zayıf-snapshot | kapsam-dışı | yanlış-alan>`: `<girdi>`
-     → BEKLENEN: **RED** `<normatif ret kimliği>` — probe: `<probe test adı yuvası>`
+     → BEKLENEN: **RED** `<rejection_layer>:<ret kimliği>` — probe: `<probe test adı yuvası>`
   2. …
+
+  > **`rejection_layer`** ret hangi katmanda üretilmeli: `engine` (uygulamanın
+  > normatif hata sınıfı — ör. #217 NaN → `InvalidWitnessEvidence`) |
+  > `verifier` (doğrulayıcının girdiyi BAŞARI SAYMAYARAK reddetmesi — ör. boş
+  > sonuç kümesi → `K1.EmptyEvidenceSet`; uygulamanın hata üretmesi gerekMEZ).
+  > Katman karıştırmak "yanlış-sebeple RED başarı sayılır" hatasını geri getirir.
 
 ### K-2 kanıt-hesabı
 <aynı yapı>

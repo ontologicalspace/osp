@@ -36,9 +36,12 @@ var olduğunu** tek başına kanıtlamaz. Pre-code freeze için dış ANKOR gere
 **Kural 1 — kendi digest'ini taşıma:** hiçbir plan sürümü KENDİ digest'ini
 dosya içinde taşımaz. `plan-v0` originating digest DAHİL hiçbir digest alanı
 içermez (v0'nın originating digest'i kendi digest'i olurdu → döngüsel tanım).
-`plan-vN` (N ≥ 1) `previous_digest` + `originating_digest` taşıyabilir. Digest
-kimlikleri yalnız ÜÇ dış kayıtta yaşar: (1) NOTES freeze kaydı, (2)
-`plans.jsonl` satırı, (3) CompletionClaim.
+`plan-vN` (N ≥ 1) `previous_digest` + `originating_digest` taşıyabilir. Bir
+sürümün **kendi** digest'i yalnız ÜÇ dış kayıtta yaşar: (1) NOTES freeze
+kaydı, (2) `plans.jsonl` satırı, (3) CompletionClaim. **Önceki sürümlerin**
+digest'lerinin (`previous_digest`/`originating_digest`) vN dosyasında
+taşınması bu kuralı İHLAL ETMEZ — yasak olan yalnızca bir sürümün KENDİ
+digest'ini içermesidir (döngüsel tanım).
 
 **Kural 2 — immutable sürümler:** her amendment TAM YENİ SÜRÜM üretir
 (`plan-v0.md`, `plan-v1.md`, …). Her sürüm donmuş TAM plandır; önceki sürüm
@@ -69,7 +72,8 @@ digest + originating digest + amendment zincirini AYRIT eder.
   "originating_digest": null,
   "previous_digest": null,
   "frozen_at": "2026-10-15T09:00:00+03:00",
-  "freeze_anchor_ref": "NOTES pre-registration bölümü (tarih + osp_revision + run bağlamı)",
+  "freeze_phase": "pre-code",
+  "freeze_anchor_ref": "NOTES pre-registration bölümü — BU SÜRÜMÜN freeze kaydı (tarih + osp_revision + run bağlamı)",
   "scope_trigger": "authz",
   "failure_modes": ["yetki/tenant sınırı", "idempotens bağlamı", "kaynak tükenmesi", "başarısızlıkta kanıt dayanıklılığı", "kanonik tek-kaynak"],
   "criteria": [
@@ -86,6 +90,7 @@ digest + originating digest + amendment zincirini AYRIT eder.
           "id": "CE-1",
           "input": "programmatic NaN-weight evidence (issue #217)",
           "expected_verdict": "RED",
+          "rejection_layer": "engine",
           "expected_rejection": "InvalidWitnessEvidence",
           "probe_ref": "nan_weight_rejected"
         }
@@ -95,15 +100,33 @@ digest + originating digest + amendment zincirini AYRIT eder.
 }
 ```
 
-**PlanEvidenceContract ≠ ObservedEvidence:** `evidence_contract` +
-`counterexamples` alanları **önceden tanımlanmış kanıt BEKLENTİSİ** taşır
-(gözlemlenen sonuç değil — gözlem yalnız CompletionClaim'de raporlanır).
+**Alan notları:**
+
+- **`rejection_layer` ZORUNLU — ret hangi katmanda üretilmeli?** Motor RED'i
+  ile doğrulayıcı RED'i ayrılır: `engine` = uygulamanın normatif hata sınıfı
+  üretmesi (ör. #217: NaN ağırlık → `InvalidWitnessEvidence`); `verifier` =
+  senaryo/kanıt doğrulayıcısının karşı-örnek girdiyi BAŞARI SAYMAYARAK
+  reddetmesi (ör. boş sonuç kümesi → `K1.EmptyEvidenceSet` — burada
+  uygulamanın hata üretmesi GEREKMEZ; doğru davranış doğrulayıcının
+  başarısızlık kararıdır). Ret kimliği ilgili kriterin doğrulama sözleşmesiyle
+  adlandırılır. Bu ayrım olmadan motor hatası ile verifier ret'i birbirine
+  karışır — #213'ün çıkış noktası ikinci gruptur.
+- **`freeze_phase`:** `v0` için zorunlu `"pre-code"`; `vN ≥ 1` için
+  dondurulduğu yürütme aşaması (örn. `"mid-execution"`). Amendment'ın ne
+  TARİHTE değil yürütmenin HANGİ AŞAMASINDA donduğu böyle denetlenir — stratum
+  etiketi `pre-code` başlangıç planını niteler, amendment'ı değil.
+- **`freeze_anchor_ref`:** genel NOTES açıklaması DEĞİL — İLGİLİ SÜRÜMÜN
+  gerçek freeze kaydını gösterir.
+- **PlanEvidenceContract ≠ ObservedEvidence:** `evidence_contract` +
+  `counterexamples` alanları **önceden tanımlanmış kanıt BEKLENTİSİ** taşır
+  (gözlemlenen sonuç değil — gözlem yalnız CompletionClaim'de raporlanır).
 
 **`expected_rejection` ZORUNLU:** RED'in VARLIĞI değil doğru RET KİMLİĞİ
-kanıtlanır; ret kimliği konu issue'nun normatif hata kararıyla eşleşir.
-Beklenmeyen hata / altyapı hatasıyla üretilen RED **başarılı negatif test
-SAYILMAZ** (ör. #217: NaN ağırlık → `InvalidWitnessEvidence` beklenirken JSON
-parse hatası veya quorum-ret gözlenirse kanıt GEÇERSİZDİR).
+kanıtlanır; ret kimliği `rejection_layer` ile birlikte konu issue'nun
+normatif kararıyla eşleşir. Beklenmeyen hata / altyapı hatasıyla üretilen RED
+**başarılı negatif test SAYILMAZ** (ör. #217: NaN ağırlık → engine katmanında
+`InvalidWitnessEvidence` beklenirken JSON parse hatası veya quorum-ret
+gözlenirse kanıt GEÇERSİZDİR).
 
 ## 5. Kanıt-hesabı durum matrisi (#213)
 
@@ -117,6 +140,13 @@ Aşama zinciri: **Plan niyeti (kod öncesi) → Pre-registration Readiness
 (eksik karşı-örnek = RED) → Probe Execution → CompletionClaim (gerçek gözlem +
 digest bağı + kapsam).** Probe test adının planda yer alması testin koştuğunu
 kanıtlamaz.
+
+**Ret üçlüsü: ExpectedRejection ≠ ObservedRejection ≠ VerifiedRejection.**
+Beklenen ret planın kanıt sözleşmesinde tanımlanır; gözlenen ret probe
+çıktısında okunur; DOĞRULANMIŞ ret ancak gözlemin `execution_ref` (hangi
+koşu/log) + `code_revision` (hangi kod sürümü) bağıyla MATCH olarak
+bağlanmasıyla oluşur. CompletionClaim bu üçünü ayrı alanlarda taşır
+(`docs/templates/completion-claim.md`).
 
 ## 6. Pilot ölçümleri (Aşama-2 kararının girdisi)
 

@@ -16,14 +16,28 @@
 
 ## Kriter → kanıt tablosu (gerçek GÖZLEMLER — sözleşme değil)
 
-| K | Kanıt sözleşmesi (plandan) | Gözlemlenen kanıt | Karşı-örnek probe'ları | Sonuç |
-|---|---|---|---|---|
-| K-1 | <identity/cardinality/fields/scope özeti> | <ne gözlendi — gerçek satır/yanıt/ölçüm> | CE-1 `<probe adı>` → gözlenen ret: `<gerçek sınıf>` = beklendi ✓ / ≠ beklendi ✗ | karşılandı |
-| K-2 | … | … | … | … |
+| K | Kanıt sözleşmesi (plandan) | Gözlemlenen kanıt |
+|---|---|---|
+| K-1 | <identity/cardinality/fields/scope özeti> | <ne gözlendi — gerçek satır/yanıt/ölçüm> |
+| K-2 | … | … |
 
-**Ret-sebebi kuralı:** her karşı-örnek probe'unun GERÇEK gözlenen ret sınıfı
-yazılır; beklenen kimlikle eşleşmeyen RED (altyapı hatası, beklenmeyen hata)
-başarılı negatif test SAYILMAZ — tabloda ✗ olarak dürüst kalır.
+### Karşı-örnek probe sonuçları (her CE için ZORUNLU bağ)
+
+| probe_ref | execution_ref | code_revision | expected (layer:ret) | observed_rejection | result |
+|---|---|---|---|---|---|
+| `<CE-1 probe adı>` | `<CI koşusu / log / run kaydı>` | `<commit sha>` | `engine:InvalidWitnessEvidence` | `<gerçek ret sınıfı>` | `MATCH` |
+| `<CE-2 probe adı>` | `…` | `…` | `verifier:K1.EmptyEvidenceSet` | `<gerçek>` | `MATCH \| MISMATCH \| PENDING` |
+
+> **Bağ zorunluluğu:** `probe_ref` + `execution_ref` + `code_revision`
+> olmadan yazılmış bir sonuç YALNIZCA İDDİADIR — "testin adı tabloya
+> yazılmış" ile "test koşuldu ve doğru ret kimliği gözlendi" birbirinden
+> ayırt edilir (ExpectedRejection ≠ ObservedRejection ≠ VerifiedRejection;
+> doğrulanmış ret = gözlemin koşu + kod-sürümü bağıyla MATCH olması).
+
+**Ret-sebebi kuralı:** her probe'un GERÇEK gözlenen ret sınıfı yazılır;
+beklenen `rejection_layer` + ret kimliğiyle eşleşmeyen RED (altyapı hatası,
+beklenmeyen hata, yanlış katman) başarılı negatif test SAYILMAZ — tabloda
+`MISMATCH` olarak dürüst kalır.
 
 **PENDING dürüstlüğü:** probe'u koşulmamış/hazırlanmamış kriter
 "karşılandı" yazılamaz — PENDING olarak listelenir.
