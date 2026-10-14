@@ -828,9 +828,11 @@ fn real_submodule_clean_nested_analyzed_paths_pass() {
     let env = task_envelope(&fx.parent.head, 3);
     let task_path = fx.parent.write_task(&env);
     let proposals_path = fx.parent.write_proposals(3, 1);
+    // #210 N1: ölçüm kanonik (detached @ HEAD, submodule init'li) — file://
+    // submodule init izni CAĞIRANDAN (run_attempt_file_submodules).
     let output = fx
         .parent
-        .run_attempt(&task_path, &proposals_path, 7, "human");
+        .run_attempt_file_submodules(&task_path, &proposals_path, 7, "human");
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Exact kontrat (#156 R2 P1-2): clean initialized submodule → attempt
     // BAŞARILI olmalı ve Task completed üretmeli. Zayıf `success || !contains`
@@ -842,6 +844,59 @@ fn real_submodule_clean_nested_analyzed_paths_pass() {
     );
     // #166 akış ayrımı: progress stderr'de.
     assert!(stderr.contains("Task completed"), "got: {stderr}");
+}
+
+/// #210 (N1) kapsam-fence regresyonu: çağırıcının worktree'sinde submodule
+/// İNİT'SİZ (deinit — gitlink durur, status TEMİZ) → kanonik ölçum submodule
+/// içeriğini YİNE görür (detached worktree pinned gitlink'lerde init'li) ve
+/// analyzed ⊆ kanonik tracked fence'i GEÇER. N1 öncesi: canlı ölçüm içeriği
+/// görmezdi (ölçüm kapsamı worktree init tesadüfüne bağlıydı); N1'siz bu
+/// deinit durumu "analyzed path not tracked" yanlış-RED'i üretirdi.
+#[test]
+fn strict_attempt_completes_with_uninitialized_submodule() {
+    let fx = SubmoduleFixture::new();
+    let st = Command::new("git")
+        .args(["-C", fx.parent.repo_path().to_str().unwrap()])
+        .args(["submodule", "deinit", "--force", "clients/fe"])
+        .status()
+        .expect("git submodule deinit");
+    assert!(st.success(), "submodule deinit failed");
+    assert!(
+        !fx.sub_nested.exists(),
+        "caller worktree submodule content is gone (uninitialized)"
+    );
+    let status = Command::new("git")
+        .args([
+            "-C",
+            fx.parent.repo_path().to_str().unwrap(),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ])
+        .output()
+        .expect("git status");
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "deinit leaves the caller worktree CLEAN (gitlink unchanged)"
+    );
+
+    let env = task_envelope(&fx.parent.head, 3);
+    let task_path = fx.parent.write_task(&env);
+    let proposals_path = fx.parent.write_proposals(3, 1);
+    let output = fx
+        .parent
+        .run_attempt_file_submodules(&task_path, &proposals_path, 7, "human");
+    assert!(
+        output.status.success(),
+        "uninitialized caller submodule must NOT change the canonical measurement \
+         scope (fence uses the canonical tracked set). stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Task completed"),
+        "got: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -866,7 +921,7 @@ fn real_submodule_ignore_config_cannot_silence_the_fence() {
     let proposals_path = fx.parent.write_proposals(3, 1);
     let output = fx
         .parent
-        .run_attempt(&task_path, &proposals_path, 7, "human");
+        .run_attempt_file_submodules(&task_path, &proposals_path, 7, "human");
     assert!(
         !output.status.success(),
         "submodule ignore config must NOT silence the dirty-submodule fence"
@@ -890,7 +945,7 @@ fn real_submodule_dirty_nested_analyzed_paths_reject() {
     let proposals_path = fx.parent.write_proposals(3, 1);
     let output = fx
         .parent
-        .run_attempt(&task_path, &proposals_path, 7, "human");
+        .run_attempt_file_submodules(&task_path, &proposals_path, 7, "human");
     assert!(
         !output.status.success(),
         "dirty submodule content in analysis scope must reject the attempt"
@@ -2627,4 +2682,432 @@ fn submodule_declared_dirty_chain_attempt_resume_gate() {
         verdict["binding"]["completion_route"], "witnessed_resume",
         "{verdict}"
     );
+}
+
+/// **#210 (N1) — run-27 yanlış-RED'inin tersyüz edilmiş kanıtı:** çağırıcı
+/// worktree'sinde submodule İNİT'SİZKEN (run-27'in nexus-core base'i gibi;
+/// gitlink duruyor, ağaç TEMİZ) STRICT attempt → resume → realization-gate
+/// zinciri. N1 öncesi: strict attempt canlı ölçerdi (submodule'siz kapsam →
+/// pending tabanı `32e8…` sınıfı), gate kanonik ölçerdi (`a3b5…` sınıfı) →
+/// #203 m.5b digest-parite YANLIŞ RED. N1 sonrası: her iki uç da kanonik
+/// ağacı ölçer → parite tutar → `RealizedCompleted`.
+#[test]
+fn uninitialized_submodule_strict_chain_attempt_resume_gate() {
+    let fx = SubmoduleFixture::new();
+    let parent = &fx.parent;
+    let work = parent.work_path().to_path_buf();
+
+    // Çağırıcı worktree: submodule init'siz (deinit) — içerik yok, status temiz.
+    let st = Command::new("git")
+        .args(["-C", parent.repo_path().to_str().unwrap()])
+        .args(["submodule", "deinit", "--force", "clients/fe"])
+        .status()
+        .expect("git submodule deinit");
+    assert!(st.success(), "submodule deinit failed");
+    assert!(
+        !fx.sub_nested.exists(),
+        "uninitialized caller worktree (the run-27 condition)"
+    );
+
+    // Task: main.rs path-kapsamlı v2 (gate predicate-scope sözleşmesi),
+    // AddNode+ModifyEntity (op-matrix — #204 zinciriyle aynı şekil).
+    let mut task_env = task_envelope_v2(&parent.head, "main.rs");
+    task_env["task"]["allowed_operations"] = serde_json::json!(["AddNode", "ModifyEntity"]);
+    let task_path = parent.write_task(&task_env);
+
+    // v3 proposals — new_node HİPOTETİK (diskte dosya YOK; strict ağaç temiz
+    // kalır; aday içeriği yalnız applied.patch'te gerçekleşir).
+    let proposals = serde_json::json!({
+        "schema_version": 3,
+        "repository_head": parent.head,
+        "proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 5.0, "path": "src2/new.rs"}],
+            "new_edges": [],
+            "removed_edges": [],
+            "affected_nodes": ["main.rs"],
+            "modified_entities": [{"path": "main.rs"}],
+            "reasoning": "strict canonical measurement chain"
+        }]
+    });
+    let proposals_path = work.join("proposals-210-strict.json");
+    fs::write(
+        &proposals_path,
+        serde_json::to_string_pretty(&proposals).unwrap(),
+    )
+    .unwrap();
+
+    // 1) STRICT askı (production witness, temiz ağaç, submodule init'siz) →
+    //    ölçüm kanonik (detached @ HEAD, submodule init'li) → exit 10.
+    let run_dir = work.join("run-210-strict");
+    fs::create_dir_all(&run_dir).unwrap();
+    let attempt_path = run_dir.join("attempt.json");
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .args(["--execution-mode", "production"])
+        .args(["--witness", "production"])
+        .args(["--llm", "mock"])
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg(&work)
+        .arg("--out")
+        .arg(&attempt_path)
+        .output()
+        .expect("run osp attempt");
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "strict suspension must suspend (not a scope/parity failure) on the \
+         uninitialized-submodule fixture. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let attempt = read_json_value(&attempt_path);
+    let claim_id = attempt["result"]["pending"]["claim_id"]
+        .as_u64()
+        .expect("pending claim id");
+
+    // 2) Resume — strict kol da kanonik ölçer (N1) → basis paritesi tutar;
+    //    2 bağımsız tanık → Applied.
+    let pending_dir = work.join(".osp").join("pending-authorizations");
+    let mut artifacts: Vec<std::path::PathBuf> = fs::read_dir(&pending_dir)
+        .expect("pending-authorizations dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().map(|e| e == "json").unwrap_or(false)
+                && !p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().contains("receipt"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    artifacts.sort();
+    assert_eq!(artifacts.len(), 1, "tam bir askı: {artifacts:?}");
+    let artifact = artifacts.pop().unwrap();
+
+    let events: Vec<serde_json::Value> = [200u64, 300u64]
+        .iter()
+        .enumerate()
+        .map(|(i, actor)| {
+            serde_json::json!({
+                "id": (i + 1) as u64,
+                "source": format!("strict-chain-{i}"),
+                "witness_kind": "MergeCommit",
+                "actor": actor,
+                "claim": claim_id,
+            })
+        })
+        .collect();
+    let evidence = work.join("witnesses-210-strict.json");
+    fs::write(&evidence, serde_json::to_string_pretty(&events).unwrap()).unwrap();
+
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("trajectory")
+        .arg("resume")
+        .arg(&artifact)
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .arg("--witness-evidence")
+        .arg(&evidence)
+        .arg("--state-dir")
+        .arg(&work)
+        .args(["--format", "json"])
+        .args(["--evidence-trust", "operator-asserted"])
+        .output()
+        .expect("run osp resume");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "strict resume must apply (canonical basis parity holds). stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 3) Gate — before-analyze kanonik; pending tabanı da kanonik → m.5b
+    //    digest-parity TUTAR (N1 öncesi burası yanlış RED'liyordu).
+    fs::copy(&task_path, run_dir.join("task.json")).unwrap();
+    fs::write(
+        run_dir.join("applied.patch"),
+        b"diff --git a/main.rs b/main.rs\n--- a/main.rs\n+++ b/main.rs\n@@ -1,3 +1,4 @@\n+// gate realization candidate\n mod a;\n mod b;\n pub fn main() { a::a(); b::b(); }\n",
+    )
+    .unwrap();
+    let gate_evidence = run_dir.join("declared-realization.json");
+    fs::write(
+        &gate_evidence,
+        r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"tests":{"passed":1,"failed":0,"skipped":0}}"#,
+    )
+    .unwrap();
+
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("realization-gate")
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .arg(&run_dir)
+        .arg("--state-dir")
+        .arg(&work)
+        .arg("--evidence")
+        .arg(&gate_evidence)
+        .output()
+        .expect("run osp realization-gate");
+    let gate_stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gate must realize with digest parity DESPITE the uninitialized caller \
+         submodule (the #210 wrong-RED, inverted). stderr={gate_stderr}"
+    );
+    let verdict = read_json_value(&run_dir.join("realization-verdict.json"));
+    assert!(
+        verdict["verdict"]["RealizedCompleted"].is_object(),
+        "{verdict}"
+    );
+    assert_eq!(
+        verdict["binding"]["completion_route"], "witnessed_resume",
+        "{verdict}"
+    );
+    parent.assert_repo_clean();
+}
+
+/// #215 review P1 (süreç-düzeyi): post-checkout hook'u kanonik checkout'u
+/// kirletirse attempt FAIL-CLOSED döner — kalıcı zarf/attempt artifact
+/// oluşmaz (ölçüm, bağlandığı commit'in içeriği olmadan üretilmemiş sayılır).
+#[test]
+fn post_checkout_hook_attempt_fails_closed_without_artifact() {
+    let fx = HarnessFixture::new();
+    // Hook'U fixture kurulduktan SONRA yaz (fixture'ın kendi commit'leri
+    // etkilenmesin); hook yalnız `git worktree add` checkout'unda koşar.
+    let hooks = fx.repo_path().join(".git").join("hooks");
+    fs::create_dir_all(&hooks).expect("hooks dir");
+    let hook = hooks.join("post-checkout");
+    fs::write(
+        &hook,
+        "#!/bin/sh\nprintf '// injected by hook\\n' >> main.rs\n",
+    )
+    .expect("write hook");
+    // Linux'ta git, çalıştırma biti OLMAYAN hook'u atlar (Windows'ta atlamaz) —
+    // yerel/CI ayrışmasını kapatmak için POSIX tarafında +x zorlanır.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x hook");
+    }
+
+    let env = task_envelope(&fx.head, 2);
+    let task_path = fx.write_task(&env);
+    let proposals_path = fx.write_proposals(2, 1);
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    cmd.current_dir(fx.work_path())
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(fx.repo_path())
+        .args(["--execution-mode", "harness"])
+        .args(["--witness", "harness-auto-approve"])
+        .args(["--llm", "mock"])
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg(fx.work_path());
+    let output = cmd.output().expect("run osp attempt");
+    assert!(
+        !output.status.success(),
+        "dirty canonical checkout must fail the attempt"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("canonical checkout is dirty") && stderr.contains("post-checkout hook"),
+        "RED names the cleanliness failure and its likely cause: {stderr}"
+    );
+    assert!(
+        !fx.work_path().join("attempts").exists(),
+        "no canonical attempt artifact on a refused measurement"
+    );
+    assert!(
+        !fx.work_path().join(".osp").exists(),
+        "no .osp/ state on a refused measurement"
+    );
+    fx.assert_repo_clean();
+}
+
+/// #215 review P2 (yaşam-döngüsü matrisi): kanonik ölçümün iddiası caller'ın
+/// init durumundan BAĞIMSIZLIKTIR — attempt ile resume arasında submodule init
+/// durumu değişse bile resume aynı kanonik digest'i ölçer (pending tabanıyla
+/// parite → Applied). Gate kendi worktree'ini açar (caller'ı hiç görmez);
+/// matris hücreleri resume düzeyinde kanıtlar. Mevcut
+/// `uninitialized_submodule_strict_chain_*` testi (init'siz,init'siz) hücresini
+/// kapatır; bu ikisi kalan hücreler.
+fn strict_resume_applies_across_submodule_state_change(
+    init_at_attempt: bool,
+    init_at_resume: bool,
+) {
+    assert_ne!(
+        init_at_attempt, init_at_resume,
+        "matris köşegeni başka testte"
+    );
+    let fx = SubmoduleFixture::new();
+    let parent = &fx.parent;
+    let work = parent.work_path().to_path_buf();
+
+    let set_submodule_state = |initialized: bool| {
+        let mut cmd = Command::new("git");
+        cmd.args(["-C", parent.repo_path().to_str().unwrap()]);
+        if initialized {
+            cmd.args(["submodule", "update", "--init", "clients/fe"]);
+            file_protocol_env(&mut cmd);
+        } else {
+            cmd.args(["submodule", "deinit", "--force", "clients/fe"]);
+        }
+        let st = cmd.status().expect("toggle submodule state");
+        assert!(st.success(), "submodule toggle failed");
+        assert_eq!(
+            fx.sub_nested.exists(),
+            initialized,
+            "caller worktree submodule state matches the requested phase"
+        );
+    };
+
+    set_submodule_state(init_at_attempt);
+    let mut task_env = task_envelope_v2(&parent.head, "main.rs");
+    task_env["task"]["allowed_operations"] = serde_json::json!(["AddNode", "ModifyEntity"]);
+    let task_path = parent.write_task(&task_env);
+    let proposals = serde_json::json!({
+        "schema_version": 3,
+        "repository_head": parent.head,
+        "proposals": [{
+            "new_nodes": [{"kind": "Module", "initial_mass": 5.0, "path": "src2/new.rs"}],
+            "new_edges": [],
+            "removed_edges": [],
+            "affected_nodes": ["main.rs"],
+            "modified_entities": [{"path": "main.rs"}],
+            "reasoning": "lifecycle matrix cell"
+        }]
+    });
+    let proposals_path = work.join("proposals-215-matrix.json");
+    fs::write(
+        &proposals_path,
+        serde_json::to_string_pretty(&proposals).unwrap(),
+    )
+    .unwrap();
+
+    // 1) Strict askı (production witness) — init durumu init_at_attempt.
+    let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("trajectory")
+        .arg("attempt")
+        .arg("7")
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .args(["--execution-mode", "production"])
+        .args(["--witness", "production"])
+        .args(["--llm", "mock"])
+        .arg("--proposals")
+        .arg(&proposals_path)
+        .arg("--task")
+        .arg(&task_path)
+        .arg("--state-dir")
+        .arg(&work)
+        .output()
+        .expect("run osp attempt");
+    assert_eq!(
+        output.status.code(),
+        Some(10),
+        "strict suspension (phase A init={init_at_attempt}). stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // 2) Askının claim'idini --out zarfından al (pending kimliği).
+    let pending_dir = work.join(".osp").join("pending-authorizations");
+    let mut artifacts: Vec<std::path::PathBuf> = fs::read_dir(&pending_dir)
+        .expect("pending-authorizations dir")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.extension().map(|e| e == "json").unwrap_or(false)
+                && !p
+                    .file_name()
+                    .map(|n| n.to_string_lossy().contains("receipt"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    artifacts.sort();
+    assert_eq!(artifacts.len(), 1, "tam bir askı: {artifacts:?}");
+    let artifact = artifacts.pop().unwrap();
+    let pending = read_json_value(&artifact);
+    let claim_id = pending["record"]["claim_id"].as_u64().expect("claim id");
+
+    // 3) Aşamalar ARASINDA init durumunu ÇEVİR — kanonik ölçüm bunu görmemeli.
+    set_submodule_state(init_at_resume);
+
+    // 4) Resume — kanonik digest değişmedi → basis paritesi → Applied.
+    let events: Vec<serde_json::Value> = [200u64, 300u64]
+        .iter()
+        .enumerate()
+        .map(|(i, actor)| {
+            serde_json::json!({
+                "id": (i + 1) as u64,
+                "source": format!("matrix-{i}"),
+                "witness_kind": "MergeCommit",
+                "actor": actor,
+                "claim": claim_id,
+            })
+        })
+        .collect();
+    let evidence = work.join("witnesses-215-matrix.json");
+    fs::write(&evidence, serde_json::to_string_pretty(&events).unwrap()).unwrap();
+    let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+    file_protocol_env(&mut cmd);
+    let output = cmd
+        .current_dir(&work)
+        .arg("trajectory")
+        .arg("resume")
+        .arg(&artifact)
+        .arg("--repo")
+        .arg(parent.repo_path())
+        .arg("--witness-evidence")
+        .arg(&evidence)
+        .arg("--state-dir")
+        .arg(&work)
+        .args(["--format", "json"])
+        .args(["--evidence-trust", "operator-asserted"])
+        .output()
+        .expect("run osp resume");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "resume must apply despite the init-state flip between phases \
+         (canonical digest is caller-init independent). stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    parent.assert_repo_clean();
+}
+
+#[test]
+fn resume_applies_after_deinit_between_attempt_and_resume() {
+    strict_resume_applies_across_submodule_state_change(true, false);
+}
+
+#[test]
+fn resume_applies_after_init_between_attempt_and_resume() {
+    strict_resume_applies_across_submodule_state_change(false, true);
 }

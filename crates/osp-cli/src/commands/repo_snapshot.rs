@@ -154,7 +154,10 @@ fn capture_head(repo: &Path) -> Result<GitCommitId, RepoSnapshotError> {
     GitCommitId::try_from(head_str)
 }
 
-fn capture_tracked_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
+/// `pub(crate)` (#210 N1): kanonik ölçüm penceresi (detached worktree) de aynı
+/// capture'ı kullanır — fence kümesi çağırıcının worktree init tesadüfünden
+/// DEĞİL, ölçülen kanonik ağaçtan gelir.
+pub(crate) fn capture_tracked_paths(repo: &Path) -> Result<BTreeSet<String>, RepoSnapshotError> {
     // Parent HEAD tree (düz dosyalar). Submodule içeride DEĞİLDİR: parent `ls-tree -r`
     // yalnızca gitlink'i (`160000 commit <sha>\t<path>`) listeler — nested dosyalar
     // parent HEAD tree'sinde yok (#155 P1-1: bu yüzden analyzed nested path'ler
@@ -509,8 +512,24 @@ pub fn validate_analyzed_paths_tracked(
     node_paths: &std::collections::HashMap<u64, String>,
     snapshot: &RepositorySnapshot,
 ) -> Result<(), RepoSnapshotError> {
+    validate_analyzed_paths_canonical(node_paths, &snapshot.tracked_paths)
+}
+
+/// #210 (N1): kanonik kapsam fence'i — analyzed ⊆ kanonik tracked set.
+///
+/// Önerme `validate_analyzed_paths_tracked` ile AYNI (HEAD'e bağlı ölçüm
+/// commit'lenmemiş dosyaya dayanamaz); küme kaynağı farklıdır: CANONICAL ağaç
+/// (detached worktree @ pinned HEAD, submodule'ler pinned gitlink'lerde init'li).
+/// N1 ile ölçüm kanonikleşti — çağırıcının worktree'ünde submodule init'sizken
+/// ölçüm submodule içeriğini görünce canlı-snapshot kümesi yanlış-RED üretirdi
+/// (run-27 #210 sınıfının fence-yüzeyi). Tek sözleşme: snapshot türevli eski
+/// çağrı bu fonksiyona delege eder.
+pub fn validate_analyzed_paths_canonical(
+    node_paths: &std::collections::HashMap<u64, String>,
+    canonical_tracked: &std::collections::BTreeSet<String>,
+) -> Result<(), RepoSnapshotError> {
     for path in node_paths.values() {
-        if !snapshot.tracked_paths.contains(path) {
+        if !canonical_tracked.contains(path) {
             return Err(RepoSnapshotError::GitCommandFailed {
                 command: "ls-tree",
                 detail: format!(

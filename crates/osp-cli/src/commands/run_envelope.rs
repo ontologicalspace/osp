@@ -110,8 +110,10 @@ pub struct CliRunResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<CliPendingAuthorizationIdentity>,
     /// **#204:** yalnız opt-in `--allow-declared-dirty` koşuları için `Some` —
-    /// fence kararı + ölçüm provenansı. Default koşuların baytları değişmez;
-    /// opt-in'de kayıt ZORUNLUDUR (flag var + kayıt yok → persist öncesi RED).
+    /// fence kararı + ölçüm provenansı. Zarf ALANLARI değişmez (default koşularda
+    /// bu alan yok — skip_serializing_if); #210 N1 ile default koşunun ölçtüğü
+    /// KAPSAM/digest değişebilir (kanonik ağaç) — zarf şeması aynı kalır.
+    /// Opt-in'de kayıt ZORUNLUDUR (flag var + kayıt yok → persist öncesi RED).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fence: Option<CliDeclaredDirtyFenceRecord>,
 }

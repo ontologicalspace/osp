@@ -320,13 +320,7 @@ pub fn run_realization_gate(args: RealizationGateArgs) -> anyhow::Result<()> {
             })?;
             let before_digest = osp_core::authorization::SpaceDigest::compute(&before.space)
                 .map_err(|e| anyhow::anyhow!("gate before-analysis digest failed: {e}"))?;
-            anyhow::ensure!(
-                before_digest == binding.base_content_digest,
-                "space-content parity fence: the gate's own before-analysis of base_head does \
-                 not reproduce the pending authorization's base content digest — the \
-                 authorization was measured on a different base than this repo state \
-                 (binding refused)"
-            );
+            enforce_base_content_parity(&binding.base_content_digest, &before_digest, &base_head)?;
         }
 
         // (b) Patch'i uygula (MUTLAK yol — git worktree -C ile göreli yolu
@@ -581,6 +575,28 @@ struct ResumedBinding {
     pending_ref: String,
     /// Bağlanan receipt'in sha256 digest'i (read-once baytlardan).
     receipt_digest: String,
+}
+
+/// **#203 m.5b digest-parity fence — #210 yan-karar:** RED mesajı İKİ digest'i
+/// de taşır (beklenen [pending] vs ölçülen [gate]) — asimetri iki değer yan yana
+/// göründüğü an okunur (#210 kök-nedene gidiş ~1 saat sürdü; tek-değerli mesaj
+/// teşhisi geciktiriyordu).
+fn enforce_base_content_parity(
+    expected: &osp_core::authorization::SpaceDigest,
+    measured: &osp_core::authorization::SpaceDigest,
+    base_head: &str,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        expected == measured,
+        "space-content parity fence: the gate's own before-analysis of base_head does \
+         not reproduce the pending authorization's base content digest — expected \
+         [pending] {} but measured [gate] {} at base_head {base_head}; the \
+         authorization was measured on a different base than this repo state \
+         (binding refused)",
+        expected.to_hex(),
+        measured.to_hex()
+    );
+    Ok(())
 }
 
 /// **#203 bağlama sözleşmesi — attempt→pending tam kimlik bağı.** Yalnız
@@ -1091,6 +1107,46 @@ mod tests {
             r#"{"patch_created":true,"parse":true,"build":{"outcome":"succeeded"},"c_observed":0.5}"#
         )
         .is_err());
+    }
+
+    /// #210 yan-karar: m.5b parity RED mesajı İKİ digest'i de taşır —
+    /// beklenen [pending] ve ölçülen [gate] yan yana görünür.
+    #[test]
+    fn parity_fence_red_message_carries_both_digests() {
+        let digest_of = |space: &osp_core::space::Space| {
+            osp_core::authorization::SpaceDigest::compute(space).expect("digest")
+        };
+        let empty = osp_core::space::Space::default();
+        let mut one_node = osp_core::space::Space::default();
+        one_node.nodes.insert(
+            42,
+            osp_core::space::Node {
+                id: 42,
+                ..Default::default()
+            },
+        );
+        let d_empty = digest_of(&empty);
+        let d_one = digest_of(&one_node);
+        assert_ne!(d_empty.to_hex(), d_one.to_hex(), "ayrışan uzaylar");
+
+        // Eşitse sessiz geçiş.
+        enforce_base_content_parity(&d_empty, &d_empty, "abc123").expect("parity holds");
+
+        // Ayrışmada RED: mesaj iki digest'i VE base_head'i adıyla taşır.
+        let err = enforce_base_content_parity(&d_empty, &d_one, "abc123")
+            .expect_err("mismatched digests must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("[pending]"), "{msg}");
+        assert!(
+            msg.contains(&d_empty.to_hex()),
+            "expected digest visible: {msg}"
+        );
+        assert!(msg.contains("[gate]"), "{msg}");
+        assert!(
+            msg.contains(&d_one.to_hex()),
+            "measured digest visible: {msg}"
+        );
+        assert!(msg.contains("abc123"), "base_head anchored: {msg}");
     }
 
     #[test]

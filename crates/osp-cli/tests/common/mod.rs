@@ -295,6 +295,46 @@ impl HarnessFixture {
             .expect("run osp")
     }
 
+    /// #210 (N1): kanonik ölçüm detached worktree'de `submodule update --init`
+    /// çağırır — file:// URL'li submodule'lerde protokol izni CAĞIRANDAN gelir
+    /// (araç güvenlik varsayınını sessizce gevşetmez; init başarısızlığı bilinçli
+    /// fail-closed RED'dir). Submodule'li fixture testleri bu varyantı kullanır.
+    pub fn run_attempt_file_submodules(
+        &self,
+        task_path: &std::path::Path,
+        proposals_path: &std::path::Path,
+        positional_task_id: u64,
+        format: &str,
+    ) -> std::process::Output {
+        let _guard = OSP_ATTEMPT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cmd = Command::cargo_bin("osp").expect("osp binary");
+        cmd.env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .env("GIT_CONFIG_VALUE_0", "always");
+        cmd.current_dir(self.work_path())
+            .arg("trajectory")
+            .arg("attempt")
+            .arg(positional_task_id.to_string())
+            .arg("--repo")
+            .arg(self.repo_path())
+            .arg("--execution-mode")
+            .arg("harness")
+            .arg("--witness")
+            .arg("harness-auto-approve")
+            .arg("--llm")
+            .arg("mock")
+            .arg("--proposals")
+            .arg(proposals_path)
+            .arg("--task")
+            .arg(task_path)
+            .arg("--state-dir")
+            .arg(self.work_path()) // harness invariant: state-dir outside repo (P0)
+            .arg("--format")
+            .arg(format)
+            .output()
+            .expect("run osp")
+    }
+
     /// Assert the analyzed repo has no `.osp/` state (no side-effects leaked into repo).
     /// Review P1-2 — fail-closed must leave the repo untouched.
     pub fn assert_repo_clean(&self) {
