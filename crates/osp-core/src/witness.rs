@@ -127,8 +127,10 @@ impl WitnessSet {
     /// **inv #1 + #2 — tek giriş noktası.** Author'ı çıkar + actor-eksenli dedup
     /// (her tanık için en güçlü gözlem kalır) → `CanonicalWitnessSet`.
     ///
-    /// "dedup'i unutma" hatası imkânsız: `support()`/`approver_count()` sadece
-    /// `CanonicalWitnessSet`'te, o da sadece bu metodla oluşur.
+    /// **#217 fail-closed sayısal geçerlilik:** ham sayısal alanlar TÜM olaylarda
+    /// doğrulanır (author ve dedup DAHİL — bir olayın Q1/Q2'de kullanılmaması ham
+    /// kümenin geçerli olduğu anlamına gelmez); hesaplanan `support`'un sonluluğu
+    /// YALNIZ author-filtreli + actor-dedup sonrası kanonik kümede kontrol edilir.
     ///
     /// **#212 seçim sözleşmesi (girdi sırasından bağımsız):** aynı actor'e ait
     /// olaylar arasında hayatta kalan, 5-anahtarlı total sırayla belirlenir —
@@ -136,9 +138,13 @@ impl WitnessSet {
     /// witness_kind canonical-rank ASC. Bu beşi eşit iki ayrı olay olamaz
     /// (actor sabitken fark yaratan tek kalan alan weight'tir) → seçim her
     /// zaman tam deterministik. NaN/∞ determinizmi `total_cmp` ile çözülür;
-    /// sayısal **geçerlilik** ayrı sözleşmedir (#217).
-    pub fn canonicalize_for(&self, author: AgentId) -> CanonicalWitnessSet {
+    /// sayısal **geçerlilik** ayrı sözleşmedir (#217 — bu sınırda RED).
+    pub fn canonicalize_for(
+        &self,
+        author: AgentId,
+    ) -> Result<CanonicalWitnessSet, WitnessNumericsError> {
         use std::collections::HashMap;
+        self.validate_numerics()?;
         let mut deduped: HashMap<AgentId, EvidenceEvent> = HashMap::new();
         for e in &self.events {
             if e.actor == author {
@@ -155,11 +161,56 @@ impl WitnessSet {
         // (id, actor): farklı actor'lerde aynı event-id HashMap iterasyon sırasını
         // sızdıramaz; tek başına id bu garantiyi vermez (#212 tur-1 P1-1).
         events.sort_by_key(|e| (e.id, e.actor));
-        CanonicalWitnessSet {
+        // #217: hesaplanan support'un temsil edilebilirliği — ham girdiler sonlu
+        // olsa bile toplam taşabilir (f64::MAX + f64::MAX). Yalnız KANONİK küme
+        // üzerinde: author'un olayı inv #1 ile dışlanmış olabilir (tur-2 P2-1).
+        let support: f64 = events.iter().map(|e| e.weight).sum();
+        if !support.is_finite() {
+            return Err(WitnessNumericsError::NonFiniteSupport { support });
+        }
+        Ok(CanonicalWitnessSet {
             events,
             min_approvers: self.min_approvers,
             quorum_threshold: self.quorum_threshold,
+        })
+    }
+
+    /// **#217 — tek kanonik sayısal geçerlilik sözleşmesi.** Ham alanları doğrular:
+    /// quorum parametreleri (`quorum_threshold` sonlu ve ≥ 0) + TÜM olayların
+    /// `weight`'i (sonlu ve ≥ 0 — negatif ağırlık tanık-susturma/quorum-düşürme
+    /// yüzeyi). `canonicalize_for` ve motorun erken kontrolü (commit_task_claim)
+    /// AYNI bu sözleşmeyi çağırır (ikinci implementasyon yok). Hesaplanan
+    /// support'un sonluluğu burada DEĞİL — kanonikleştirme sonunda
+    /// (author-filtre bağımlı). `min_approvers` serbest (usize; 0 = bilinçli
+    /// HarnessAutoApprove tanıksız-rotası — sayısal geçerlilik ≠ yetkilendirme
+    /// politikası; tanıksız-modun production izni witness-policy katmanının
+    /// sorumluluğudur).
+    pub fn validate_numerics(&self) -> Result<(), WitnessNumericsError> {
+        if !self.quorum_threshold.is_finite() {
+            return Err(WitnessNumericsError::NonFiniteQuorumThreshold {
+                threshold: self.quorum_threshold,
+            });
         }
+        if self.quorum_threshold < 0.0 {
+            return Err(WitnessNumericsError::NegativeQuorumThreshold {
+                threshold: self.quorum_threshold,
+            });
+        }
+        for e in &self.events {
+            if !e.weight.is_finite() {
+                return Err(WitnessNumericsError::NonFiniteWeight {
+                    event_id: e.id,
+                    weight: e.weight,
+                });
+            }
+            if e.weight < 0.0 {
+                return Err(WitnessNumericsError::NegativeWeight {
+                    event_id: e.id,
+                    weight: e.weight,
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -193,6 +244,31 @@ fn actor_axis_prefers(incumbent: &EvidenceEvent, challenger: &EvidenceEvent) -> 
                 .cmp(&witness_kind_rank(incumbent.witness_kind))
         })
         != std::cmp::Ordering::Less
+}
+
+/// **#217:** sayısal geçerlilik hatası — operational fault (INV-T9
+/// `InvalidWitnessEvidence` sınıfı; motor `EngineCommitError::InvalidWitnessEvidence`
+/// / resume `ResumeHeldError::InvalidEvidence` üzerinden exit 20). NaN support ile
+/// `NaN < θ == false` üzerinden Q2 bypass'ını kapatır.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum WitnessNumericsError {
+    /// Olay ağırlığı sonlu değil (NaN/±∞).
+    #[error("non-finite evidence weight: event {event_id} weight {weight:?} — weights must be finite and non-negative")]
+    NonFiniteWeight { event_id: EvidenceId, weight: f64 },
+    /// Negatif ağırlık — pozitif-kanıt modelinde temsil yok (tanık susturma yüzeyi).
+    #[error("negative evidence weight: event {event_id} weight {weight:?} — weights must be non-negative")]
+    NegativeWeight { event_id: EvidenceId, weight: f64 },
+    /// Quorum eşiği sonlu değil.
+    #[error(
+        "non-finite quorum threshold: {threshold:?} — threshold must be finite and non-negative"
+    )]
+    NonFiniteQuorumThreshold { threshold: f64 },
+    /// Negatif quorum eşiği.
+    #[error("negative quorum threshold: {threshold:?} — threshold must be non-negative")]
+    NegativeQuorumThreshold { threshold: f64 },
+    /// Ham girdiler sonlu olsa bile kanonik kümenin toplam support'u taşdı (+∞).
+    #[error("non-finite computed support: {support:?} — canonical set support overflow (sum of individually finite weights)")]
+    NonFiniteSupport { support: f64 },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -546,8 +622,16 @@ pub struct Claim {
 /// **INV-T9:** `Held` expected authorization bekleme durumudur (agent-correctable
 /// failure DEĞİL). Engine bunu `EngineCommitResult::Held`'e map'ler, navigator
 /// `AwaitingWitnesses` ile suspend eder — retry loop'a girmez, budget tüketmez.
-pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessDisposition {
-    let canon = omega.canonicalize_for(claim.author);
+///
+/// **#217:** sayısal geçerlilik ihlali operational fault'tur — domain outcome
+/// (Held/Rejected) DEĞİL; `Err(WitnessNumericsError)` olarak döner, motor
+/// `InvalidWitnessEvidence` sınıfına map'ler. `Err(e) ⇒ S_after == S_before`
+/// (mutasyon yalnız `Ok(Satisfied)` dalında).
+pub fn evaluate(
+    claim: &Claim,
+    omega: &WitnessSet,
+) -> Result<WitnessDisposition, WitnessNumericsError> {
+    let canon = omega.canonicalize_for(claim.author)?;
 
     // Snapshot — her disposition'da tam witness kanıtı taşır.
     let snapshot = WitnessQuorumSnapshot {
@@ -559,24 +643,24 @@ pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessDisposition {
 
     // Q1: distinct non-author approvers
     if canon.approver_count() < canon.min_approvers() {
-        return WitnessDisposition::Held {
+        return Ok(WitnessDisposition::Held {
             reason: WitnessHoldReason::MinApproversNotMet {
                 distinct: canon.approver_count(),
                 required: canon.min_approvers(),
             },
             snapshot,
-        };
+        });
     }
 
     // Q2: support >= quorum
     if canon.support() < canon.quorum_threshold() {
-        return WitnessDisposition::Held {
+        return Ok(WitnessDisposition::Held {
             reason: WitnessHoldReason::QuorumInsufficient {
                 support: canon.support(),
                 threshold: canon.quorum_threshold(),
             },
             snapshot,
-        };
+        });
     }
 
     // Q3 (honest-reject): Faz 1.7+ — sinyal yok, skip.
@@ -587,12 +671,12 @@ pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessDisposition {
     // preimage'ı kullanır (iki truth source drift riski kapalı).
     let delta = crate::bigbang::prospective_delta_from_claim(claim);
 
-    WitnessDisposition::Satisfied {
+    Ok(WitnessDisposition::Satisfied {
         delta,
         safety_weakened: false,
         override_reason: None,
         snapshot,
-    }
+    })
 }
 
 /// Repo/claim seviyesinde tri-state sınıflama (inv #3).
@@ -779,7 +863,7 @@ mod tests {
             ev(2, "PR#2", WitnessKind::MergeCommit, 100), // author!
             ev(3, "PR#3", WitnessKind::MergeCommit, 300),
         ]);
-        let canon = omega.canonicalize_for(100);
+        let canon = omega.canonicalize_for(100).unwrap();
         // author (100) çıkarıldı → 2 approver (200, 300)
         assert_eq!(canon.approver_count(), 2);
         assert!(!canon.events().iter().any(|e| e.actor == 100));
@@ -793,7 +877,7 @@ mod tests {
             ev(1, "PR#1", WitnessKind::MergeCommit, 100),
             ev(2, "PR#2", WitnessKind::MergeCommit, 100),
         ]);
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(
             result,
             WitnessDisposition::Held {
@@ -813,7 +897,7 @@ mod tests {
             ev(1, "PR#42", WitnessKind::MergeCommit, 200),
             ev(2, "commit-abc", WitnessKind::MergeCommit, 200),
         ]);
-        match evaluate(&claim, &omega) {
+        match evaluate(&claim, &omega).unwrap() {
             WitnessDisposition::Held { reason, snapshot } => {
                 assert!(matches!(
                     reason,
@@ -845,7 +929,7 @@ mod tests {
             ev(1, "PR#42", WitnessKind::MergeCommit, 200),
             ev(2, "PR#42", WitnessKind::CoAuthored, 200), // same source+actor+claim
         ]);
-        let canon = omega.canonicalize_for(999); // author yok
+        let canon = omega.canonicalize_for(999).unwrap(); // author yok
         assert_eq!(canon.approver_count(), 1, "aynı key → 1 event");
         assert!(
             (canon.support() - 1.0).abs() < 1e-9,
@@ -867,7 +951,7 @@ mod tests {
                 200,
             ),
         ]);
-        let canon = omega.canonicalize_for(999);
+        let canon = omega.canonicalize_for(999).unwrap();
         assert_eq!(canon.approver_count(), 1, "aynı actor → 1 olay");
         assert!(
             (canon.support() - 0.8).abs() < 1e-9,
@@ -887,7 +971,7 @@ mod tests {
                 200,
             ),
         ]);
-        let canon = omega.canonicalize_for(999);
+        let canon = omega.canonicalize_for(999).unwrap();
         assert_eq!(canon.approver_count(), 1);
         assert!(
             (canon.support() - 1.0).abs() < 1e-9,
@@ -934,8 +1018,10 @@ mod tests {
             ),
         ];
         for (name, a, b, winner) in rows {
-            let fwd = WitnessSet::new(vec![a.clone(), b.clone()]).canonicalize_for(999);
-            let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999);
+            let fwd = WitnessSet::new(vec![a.clone(), b.clone()])
+                .canonicalize_for(999)
+                .unwrap();
+            let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999).unwrap();
             assert_eq!(fwd, rev, "{name}: girdi sırası sonucu değiştirdi");
             assert_eq!(fwd.events(), &[winner], "{name}: yanlış olay hayatta kaldı");
         }
@@ -948,8 +1034,10 @@ mod tests {
         let a = ev_w(7, "trailer:Z", WitnessKind::MergeCommit, 200, 1, 1.0);
         let b = ev_w(7, "PR#A", WitnessKind::MergeCommit, 200, 1, 1.0);
         let expected = b.clone();
-        let fwd = WitnessSet::new(vec![a.clone(), b.clone()]).canonicalize_for(999);
-        let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999);
+        let fwd = WitnessSet::new(vec![a.clone(), b.clone()])
+            .canonicalize_for(999)
+            .unwrap();
+        let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999).unwrap();
         assert_eq!(fwd, rev);
         assert_eq!(
             fwd.events(),
@@ -972,7 +1060,7 @@ mod tests {
                 400,
             ),
         ]);
-        let canon = omega.canonicalize_for(999);
+        let canon = omega.canonicalize_for(999).unwrap();
         assert_eq!(canon.approver_count(), 3);
         assert!((canon.support() - (1.0 + 1.0 + 0.7)).abs() < 1e-9);
     }
@@ -985,8 +1073,10 @@ mod tests {
         // id eşitse actor'a göre, 200 < 300 → actor 200'nin olayı önce.
         let a = ev(7, "PR#1", WitnessKind::MergeCommit, 200);
         let b = ev(7, "PR#2", WitnessKind::PRMerged, 300);
-        let fwd = WitnessSet::new(vec![a.clone(), b.clone()]).canonicalize_for(999);
-        let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999);
+        let fwd = WitnessSet::new(vec![a.clone(), b.clone()])
+            .canonicalize_for(999)
+            .unwrap();
+        let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999).unwrap();
         assert_eq!(fwd, rev, "girdi sırası çıktıyı değiştirdi");
         let actors: Vec<AgentId> = fwd.events().iter().map(|e| e.actor).collect();
         assert_eq!(
@@ -1003,7 +1093,7 @@ mod tests {
             ev(1, "PR#42", WitnessKind::MergeCommit, 200),
             ev(2, "PR#42", WitnessKind::MergeCommit, 300),
         ]);
-        let canon = omega.canonicalize_for(999);
+        let canon = omega.canonicalize_for(999).unwrap();
         assert_eq!(canon.approver_count(), 2);
     }
 
@@ -1017,7 +1107,7 @@ mod tests {
             ev(2, "PR#2", WitnessKind::MergeCommit, 300),
         ]);
         // support = 2.0 ≥ 1.5, 2 distinct ≥ 2 → Satisfied
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(
             result,
             WitnessDisposition::Satisfied {
@@ -1036,7 +1126,7 @@ mod tests {
             ev(2, "t2", WitnessKind::TrailerReviewed, 300),
             ev(3, "t3", WitnessKind::TrailerReviewed, 400),
         ]);
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
     }
 
@@ -1045,7 +1135,7 @@ mod tests {
         // 1 MergeCommit: support=1.0 ama distinct=1 < 2 → Held (Q1 önce)
         let claim = claim_with_author(100);
         let omega = WitnessSet::new(vec![ev(1, "PR#1", WitnessKind::MergeCommit, 200)]);
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(
             result,
             WitnessDisposition::Held {
@@ -1066,7 +1156,7 @@ mod tests {
             ev(1, "c1", WitnessKind::CoAuthored, 200),
             ev(2, "c2", WitnessKind::CoAuthored, 300),
         ]);
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(
             result,
             WitnessDisposition::Held {
@@ -1094,7 +1184,7 @@ mod tests {
             ),
             ev(3, "commit-x", WitnessKind::CoAuthored, 300),
         ]);
-        match evaluate(&claim, &omega) {
+        match evaluate(&claim, &omega).unwrap() {
             WitnessDisposition::Held { reason, snapshot } => {
                 assert!(
                     matches!(
@@ -1120,7 +1210,7 @@ mod tests {
     fn evaluate_empty_set_holds() {
         let claim = claim_with_author(100);
         let omega = WitnessSet::new(vec![]);
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(result, WitnessDisposition::Held { .. }));
     }
 
@@ -1132,7 +1222,7 @@ mod tests {
         let claim = claim_with_author(100);
         let omega =
             WitnessSet::new(vec![ev(1, "PR#1", WitnessKind::MergeCommit, 200)]).with_quorum(1, 1.0);
-        let result = evaluate(&claim, &omega);
+        let result = evaluate(&claim, &omega).unwrap();
         assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
     }
 
@@ -1149,7 +1239,7 @@ mod tests {
             ev(1, "PR#1", WitnessKind::MergeCommit, 200),
             ev(2, "PR#2", WitnessKind::MergeCommit, 300),
         ]);
-        if let WitnessDisposition::Satisfied { delta, .. } = evaluate(&claim, &omega) {
+        if let WitnessDisposition::Satisfied { delta, .. } = evaluate(&claim, &omega).unwrap() {
             assert_eq!(delta.new_nodes.len(), 1);
             assert_eq!(delta.new_nodes[0].id, 42);
         } else {
@@ -1328,7 +1418,7 @@ mod tests {
             ),
             "got {err:?}"
         );
-        let canon = WitnessSet::new(events).canonicalize_for(999);
+        let canon = WitnessSet::new(events).canonicalize_for(999).unwrap();
         assert_eq!(canon.approver_count(), 1, "çekirdek tekil temsil üretir");
     }
 
@@ -1349,5 +1439,187 @@ mod tests {
     fn validate_external_evidence_empty_set_is_clean() {
         // Boş kanıt dosyası kusur DEĞİL — StillHeld domain outcome'ıdır.
         assert!(validate_external_evidence(&[], 100).is_ok());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #217 — fail-closed sayısal geçerlilik (plan-v0 K-1/K-2/K-3 probe'ları;
+    // hepsi varyant-assert'li — "is_err değil, DOĞRU ret kimliği")
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn nan_weight_is_invalid_evidence() {
+        // K-3 CE1 (#217 asıl ihlali): Q1 GEÇEN küme (2 distinct actor) + NaN
+        // ağırlık → eskiden support=NaN → `NaN < 1.5` false → Satisfied (bypass);
+        // şimdi operational fault.
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, f64::NAN),
+            ev_w(2, "PR#2", WitnessKind::CoAuthored, 300, 1, 0.4),
+        ]);
+        let err = evaluate(&claim, &omega).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WitnessNumericsError::NonFiniteWeight { event_id: 1, .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn infinite_weight_rejected() {
+        let omega = WitnessSet::new(vec![ev_w(
+            1,
+            "PR#1",
+            WitnessKind::MergeCommit,
+            200,
+            1,
+            f64::INFINITY,
+        )]);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WitnessNumericsError::NonFiniteWeight { event_id: 1, .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn negative_weight_rejected() {
+        // Negatif ağırlık = tanık-susturma/quorum-düşürme yüzeyi — pozitif-kanıt
+        // modelinde temsil yok.
+        let omega = WitnessSet::new(vec![ev_w(
+            1,
+            "PR#1",
+            WitnessKind::MergeCommit,
+            200,
+            1,
+            -1.0,
+        )]);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WitnessNumericsError::NegativeWeight { event_id: 1, weight } if weight == -1.0
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nan_quorum_threshold_rejected() {
+        let omega = WitnessSet::new(vec![]).with_quorum(2, f64::NAN);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(err, WitnessNumericsError::NonFiniteQuorumThreshold { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn positive_infinite_threshold_rejected() {
+        let omega = WitnessSet::new(vec![]).with_quorum(2, f64::INFINITY);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(err, WitnessNumericsError::NonFiniteQuorumThreshold { .. }),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn negative_threshold_rejected() {
+        let omega = WitnessSet::new(vec![]).with_quorum(2, -0.1);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WitnessNumericsError::NegativeQuorumThreshold { threshold } if threshold == -0.1
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn nan_author_weight_rejected() {
+        // K-1 CE1: doğrulama author-filtresinden ÖNCE — author'un bozuk olayı da
+        // ham küme kusurudur (Q1/Q2'de kullanılmaması geçerli olduğu anlamına gelmez).
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "PR#1", WitnessKind::MergeCommit, 100, 1, f64::NAN), // author!
+            ev_w(2, "PR#2", WitnessKind::MergeCommit, 200, 1, 1.0),
+        ]);
+        let err = omega.canonicalize_for(100).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WitnessNumericsError::NonFiniteWeight { event_id: 1, .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_weaker_duplicate_rejected() {
+        // K-1 CE2: doğrulama dedup'tan ÖNCE — actor-eksenli seçimin ELEYECEĞİ
+        // zayıf kopyanın bozuk ağırlığı bile RED üretir.
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, 1.0), // güçlü — hayatta kalırdı
+            ev_w(2, "PR#1", WitnessKind::CoAuthored, 200, 1, f64::NAN), // zayıf kopya — dedup elerdi
+        ]);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                WitnessNumericsError::NonFiniteWeight { event_id: 2, .. }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn finite_weights_support_overflow_rejected() {
+        // K-3 CE2: ham girdiler sonlu; KANONİK kümenin toplamı taşar → RED.
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "a", WitnessKind::MergeCommit, 200, 1, f64::MAX),
+            ev_w(2, "b", WitnessKind::MergeCommit, 300, 1, f64::MAX),
+        ]);
+        let err = omega.canonicalize_for(999).unwrap_err();
+        assert!(
+            matches!(err, WitnessNumericsError::NonFiniteSupport { .. }),
+            "got {err:?}"
+        );
+        // Ters yön (tur-2 P2-1): author'un f64::MAX'i inv #1 ile dışlanır →
+        // kalan kanonik küme SONLU → geçerli küme yanlış reddedilMEZ.
+        let omega_author = WitnessSet::new(vec![
+            ev_w(1, "a", WitnessKind::MergeCommit, 100, 1, f64::MAX), // author
+            ev_w(2, "b", WitnessKind::MergeCommit, 200, 1, f64::MAX),
+        ]);
+        let canon = omega_author
+            .canonicalize_for(100)
+            .expect("author dışlanınca kalan support sonlu — geçerli");
+        assert_eq!(canon.approver_count(), 1);
+    }
+
+    #[test]
+    fn harness_zero_quorum_remains_valid() {
+        // K-2 bilinçli-geçerli pini: (0, 0.0) = HarnessAutoApprove tanıksız-rotası —
+        // sayısal geçerlilik bunu HARİÇ TUTMAZ (sayısal ≠ yetkilendirme politikası).
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![]).with_quorum(0, 0.0);
+        let result = evaluate(&claim, &omega).expect("(0, 0.0) geçerli konfigürasyon");
+        assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
+    }
+
+    #[test]
+    fn zero_weight_is_valid() {
+        // Sıfır ağırlık = nötr tanık — zararsız, geçerli (yalnız negatif/sonsuza RED).
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, 0.0),
+            ev_w(2, "PR#2", WitnessKind::MergeCommit, 300, 1, 1.0),
+        ]);
+        let canon = omega.canonicalize_for(999).unwrap();
+        assert_eq!(canon.approver_count(), 2);
+        assert!((canon.support() - 1.0).abs() < 1e-9);
     }
 }

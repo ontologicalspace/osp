@@ -758,9 +758,16 @@ impl TryFrom<&crate::witness::WitnessSet> for CanonicalWitnessPolicy {
         if !omega.quorum_threshold.is_finite() {
             return Err(AuthorizationBasisDigestError::NonFiniteRejected);
         }
+        // **#217 (tur-1 P2-1):** sessiz `as u32` daraltması yasak — u32 sınırları
+        // aşılırsa kontrollü hata (runtime quorum ↔ authorization basis aynı sayı).
+        let min_approvers = u32::try_from(omega.min_approvers).map_err(|_| {
+            AuthorizationBasisDigestError::MinApproversOutOfRange {
+                value: omega.min_approvers as u64,
+            }
+        })?;
         Ok(Self {
             schema_version: 1,
-            min_approvers: omega.min_approvers as u32,
+            min_approvers,
             quorum_threshold: omega.quorum_threshold,
             independence_policy: WitnessIndependencePolicyTag::default(),
         })
@@ -5243,6 +5250,12 @@ pub enum CanonicalDigestError {
     /// `gate_decision_tag_v1` (fallible) kullanır; bu varyantlar Err döndürür.
     #[error("V1 encoder cannot encode V2-only GateDecision variant (tag {tag}) — V1 byte contract frozen")]
     UnsupportedV1GateDecision { tag: u8 },
+    /// **#217 (tur-1 P2-1):** `min_approvers` u32 sınırlarını aşıyor — sessiz `as u32`
+    /// daraltması YASAK; runtime quorum ile authorization basis farklı sayılar taşıyamaz.
+    #[error(
+        "min_approvers {value} exceeds u32::MAX — cannot narrow for canonical policy without loss"
+    )]
+    MinApproversOutOfRange { value: u64 },
 }
 
 /// Backward-compat alias — eski call site'lar çalışmaya devam eder. Yeni kod
@@ -12437,6 +12450,46 @@ mod tests {
     }
 
     #[test]
+    fn invalid_resume_preserves_revision() {
+        // #217 K-3 CE4: programatik sayısal kusurla resume → ResumeHeldError::
+        // InvalidEvidence + t_c/space revision/kayıtlı authorization DEĞİŞMEZ.
+        // (Wire NaN üretemez — serde_json; bu YALNIZ programatik API sınırı.)
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base.clone());
+
+        let mut nan_event = resume_event(1, 200, 42);
+        nan_event.weight = f64::NAN;
+        let t_c_before = engine.t_c();
+        let err = engine
+            .resume_held_authorization(&envelope, vec![nan_event, resume_event(2, 300, 42)])
+            .expect_err("NaN-weight evidence must be an operational fault");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::InvalidEvidence { ref detail }
+                    if detail.contains("weight")
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(engine.t_c(), t_c_before, "resume Err ⇒ t_c değişmez");
+        assert_eq!(
+            engine.current_space_view_revision().unwrap().sequence,
+            base.sequence,
+            "resume Err ⇒ space revision değişmez"
+        );
+        // Kayıtlı authorization duruyor — aynı envelope ile temiz kanıt retry edilebilir.
+        let outcome = engine.resume_held_authorization(
+            &envelope,
+            vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+        );
+        assert!(
+            outcome.is_ok(),
+            "Err uzayı/kaydı kirletmedi — temiz retry çalışmalı: {outcome:?}"
+        );
+    }
+
+    #[test]
     fn resume_foreign_claim_evidence_fail_closed() {
         let mut engine = resume_test_engine([0xdd; 16]);
         let base = engine.current_space_view_revision().unwrap();
@@ -13827,6 +13880,24 @@ mod tests {
         let omega2 = crate::witness::WitnessSet::new(vec![]).with_quorum(5, 3.0);
         let policy2 = CanonicalWitnessPolicy::try_from(&omega2).unwrap();
         assert_ne!(policy.min_approvers, policy2.min_approvers);
+    }
+
+    #[test]
+    fn min_approvers_u32_overflow_rejected() {
+        // #217 (tur-1 P2-1): `as u32` sessiz daraltması YASAK — u32 sınırları
+        // aşılırsa kontrollü hata (runtime quorum ↔ authorization basis aynı sayı).
+        // 64-bit ortamda u32::MAX+1 usize'a sığar; 32-bit'te bu test satırı zaten
+        // derlenmez (usize = u32) — CI 64-bit.
+        let overflow_min = (u32::MAX as usize) + 1;
+        let omega = crate::witness::WitnessSet::new(vec![]).with_quorum(overflow_min, 1.5);
+        let err = CanonicalWitnessPolicy::try_from(&omega).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                AuthorizationBasisDigestError::MinApproversOutOfRange { value } if value == overflow_min as u64
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

@@ -2480,6 +2480,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_commit_numeric_fault_is_invalid_witness_evidence() {
+        // #217 (tur-1 P1-1 + tur-2 P1 kabul testi b): Q1-Q3'e ULAŞAN (satisfied
+        // predicate → Mainline) commit_task_claim + NaN threshold → TAM OLARAK
+        // EngineCommitError::InvalidWitnessEvidence — AuthorizationContextFailed
+        // DEĞİL (CanonicalWitnessPolicy::try_from NonFiniteRejected'inden önce
+        // erken doğrulama). + durum değişmez.
+        let mut engine = make_real_engine();
+        let policy = TaskPolicy::default();
+        let task = coupling_task(1, 0.55, policy);
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task.clone());
+        let claim = test_claim_with_task(1, Some(1), 0.40);
+        let omega = crate::witness::WitnessSet::new(Vec::new()).with_quorum(2, f64::NAN);
+        let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
+        let t_c_before = engine.t_c();
+        let nodes_before = engine.space().nodes.len();
+        let result = commit_test(
+            &mut engine,
+            &claim,
+            &task,
+            &resolver as &dyn TaskResolver,
+            &omega,
+            measured,
+        );
+        match result {
+            Err(crate::engine::EngineCommitError::InvalidWitnessEvidence(ref detail)) => {
+                assert!(
+                    detail.contains("threshold"),
+                    "sayısal kusur detay taşımali: {detail}"
+                );
+            }
+            other => panic!(
+                "EngineCommitError::InvalidWitnessEvidence bekleniyordu (AuthorizationContextFailed DEĞİL): {other:?}"
+            ),
+        }
+        assert_eq!(engine.t_c(), t_c_before, "operational fault ⇒ t_c değişmez");
+        assert_eq!(
+            engine.space().nodes.len(),
+            nodes_before,
+            "operational fault ⇒ uzay değişmez"
+        );
+    }
+
     // 8. navigator_delta_edges_affect_coupling
     #[test]
     fn navigator_delta_edges_affect_coupling() {
