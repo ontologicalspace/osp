@@ -12486,13 +12486,19 @@ mod tests {
             "got {err:?}"
         );
         assert_eq!(engine.t_c(), t_c_before, "resume Err ⇒ t_c değişmez");
+        // Tam revision değişmezliği (tur-2 P2): sequence VE content_digest.
+        let after_error = engine.current_space_view_revision().unwrap();
         assert_eq!(
-            engine.current_space_view_revision().unwrap().sequence,
-            base.sequence,
-            "resume Err ⇒ space revision değişmez"
+            after_error.sequence, base.sequence,
+            "resume Err ⇒ sequence değişmez"
+        );
+        assert_eq!(
+            after_error.content_digest.to_hex(),
+            base.content_digest.to_hex(),
+            "resume Err ⇒ content_digest değişmez"
         );
         // Kayıtlı authorization duruyor — aynı envelope ile temiz kanıt retry edilebilir.
-        // (Kod-review: varyant + content_digest assert — yalnız is_ok değil.)
+        // (Kod-review: Applied varyantı + sequence ilerlemesi — yalnız is_ok değil.)
         let outcome = engine
             .resume_held_authorization(
                 &envelope,
