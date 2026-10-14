@@ -1562,19 +1562,31 @@ mod tests {
     #[test]
     fn invalid_weaker_duplicate_rejected() {
         // K-1 CE2: doğrulama dedup'tan ÖNCE — actor-eksenli seçimin ELEYECEĞİ
-        // zayıf kopyanın bozuk ağırlığı bile RED üretir.
-        let omega = WitnessSet::new(vec![
-            ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, 1.0), // güçlü — hayatta kalırdı
-            ev_w(2, "PR#1", WitnessKind::CoAuthored, 200, 1, f64::NAN), // zayıf kopya — dedup elerdi
-        ]);
-        let err = omega.canonicalize_for(999).unwrap_err();
-        assert!(
-            matches!(
-                err,
-                WitnessNumericsError::NonFiniteWeight { event_id: 2, .. }
-            ),
-            "got {err:?}"
+        // zayıf kopyanın geçersiz ağırlığı bile RED üretir.
+        // **P1-1 (kod-review tur-1):** girdi -∞ — NaN DEĞİL. total_cmp'de pozitif
+        // NaN sonlu değerlerden BÜYÜK sıralanır (dedup'un KORUYACAĞI olay olurdu);
+        // -∞ ise 1.0 karşısında kesin zayıf → dedup'ın eleyeceği olay garanti.
+        // İki giriş sırası da doğrulanır.
+        let invalid = ev_w(
+            2,
+            "PR#1",
+            WitnessKind::CoAuthored,
+            200,
+            1,
+            f64::NEG_INFINITY,
         );
+        let strong = ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, 1.0);
+        for events in [vec![strong.clone(), invalid.clone()], vec![invalid, strong]] {
+            let omega = WitnessSet::new(events);
+            let err = omega.canonicalize_for(999).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    WitnessNumericsError::NonFiniteWeight { event_id: 2, .. }
+                ),
+                "got {err:?}"
+            );
+        }
     }
 
     #[test]
