@@ -978,6 +978,25 @@ mod tests {
     }
 
     #[test]
+    fn canonical_output_order_stable_with_same_id_across_actors() {
+        // #212 review P2-2: farklı actor'lerde AYNI event-id (wire'da
+        // DuplicateEventId ile reddedilir; programatik core girişinde mümkün) —
+        // çıktı sıralaması (id, actor) ile girdi sırasından bağımsız sabittir:
+        // id eşitse actor'a göre, 200 < 300 → actor 200'nin olayı önce.
+        let a = ev(7, "PR#1", WitnessKind::MergeCommit, 200);
+        let b = ev(7, "PR#2", WitnessKind::PRMerged, 300);
+        let fwd = WitnessSet::new(vec![a.clone(), b.clone()]).canonicalize_for(999);
+        let rev = WitnessSet::new(vec![b, a]).canonicalize_for(999);
+        assert_eq!(fwd, rev, "girdi sırası çıktıyı değiştirdi");
+        let actors: Vec<AgentId> = fwd.events().iter().map(|e| e.actor).collect();
+        assert_eq!(
+            actors,
+            vec![200, 300],
+            "(id, actor) sıralaması: id eşit → actor ASC"
+        );
+    }
+
+    #[test]
     fn dedup_different_actor_kept() {
         // Aynı PR, farklı approver → ikisi de kalır (iki kişi)
         let omega = WitnessSet::new(vec![
@@ -1056,6 +1075,45 @@ mod tests {
             }
             if (support - 0.8).abs() < 1e-9 && (threshold - 1.5).abs() < 1e-9
         ));
+    }
+
+    #[test]
+    fn evaluate_two_actors_second_evidence_not_double_counted() {
+        // #212 review P2-1: Q1 GEÇER (2 distinct actor) ama aynı actor'ün ikinci
+        // kanıtı Q2'de sayılmaz → support 1.2 < 1.5 → Held(QuorumInsufficient).
+        // Eski davranış: 3 olay, support 1.9 → Satisfied (Q2 çift-sayımdı).
+        // Q1 ve Q2'nin actor-unique sözleşmesini evaluate() ucunda birlikte doğrular.
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![
+            ev(1, "PR#1", WitnessKind::PRMerged, 200),
+            ev(
+                2,
+                "trailer: Reviewed-by:200",
+                WitnessKind::TrailerReviewed,
+                200,
+            ),
+            ev(3, "commit-x", WitnessKind::CoAuthored, 300),
+        ]);
+        match evaluate(&claim, &omega) {
+            WitnessDisposition::Held { reason, snapshot } => {
+                assert!(
+                    matches!(
+                        reason,
+                        WitnessHoldReason::QuorumInsufficient { support, threshold }
+                            if (support - 1.2).abs() < 1e-9 && (threshold - 1.5).abs() < 1e-9
+                    ),
+                    "got {reason:?}"
+                );
+                assert_eq!(snapshot.approvers, 2, "Q1 geçti: 2 distinct actor");
+                assert_eq!(snapshot.required_approvers, 2);
+                assert!(
+                    (snapshot.support - 1.2).abs() < 1e-9,
+                    "0.8 (en güçlü, actor 200) + 0.4 — 1.9 DEĞİL"
+                );
+                assert_eq!(snapshot.required_support, 1.5);
+            }
+            other => panic!("Held bekleniyordu: {other:?}"),
+        }
     }
 
     #[test]
