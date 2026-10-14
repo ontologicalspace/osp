@@ -344,8 +344,12 @@ mod tests {
         )
         .expect("strict parse");
         // 999: şablonun placeholder actor'ü (2) DEĞİL — author çakışması olmadığı
-        // varsayımı altında canonicalize events'i dışlamaz.
-        let canon = WitnessSet::new(events).canonicalize_for(999);
+        // varsayımı altında canonicalize events'i dışlamaz. #217: worked-example
+        // kanıtları WitnessKind::default_weight SABİTLERİNDEN üretilir — sayısal
+        // geçerlik yapısal (validate_numerics'in başarısız olması imkânsız).
+        let canon = WitnessSet::new(events)
+            .canonicalize_for(999)
+            .expect("worked-example evidence derives from constants — numerically valid");
         assert_eq!(canon.approver_count(), 1);
         assert_eq!(canon.min_approvers(), 2);
         assert!(

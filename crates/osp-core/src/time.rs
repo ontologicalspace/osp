@@ -23,13 +23,17 @@ use crate::witness::{evaluate, Claim, WitnessDisposition, WitnessSet};
 ///
 /// **INV-T9:** `Held` expected authorization bekleme, `Rejected` explicit witness ret —
 /// ikisi de expected domain outcome, HATA DEĞİL.
+///
+/// **#217:** sayısal geçerlilik ihlali operational fault'tur — `Err(
+/// WitnessNumericsError)` olarak döner; `Err(e) ⇒ space DOKUNULMAZ` (mutasyon
+/// yalnız `Ok(Satisfied)` dalında — yapısal fail-closed).
 pub trait TimeMachine {
     fn advance(
         &mut self,
         space: &mut Space,
         claim: &Claim,
         omega: &WitnessSet,
-    ) -> WitnessDisposition;
+    ) -> Result<WitnessDisposition, crate::witness::WitnessNumericsError>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -50,8 +54,8 @@ impl TimeMachine for TimeFSM {
         space: &mut Space,
         claim: &Claim,
         omega: &WitnessSet,
-    ) -> WitnessDisposition {
-        match evaluate(claim, omega) {
+    ) -> Result<WitnessDisposition, crate::witness::WitnessNumericsError> {
+        match evaluate(claim, omega)? {
             WitnessDisposition::Satisfied {
                 mut delta,
                 safety_weakened,
@@ -61,14 +65,14 @@ impl TimeMachine for TimeFSM {
                 // Mutasyon: apply_delta node/edge ekler + repositioned set döner (inv #6)
                 let repositioned = apply_delta(space, &delta);
                 delta.repositioned = repositioned;
-                WitnessDisposition::Satisfied {
+                Ok(WitnessDisposition::Satisfied {
                     delta,
                     safety_weakened,
                     override_reason,
                     snapshot,
-                }
+                })
             }
-            other => other, // Held/Rejected — space dokunulmaz
+            other => Ok(other), // Held/Rejected — space dokunulmaz
         }
     }
 }
@@ -110,8 +114,9 @@ mod tests {
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
-        let result = fsm.advance(&mut space, &claim, &omega);
+        let result = fsm.advance(&mut space, &claim, &omega).unwrap();
         assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
+        // (result zaten unwrap edildi — #217 Result yayılımı)
         assert_eq!(space.node_count(), 1, "node 42 eklenmiş olmalı");
         assert!(space.nodes.contains_key(&42));
     }
@@ -122,7 +127,7 @@ mod tests {
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200)]); // Held (tek witness)
-        let result = fsm.advance(&mut space, &claim, &omega);
+        let result = fsm.advance(&mut space, &claim, &omega).unwrap();
         assert!(matches!(result, WitnessDisposition::Held { .. }));
         assert_eq!(space.node_count(), 0, "Held sonrası mutasyon olmamalı");
     }
@@ -133,7 +138,8 @@ mod tests {
         let mut space = Space::new();
         let claim = claim_with(100, 42);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
-        if let WitnessDisposition::Satisfied { delta, .. } = fsm.advance(&mut space, &claim, &omega)
+        if let WitnessDisposition::Satisfied { delta, .. } =
+            fsm.advance(&mut space, &claim, &omega).unwrap()
         {
             assert_eq!(delta.new_nodes.len(), 1);
             assert_eq!(delta.new_nodes[0].id, 42);
@@ -152,7 +158,7 @@ mod tests {
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
         if let WitnessDisposition::Satisfied {
             safety_weakened, ..
-        } = fsm.advance(&mut space, &claim, &omega)
+        } = fsm.advance(&mut space, &claim, &omega).unwrap()
         {
             // Faz 1.5 evaluate hep false (admin override Faz 1.11+)
             assert!(!safety_weakened);
@@ -168,10 +174,10 @@ mod tests {
         let claim = claim_with(100, 1);
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
         // İlk advance
-        let _ = fsm.advance(&mut space, &claim, &omega);
+        let _ = fsm.advance(&mut space, &claim, &omega).unwrap();
         // FSM stateless — ikinci advance aynı claim ile tekrar çalışır (idempotent FSM)
         let claim2 = claim_with(100, 2);
-        let result = fsm.advance(&mut space, &claim2, &omega);
+        let result = fsm.advance(&mut space, &claim2, &omega).unwrap();
         assert!(matches!(result, WitnessDisposition::Satisfied { .. }));
         assert_eq!(space.node_count(), 2);
     }
@@ -183,12 +189,42 @@ mod tests {
         let omega = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
         for i in 1..=5 {
             let claim = claim_with(100, i);
-            let r = fsm.advance(&mut space, &claim, &omega);
+            let r = fsm.advance(&mut space, &claim, &omega).unwrap();
             assert!(
                 matches!(r, WitnessDisposition::Satisfied { .. }),
                 "advance #{i} Satisfied olmalı"
             );
         }
         assert_eq!(space.node_count(), 5, "5 commit → 5 node");
+    }
+
+    #[test]
+    fn invalid_evidence_does_not_mutate_space() {
+        // #217 K-3 CE3: Err(e) ⇒ S_after == S_before — mutasyon yalnız
+        // Ok(Satisfied) dalında (yapısal fail-closed).
+        let mut fsm = TimeFSM;
+        let mut space = Space::new();
+        // Önce geçerli bir commit → uzay dolu başlasın (boş-küme yanılsaması yok).
+        let good = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]);
+        let claim0 = claim_with(100, 1);
+        assert!(matches!(
+            fsm.advance(&mut space, &claim0, &good).unwrap(),
+            WitnessDisposition::Satisfied { .. }
+        ));
+        let before = space.node_count();
+        assert_eq!(before, 1);
+
+        // NaN threshold → Err + uzay AYNEN.
+        let broken = WitnessSet::new(vec![ev(1, 200), ev(2, 300)]).with_quorum(2, f64::NAN);
+        let claim1 = claim_with(100, 2);
+        let err = fsm.advance(&mut space, &claim1, &broken).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::witness::WitnessNumericsError::NonFiniteQuorumThreshold { .. }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(space.node_count(), before, "Err ⇒ uzay değişmez");
     }
 }

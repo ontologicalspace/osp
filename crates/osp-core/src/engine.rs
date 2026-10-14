@@ -1458,7 +1458,14 @@ impl SpaceEngine {
             .with_quorum(requirement.min_approvers, requirement.quorum_threshold);
 
         // 6. Değerlendir + (Satisfied ise) uygula.
-        let disposition = self.time.advance(&mut self.space, &claim, &omega);
+        // **#217:** sayısal geçerlilik ihlali operational fault — resume yüzeyinde
+        // mevcut `ResumeHeldError::InvalidEvidence` varyantı (CLI exit 20).
+        let disposition = self
+            .time
+            .advance(&mut self.space, &claim, &omega)
+            .map_err(|e| ResumeHeldError::InvalidEvidence {
+                detail: e.to_string(),
+            })?;
         match disposition {
             crate::witness::WitnessDisposition::Satisfied { snapshot, .. } => {
                 self.t_c += 1;
@@ -1987,7 +1994,11 @@ impl SpaceEngine {
         self.check_claim_rules_with_context(claim, &rule_context)?;
 
         // Phase 1: WITNESS-BASED GATES (Q1-Q3) + TIME ADVANCE (apply_delta mutasyon)
-        let result = self.time.advance(&mut self.space, claim, omega);
+        // **#217:** sayısal geçerlilik ihlali operational fault (exit 20 sınıfı).
+        let result = self
+            .time
+            .advance(&mut self.space, claim, omega)
+            .map_err(|e| EngineCommitError::InvalidWitnessEvidence(e.to_string()))?;
         let (delta, safety_weakened) = match result {
             WitnessDisposition::Satisfied {
                 delta,
@@ -2384,6 +2395,18 @@ impl SpaceEngine {
             });
         }
 
+        // **#217 (tur-2 P1 yerleşimi):** Q1-Q3'e ULAŞAN yollar için sayısal
+        // geçerlilik — NotApplied erken dönüşünden SONRA, authorization
+        // projection'dan (CanonicalWitnessPolicy::try_from — mevcut
+        // NonFiniteRejected → AuthorizationContextFailed sınıfı) ÖNCE, böylece
+        // sayısal kusur doğru normatif kimlikle reddedilir: InvalidWitnessEvidence
+        // (exit 20). Tek kanonik sözleşme: validate_numerics (aynı fn
+        // canonicalize_for içinden de çağrılır — bilinçli çift-çağrı).
+        input
+            .omega
+            .validate_numerics()
+            .map_err(|e| EngineCommitError::InvalidWitnessEvidence(e.to_string()))?;
+
         // **#100 Faz 8a (TD-3) — V2 otorite zinciri:** witness requirement gerçek
         // `input.omega`'dan (engine config DEĞİL) + bundle bütün olarak consume edilir
         // → `AuthorizationContextV2` (invariant checkpoint: witness `validate_for(
@@ -2436,7 +2459,12 @@ impl SpaceEngine {
         // **INV-T9:** WitnessDisposition::Held expected authorization bekleme, Rejected
         // explicit witness ret — ikisi de domain outcome, HATA DEĞİL. EngineCommitResult::Held/
         // Rejected olarak döner; navigator AwaitingWitnesses/RequiresRevision'a map'ler.
-        let disposition = self.time.advance(&mut self.space, input.claim, input.omega);
+        // **#217:** sayısal geçerlilik ihlali operational fault — exit 20 sınıfı
+        // (erken kontrol projection'dan önce; bu map savunma ikinci katman).
+        let disposition = self
+            .time
+            .advance(&mut self.space, input.claim, input.omega)
+            .map_err(|e| EngineCommitError::InvalidWitnessEvidence(e.to_string()))?;
         match disposition {
             WitnessDisposition::Satisfied { .. } => {
                 self.t_c += 1;
@@ -3325,7 +3353,20 @@ impl SpaceEngine {
         }
 
         // Q1-Q3 Witness
-        match crate::witness::evaluate(claim, omega) {
+        // **#217:** sayısal geçerlilik ihlali operational fault — gate listesinde
+        // failed gate olarak görünür (asıl zorlama commit yolunda advance map'inde).
+        let witness_eval = match crate::witness::evaluate(claim, omega) {
+            Ok(disposition) => disposition,
+            Err(e) => {
+                results.push(GateResult::failed(
+                    "Q1-Q3 Witness",
+                    &format!("InvalidWitnessEvidence: {e}"),
+                    None,
+                ));
+                return results; // pipeline stops — operational fault
+            }
+        };
+        match witness_eval {
             crate::witness::WitnessDisposition::Satisfied { .. } => {
                 results.push(GateResult::passed(
                     "Q1-Q3 Witness",
@@ -4701,6 +4742,23 @@ mod tests {
         assert_eq!(engine.t_c(), 1);
         engine.commit(&claim, &omega).unwrap();
         assert_eq!(engine.t_c(), 2);
+    }
+
+    #[test]
+    fn commit_numeric_fault_is_invalid_witness_evidence() {
+        // #217 K-3: legacy commit() + NaN threshold → EngineCommitError::
+        // InvalidWitnessEvidence (operational fault, exit 20 sınıfı) + uzay/t_c
+        // değişmez.
+        let mut engine = make_engine();
+        let claim = claim_with(100, CENTER);
+        let broken = WitnessSet::new(vec![]).with_quorum(2, f64::NAN);
+        let err = engine.commit(&claim, &broken).unwrap_err();
+        assert!(
+            matches!(err, EngineCommitError::InvalidWitnessEvidence(ref d) if d.contains("threshold")),
+            "got {err:?}"
+        );
+        assert_eq!(engine.t_c(), 0, "operational fault ⇒ t_c değişmez");
+        assert_eq!(engine.space().node_count(), 0, "uzay dokunulmaz");
     }
 
     // --- Q5 vision pre-check (Safety — reviewer #1) ---
@@ -6164,6 +6222,76 @@ v = 0.5
             other => {
                 panic!("#100 NoPreferredVector fixture Evaluated(Reject) bekliyordu: {other:?}")
             }
+        }
+    }
+
+    #[test]
+    fn notapplied_path_ignores_broken_omega() {
+        // #217 (tur-2 P1 kabul testi a): sayısal-bozuk omega + witness'a ULAŞMAYAN
+        // Reject→NotApplied claim → ÖNCEKİ domain outcome KORUNUR (InvalidWitnessEvidence
+        // üretilmez). Erken doğrulama NotApplied erken dönüşünden SONRA konumlandır.
+        use crate::trajectory::{AxisMetric, PredicateFailurePolicy, ProvenancedRawPosition};
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        let mut task = task_with_node_scope(1, 42);
+        task.policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        task.policy.min_improvement_delta = 0.05;
+        let mut claim = claim_with_task_id(42, vec![mod_node(1)], vec![], vec![]);
+        claim.computed_raw = RawPosition {
+            x: 0.9,
+            y: 0.5,
+            z: 0.5,
+            w: 0.5,
+            v: 0.5,
+        };
+        claim.intent = crate::witness::Intent::new(100, claim.computed_raw);
+        let mk = |v: f64| AxisMetric {
+            value: v,
+            source: crate::coords::MetricSource::Scip,
+        };
+        let measured = ProvenancedRawPosition {
+            coupling: mk(0.9), // 0.9 > 0.5 → Unsatisfied → NotCompleted → Reject
+            cohesion: mk(0.5),
+            instability: mk(0.5),
+            entropy: mk(0.5),
+            witness_depth: mk(0.5),
+        };
+        let mut resolver = crate::trajectory::InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        // Bozuk omega: NaN threshold — AMA witness aşamasına hiç ulaşılmıyor.
+        let omega = WitnessSet::new(vec![]).with_quorum(2, f64::NAN);
+        let carrier = characterization_carrier_test(&engine, &claim, measured);
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &carrier,
+            &omega,
+            &resolver as &dyn crate::trajectory::TaskResolver,
+        ));
+        match result {
+            Ok(crate::engine::EngineCommitResult::Evaluated {
+                result,
+                authorization,
+            }) => {
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::Reject
+                );
+                assert!(matches!(
+                    result.apply_target,
+                    crate::trajectory::ApplyTarget::NotApplied
+                ));
+                assert!(
+                    authorization.is_none(),
+                    "NotApplied yolu bozuk omegadan etkilenmez — authorization yine None"
+                );
+            }
+            other => panic!(
+                "NotApplied yolu ÖNCEKİ domain outcome'u korumalı (InvalidWitnessEvidence DEĞİL): {other:?}"
+            ),
         }
     }
 
