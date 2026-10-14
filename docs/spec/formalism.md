@@ -387,15 +387,22 @@ struct EvidenceEvent {
 }
 ```
 
-**Dedup kuralı:** aynı `(source, actor, claim)` üçlüsü için **en güçlü evidence** sayılır.
-Örn: PR #42'nin merge-commit'i (MergeCommit, 1.0) + aynı PR'ın PRMerged (0.8) kaydı →
-yalnızca MergeCommit (1.0) sayılır; PRMerged droplanır.
+**Dedup kuralı (#212 — actor-ekseni):** her **actor** için yalnızca **en güçlü evidence** sayılır.
+Örn: aynı tanığın (actor 200) merge-commit'i (MergeCommit, 1.0) + CoAuthored kaydı (0.4) →
+yalnızca MergeCommit (1.0) sayılır; CoAuthored droplanır. `EvidenceEvent` bir **gözlemdir,
+tanık kimliği değil** — bir tanığın N gözlemi N bağımsız onaycı yaratmaz. Aynı actor'e ait
+gözlemler arasında hayatta kalan olay, girdi sırasından bağımsız deterministik sırayla seçilir:
+weight DESC → id ASC → source ASC → claim ASC → witness_kind canonical-rank ASC.
 
 #### 4.4.2 Workflow-Agnostik Skor (dedup sonrası)
 
 ```
-support(C) = Σ_{e ∈ dedup_events(C)} e.weight        (her event bir kez)
+support(C) = Σ_{a ∈ distinct_non_author_actors} strongest(e_a).weight
 ```
+
+(`strongest(e_a)` = actor `a`'nın korunan en güçlü gözlemi — olay toplamı DEĞİL.)
+**Varsayım:** `support(C)`, C'ye bağlı kanıtlara uygulanır; bu bağlamayı çekirdek
+doğrulamaz (sınır: claim-binding — #216).
 
 Repo-level `WitnessProfile` (Faz 1.4'te `osp-core::witness`):
 ```
@@ -765,8 +772,10 @@ pub struct CoordinateSystem {
 }
 
 // ═══ Şahitlik zinciri (§4) — Evidence → WitnessSet → Status → Result ═══
-//          EvidenceEvent   : gözlemlenen kanıt (dedup birimi, inv #2)
-//          WitnessSet (Ω)  : claim için toplanmış dedup'lı kanıtlar (inv #9)
+//          EvidenceEvent   : gözlemlenen kanıt — gözlem birimi, tanık kimliği değil
+//                             (inv #2'nin girdisi; actor başına en güçlü gözlem seçilir)
+//          WitnessSet (Ω)  : claim için toplanmış HAM kanıtlar (inv #9) —
+//                             dedup burada DEĞİL, canonicalize_for'da (#212)
 //          WitnessStatus   : repo/claim seviyesinde epistemolojik durum (inv #3)
 //          WitnessResult   : Commit / Reject / Hold kararı
 
@@ -780,8 +789,9 @@ pub struct EvidenceEvent {
 }
 pub enum WitnessKind { MergeCommit, PRMerged, TrailerReviewed, CoAuthored }
 
-pub struct WitnessSet {              // W(C, Ω)'nın Ω'sı
-    pub events: Vec<EvidenceEvent>,  // dedup'lı (inv #2)
+pub struct WitnessSet {              // W(C, Ω)'nın Ω'sı — ham kanıtlar
+    pub events: Vec<EvidenceEvent>,  // dedup EDİLMEMİŞ; actor-eksenli dedup
+                                     // canonicalize_for'da (inv #2, #212)
     pub min_approvers: usize,        // default 2 (inv #1 — author dışarıda)
     pub quorum_threshold: f64,       // θ_quorum, default 1.5
 }

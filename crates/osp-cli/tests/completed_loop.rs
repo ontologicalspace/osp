@@ -1456,8 +1456,8 @@ fn production_resume_defective_evidence_exit_20() {
         "stderr explains author-self rejection"
     );
 
-    // (b) duplicate actor (aynı actor, farklı kaynak) — triple-dedup tek başına
-    // yakalamaz; yüzey doğrulaması reddeder.
+    // (b) duplicate actor (aynı actor, farklı kaynak) — #212'den beri çekirdek
+    // actor-eksenli seçer; wire yüzeyi yine de dosya kusuru olarak reddeder.
     let dup_path = fx.work_path().join("witnesses-dup.json");
     let dup_events = serde_json::json!([
         { "id": 1, "source": "PR#1", "witness_kind": "MergeCommit", "actor": 200, "claim": claim_id },
