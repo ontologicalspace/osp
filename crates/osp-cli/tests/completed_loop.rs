@@ -2892,11 +2892,20 @@ fn post_checkout_hook_attempt_fails_closed_without_artifact() {
     // etkilenmesin); hook yalnız `git worktree add` checkout'unda koşar.
     let hooks = fx.repo_path().join(".git").join("hooks");
     fs::create_dir_all(&hooks).expect("hooks dir");
+    let hook = hooks.join("post-checkout");
     fs::write(
-        hooks.join("post-checkout"),
+        &hook,
         "#!/bin/sh\nprintf '// injected by hook\\n' >> main.rs\n",
     )
     .expect("write hook");
+    // Linux'ta git, çalıştırma biti OLMAYAN hook'u atlar (Windows'ta atlamaz) —
+    // yerel/CI ayrışmasını kapatmak için POSIX tarafında +x zorlanır.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod +x hook");
+    }
 
     let env = task_envelope(&fx.head, 2);
     let task_path = fx.write_task(&env);
