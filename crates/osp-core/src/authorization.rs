@@ -9579,20 +9579,29 @@ impl ResumeReceipt {
 
     /// **R1 P1-1:** Receipt'i askılı kayda karşı doğrula — tek doğrulama yüzeyi.
     ///
-    /// Schema sabiti + kimlik üçlüsü (task/claim/attempt) + evidence digest hex'i
-    /// record ile eşit olmalı. Sapma = receipt başka bir askıya ait ya da forge
-    /// → `Err` (fail-closed; "already applied" olarak sayılmaz).
+    /// Şema kabul listesi (v1 | v2 — **#220**) + kimlik üçlüsü (task/claim/
+    /// attempt) + evidence digest hex'i record ile eşit olmalı. Sapma =
+    /// receipt başka bir askıya ait ya da forge → `Err` (fail-closed;
+    /// "already applied" olarak sayılmaz).
+    ///
+    /// **#220 — şema = deklaratif metadata (N2):** v2, digest'in weight dahil
+    /// v2 kodlamasıyla üretildiğini BİLDİRİR; kriptografik doğrulama DEĞİL
+    /// (sürüm alanının tek başına değiştirilmesi şekil kontrollerince tespit
+    /// edilmez). Tek şema politikası: store / realization-gate / finalize bu
+    /// doğrulayıcıyı paylaşır.
     ///
     /// **R2 P1 yapısal kontroller:** kanıt bağlama alanları shape-düzeyinde
     /// doğulanır (trust modu bilinen değer, digest 64-hex, actor listesi
     /// sorted+distinct+non-empty) — bunların record'la çapraz kontrolü yoktur
     /// (run'a özgü veri); görevleri kalıcı kaydın dürüst biçimde dolu olması.
     pub fn verify_against(&self, record: &PendingAuthorization) -> Result<(), String> {
-        if self.schema != RESUME_RECEIPT_SCHEMA {
-            return Err(format!(
-                "schema {:?} ≠ expected {:?}",
-                self.schema, RESUME_RECEIPT_SCHEMA
-            ));
+        match self.schema.as_str() {
+            RESUME_RECEIPT_SCHEMA_V1 | RESUME_RECEIPT_SCHEMA => {}
+            other => {
+                return Err(format!(
+                    "unsupported receipt schema {other:?} (known: {RESUME_RECEIPT_SCHEMA_V1:?}, {RESUME_RECEIPT_SCHEMA:?})"
+                ));
+            }
         }
         if self.task_id != record.task_id {
             return Err(format!(
@@ -9642,8 +9651,14 @@ impl ResumeReceipt {
     }
 }
 
-/// Resume receipt schema sabiti.
-pub const RESUME_RECEIPT_SCHEMA: &str = "osp.resume-receipt.v1";
+/// Resume receipt schema sabiti — yeni yazımlar (**#220**): v2 şeması,
+/// receipt'in `witness_evidence_digest_hex`'inin **v2 digest kodlamasıyla**
+/// (weight dahil) üretildiğini bildirir.
+pub const RESUME_RECEIPT_SCHEMA: &str = "osp.resume-receipt.v2";
+/// Tarihsel v1 şeması (weight'siz v1 digest kodlaması) — YALNIZ okuma: eski
+/// receipt'ler mevcut anlamlarıyla geçerli kalır; yeniden YAZILMAZ (#220 —
+/// idempotent yeniden-resume mevcut v1 receipt'i korur).
+pub const RESUME_RECEIPT_SCHEMA_V1: &str = "osp.resume-receipt.v1";
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // #164 R2 — Evidence trust boundary + witness kanıt digest'i
@@ -9686,24 +9701,77 @@ impl EvidenceTrustMode {
     }
 }
 
-/// **#164 R2 P1:** Resume'da değerlendirilen witness kanıt dizisinin digest'i.
+/// **#220:** `ResumeWitnessEvidenceDigest` üretiminin public hata tipi —
+/// nötr `CanonicalEncodingError` (crate-private) dış API'ye SIZMAZ;
+/// `event_id` bağlamı #217 tanılama geleneğini taşır (tur-2: `From` tek
+/// başına bu bağlamı veremediğinden eşleme olay döngüsünde yapılır).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ResumeWitnessEvidenceDigestError {
+    /// Olayın weight'i sonlu değil (NaN/±∞) — digest non-finite değeri
+    /// bağlayamaz; #217 numerics sınırının digest katmanındaki yansıması.
+    #[error(
+        "non-finite weight (NaN or ±Infinity) in resume witness evidence event {event_id} — digest cannot bind it"
+    )]
+    NonFiniteWeight { event_id: u64 },
+    /// Kanonik uzunluk taşması (stable surface — mevcut call site'larda
+    /// üretilemez; `CanonicalDigestError::LengthOverflow` ile paralel).
+    #[error("canonical length overflow in {field}")]
+    LengthOverflow { field: &'static str },
+}
+
+impl ResumeWitnessEvidenceDigestError {
+    /// Nötr encoder hatasını olay bağlamıyla eşle (tükenmez — her iki
+    /// varyant; `CanonicalEncodingError`'un tamamı karşılanır).
+    fn from_canonical_encoding(err: CanonicalEncodingError, event_id: u64) -> Self {
+        match err {
+            CanonicalEncodingError::NonFiniteRejected => Self::NonFiniteWeight { event_id },
+            CanonicalEncodingError::LengthOverflow { field } => Self::LengthOverflow { field },
+        }
+    }
+}
+
+/// **#164 R2 P1 / #220:** Resume'da değerlendirilen witness kanıt dizisinin
+/// digest'i.
 ///
-/// Kanonik kodlama (BLAKE3, domain-separated): olay sayısı (u64 LE) + her olay
-/// (id'ye göre sorted): id (u64 LE) + source (u64 LE uzunluk + baytlar) +
-/// witness_kind tag (u8: MergeCommit=0, PRMerged=1, TrailerReviewed=2,
-/// CoAuthored=3) + actor (u64 LE) + claim (u64 LE). Weight DAHİL DEĞİL —
-/// `default_weight(kind)`'ın deterministik fonksiyonu (bijection), bağımsız
-/// bilgi taşımaz; kind tag'ı zaten bağlı. Sıralama id'ye göre olduğundan
-/// dosyadaki satır sırası digest'i değiştirmez.
+/// Kanonik kodlama (BLAKE3, domain-separated **v2**): olay sayısı (u64 LE) +
+/// her olay (id'ye göre sorted): id (u64 LE) + source (u64 LE uzunluk + BAYT
+/// uzunluğu — UTF-8) + witness_kind tag (u8: MergeCommit=0, PRMerged=1,
+/// TrailerReviewed=2, CoAuthored=3) + actor (u64 LE) + claim (u64 LE) +
+/// **weight (canonical f64: sonlu-red, −0.0→+0.0, `to_bits` LE — #220)**.
+///
+/// **#220 — weight neden dahil:** `EvidenceEvent.weight` programatik yüzeyde
+/// bağımsız bir eksendir (`pub f64`; motor API'si rastgele olay kabul eder;
+/// #212 seçim testleri ve #217 numerics sınırları bu ekseni kullanır) —
+/// digest, değerlendirmenin fiilen kullandığı veriyi TAM bağlar. Wire yüzeyi
+/// weight taşımaz (#205: `default_weight(kind)`'dan türetilir); v1'deki
+/// "weight = bijection, dahil değil" notu yalnız O yüzeyde doğruydu.
+///
+/// **v1 → v2 göçü:** girdi uzayına weight girmesiyle digest DEĞERLERİ
+/// değişti; ayraç `osp.resume-witness-evidence.v2\0`. Eski (v1) receipt'lerin
+/// `witness_evidence_digest_hex`'i v1 kodlamasının commitment'ı olarak yaşamaya
+/// devam eder — hiçbir doğrulayıcı digest'i yeniden hesaplamaz (`verify_against`
+/// yalnız 64-hex şekil kontrolü yapar; şema deklaratif metadata'dır,
+/// kriptografik doğrulama DEĞİL).
+///
+/// **Sıralama sınırı (bilinçli):** sıra-bağımsızlığı sözleşmesi DOĞRULANMIŞ
+/// (unique-ID) kümeler içindir — `validate_external_evidence` duplicate-ID'yi
+/// reddeder. Public `compute`, duplicate-ID'li programatik girdilerde girdi
+/// sırasına bağlı olabilir; tam kanonik sıralama ayrı karardır (#220 kapsamı
+/// dışı).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResumeWitnessEvidenceDigest([u8; 32]);
 
 impl ResumeWitnessEvidenceDigest {
-    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.resume-witness-evidence.v1\0";
+    const DOMAIN_SEPARATOR: &'static [u8] = b"osp.resume-witness-evidence.v2\0";
 
-    /// Digest hesapla — infallible (BLAKE3 over düz veri).
-    pub fn compute(events: &[crate::witness::EvidenceEvent]) -> Self {
-        use crate::canonical_encoding::{encode_u64, encode_u8};
+    /// Digest hesapla — non-finite weight'te **fail-closed** (#220): BLAKE3
+    /// over düz veri; yalnız weight kodlaması sonlu-değerlidir (`unwrap` yok —
+    /// numerics doğrulaması `time.advance` içinde SONRA koşar, bu yüzden bu
+    /// hata motor yolunda gerçekten ulaşılabilir).
+    pub fn compute(
+        events: &[crate::witness::EvidenceEvent],
+    ) -> Result<Self, ResumeWitnessEvidenceDigestError> {
+        use crate::canonical_encoding::{encode_f64, encode_u64, encode_u8};
         let mut sorted: Vec<&crate::witness::EvidenceEvent> = events.iter().collect();
         sorted.sort_by_key(|e| e.id);
         let mut hasher = blake3::Hasher::new();
@@ -9722,8 +9790,11 @@ impl ResumeWitnessEvidenceDigest {
             encode_u8(&mut hasher, kind_tag, "event_kind");
             encode_u64(&mut hasher, event.actor, "event_actor");
             encode_u64(&mut hasher, event.claim, "event_claim");
+            encode_f64(&mut hasher, event.weight, "event_weight").map_err(|e| {
+                ResumeWitnessEvidenceDigestError::from_canonical_encoding(e, event.id)
+            })?;
         }
-        Self(*hasher.finalize().as_bytes())
+        Ok(Self(*hasher.finalize().as_bytes()))
     }
 
     /// Hex (64 karakter — receipt/JSON yüzeyleri).
@@ -9762,14 +9833,20 @@ impl ResumeWitnessEvidenceProvenance {
     /// evidence` geçmiş) kanıt üzerinden anlamlıdır — motor resume'da böyle
     /// çağırır. Tip invariant'ı (digest + actors AYNI diziden türetilir) her
     /// caller için construction ile garanti; çelişkili değer üretilemez.
-    pub fn from_validated_evidence(events: &[crate::witness::EvidenceEvent]) -> Self {
+    ///
+    /// **#220 — fail-closed:** non-finite weight'te `Err` (numerics doğrulaması
+    /// `time.advance` içinde SONRA koşar; bu yüzden motor yolunda bu hata
+    /// gerçekten ulaşılabilir — `unwrap` yok).
+    pub fn from_validated_evidence(
+        events: &[crate::witness::EvidenceEvent],
+    ) -> Result<Self, ResumeWitnessEvidenceDigestError> {
         let mut actors: Vec<u64> = events.iter().map(|e| e.actor).collect();
         actors.sort_unstable();
         actors.dedup();
-        Self {
-            digest: ResumeWitnessEvidenceDigest::compute(events),
+        Ok(Self {
+            digest: ResumeWitnessEvidenceDigest::compute(events)?,
             actors,
-        }
+        })
     }
 
     /// Değerlendirilen kanıt dizisinin digest'i.
@@ -12467,6 +12544,9 @@ mod tests {
         // #217 K-3 CE4: programatik sayısal kusurla resume → ResumeHeldError::
         // InvalidEvidence + t_c/space revision/kayıtlı authorization DEĞİŞMEZ.
         // (Wire NaN üretemez — serde_json; bu YALNIZ programatik API sınırı.)
+        // #220 K-6a: ret artık digest katmanından gelir (provenance, time.
+        // advance'ten ÖNCE — yerleşim kaynak-düzey sözleşme; marker:
+        // "digest cannot bind it").
         let mut engine = resume_test_engine([0xdd; 16]);
         let base = engine.current_space_view_revision().unwrap();
         let envelope = sample_envelope_with_base(base.clone());
@@ -12481,9 +12561,9 @@ mod tests {
             matches!(
                 err,
                 crate::engine::ResumeHeldError::InvalidEvidence { ref detail }
-                    if detail.contains("weight")
+                    if detail.contains("weight") && detail.contains("digest cannot bind it")
             ),
-            "got {err:?}"
+            "#220: ret digest katmanından (provenance, time.advance'ten ÖNCE) gelmalı — got {err:?}"
         );
         assert_eq!(engine.t_c(), t_c_before, "resume Err ⇒ t_c değişmez");
         // Tam revision değişmezliği (tur-2 P2): sequence VE content_digest.
@@ -12691,7 +12771,8 @@ mod tests {
             resulting_sequence,
             evidence_trust: EvidenceTrustMode::OperatorAsserted,
             // R3 P1: kanıt provenance'ı TEK değer — digest/actors ayrı verilmez.
-            evidence_provenance: ResumeWitnessEvidenceProvenance::from_validated_evidence(&events),
+            evidence_provenance: ResumeWitnessEvidenceProvenance::from_validated_evidence(&events)
+                .expect("default weights are finite"),
         }
     }
 
@@ -12707,11 +12788,12 @@ mod tests {
             // yine de sorted+distinct üretir (defensive).
             resume_event(3, 200, 42),
         ];
-        let provenance = ResumeWitnessEvidenceProvenance::from_validated_evidence(&events);
+        let provenance = ResumeWitnessEvidenceProvenance::from_validated_evidence(&events)
+            .expect("default weights are finite");
         assert_eq!(provenance.actors(), &[200, 300], "sorted + distinct actors");
         assert_eq!(
             *provenance.digest(),
-            ResumeWitnessEvidenceDigest::compute(&events),
+            ResumeWitnessEvidenceDigest::compute(&events).expect("default weights are finite"),
             "digest aynı diziden bağımsız hesapla"
         );
     }
@@ -12745,6 +12827,10 @@ mod tests {
         assert_eq!(read.claim_id, record.claim_id);
         assert_eq!(read.resulting_sequence, 1);
         // R2 P1 — kanıt bağlama alanları round-trip.
+        assert_eq!(
+            read.schema, RESUME_RECEIPT_SCHEMA,
+            "#220: yeni yazım v2 şeması"
+        );
         assert_eq!(read.evidence_trust, "operator_asserted");
         assert_eq!(read.witness_evidence_digest_hex.len(), 64);
         assert_eq!(read.witness_actors, vec![200, 300]);
@@ -12763,15 +12849,15 @@ mod tests {
         let mut b = a.clone();
         b.reverse();
         assert_eq!(
-            ResumeWitnessEvidenceDigest::compute(&a),
-            ResumeWitnessEvidenceDigest::compute(&b),
+            ResumeWitnessEvidenceDigest::compute(&a).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&b).expect("default weights finite"),
             "same events, different order → same digest"
         );
 
         let c = vec![resume_event(1, 201, 42), resume_event(2, 300, 42)];
         assert_ne!(
-            ResumeWitnessEvidenceDigest::compute(&a),
-            ResumeWitnessEvidenceDigest::compute(&c),
+            ResumeWitnessEvidenceDigest::compute(&a).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&c).expect("default weights finite"),
             "different actor → different digest"
         );
 
@@ -12779,15 +12865,247 @@ mod tests {
         let mut d = a.clone();
         d[0].source = "different-source".to_string();
         assert_ne!(
-            ResumeWitnessEvidenceDigest::compute(&a),
-            ResumeWitnessEvidenceDigest::compute(&d)
+            ResumeWitnessEvidenceDigest::compute(&a).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&d).expect("default weights finite")
         );
         let mut e = a.clone();
         e[0].witness_kind = crate::witness::WitnessKind::PRMerged;
         assert_ne!(
-            ResumeWitnessEvidenceDigest::compute(&a),
-            ResumeWitnessEvidenceDigest::compute(&e)
+            ResumeWitnessEvidenceDigest::compute(&a).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&e).expect("default weights finite")
         );
+    }
+
+    #[test]
+    fn resume_witness_evidence_digest_is_weight_bound() {
+        // #220 K-1: aynı 5 kimlik alanı + farklı sonlu weight → FARKLI digest;
+        // özdeş-kopya kontrol çifti AYNI kalır (fark weight'ten geliyor);
+        // sıra-karışık varyant da farklı kalır.
+        let a = vec![resume_event(1, 200, 42), resume_event(2, 300, 42)];
+        let mut b = a.clone();
+        b[0].weight = 0.4;
+        assert_ne!(
+            ResumeWitnessEvidenceDigest::compute(&a).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&b).expect("0.4 is finite"),
+            "same identity fields, different finite weight → different digest"
+        );
+        // Kontrol: özdeş kopya aynı digest (fark gerçekten weight'ten).
+        assert_eq!(
+            ResumeWitnessEvidenceDigest::compute(&a).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&a.clone()).expect("default weights finite")
+        );
+        // Sıra-karışık varyant: her iki küme ters sıralansa fark KORUNUR.
+        let mut ar = a.clone();
+        ar.reverse();
+        let mut br = b.clone();
+        br.reverse();
+        assert_ne!(
+            ResumeWitnessEvidenceDigest::compute(&ar).expect("default weights finite"),
+            ResumeWitnessEvidenceDigest::compute(&br).expect("0.4 is finite"),
+            "order-mixed variant stays weight-bound"
+        );
+    }
+
+    /// #220 K-3: elle yazılmış preimage'in BLAKE3'ü — v2 kodlama kilidi
+    /// (preimage'in kendisi golden testinde literal olarak durur).
+    const GOLDEN_RESUME_WITNESS_EVIDENCE_DIGEST_V2: &str =
+        "e8cb91adf8164bb9e24e61a413603764c68fcc2b9a98cc2181d6518970a5f984";
+
+    #[test]
+    fn resume_witness_evidence_digest_golden_vector_v2() {
+        // #220 K-3 — İKİ KATMAN: (1) elle yazılmış preimage (implementasyon
+        // encoder'ları KULLANILMADAN — std to_le_bytes + literal f64 bit
+        // desenleri) → BLAKE3 = sabit hex; (2) compute(events) = aynı hex.
+        // Vektör: 2 olay; girdi sırası 7 önce (sıralamada 3 önce — id-sort
+        // pinlenir); farklı kind'lar; kesirli + default-dışı weight (0.75);
+        // çok baytlı UTF-8 source ("tanık-kaynağı": 13 karakter, 16 BAYT —
+        // String::len BAYT uzunluğu pinlenir).
+        let mut pre = Vec::new();
+        pre.extend_from_slice(b"osp.resume-witness-evidence.v2\0");
+        pre.extend_from_slice(&2u64.to_le_bytes()); // event_count
+                                                    // id=3 (sıralamada İLK): MergeCommit, source "s" (1 bayt), weight 1.0
+        pre.extend_from_slice(&3u64.to_le_bytes()); // id
+        pre.extend_from_slice(&1u64.to_le_bytes()); // source BAYT uzunluğu
+        pre.extend_from_slice(b"s");
+        pre.push(0u8); // MergeCommit tag
+        pre.extend_from_slice(&200u64.to_le_bytes()); // actor
+        pre.extend_from_slice(&42u64.to_le_bytes()); // claim
+        pre.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF0, 0x3F]); // weight 1.0 (f64 LE)
+                                                                                  // id=7: TrailerReviewed, source "tanık-kaynağı" (16 bayt), weight 0.75
+        pre.extend_from_slice(&7u64.to_le_bytes()); // id
+        pre.extend_from_slice(&16u64.to_le_bytes()); // source BAYT uzunluğu (13 karakter ≠ 16 bayt: ı,ğ,ı ikişer bayt)
+        pre.extend_from_slice("tanık-kaynağı".as_bytes());
+        pre.push(2u8); // TrailerReviewed tag
+        pre.extend_from_slice(&300u64.to_le_bytes()); // actor
+        pre.extend_from_slice(&42u64.to_le_bytes()); // claim
+        pre.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xE8, 0x3F]); // weight 0.75 (f64 LE)
+        let golden = blake3::hash(&pre).to_hex().to_string();
+        assert_eq!(
+            golden, GOLDEN_RESUME_WITNESS_EVIDENCE_DIGEST_V2,
+            "preimage→BLAKE3 sabit hex (katman-1)"
+        );
+        let mut ev7 = crate::witness::EvidenceEvent::new(
+            7,
+            "tanık-kaynağı".to_string(),
+            crate::witness::WitnessKind::TrailerReviewed,
+            300,
+            42,
+        );
+        ev7.weight = 0.75;
+        let ev3 = crate::witness::EvidenceEvent::new(
+            3,
+            "s".to_string(),
+            crate::witness::WitnessKind::MergeCommit,
+            200,
+            42,
+        );
+        let events = vec![ev7, ev3]; // girdi sırası: 7 önce
+        assert_eq!(
+            ResumeWitnessEvidenceDigest::compute(&events)
+                .expect("finite weights")
+                .to_hex(),
+            GOLDEN_RESUME_WITNESS_EVIDENCE_DIGEST_V2,
+            "compute == elle yazılmış preimage sözleşmesi (katman-2)"
+        );
+    }
+
+    #[test]
+    fn resume_witness_evidence_digest_normalizes_negative_zero_weight() {
+        // #220 K-4: −0.0 ≡ +0.0 — canonical_f64_bytes normalize (to_bits
+        // farklı ama değer eşit; encode_f64 TEK KAYNAK).
+        let base = vec![resume_event(1, 200, 42), resume_event(2, 300, 42)];
+        let mut neg = base.clone();
+        neg[0].weight = -0.0;
+        let mut pos = base.clone();
+        pos[0].weight = 0.0;
+        assert_eq!(
+            ResumeWitnessEvidenceDigest::compute(&neg).expect("-0.0 is finite"),
+            ResumeWitnessEvidenceDigest::compute(&pos).expect("+0.0 is finite"),
+            "−0.0 and +0.0 weights canonicalize identically"
+        );
+    }
+
+    #[test]
+    fn resume_witness_evidence_digest_rejects_non_finite_weight_fail_closed() {
+        // #220 K-5: NaN/+∞/−∞ weight → Err(NonFiniteWeight { event_id });
+        // panic yok; event_id bağlamı doğru olayı işaret eder; from_validated_
+        // evidence aynı hatayı taşır (motor yolu — tur-2 P1-4: numerics
+        // doğrulaması time.advance'te SONRA koşar).
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut ev = resume_event(1, 200, 42);
+            ev.weight = bad;
+            let events = vec![ev, resume_event(2, 300, 42)];
+            let err = ResumeWitnessEvidenceDigest::compute(&events)
+                .expect_err("non-finite weight must fail closed");
+            assert_eq!(
+                err,
+                ResumeWitnessEvidenceDigestError::NonFiniteWeight { event_id: 1 },
+                "got {err:?} for weight {bad}"
+            );
+            assert!(matches!(
+                ResumeWitnessEvidenceProvenance::from_validated_evidence(&events),
+                Err(ResumeWitnessEvidenceDigestError::NonFiniteWeight { event_id: 1 })
+            ));
+        }
+    }
+
+    /// 5f04f87'deki v1 algoritmanın birebir kopyası (authorization.rs:9705-9727
+    /// @5f04f87; v2 şeridiyle koddan çıktı) — K-7'nin tarihsel fixture'ına
+    /// GERÇEK v1 commitment değeri üretir. Kod-review tur-1 P1-1: sentetik
+    /// dolgu ("ab".repeat) yerine algoritma-sadık üretim.
+    fn legacy_v1_digest_hex(events: &[crate::witness::EvidenceEvent]) -> String {
+        use crate::canonical_encoding::{encode_u64, encode_u8};
+        let mut sorted: Vec<&crate::witness::EvidenceEvent> = events.iter().collect();
+        sorted.sort_by_key(|e| e.id);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"osp.resume-witness-evidence.v1\0");
+        encode_u64(&mut hasher, sorted.len() as u64, "event_count");
+        for event in sorted {
+            encode_u64(&mut hasher, event.id, "event_id");
+            encode_u64(&mut hasher, event.source.len() as u64, "event_source_len");
+            hasher.update(event.source.as_bytes());
+            let kind_tag = match event.witness_kind {
+                crate::witness::WitnessKind::MergeCommit => 0u8,
+                crate::witness::WitnessKind::PRMerged => 1,
+                crate::witness::WitnessKind::TrailerReviewed => 2,
+                crate::witness::WitnessKind::CoAuthored => 3,
+            };
+            encode_u8(&mut hasher, kind_tag, "event_kind");
+            encode_u64(&mut hasher, event.actor, "event_actor");
+            encode_u64(&mut hasher, event.claim, "event_claim");
+            // v1: weight YOK — girdi uzayı yalnız 5 kimlik alanı.
+        }
+        let mut hex = String::with_capacity(64);
+        for byte in hasher.finalize().as_bytes() {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
+    /// 5f04f87 v1 algoritmasının sabit birim-takımı (s1/s2, MergeCommit,
+    /// actor 200/300, claim 42) üzerindeki GERÇEK çıktısı — 5f04f87
+    /// worktree'sinde aynı olaylarla koşularak üretildi (#220 kod-review
+    /// tur-1 P1-1); `legacy_v1_digest_hex` üretiminin sadakat kilidi.
+    const LEGACY_V1_UNIT_SET_HEX: &str =
+        "724ab9b205d5651404d35659116031bb4d296dea2bda457401c3eda299ec47d6";
+
+    #[test]
+    fn legacy_v1_receipt_reads_through_store_and_stays_v1() {
+        // #220 K-7 (tur-3 N1 + kod-review tur-1 P1-1): SABİT tarihsel v1
+        // receipt baytları (şema literal gömülü — mevcut şema sabitlerinden
+        // üretilMEz; witness digest = v1 algoritmasının GERÇEK çıktısı)
+        // GERÇEK mağaza okuma yolundan okunur; verify_against {v1,v2} kabul
+        // listesiyle geçer; already-applied idempotency'si korunur — yeniden
+        // yazım fail-closed, v1 receipt v2'ye DÖNÜŞTÜRÜLMEZ. CLI yüzeyindeki
+        // already-applied regsresyonu osp-cli'de
+        // (production_resume_with_legacy_v1_receipt_already_applied_exit_15).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let store = FilesystemPendingAuthorizationStore::new(tmp.path());
+        let record = sample_pending_record();
+        // Tarihsel fixture: kimlik alanları record'la eşleşir (eşleşmezse
+        // zaten geçersiz); şema DEĞERİ literal'dir. witness digest hex'i v1
+        // algoritmasının BU olay takımı üzerindeki gerçek çıktısıdır
+        // (algoritma-sadık üretim + aşağıdaki 5f04f87 gerçek-çıktı sabiti)
+        // — yeniden hesaplanmaz (N2 sınırı), şekil-düzeyinde 64-hex.
+        let legacy_events = vec![resume_event(1, 200, 42), resume_event(2, 300, 42)];
+        assert_eq!(
+            legacy_v1_digest_hex(&legacy_events),
+            LEGACY_V1_UNIT_SET_HEX,
+            "v1 üretimi 5f04f87 gerçek çıktısına sabitli (sadakat kilidi)"
+        );
+        let legacy = format!(
+            concat!(
+                r#"{{"schema":"osp.resume-receipt.v1","task_id":1,"claim_id":42,"#,
+                r#""attempt_num":1,"evidence_digest_hex":"{basis_hex}","#,
+                r#""applied_at":1700000000,"resulting_sequence":1,"#,
+                r#""evidence_trust":"operator_asserted","#,
+                r#""witness_evidence_digest_hex":"{witness_hex}","#,
+                r#""witness_actors":[200,300]}}"#
+            ),
+            basis_hex = record.evidence_digest.to_hex(),
+            witness_hex = legacy_v1_digest_hex(&legacy_events),
+        );
+        let path = store.resume_receipt_path_for(&record);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, legacy.as_bytes()).unwrap();
+
+        let read = store
+            .read_resume_receipt(&record)
+            .expect("store read")
+            .expect("legacy v1 receipt present");
+        assert_eq!(read.schema, "osp.resume-receipt.v1");
+        read.verify_against(&record)
+            .expect("v1 accepted by the {v1,v2} accept-list policy");
+
+        // İdempotency/no-clobber: mevcut v1 receipt yeniden yazılamaz.
+        store
+            .write_resume_receipt(resume_receipt_test_input(&record, 1_700_000_001, 2))
+            .expect_err("existing v1 receipt must not be rewritten (no-clobber)");
+        let read_again = store
+            .read_resume_receipt(&record)
+            .expect("store read")
+            .expect("receipt still present");
+        assert_eq!(read_again.schema, "osp.resume-receipt.v1", "stays v1");
     }
 
     #[test]

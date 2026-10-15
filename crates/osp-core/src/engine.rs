@@ -1453,10 +1453,17 @@ impl SpaceEngine {
         //    değerlendirilen kanıtın TEK provenance değeri (R2/R3 P1 — digest
         //    + actors aynı validated evidence'den, receipt'e oldukları gibi gider).
         let claim = crate::authorization::restore_claim_for_resume(basis);
+        // **#220:** provenance (digest) hesabı fail-closed VE `time.advance`
+        // den ÖNCE — Err'de uzay/revision/receipt değişmez. (Numerics
+        // doğrulaması advance İÇİNDE sonraya koşar; bu yüzden bu hata motor
+        // yolunda gerçekten ulaşılabilir — `unwrap` yok.)
         let evidence_provenance =
             crate::authorization::ResumeWitnessEvidenceProvenance::from_validated_evidence(
                 &evidence,
-            );
+            )
+            .map_err(|e| ResumeHeldError::InvalidEvidence {
+                detail: e.to_string(),
+            })?;
         let omega = crate::witness::WitnessSet::new(evidence)
             .with_quorum(requirement.min_approvers, requirement.quorum_threshold);
 

@@ -361,7 +361,14 @@ finds it; binds the evidence-trust declaration, the evaluated-evidence digest
 and the witness actors) is written next to the canonical artifact. That digest
 is a **commitment**: a later-presented evidence file can be checked against it
 ("is this the same evidence?"), but the events themselves are not reconstructed
-from the receipt. Quorum still insufficient → exit `10` (artifact unchanged); explicit rejection →
+from the receipt. Since **#220** that digest binds each event's `weight` as
+well (canonical f64 encoding, domain separator
+`osp.resume-witness-evidence.v2`), and new receipts carry schema
+`osp.resume-receipt.v2`. Receipts written before #220 keep their v1-schema
+digests: still readable and valid as v1-encoding commitments, never rewritten.
+One boundary note: the receipt schema *declares* which digest-encoding version
+produced the value — it is declarative metadata, not a cryptographic
+re-verification (the hex is shape-checked, never recomputed). Quorum still insufficient → exit `10` (artifact unchanged); explicit rejection →
 exit `11`. Fail-closed refusals: the space changed since suspension (or the
 artifact was already applied) → exit `15` — remeasure with a fresh attempt;
 evidence bound to a foreign claim or otherwise defective (author-self,
