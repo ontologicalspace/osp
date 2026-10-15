@@ -39,3 +39,6 @@ predicates = "3"
 # Entegrasyon testleri digest'i bağımsız yeniden hesaplayıp karşılaştırır (bin-only
 # crate: normal dependency'ler test binary'sine görünmez).
 sha2 = "0.10"
+# #220 K-7: tarihsel v1 ResumeWitnessEvidenceDigest'i test içinde GERÇEK
+# değeriyle yeniden üretmek için (5f04f87 algoritması; osp-core ile aynı sürüm).
+blake3 = "1"

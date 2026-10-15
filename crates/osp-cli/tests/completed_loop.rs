@@ -1411,6 +1411,91 @@ fn production_resume_twice_refused_by_receipt() {
     fx.assert_repo_clean();
 }
 
+/// #220 K-7 (kod-review tur-1 P1-1): `write_witness_evidence` ile aynı şekilde
+/// kurulan iki tanık olayının 5f04f87 v1 algoritmasındaki GERÇEK digest'i —
+/// v1 şema etiketli tarihsel fixture'a sentetik dolgu yerine gerçek v1
+/// commitment değeri taşır. (v1 algoritması v2 şeridiyle koddan çıktı; bu
+/// kopya authorization.rs:9705-9727 @5f04f87'den — üretimin sadakat kilidi
+/// osp-core testinde LEGACY_V1_UNIT_SET_HEX sabitidir: değer 5f04f87
+/// worktree'sinde gerçek koşuyla üretildi.)
+fn legacy_v1_two_witness_digest_hex(claim_id: u64) -> String {
+    let events: [(u64, &str, u8, u64); 2] = [
+        (1, "test-evidence-0", 0, 200),
+        (2, "test-evidence-1", 0, 300),
+    ];
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"osp.resume-witness-evidence.v1\0");
+    hasher.update(&2u64.to_le_bytes());
+    for (id, source, kind_tag, actor) in events {
+        hasher.update(&id.to_le_bytes());
+        hasher.update(&(source.len() as u64).to_le_bytes());
+        hasher.update(source.as_bytes());
+        hasher.update(&[kind_tag]);
+        hasher.update(&actor.to_le_bytes());
+        hasher.update(&claim_id.to_le_bytes());
+        // v1: weight YOK — girdi uzayı yalnız 5 kimlik alanı.
+    }
+    let mut hex = String::with_capacity(64);
+    for byte in hasher.finalize().as_bytes() {
+        hex.push_str(&format!("{byte:02x}"));
+    }
+    hex
+}
+
+#[test]
+fn production_resume_with_legacy_v1_receipt_already_applied_exit_15() {
+    // #220 K-7 (kod-review tur-1 P1-1): tarihsel v1 receipt canonical adreste
+    // dururken GERÇEK CLI resume → already-applied fence exit 15; receipt
+    // bayt-bayt DEĞİŞMEZ (v2'ye dönüştürülMEZ). Fixture gerçek v1 digest
+    // taşır (5f04f87 algoritması), şema literal'dir.
+    let (fx, artifact, claim_id) = suspend_and_locate_artifact();
+
+    // Kimlik alanları artifact'ın canonical adından
+    // (task-N--claim-C--attempt-N--<digest>).
+    let stem = artifact.file_stem().unwrap().to_string_lossy().into_owned();
+    let parts: Vec<&str> = stem.split("--").collect();
+    assert_eq!(parts.len(), 4, "canonical artifact filename: {stem}");
+    let task_id: u64 = parts[0].trim_start_matches("task-").parse().unwrap();
+    let attempt_num: u64 = parts[2].trim_start_matches("attempt-").parse().unwrap();
+    let basis_hex = parts[3];
+
+    let receipt_path = artifact.with_extension("json.receipt.json");
+    let legacy = serde_json::json!({
+        "schema": "osp.resume-receipt.v1",
+        "task_id": task_id,
+        "claim_id": claim_id,
+        "attempt_num": attempt_num,
+        "evidence_digest_hex": basis_hex,
+        "applied_at": 1700000000,
+        "resulting_sequence": 1,
+        "evidence_trust": "operator_asserted",
+        "witness_evidence_digest_hex": legacy_v1_two_witness_digest_hex(claim_id),
+        "witness_actors": [200, 300],
+    });
+    let legacy_bytes = serde_json::to_vec_pretty(&legacy).unwrap();
+    fs::write(&receipt_path, &legacy_bytes).expect("write legacy v1 receipt");
+
+    let evidence = write_witness_evidence(&fx, claim_id, &[200, 300]);
+    let output = run_resume(&fx, &artifact, &evidence, "human");
+    assert_eq!(
+        output.status.code(),
+        Some(15),
+        "v1 receipt must trigger the already-applied fence. stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("already applied"),
+        "stderr explains the refusal"
+    );
+
+    // Bayt-bayt değişmezlik — v1 receipt v2'ye sessizce dönüştürüleMEZ.
+    let after = fs::read(&receipt_path).expect("receipt still present");
+    assert_eq!(after, legacy_bytes, "v1 receipt byte-for-byte unchanged");
+    let v: serde_json::Value = serde_json::from_slice(&after).unwrap();
+    assert_eq!(v["schema"], "osp.resume-receipt.v1", "stays v1");
+    fx.assert_repo_clean();
+}
+
 #[test]
 fn production_resume_foreign_claim_evidence_exit_20() {
     // #164 claim-binding fence: kanıt olayı başka claim'e → exit 20 (operational

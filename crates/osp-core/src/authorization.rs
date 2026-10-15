@@ -12918,7 +12918,7 @@ mod tests {
         // desenleri) → BLAKE3 = sabit hex; (2) compute(events) = aynı hex.
         // Vektör: 2 olay; girdi sırası 7 önce (sıralamada 3 önce — id-sort
         // pinlenir); farklı kind'lar; kesirli + default-dışı weight (0.75);
-        // çok baytlı UTF-8 source ("tanık-kaynağı": 13 karakter, 15 BAYT —
+        // çok baytlı UTF-8 source ("tanık-kaynağı": 13 karakter, 16 BAYT —
         // String::len BAYT uzunluğu pinlenir).
         let mut pre = Vec::new();
         pre.extend_from_slice(b"osp.resume-witness-evidence.v2\0");
@@ -13009,20 +13009,70 @@ mod tests {
         }
     }
 
+    /// 5f04f87'deki v1 algoritmanın birebir kopyası (authorization.rs:9705-9727
+    /// @5f04f87; v2 şeridiyle koddan çıktı) — K-7'nin tarihsel fixture'ına
+    /// GERÇEK v1 commitment değeri üretir. Kod-review tur-1 P1-1: sentetik
+    /// dolgu ("ab".repeat) yerine algoritma-sadık üretim.
+    fn legacy_v1_digest_hex(events: &[crate::witness::EvidenceEvent]) -> String {
+        use crate::canonical_encoding::{encode_u64, encode_u8};
+        let mut sorted: Vec<&crate::witness::EvidenceEvent> = events.iter().collect();
+        sorted.sort_by_key(|e| e.id);
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"osp.resume-witness-evidence.v1\0");
+        encode_u64(&mut hasher, sorted.len() as u64, "event_count");
+        for event in sorted {
+            encode_u64(&mut hasher, event.id, "event_id");
+            encode_u64(&mut hasher, event.source.len() as u64, "event_source_len");
+            hasher.update(event.source.as_bytes());
+            let kind_tag = match event.witness_kind {
+                crate::witness::WitnessKind::MergeCommit => 0u8,
+                crate::witness::WitnessKind::PRMerged => 1,
+                crate::witness::WitnessKind::TrailerReviewed => 2,
+                crate::witness::WitnessKind::CoAuthored => 3,
+            };
+            encode_u8(&mut hasher, kind_tag, "event_kind");
+            encode_u64(&mut hasher, event.actor, "event_actor");
+            encode_u64(&mut hasher, event.claim, "event_claim");
+            // v1: weight YOK — girdi uzayı yalnız 5 kimlik alanı.
+        }
+        let mut hex = String::with_capacity(64);
+        for byte in hasher.finalize().as_bytes() {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+        hex
+    }
+
+    /// 5f04f87 v1 algoritmasının sabit birim-takımı (s1/s2, MergeCommit,
+    /// actor 200/300, claim 42) üzerindeki GERÇEK çıktısı — 5f04f87
+    /// worktree'sinde aynı olaylarla koşularak üretildi (#220 kod-review
+    /// tur-1 P1-1); `legacy_v1_digest_hex` üretiminin sadakat kilidi.
+    const LEGACY_V1_UNIT_SET_HEX: &str =
+        "724ab9b205d5651404d35659116031bb4d296dea2bda457401c3eda299ec47d6";
+
     #[test]
     fn legacy_v1_receipt_reads_through_store_and_stays_v1() {
-        // #220 K-7 (tur-3 N1): SABİT tarihsel v1 receipt baytları (şema
-        // literal gömülü — mevcut şema sabitlerinden üretilMEz) GERÇEK mağaza
-        // okuma yolundan okunur; verify_against {v1,v2} kabul listesiyle
-        // geçer; already-applied idempotency'si korunur — yeniden yazım
-        // fail-closed, v1 receipt v2'ye DÖNÜŞTÜRÜLMEZ.
+        // #220 K-7 (tur-3 N1 + kod-review tur-1 P1-1): SABİT tarihsel v1
+        // receipt baytları (şema literal gömülü — mevcut şema sabitlerinden
+        // üretilMEz; witness digest = v1 algoritmasının GERÇEK çıktısı)
+        // GERÇEK mağaza okuma yolundan okunur; verify_against {v1,v2} kabul
+        // listesiyle geçer; already-applied idempotency'si korunur — yeniden
+        // yazım fail-closed, v1 receipt v2'ye DÖNÜŞTÜRÜLMEZ. CLI yüzeyindeki
+        // already-applied regsresyonu osp-cli'de
+        // (production_resume_with_legacy_v1_receipt_already_applied_exit_15).
         let tmp = tempfile::tempdir().expect("tempdir");
         let store = FilesystemPendingAuthorizationStore::new(tmp.path());
         let record = sample_pending_record();
         // Tarihsel fixture: kimlik alanları record'la eşleşir (eşleşmezse
         // zaten geçersiz); şema DEĞERİ literal'dir. witness digest hex'i v1
-        // kodlamasının commitment'ıdır — yeniden hesaplanmaz (N2 sınırı),
-        // şekil-düzeyinde 64-hex.
+        // algoritmasının BU olay takımı üzerindeki gerçek çıktısıdır
+        // (algoritma-sadık üretim + aşağıdaki 5f04f87 gerçek-çıktı sabiti)
+        // — yeniden hesaplanmaz (N2 sınırı), şekil-düzeyinde 64-hex.
+        let legacy_events = vec![resume_event(1, 200, 42), resume_event(2, 300, 42)];
+        assert_eq!(
+            legacy_v1_digest_hex(&legacy_events),
+            LEGACY_V1_UNIT_SET_HEX,
+            "v1 üretimi 5f04f87 gerçek çıktısına sabitli (sadakat kilidi)"
+        );
         let legacy = format!(
             concat!(
                 r#"{{"schema":"osp.resume-receipt.v1","task_id":1,"claim_id":42,"#,
@@ -13033,7 +13083,7 @@ mod tests {
                 r#""witness_actors":[200,300]}}"#
             ),
             basis_hex = record.evidence_digest.to_hex(),
-            witness_hex = "ab".repeat(32),
+            witness_hex = legacy_v1_digest_hex(&legacy_events),
         );
         let path = store.resume_receipt_path_for(&record);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
