@@ -1312,7 +1312,7 @@ fn production_resume_applies_with_two_witnesses() {
     let receipt_raw =
         fs::read_to_string(&receipt_path).expect("resume receipt persisted next to artifact");
     let receipt: serde_json::Value = serde_json::from_str(&receipt_raw).unwrap();
-    assert_eq!(receipt["schema"], "osp.resume-receipt.v1");
+    assert_eq!(receipt["schema"], "osp.resume-receipt.v2");
     assert_eq!(receipt["claim_id"].as_u64(), Some(claim_id));
     assert_eq!(receipt["resulting_sequence"].as_u64(), Some(1));
     assert_eq!(receipt["evidence_trust"], "operator_asserted");

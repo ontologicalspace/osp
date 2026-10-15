@@ -146,7 +146,8 @@ mod tests {
             evidence_provenance:
                 osp_core::authorization::ResumeWitnessEvidenceProvenance::from_validated_evidence(
                     &events,
-                ),
+                )
+                .expect("default weights are finite"),
         };
         let envelope = build_resume_envelope_v1(
             &outcome,
