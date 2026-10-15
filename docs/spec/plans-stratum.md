@@ -25,11 +25,109 @@ dondurur; runtime/üretici bu şeritte YOK (Aşama-2 kararı pilot verisiyle).
 SHA-256 bir plan sürümünün içerik KİMLİĞİNİ kanıtlar; o içeriğin **koddan önce
 var olduğunu** tek başına kanıtlamaz. Pre-code freeze için dış ANKOR gerekir:
 
-- **Freeze anchor** = pre-registration NOTES freeze kaydı: `{tarih-saat,
+- **Freeze anchor (yerel)** = pre-registration NOTES freeze kaydı: `{tarih-saat,
   plan sürümü, digest, osp_revision, run bağlamı}`.
-- Dürüstlük sınırı: bu ankör kriptografik timestamp DEĞİLDİR — ritüelin
-  şeffaflığına (NOTES dizisi + run-dir artefaktları) bağlı, sonradan
-  denetlenebilir bir kayıttır.
+- **Freeze evidence (dış — #223 kararı, yön a)** = GitHub freeze-ankörü yorumu:
+  strip'in issue'suna freeze ANINDA yayımlanan TEK yorum; manifest + planın TAM
+  baytları. Zaman kanıtı GitHub sunucusundadır (`created_at`).
+
+### 2.1 Dış freeze kanıtı sözleşmesi (GitHub yorum-ankörü)
+
+**Yorum yapısı** (marker'lar `<run_id>` + `v<sürüm>` ile benzersizleştirilir):
+
+```
+<!-- osp:freeze-manifest:<run_id>:v<N> -->
+{manifest JSON: schema=osp.freeze-manifest.v1, run_id, task_id, task_ref,
+ plan_version, plan_digest, criteria[], osp_revision, frozen_at_local,
+ decision_record_ref, previous_digest, originating_digest}
+<!-- /osp:freeze-manifest:<run_id>:v<N> -->
+
+<!-- osp:plan-bytes:<run_id>:v<N>:begin -->
+<plan dosyasının TAM baytları — LF, UTF-8, BOM'suz, tam bir sondaki LF>
+<!-- osp:plan-bytes:<run_id>:v<N>:end -->
+```
+
+**Normatif bayt-çıkarım kuralı** (bağımsız yeniden-implemente edilebilir; ham
+Markdown `body` okunur — `body_text`/HTML DEĞİL):
+
+```
+body  = response["body"].encode("utf-8")
+begin = (begin_marker + "\n").encode("utf-8")
+end   = end_marker.encode("utf-8")
+start = body.index(begin) + len(begin)
+stop  = body.index(end, start)
+published_plan_bytes = body[start:stop]
+```
+
+Güvenlik koşulları: (1) begin/end marker'ların HER BİRİ tam bir kez bulunmalı
+(kardinalite ≠ 1 → RED `ByteExtractionMalformed`); (2) `start < stop` zorunlu —
+empty-plan RED; (3) çıkarılan bayt yeniden kodlanmadan doğrudan hash'lenir;
+end-marker ek LF tüketmez (sondaki LF planın son baytıdır). SHA-256 daima
+dosyanın **gerçek baytları** üzerinde hesaplanır (LF + BOM'suz yazım; CRLF/BOM/
+metin-normalizasyonu aynı görünen Markdown'da farklı digest üretir).
+
+**Kabul koşulu:** `published_plan_bytes_sha256 == freeze_manifest.plan_digest`.
+
+**Alan tablosu (normatif ayrım):**
+
+| Alan | Normatif anlam |
+|---|---|
+| `freeze_anchor_ref` | yerel NOTES freeze kaydı (değişmez) |
+| `freeze_evidence_ref` | GitHub freeze-ankörü yorum URL'si — `plans.jsonl` YENİ satırlarında zorunlu; URL hash'lenen plan dosyasında TAŞINMAZ (döngüsellik) |
+| `frozen_at` | yerel beyan zamanı |
+| `freeze_evidence_created_at` | sunucudan okunan oluşturma zamanı — bağımsız doğrulama kaydında yaşar |
+
+**İmmutability + tekillik:** freeze yorumu hiçbir koşulda DÜZENLENMEZ
+(`lastEditedAt == null` / `updated_at == created_at`); düzenlenme = normatif
+RED (`FreezeAnchorEdited`), yeni-yorumla-onarım YOK — yalnız gerçek amendment
+(vN+1) yeni ankör alır. Aynı `run_id + plan_version` için TEK ankör
+(`FreezeAnchorDuplicate`). Yorumun silinebilmesi bilinçli sınırdır (§7).
+
+**POST timeout-idempotency (beş durum):**
+
+| POST / sorgu durumu | Karar |
+|---|---|
+| POST 201, yorum doğrulandı | Devam |
+| Timeout, tam-eşleşen TEK yorum | mevcut yorumla devam |
+| Timeout, İKİ eşleşen yorum | RED (`IdempotencyViolation`) |
+| Timeout, eşleşen YOK | UNVERIFIABLE → sorgu yeniden denenir; otomatik ikinci POST ASLA |
+| Sorgu hatası | BLOCKED |
+
+Kalıcı belirsizlikte freeze denemesi BAŞARISIZ sayılır ve kayda geçer.
+
+**İki-aşamalı K-2 (erken PASS yasağı):**
+
+```
+K2.PASS iff content_integrity==PASS AND anchor_integrity==PASS
+         AND chronology==PASS AND record_binding==PASS
+```
+
+`chronology` yalnız ilk PushEvent gözlendikten sonra değerlendirilir;
+`chronology == PENDING/UNVERIFIABLE` iken K-2=PASS yazılması RED
+(`PrematureVerdict`). Kronoloji üçlüsü: `ankör.created_at < push.created_at`
+PASS · `>` RED (`FreezeChronologyViolation`) · `==` UNVERIFIABLE
+(`ChronologyIndeterminate` — eşit saniyede sıra çıkarılamaz).
+**Karşılaştırma push'u sürüme göredir:** `v0` kronolojisi dalın İLK push'u ile
+değerlendirilir; `vN` (N ≥ 1) amendment kronolojisi, amendment'ın kapsadığı İLK
+SONRAKİ kod push'u ile değerlendirilir (amendment'ın kendi kod değişikliğinden
+önce donduğunu kanıtlar) — v1 ankörünün ilk push'tan SONRA oluşturulması bu
+nedenle RED DEĞİLDİR; karşılaştırma noktası amendment'a ait push'tur.
+
+**Doğrulayıcı prosedür + `fixture_ref ≠ execution_ref`:** doğrulama girdisi
+(fixture) ile yürütme kanıtı (gerçek koşu kaydı) AYRI kayıtlardır; koşu kaydı
+`probe_ref · fixture_ref · fixture sha256 · verifier_command ·
+verifier_revision (script sha256) · code_revision (Git commit SHA) ·
+executed_at · gözlenen ret · sonuç` taşır. Negatif probe'lar yalnız izole
+fixture'larla çalışır — gerçek issue yalnız üretim freeze olgularını taşır.
+İlke: *freeze kanıtını doğrulayan mekanizma, doğruladığı kanıtın geçmişini
+değiştirmez.* Kanıt seviyeleri ayrı tutılır: bağımsız platform kanıtı
+(GitHub'daki ankör + içerik + sunucu zamanları) ile yerel yürütme kanıtı
+(verifier koşuları/fixture/sonuçlar) birbirinin yerine GEÇMEZ.
+
+**Dürüstlük sınırları:** NOTES kaydı kriptografik timestamp DEĞİLDİR. GitHub
+`created_at` sunucu-saatlidir; ANCAK kronoloji en az iki doğrulanmış OLAYın
+ilişkisidir — sunucu zamanının varlığı tek başına kronoloji ispatı değildir
+(PushEvent bağı şart; §7).
 
 ## 3. Digest döngüselliği yasağı + immutable sürüm zinciri
 
@@ -37,8 +135,10 @@ var olduğunu** tek başına kanıtlamaz. Pre-code freeze için dış ANKOR gere
 dosya içinde taşımaz. `plan-v0` originating digest DAHİL hiçbir digest alanı
 içermez (v0'nın originating digest'i kendi digest'i olurdu → döngüsel tanım).
 `plan-vN` (N ≥ 1) `previous_digest` + `originating_digest` taşıyabilir. Bir
-sürümün **kendi** digest'i yalnız ÜÇ dış kayıtta yaşar: (1) NOTES freeze
-kaydı, (2) `plans.jsonl` satırı, (3) CompletionClaim. **Önceki sürümlerin**
+sürümün **kendi** digest'i yalnız DÖRT dış kayıtta yaşar: (1) NOTES freeze
+kaydı, (2) `plans.jsonl` satırı, (3) CompletionClaim, (4) GitHub freeze-ankörü
+yorumundaki manifest (#223'ten itibaren). Dış ankörün URL'si (`freeze_evidence_ref`)
+hash'lenen plan dosyasında TAŞINMAZ (§2.1 döngüsellik kuralı). **Önceki sürümlerin**
 digest'lerinin (`previous_digest`/`originating_digest`) vN dosyasında
 taşınması bu kuralı İHLAL ETMEZ — yasak olan yalnızca bir sürümün KENDİ
 digest'ini içermesidir (döngüsel tanım).
@@ -74,6 +174,7 @@ digest + originating digest + amendment zincirini AYRIT eder.
   "frozen_at": "2026-10-15T09:00:00+03:00",
   "freeze_phase": "pre-code",
   "freeze_anchor_ref": "NOTES pre-registration bölümü — BU SÜRÜMÜN freeze kaydı (tarih + osp_revision + run bağlamı)",
+  "freeze_evidence_ref": "https://github.com/<org>/<repo>/issues/<n>#issuecomment-<id>",
   "scope_trigger": "authz",
   "failure_modes": ["yetki/tenant sınırı", "idempotens bağlamı", "kaynak tükenmesi", "başarısızlıkta kanıt dayanıklılığı", "kanonik tek-kaynak"],
   "criteria": [
@@ -117,6 +218,9 @@ digest + originating digest + amendment zincirini AYRIT eder.
   etiketi `pre-code` başlangıç planını niteler, amendment'ı değil.
 - **`freeze_anchor_ref`:** genel NOTES açıklaması DEĞİL — İLGİLİ SÜRÜMÜN
   gerçek freeze kaydını gösterir.
+- **`freeze_evidence_ref`:** dış freeze kanıtının (GitHub yorum-ankörü, §2.1)
+  URL'si — #223'ten itibaren YENİ satırlarda ZORUNLU; eski satırlar historical
+  (geriye-dönük eklenmez). URL hash'lenen plan dosyasında taşınmaz.
 - **PlanEvidenceContract ≠ ObservedEvidence:** `evidence_contract` +
   `counterexamples` alanları **önceden tanımlanmış kanıt BEKLENTİSİ** taşır
   (gözlemlenen sonuç değil — gözlem yalnız CompletionClaim'de raporlanır).
@@ -178,6 +282,17 @@ bağlanmasıyla oluşur. CompletionClaim bu üçünü ayrı alanlarda taşır
 - **D8:** plan koordinat/uzay-pozisyon içermez.
 - **n=1 reviewer:** plan-kapısı insan denetimidir; bağımsız-reviewer iddiası
   taşımaz.
+- **Dış ankör sınırları (#223):** freeze yorumu silinebilir (GitHub tarafında) —
+  ankörün yokluğu freeze'i geçersiz KILMAZ ama bağımsız kronoloji kanıtı düşer;
+  `freeze_evidence_ref` plans.jsonl'de kalır. Events API geçmişi sınırlıdır
+  (≤300 olay, ≤30 gün; görünürlük 30sn–6sa gecikebilir) — uzun vadeli kanıt
+  deposu DEĞİL; PushEvent bulunamaması = UNVERIFIABLE (RED değil), sonradan
+  yeniden denenebilir; arşivlenen yerel event JSON'u bağımsız sunucu kaydıyla
+  eş-güvenli SAYILMAZ; her doğrulama `verified_at` taşır.
+- **K-2 yayım fallback tablosu (#223):** tam plan baytları ankörde = normal
+  PASS yolu · manifest + ilk kod PR'inde bayt-özdeş kopya = digest
+  doğrulanırsa uygun · manifest-only = K-2 PENDING (karşılanmadı —
+  yanlış-success YOK).
 - `--bar-elicitation` kanıt-sorusu genişletmesi (#213 §2 üretim akışı) AYRI
   şerittir.
 
@@ -185,13 +300,18 @@ bağlanmasıyla oluşur. CompletionClaim bu üçünü ayrı alanlarda taşır
 
 ```
 plan-v0.md yazılır (K-N kanıt-hesabı dahil, digest alanı YOK)
-  → freeze: digest = sha256(baytlar) NOTES freeze kaydına + plans.jsonl satırına
+  → freeze: digest = sha256(baytlar)
+      → GitHub freeze-ankörü yorumu (manifest + TAM baytlar; §2.1 — kronoloji:
+        ankör.created_at < ilk kod push'unun PushEvent.created_at)
+      → NOTES freeze kaydı + plans.jsonl satırı (freeze_evidence_ref = ankör URL'si)
   → KOD
   → (gerekirse) amendment → plan-v1.md [previous_digest=v0digest, originating_digest=v0digest]
-      → yeni freeze kaydı + YENİ plans.jsonl satırı (append; eski satır durur)
-  → probe'lar koşulur (her CE: beklenen ret kimliği doğrulanır)
+      → yeni freeze kaydı + YENİ ankör yorumu (vN; eski ankör dokunulmaz)
+        + YENİ plans.jsonl satırı (append; eski satır durur)
+  → probe'lar koşulur (her CE: beklenen ret kimliği doğrulanır; fixture_ref ≠ execution_ref)
   → CompletionClaim (PR gövdesi): aktif + originating digest + zincir
       + K→sözleşme→GÖZLEMLENEN kanıt→gerçek ret sınıfı tablosu
+      + freeze-ankör satırı (URL + created_at + chronology_verdict + verified_at)
 ```
 
 Şablonlar: `docs/templates/plan-v0.md`, `docs/templates/completion-claim.md`.

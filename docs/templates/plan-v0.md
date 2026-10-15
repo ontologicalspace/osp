@@ -21,9 +21,12 @@
 originating digest'i kendi digest'i olurdu). `plan-vN` (N ≥ 1) yalnız
 `previous_digest` + `originating_digest` taşıyabilir — bunlar ÖNCEKİ
 sürümlerin kimlikleridir; yasak bir sürümün KENDİ digest'ini içermesine
-dairdir. Bir sürümün kendi digest'i yalnız ÜÇ dış kayıtta yaşar:
-(1) NOTES freeze kaydı, (2) `plans.jsonl` satırı, (3) CompletionClaim.
-Bkz. `docs/spec/plans-stratum.md`.
+dairdir. Bir sürümün kendi digest'i yalnız DÖRT dış kayıtta yaşar:
+(1) NOTES freeze kaydı, (2) `plans.jsonl` satırı, (3) CompletionClaim,
+(4) GitHub freeze-ankörü yorumundaki manifest (#223'ten itibaren). Dış ankörün
+URL'si (`freeze_evidence_ref`) bu dosyada **taşınmaz** — yorum yaratılmadan URL
+bilinemez; yazılsaydı digest'i değiştirirdi (döngüsellik); URL plans.jsonl +
+NOTES + CompletionClaim'de yaşar. Bkz. `docs/spec/plans-stratum.md` §2.1.
 
 ## Amendment zinciri (yalnız N ≥ 1 sürümlerde doldurulur)
 
