@@ -810,14 +810,21 @@ pub enum WitnessStatus {             // inv #3 — tri-state epistemolojik
     UnobservableLocally,             // squash/rebase + trailersız
 }
 
-pub enum WitnessResult {
-    Commit {
+pub enum WitnessDisposition {         // inv #9 — üçlü domain outcome (INV-T9)
+    Satisfied {                       // Q1-Q3 geçti → prospective delta
         delta: Delta,
-        safety_weakened: bool,       // inv #7 — admin override flag
+        safety_weakened: bool,        // inv #7 — admin override flag
         override_reason: Option<String>,
+        snapshot: WitnessQuorumSnapshot,
     },
-    Reject(Reason),                  // honest-reject veya vision ihlali (Q3/Q4)
-    Hold(Reason),                    // quorum yetersiz (Q1/Q2)
+    Rejected {                        // honest-reject (Q3, Faz 1.7+)
+        reasons: NonEmptyWitnessRejections,
+        snapshot: WitnessQuorumSnapshot,
+    },
+    Held {                            // quorum yetersiz (Q1/Q2) — authorization bekleme
+        reason: WitnessHoldReason,
+        snapshot: WitnessQuorumSnapshot,
+    },
 }
 
 pub fn evaluate(claim: &Claim, omega: &WitnessSet)

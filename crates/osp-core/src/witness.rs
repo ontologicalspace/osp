@@ -4,7 +4,7 @@
 //! - **inv #1** author-witness rejection → `canonicalize_for(author)` author'ı çıkarır
 //! - **inv #2** actor-eksenli dedup (#212) → her tanık için en güçlü gözlem kalır
 //! - **inv #3** tri-state `WitnessStatus::{Witnessed, Unwitnessed, UnobservableLocally}`
-//! - **inv #9** WitnessSet tabanlı `W(C, Ω)` → `evaluate(claim, &WitnessSet) -> WitnessResult`
+//! - **inv #9** WitnessSet tabanlı `W(C, Ω)` → `evaluate(claim, &WitnessSet) -> Result<WitnessDisposition, WitnessEvaluationError>`
 //!
 //! `CanonicalWitnessSet` (parse-don't-validate): actor-eksenli dedup + author-filter
 //! yapısal garanti. `support()` / `approver_count()` yalnızca canonicalized set üzerinde
@@ -386,7 +386,7 @@ pub enum WitnessStatus {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// WitnessResult + Reason (inv #7, #9)
+// WitnessDisposition + Reason (inv #7, #9)
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// W(C, Ω) sonucu. Sadece witness-based Q1-Q3 karar.

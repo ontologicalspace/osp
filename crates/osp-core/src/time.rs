@@ -4,7 +4,7 @@
 //! `apply_delta` (mutasyon) composition. `bigbang::commit()` kaldırıldı — ayrım:
 //! - `witness::evaluate(claim, omega)` → karar (Commit/Reject/Hold)
 //! - `bigbang::apply_delta(space, &delta)` → sadece mutasyon
-//! - `advance()` → bu ikisinin kompozisyonu, `WitnessResult` döner
+//! - `advance()` → bu ikisinin kompozisyonu, `Result<WitnessDisposition, WitnessEvaluationError>` döner
 //!
 //! Stateless (Faz 2 snapshot/persist engine seviyesinde).
 
@@ -25,8 +25,10 @@ use crate::witness::{evaluate, Claim, WitnessDisposition, WitnessSet};
 /// ikisi de expected domain outcome, HATA DEĞİL.
 ///
 /// **#217:** sayısal geçerlilik ihlali operational fault'tur — `Err(
-/// WitnessNumericsError)` olarak döner; `Err(e) ⇒ space DOKUNULMAZ` (mutasyon
-/// yalnız `Ok(Satisfied)` dalında — yapısal fail-closed).
+/// WitnessEvaluationError::Numerics(WitnessNumericsError))` olarak döner
+/// (#216'dan beri iki fault sınıfı `WitnessEvaluationError` çatısı altında);
+/// `Err(e) ⇒ space DOKUNULMAZ` (mutasyon yalnız `Ok(Satisfied)` dalında —
+/// yapısal fail-closed).
 ///
 /// **#216:** claim-binding ihlali de operational fault'tur — omega'da bu
 /// claim'e ait olmayan kanıt olayı varsa `Err(ForeignClaimEvidence)`; uzay
