@@ -232,7 +232,8 @@ pub fn run_witness_evidence(args: WitnessEvidenceArgs) -> anyhow::Result<()> {
         None => {
             eprintln!(
                 "no --artifact given: template uses claim 0 — replace it with the pending \
-                 artifact's claim id (the resume fence rejects foreign-claim evidence)"
+                 artifact's claim id (claim-binding is fail-closed: the resume fence and \
+                 evaluate both reject foreign-claim evidence, #216)"
             );
             0
         }

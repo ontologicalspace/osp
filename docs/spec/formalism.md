@@ -401,8 +401,16 @@ support(C) = Σ_{a ∈ distinct_non_author_actors} strongest(e_a).weight
 ```
 
 (`strongest(e_a)` = actor `a`'nın korunan en güçlü gözlemi — olay toplamı DEĞİL.)
-**Varsayım:** `support(C)`, C'ye bağlı kanıtlara uygulanır; bu bağlamayı çekirdek
-doğrulamaz (sınır: claim-binding — #216).
+**Varsayım (artık zorlanır):** `support(C)`, C'ye bağlı kanıtlara uygulanır. #216'ya
+dek bu bağlama çekirdek tarafından doğrulanmıyordu; şimdi **fail-closed** sözleşme:
+`WitnessSet::validate_claim_binding(claim.id)` omega'daki TÜM olaylarda
+`event.claim == claim.id` arar — ihlâl operational fault'tur (`WitnessEvaluationError::
+ForeignClaimEvidence`, INV-T9; sessiz filtre YOK: bir kanıtın değerlendirme sonucuna
+katkı yapmaması ontolojik geçerlilik anlamına gelmez). `evaluate` girişinde ve motorun
+erken kontrolünde (commit_task_claim) aynı sözleşme; resume yüzeyindeki artefakt bağlamlı
+`ClaimBindingMismatch` fence'i ilk katman olarak kalır. Sıra sözleşmesi:
+claim-binding → numerics → canonicalization. `canonicalize_for` kendisi claim'e göre
+filtreleMEZ (actor-eksenli seçim ile claim-binding iki ayrı sorumluluk — N1).
 
 Repo-level `WitnessProfile` (Faz 1.4'te `osp-core::witness`):
 ```
@@ -802,21 +810,32 @@ pub enum WitnessStatus {             // inv #3 — tri-state epistemolojik
     UnobservableLocally,             // squash/rebase + trailersız
 }
 
-pub enum WitnessResult {
-    Commit {
+pub enum WitnessDisposition {         // inv #9 — üçlü domain outcome (INV-T9)
+    Satisfied {                       // Q1-Q3 geçti → prospective delta
         delta: Delta,
-        safety_weakened: bool,       // inv #7 — admin override flag
+        safety_weakened: bool,        // inv #7 — admin override flag
         override_reason: Option<String>,
+        snapshot: WitnessQuorumSnapshot,
     },
-    Reject(Reason),                  // honest-reject veya vision ihlali (Q3/Q4)
-    Hold(Reason),                    // quorum yetersiz (Q1/Q2)
+    Rejected {                        // honest-reject (Q3, Faz 1.7+)
+        reasons: NonEmptyWitnessRejections,
+        snapshot: WitnessQuorumSnapshot,
+    },
+    Held {                            // quorum yetersiz (Q1/Q2) — authorization bekleme
+        reason: WitnessHoldReason,
+        snapshot: WitnessQuorumSnapshot,
+    },
 }
 
-pub fn evaluate(claim: &Claim, omega: &WitnessSet) -> WitnessResult;   // W(C, Ω)
+pub fn evaluate(claim: &Claim, omega: &WitnessSet)
+    -> Result<WitnessDisposition, WitnessEvaluationError>;   // W(C, Ω)
+// #216: evaluate girişinde claim-binding fail-closed (ForeignClaimEvidence);
+// #217: sayısal geçerlilik ihlali de Err (Numerics) — Err ⇒ mutasyon yok.
 
 // ═══ Zaman (§3) — FSM ═══
 pub trait TimeMachine {
-    fn advance(&mut self, claim: &Claim, omega: &WitnessSet) -> WitnessResult;
+    fn advance(&mut self, space: &mut Space, claim: &Claim, omega: &WitnessSet)
+        -> Result<WitnessDisposition, WitnessEvaluationError>;
 }
 
 // ═══ Vizyon ve sapma (§5) — θ SADECE RawPosition'ı okur (inv #4) ═══

@@ -12545,6 +12545,84 @@ mod tests {
     }
 
     #[test]
+    fn resume_mixed_fault_fence_first() {
+        // #216 K-3 CE2 (tur-1 P1-1): karışık kusur (yabancı claim + NaN weight)
+        // → fence İLK katman: ClaimBindingMismatch — InvalidEvidence DEĞİL
+        // (numerics ancak adım-6 advance'te düşünceye girer; sıra sözleşmesi
+        // üç yüzeyde tek: binding → numerics).
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base);
+
+        let mut nan_and_foreign = resume_event(1, 200, 999); // yabancı claim
+        nan_and_foreign.weight = f64::NAN; // + sayısal kusur
+        let err = engine
+            .resume_held_authorization(&envelope, vec![nan_and_foreign, resume_event(2, 300, 42)])
+            .expect_err("karışık kusur fail-closed");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::ClaimBindingMismatch {
+                    evidence_claim: 999,
+                    artifact_claim: 42,
+                    ..
+                }
+            ),
+            "fence öncelik — InvalidEvidence DEĞIL: {err:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_resume_clean_retry_after_binding_fault() {
+        // #216 K-3 CE5 (tur-1 P2-1): binding-fault sonrası AYNI artefakt + temiz
+        // kanıt → başarılı retry — fault kalıcı kaydı kirletmez (#217
+        // invalid_resume_preserves_revision deseninin claim-binding ikizi).
+        let mut engine = resume_test_engine([0xdd; 16]);
+        let base = engine.current_space_view_revision().unwrap();
+        let envelope = sample_envelope_with_base(base.clone());
+        let t_c_before = engine.t_c();
+
+        let err = engine
+            .resume_held_authorization(&envelope, vec![resume_event(1, 200, 999)])
+            .expect_err("foreign-claim evidence fail-closed");
+        assert!(
+            matches!(
+                err,
+                crate::engine::ResumeHeldError::ClaimBindingMismatch { .. }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(engine.t_c(), t_c_before, "binding fault ⇒ t_c değişmez");
+        let after_err = engine.current_space_view_revision().unwrap();
+        assert_eq!(
+            after_err.sequence, base.sequence,
+            "binding fault ⇒ sequence değişmez"
+        );
+        assert_eq!(
+            after_err.content_digest.to_hex(),
+            base.content_digest.to_hex(),
+            "binding fault ⇒ content_digest değişmez"
+        );
+
+        // Temiz retry — aynı envelope, claim-bound kanıt → Applied.
+        let outcome = engine
+            .resume_held_authorization(
+                &envelope,
+                vec![resume_event(1, 200, 42), resume_event(2, 300, 42)],
+            )
+            .expect("binding fault kaydı kirletmedi — temiz retry uygulanmalı");
+        assert!(
+            matches!(outcome, crate::engine::ResumeHeldOutcome::Applied { .. }),
+            "temiz retry Applied olmalı"
+        );
+        let after = engine.current_space_view_revision().unwrap();
+        assert_ne!(
+            after.sequence, base.sequence,
+            "retry sequence ilerletti (fault kaydı kirletmedi)"
+        );
+    }
+
+    #[test]
     fn resume_identity_mismatch_fail_closed() {
         // Artifact [0xdd]* motorunda üretildi; resume [0xee]* motorunda → mismatch.
         let mut engine = resume_test_engine([0xee; 16]);
