@@ -23,10 +23,6 @@ tmp/
 .playwright-mcp/
 space-browser-initial
 
-# Oturum scratch yüzeyi — paralel çalışma worktree'leri, probe/koşu betikleri
-# (repoya ait değil; git status ve güvenlik taraması kapsamı dışı)
-Temp/
-
 # Python bytecode cache
 __pycache__/
 *.py[cod]

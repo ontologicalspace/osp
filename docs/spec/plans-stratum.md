@@ -107,6 +107,11 @@ K2.PASS iff content_integrity==PASS AND anchor_integrity==PASS
 (`PrematureVerdict`). Kronoloji üçlüsü: `ankör.created_at < push.created_at`
 PASS · `>` RED (`FreezeChronologyViolation`) · `==` UNVERIFIABLE
 (`ChronologyIndeterminate` — eşit saniyede sıra çıkarılamaz).
+**Karşılaştırma push'u sürüme göredir:** `v0` kronolojisi dalın İLK push'u ile
+değerlendirilir; `vN` (N ≥ 1) amendment kronolojisi, amendment'ın kapsadığı İLK
+SONRAKİ kod push'u ile değerlendirilir (amendment'ın kendi kod değişikliğinden
+önce donduğunu kanıtlar) — v1 ankörünün ilk push'tan SONRA oluşturulması bu
+nedenle RED DEĞİLDİR; karşılaştırma noktası amendment'a ait push'tur.
 
 **Doğrulayıcı prosedür + `fixture_ref ≠ execution_ref`:** doğrulama girdisi
 (fixture) ile yürütme kanıtı (gerçek koşu kaydı) AYRI kayıtlardır; koşu kaydı
