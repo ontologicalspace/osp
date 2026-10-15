@@ -41,7 +41,7 @@ Agent'ın kendi çalışmasını onaylaması ontolojik olarak imkânsız (typle-
 **Yapısal garanti:** `CanonicalWitnessSet::canonicalize_for` actor-eksenli dedup — küme actor-unique, `approver_count() == events.len()` yapısal olarak distinct non-author approver.
 **Test:** `dedup_same_actor_different_source_collapses_to_strongest` + determinism pini (`actor_axis_dedup_is_input_order_independent`).
 **İhlal örneği:** Aynı tanık iki kaynakla (PR kaydı + trailer) iki onaycı sayılır → quorum tek kişiyle şişer.
-**Sınır (bilinçli):** seçim claim'e göre filtrelemez — yabancı-claim kanıtının değerlendirmeye girmesi ayrı şerittir (#216); wire yüzeyi kendi sıkılığıyla `(source, actor, claim)` ve `actor` anahtarlı kusurları RED der (`DuplicateKey`/`DuplicateActor` — core INV #2 ile özdeş değildir).
+**Sınır (bilinçli, #216 sonrası):** `canonicalize_for` actor-eksenli seçim yapar ve claim'e göre filtreleme gerçekleştirmez. Claim-binding, `evaluate` girişinde fail-closed doğrulanır; mutasyon yolunda aynı sözleşme erken kontrol edilir (#216 — `WitnessSet::validate_claim_binding`; garanti `CanonicalWitnessSet` tipinin kendisine değil, evaluate/motor sınırına aittir). Wire yüzeyi kendi sıkılığıyla `(source, actor, claim)` ve `actor` anahtarlı kusurları RED der (`DuplicateKey`/`DuplicateActor` — core INV #2 ile özdeş değildir).
 
 ### INV #3 — Tri-state witness classification
 **Tanım:** Bir Claim'in ontolojik durumu 3'ten fazladır değil: Unobservable-locally /

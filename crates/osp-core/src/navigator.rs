@@ -2524,6 +2524,61 @@ mod tests {
         );
     }
 
+    #[test]
+    fn task_commit_mixed_fault_binding_first() {
+        // #216 K-3 CE1 (tur-1 P1-1): Q4/Q5/Q5.b'den GEÇEN (witness'a ulaşan)
+        // commit_task_claim + karışık kusur omega'sı (yabancı claim + NaN weight)
+        // → TAM OLARAK InvalidWitnessEvidence, detay claim-binding — sıra
+        // sözleşmesi binding → numerics (erken kontrol sırası gözlemle pinli).
+        let mut engine = make_real_engine();
+        let policy = TaskPolicy::default();
+        let task = coupling_task(1, 0.55, policy);
+        let mut resolver = InMemoryTaskRegistry::new();
+        resolver.insert(task.clone());
+        let claim = test_claim_with_task(1, Some(1), 0.40); // claim.id = 1
+        let mut foreign_nan = crate::witness::EvidenceEvent::new(
+            5,
+            "merge-x".to_string(),
+            crate::witness::WitnessKind::MergeCommit,
+            300,
+            2, // yabancı claim (beklenen 1) — İLK kusur
+        );
+        foreign_nan.weight = f64::NAN; // İKİNCİ kusur (numerics)
+        let omega = crate::witness::WitnessSet::new(vec![foreign_nan]);
+        let measured = provenanced_from_raw(claim.computed_raw, MetricSource::Scip);
+        let t_c_before = engine.t_c();
+        let nodes_before = engine.space().nodes.len();
+        let result = commit_test(
+            &mut engine,
+            &claim,
+            &task,
+            &resolver as &dyn TaskResolver,
+            &omega,
+            measured,
+        );
+        match result {
+            Err(crate::engine::EngineCommitError::InvalidWitnessEvidence(ref detail)) => {
+                assert!(
+                    detail.contains("claim binding"),
+                    "binding numerics'ten ÖNCE — detay: {detail}"
+                );
+                assert!(
+                    !detail.contains("weight"),
+                    "numerics detayı ÖNCE gelmemeli: {detail}"
+                );
+            }
+            other => panic!(
+                "EngineCommitError::InvalidWitnessEvidence (claim-binding nedenli) bekleniyordu: {other:?}"
+            ),
+        }
+        assert_eq!(engine.t_c(), t_c_before, "operational fault ⇒ t_c değişmez");
+        assert_eq!(
+            engine.space().nodes.len(),
+            nodes_before,
+            "operational fault ⇒ uzay değişmez"
+        );
+    }
+
     // 8. navigator_delta_edges_affect_coupling
     #[test]
     fn navigator_delta_edges_affect_coupling() {

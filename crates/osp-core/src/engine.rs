@@ -1378,7 +1378,10 @@ impl SpaceEngine {
     /// Sıra (fail-closed — her adım bir önceki geçilmeden çalışmaz):
     /// 1. **Claim binding:** her kanıt olayı artifact'ın `claim_id`'sine bağlı
     ///    olmalı (`canonicalize_for` claim'e göre FİLTRELEMEZ — resume yüzeyinde
-    ///    yabancı kanıtla yetkilendirme burada kapanır).
+    ///    yabancı kanıtla yetkilendirme burada kapanır; #216'dan beri evaluate
+    ///    girişindeki `validate_claim_binding` aynı sözleşmeyi core'da ikinci
+    ///    katman olarak zorlar — bu fence artefakt bağlamlı İLK katman olarak
+    ///    kalır).
     /// 2. **Kanıt yüzey doğrulaması (R1 P1-2):** author-self / duplicate kanıt
     ///    operational fault — sessiz dışlama/dedup YOK (INV-T9 sözleşmesi).
     /// 3. **Identity fence:** artifact base `view_id` == motorun bağlı identity'si.
@@ -2394,6 +2397,18 @@ impl SpaceEngine {
                 authorization: None,
             });
         }
+
+        // **#216:** claim-binding — Ω sözleşmesi ("Ω = claim için toplanmış
+        // kanıtlar") fail-closed zorlanır. #217 yerleşimiyle aynı konum:
+        // NotApplied erken dönüşünden SONRA (witness'a ulaşmayan reddin sınıfı
+        // değişmez), authorization projection'dan ÖNCE; numerics'ten ÖNCE
+        // (sıra sözleşmesi: binding → numerics — resume fence adım sırasıyla
+        // örtüşür). Tek kanonik sözleşme: validate_claim_binding (aynı fn
+        // evaluate içinden de çağrılır — bilinçli çift-çağrı).
+        input
+            .omega
+            .validate_claim_binding(input.claim.id)
+            .map_err(|e| EngineCommitError::InvalidWitnessEvidence(e.to_string()))?;
 
         // **#217 (tur-2 P1 yerleşimi):** Q1-Q3'e ULAŞAN yollar için sayısal
         // geçerlilik — NotApplied erken dönüşünden SONRA, authorization
@@ -4761,6 +4776,93 @@ mod tests {
         assert_eq!(engine.space().node_count(), 0, "uzay dokunulmaz");
     }
 
+    #[test]
+    fn legacy_commit_binding_fault() {
+        // #216 K-3 CE3 (envanter kapanışı): legacy commit() + yabancı-claim kanıtı
+        // → InvalidWitnessEvidence (advance → evaluate binding fence — bu yüzde
+        // erken kontrol YOK, ikinci katman advance içi).
+        let mut engine = make_engine();
+        let claim = claim_with(100, CENTER); // id = 1
+        let mut foreign_b = ev(2, 300);
+        foreign_b.claim = 2; // yabancı
+        let foreign = WitnessSet::new(vec![ev(1, 200), foreign_b]);
+        let err = engine.commit(&claim, &foreign).unwrap_err();
+        assert!(
+            matches!(err, EngineCommitError::InvalidWitnessEvidence(ref d) if d.contains("claim binding")),
+            "got {err:?}"
+        );
+        assert_eq!(engine.t_c(), 0, "operational fault ⇒ t_c değişmez");
+        assert_eq!(engine.space().node_count(), 0, "uzay dokunulmaz");
+    }
+
+    #[test]
+    fn claim_binding_fault_does_not_mutate_space() {
+        // #216 K-3 CE4 (tur-1 P2-1 güçlendirilmiş): binding fault ⇒ uzay İÇERİĞİ
+        // (düğüm kimlikleri + kenar sayısı) + t_c + space_view_revision (view_id +
+        // sequence + content_digest) değişmez. Space PartialEq türemiyor —
+        // yapısal alanlar + kanonik revision kimliğiyle karşılaştırma.
+        let mut engine = make_engine();
+        // Önce geçerli bir commit → uzay dolu başlasın (boş-küme yanılsaması yok).
+        let good = claim_with(100, CENTER);
+        engine.commit(&good, &two_witnesses()).unwrap();
+        let nodes_before: Vec<u64> = {
+            let mut v: Vec<u64> = engine.space().nodes.keys().copied().collect();
+            v.sort_unstable();
+            v
+        };
+        let edges_before = engine.space().edges.len();
+        let t_c_before = engine.t_c();
+        let rev_before = engine.current_space_view_revision().unwrap();
+
+        // İKİNCİ claim + ona yabancı (claim=1) kanıt → binding fault.
+        let mut claim2 = claim_with(100, CENTER);
+        claim2.id = 2;
+        let err = engine.commit(&claim2, &two_witnesses()).unwrap_err();
+        assert!(
+            matches!(err, EngineCommitError::InvalidWitnessEvidence(ref d) if d.contains("claim binding")),
+            "got {err:?}"
+        );
+
+        let nodes_after: Vec<u64> = {
+            let mut v: Vec<u64> = engine.space().nodes.keys().copied().collect();
+            v.sort_unstable();
+            v
+        };
+        assert_eq!(nodes_after, nodes_before, "uzay düğüm içeriği değişmez");
+        assert_eq!(engine.space().edges.len(), edges_before);
+        assert_eq!(engine.t_c(), t_c_before, "t_c değişmez");
+        let rev_after = engine.current_space_view_revision().unwrap();
+        assert_eq!(rev_after.view_id, rev_before.view_id, "view_id değişmez");
+        assert_eq!(rev_after.sequence, rev_before.sequence, "sequence değişmez");
+        assert_eq!(
+            rev_after.content_digest.to_hex(),
+            rev_before.content_digest.to_hex(),
+            "content_digest değişmez"
+        );
+    }
+
+    #[test]
+    fn check_gates_foreign_claim_failed_gate() {
+        // #216 K-3 CE7 (görselleştirici yüzeyi): evaluate Err → Q1-Q3 failed
+        // gate — pipeline durur, operational fault olarak görünür.
+        let engine = make_engine();
+        let claim = claim_with(100, CENTER); // id = 1
+        let mut foreign = ev(1, 200);
+        foreign.claim = 2;
+        let omega = WitnessSet::new(vec![foreign]);
+        let results = engine.check_all_gates(&claim, &omega);
+        let q13 = results
+            .iter()
+            .find(|r| r.name == "Q1-Q3 Witness")
+            .expect("Q1-Q3 gate sonucu listede olmalı");
+        assert!(!q13.passed, "foreign omega → failed gate");
+        assert!(
+            q13.detail.contains("claim binding"),
+            "detay binding fault taşımali: {}",
+            q13.detail
+        );
+    }
+
     // --- Q5 vision pre-check (Safety — reviewer #1) ---
 
     #[test]
@@ -6287,6 +6389,80 @@ v = 0.5
                 assert!(
                     authorization.is_none(),
                     "NotApplied yolu bozuk omegadan etkilenmez — authorization yine None"
+                );
+            }
+            other => panic!(
+                "NotApplied yolu ÖNCEKİ domain outcome'u korumalı (InvalidWitnessEvidence DEĞİL): {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn notapplied_path_ignores_foreign_claim_omega() {
+        // #216 K-3 CE6 (ölçüm-scope — #217 CE-K3-5 aynası): yabancı-claim omega +
+        // witness'a ULAŞMAYAN Reject→NotApplied claim → ÖNCEKİ domain outcome
+        // KORUNUR (InvalidWitnessEvidence ÜRETİLMEZ). Erken binding kontrolü
+        // NotApplied erken dönüşünden SONRA konumlandırıldı — sınıf değişmez.
+        use crate::trajectory::{AxisMetric, PredicateFailurePolicy, ProvenancedRawPosition};
+        let mut engine = make_measurement_engine();
+        engine.space_mut().insert_node(Node {
+            id: 1,
+            kind: NodeKind::Module,
+            mass: 1.0,
+            ..Default::default()
+        });
+        let mut task = task_with_node_scope(1, 42);
+        task.policy.predicate_failure_policy = PredicateFailurePolicy::AcceptImprovement;
+        task.policy.min_improvement_delta = 0.05;
+        let mut claim = claim_with_task_id(42, vec![mod_node(1)], vec![], vec![]);
+        claim.computed_raw = RawPosition {
+            x: 0.9,
+            y: 0.5,
+            z: 0.5,
+            w: 0.5,
+            v: 0.5,
+        };
+        claim.intent = crate::witness::Intent::new(100, claim.computed_raw);
+        let mk = |v: f64| AxisMetric {
+            value: v,
+            source: crate::coords::MetricSource::Scip,
+        };
+        let measured = ProvenancedRawPosition {
+            coupling: mk(0.9), // 0.9 > 0.5 → Unsatisfied → NotCompleted → Reject
+            cohesion: mk(0.5),
+            instability: mk(0.5),
+            entropy: mk(0.5),
+            witness_depth: mk(0.5),
+        };
+        let mut resolver = crate::trajectory::InMemoryTaskRegistry::new();
+        resolver.insert(task);
+        // Yabancı omega: kanıt olayı bu claim'e ait DEĞİL — AMA witness aşamasına
+        // hiç ulaşılmıyor (NotApplied erken dönüşü önce).
+        let mut foreign = ev(1, 200);
+        foreign.claim = 999;
+        let omega = WitnessSet::new(vec![foreign]);
+        let carrier = characterization_carrier_test(&engine, &claim, measured);
+        let result = engine.commit_task_claim(TaskCommitInput::new(
+            &carrier,
+            &omega,
+            &resolver as &dyn crate::trajectory::TaskResolver,
+        ));
+        match result {
+            Ok(crate::engine::EngineCommitResult::Evaluated {
+                result,
+                authorization,
+            }) => {
+                assert_eq!(
+                    result.outcome.mutation_decision,
+                    crate::trajectory::MutationDecision::Reject
+                );
+                assert!(matches!(
+                    result.apply_target,
+                    crate::trajectory::ApplyTarget::NotApplied
+                ));
+                assert!(
+                    authorization.is_none(),
+                    "NotApplied yolu yabancı omegadan etkilenmez — authorization yine None"
                 );
             }
             other => panic!(

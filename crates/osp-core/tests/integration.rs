@@ -9,7 +9,9 @@ use osp_core::engine::{EngineCommitError, EngineConfig, SpaceEngine};
 use osp_core::persistence::SnapshotStore;
 use osp_core::space::{Edge, EdgeKind, Node, NodeKind, Space};
 use osp_core::vision_config::VisionConfig;
-use osp_core::witness::{Claim, EvidenceEvent, EvidenceId, Intent, WitnessKind, WitnessSet};
+use osp_core::witness::{
+    Claim, ClaimId, EvidenceEvent, EvidenceId, Intent, WitnessKind, WitnessSet,
+};
 // `FromStr` trait — `VisionConfig::from_str` test çağrıları için (idiomatic trait method).
 use std::str::FromStr;
 
@@ -34,12 +36,21 @@ fn import_edge(from: u64, to: u64) -> Edge {
     }
 }
 
-fn ev(id: EvidenceId, actor: u64) -> EvidenceEvent {
-    EvidenceEvent::new(id, format!("src-{id}"), WitnessKind::MergeCommit, actor, 1)
+fn ev(id: EvidenceId, actor: u64, claim: ClaimId) -> EvidenceEvent {
+    EvidenceEvent::new(
+        id,
+        format!("src-{id}"),
+        WitnessKind::MergeCommit,
+        actor,
+        claim,
+    )
 }
 
-fn two_witnesses() -> WitnessSet {
-    WitnessSet::new(vec![ev(1, 200), ev(2, 300)])
+/// **#216:** Ω sözleşmesi — kanıt olayları değerlendirilen claim'e bağlı olmalı.
+/// Fixture claim-parametreli kurar; eski tek-omega'yı-farklı-claim'lerde-yeniden-
+/// kullanma deseni yabancı-claim kontaminasyonuydu ve artık fail-closed RED.
+fn two_witnesses_for(claim: ClaimId) -> WitnessSet {
+    WitnessSet::new(vec![ev(1, 200, claim), ev(2, 300, claim)])
 }
 
 fn make_coord_system() -> CoordinateSystem {
@@ -115,7 +126,7 @@ fn scenario_1_full_lifecycle() {
 
     // 3. Commit aligned claim
     let claim = claim_aligned(1, 100, VISION_RAW);
-    let omega = two_witnesses();
+    let omega = two_witnesses_for(1);
     let outcome = engine.commit(&claim, &omega).expect("commit");
 
     // 4. Verify
@@ -124,9 +135,11 @@ fn scenario_1_full_lifecycle() {
     assert_eq!(engine.space().node_count(), 1);
     assert!(engine.space().nodes.contains_key(&101));
 
-    // 5. Second commit
+    // 5. Second commit — #216: kanıt BU claim'e bağlı olmalı (omega paylaşımı yok)
     let claim2 = claim_aligned(2, 100, VISION_RAW);
-    let outcome2 = engine.commit(&claim2, &omega).expect("commit 2");
+    let outcome2 = engine
+        .commit(&claim2, &two_witnesses_for(2))
+        .expect("commit 2");
     assert_eq!(outcome2.t_c, 2);
     assert_eq!(engine.space().node_count(), 2);
 }
@@ -143,7 +156,7 @@ fn scenario_2_q5_vision_rejection() {
 
     // Bad claim (zero-vector → θ=1.0 > bound=0.3)
     let bad = claim_bad(1, 100);
-    let omega = two_witnesses();
+    let omega = two_witnesses_for(1);
 
     let result = engine.commit(&bad, &omega);
 
@@ -161,7 +174,9 @@ fn scenario_2_q5_vision_rejection() {
 
     // Now commit a GOOD claim — should succeed (space still clean)
     let good = claim_aligned(2, 100, VISION_RAW);
-    let outcome = engine.commit(&good, &omega).expect("good commit");
+    let outcome = engine
+        .commit(&good, &two_witnesses_for(2))
+        .expect("good commit");
     assert_eq!(outcome.t_c, 1);
 }
 
@@ -221,15 +236,13 @@ fn scenario_4_event_sourcing_roundtrip() {
         .with_persistence(tmp.path())
         .expect("persistence");
 
-    let omega = two_witnesses();
-
     // Milestone at t_c=0 (empty)
     engine.save_milestone().unwrap();
 
-    // 3 commits → t_c=1,2,3 (nodes 101, 102, 103)
+    // 3 commits → t_c=1,2,3 (nodes 101, 102, 103) — #216: kanıt claim'e bağlı
     for i in 1..=3u64 {
         let claim = claim_aligned(i, 100, VISION_RAW);
-        engine.commit(&claim, &omega).unwrap();
+        engine.commit(&claim, &two_witnesses_for(i)).unwrap();
     }
     assert_eq!(engine.t_c(), 3);
     assert_eq!(engine.space().node_count(), 3);
@@ -290,10 +303,10 @@ fn scenario_6_milestone_at_interval() {
         .with_persistence(tmp.path())
         .unwrap();
 
-    let omega = two_witnesses();
+    // #216: kanıt claim'e bağlı — her commit kendi claim-bound omega'sını kurar
     for i in 1..=3u64 {
         let claim = claim_aligned(i, 100, VISION_RAW);
-        engine.commit(&claim, &omega).unwrap();
+        engine.commit(&claim, &two_witnesses_for(i)).unwrap();
     }
 
     // t_c=3 → milestone saved (3 % 3 == 0)

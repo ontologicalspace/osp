@@ -27,13 +27,17 @@ use crate::witness::{evaluate, Claim, WitnessDisposition, WitnessSet};
 /// **#217:** sayısal geçerlilik ihlali operational fault'tur — `Err(
 /// WitnessNumericsError)` olarak döner; `Err(e) ⇒ space DOKUNULMAZ` (mutasyon
 /// yalnız `Ok(Satisfied)` dalında — yapısal fail-closed).
+///
+/// **#216:** claim-binding ihlali de operational fault'tur — omega'da bu
+/// claim'e ait olmayan kanıt olayı varsa `Err(ForeignClaimEvidence)`; uzay
+/// yine DOKUNULMAZ.
 pub trait TimeMachine {
     fn advance(
         &mut self,
         space: &mut Space,
         claim: &Claim,
         omega: &WitnessSet,
-    ) -> Result<WitnessDisposition, crate::witness::WitnessNumericsError>;
+    ) -> Result<WitnessDisposition, crate::witness::WitnessEvaluationError>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -54,7 +58,7 @@ impl TimeMachine for TimeFSM {
         space: &mut Space,
         claim: &Claim,
         omega: &WitnessSet,
-    ) -> Result<WitnessDisposition, crate::witness::WitnessNumericsError> {
+    ) -> Result<WitnessDisposition, crate::witness::WitnessEvaluationError> {
         match evaluate(claim, omega)? {
             WitnessDisposition::Satisfied {
                 mut delta,
@@ -221,7 +225,9 @@ mod tests {
         assert!(
             matches!(
                 err,
-                crate::witness::WitnessNumericsError::NonFiniteQuorumThreshold { .. }
+                crate::witness::WitnessEvaluationError::Numerics(
+                    crate::witness::WitnessNumericsError::NonFiniteQuorumThreshold { .. }
+                )
             ),
             "got {err:?}"
         );

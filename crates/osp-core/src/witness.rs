@@ -10,6 +10,12 @@
 //! yapısal garanti. `support()` / `approver_count()` yalnızca canonicalized set üzerinde
 //! → "dedup'i unutma" imkânsız; küme actor-unique olduğundan `approver_count()`
 //! yapısal olarak distinct non-author approver sayısıdır (#212).
+//!
+//! **#216 claim-binding:** `canonicalize_for` actor-eksenli seçim yapar ve claim'e
+//! göre filtreleme gerçekleştirmez; garanti `evaluate` girişinde kurulur
+//! (`validate_claim_binding` — fail-closed) ve mutasyon yolunda aynı sözleşme
+//! erken kontrol edilir. `CanonicalWitnessSet` tipinin KENDİSİ claim-binding
+//! sağlamaz (N1: garanti tip'e değil, evaluate/motor sınırına aittir).
 
 use crate::coords::RawPosition;
 use crate::space::{Edge, Node};
@@ -212,6 +218,30 @@ impl WitnessSet {
         }
         Ok(())
     }
+
+    /// **#216 — tek kanonik claim-binding sözleşmesi.** Ω'daki TÜM olayların
+    /// `event.claim == claim` olduğunu doğrular — author'un kendi olayları ve
+    /// actor-eksenli dedup'un eleyeceği olaylar DAHİL (ham küme sınırı; #217
+    /// `validate_numerics` ile aynı yerleşim). Küme-özelliktir: bir olayın
+    /// Q1/Q2'de kullanılmaması omega'nın sözleşmeye uygun olduğu anlamına gelmez.
+    /// `evaluate` girişinde ve motorun erken kontrolünde (commit_task_claim)
+    /// AYNI bu sözleşme çağrılır (ikinci implementasyon yok; bilinçli çift-çağrı).
+    /// Sıra sözleşmesi: claim-binding → numerics (resume fence adım sırasıyla
+    /// örtüşür: adım-1 claim binding, adım-2 yüzey doğrulama).
+    /// **N2:** ilk karşılaşılan foreign event raporlanır (girdi sırasına bağlı
+    /// kimlik — kanonik hata-seçimi iddiası taşımaz).
+    pub fn validate_claim_binding(&self, claim: ClaimId) -> Result<(), WitnessEvaluationError> {
+        for e in &self.events {
+            if e.claim != claim {
+                return Err(WitnessEvaluationError::ForeignClaimEvidence {
+                    event_id: e.id,
+                    evidence_claim: e.claim,
+                    expected_claim: claim,
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// **#212:** `WitnessKind` canonical rank — enum deklarasyon sırası
@@ -269,6 +299,32 @@ pub enum WitnessNumericsError {
     /// Ham girdiler sonlu olsa bile kanonik kümenin toplam support'u taşdı (+∞).
     #[error("non-finite computed support: {support:?} — canonical set support overflow (sum of individually finite weights)")]
     NonFiniteSupport { support: f64 },
+}
+
+/// **#216:** kanıt değerlendirme hatası — operational fault (INV-T9
+/// `InvalidWitnessEvidence` sınıfı; motor `EngineCommitError::InvalidWitnessEvidence`
+/// / resume `ResumeHeldError::InvalidEvidence` üzerinden exit 20). Ω sözleşmesi:
+/// "Ω = claim için toplanmış kanıtlar" — yabancı-claim olayı küme sözleşmesini
+/// İHLAL eder; sessizce filtrelenMEZ (bir kanıtın değerlendirme sonucuna katkı
+/// yapmaması, o kanıtın ontolojik olarak geçerli olduğu anlamına gelmez).
+/// Resume yüzeyindeki `ClaimBindingMismatch` fence'inin (artefakt bağlamlı,
+/// 1. katman) core karşılığıdır — evaluate 2. katman (bilinçli çift-çağrı).
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum WitnessEvaluationError {
+    /// Sayısal geçerlilik hatası (#217 — sözleşme değişmez, yalnız sarılır;
+    /// `canonicalize_for` kendi `WitnessNumericsError` dönüşünü KORUR).
+    #[error(transparent)]
+    Numerics(#[from] WitnessNumericsError),
+    /// Olay başka bir claim'e bağlı — bu claim'i yabancı kanıtla değerlendirme
+    /// denemesi. **N2:** birden fazla yabancı olay varsa İLK karşılaşılan
+    /// raporlanır — hata kimliği girdi sırasına bağlıdır; kanonik hata-seçimi
+    /// determinizmi iddiası YOK (fail-closed garantisini etkilemez).
+    #[error("witness evidence claim binding mismatch: event id {event_id} witnesses claim {evidence_claim}, expected {expected_claim}")]
+    ForeignClaimEvidence {
+        event_id: EvidenceId,
+        evidence_claim: ClaimId,
+        expected_claim: ClaimId,
+    },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -624,13 +680,21 @@ pub struct Claim {
 /// `AwaitingWitnesses` ile suspend eder — retry loop'a girmez, budget tüketmez.
 ///
 /// **#217:** sayısal geçerlilik ihlali operational fault'tur — domain outcome
-/// (Held/Rejected) DEĞİL; `Err(WitnessNumericsError)` olarak döner, motor
-/// `InvalidWitnessEvidence` sınıfına map'ler. `Err(e) ⇒ S_after == S_before`
-/// (mutasyon yalnız `Ok(Satisfied)` dalında).
+/// (Held/Rejected) DEĞİL; `Err` olarak döner, motor `InvalidWitnessEvidence`
+/// sınıfına map'ler. `Err(e) ⇒ S_after == S_before` (mutasyon yalnız
+/// `Ok(Satisfied)` dalında).
+///
+/// **#216:** claim-binding — Ω sözleşmesi ("Ω = claim için toplanmış kanıtlar")
+/// burada fail-closed zorlanır: omega'da değerlendirilen claim'e ait OLMAYAN
+/// olay varsa `Err(ForeignClaimEvidence)`. Yabancı kanıt sessizce FİLTRELENMEZ
+/// (resume fence'in ret ontolojisiyle tutarlı). Sıra sözleşmesi:
+/// claim-binding → numerics → canonicalization (resume fence adım sırasıyla
+/// örtüşür).
 pub fn evaluate(
     claim: &Claim,
     omega: &WitnessSet,
-) -> Result<WitnessDisposition, WitnessNumericsError> {
+) -> Result<WitnessDisposition, WitnessEvaluationError> {
+    omega.validate_claim_binding(claim.id)?;
     let canon = omega.canonicalize_for(claim.author)?;
 
     // Snapshot — her disposition'da tam witness kanıtı taşır.
@@ -770,8 +834,10 @@ pub enum ExternalEvidenceError {
 /// **#164 (R1 P1-2):** Operatör kanıt dosyası yüzey doğrulaması.
 ///
 /// Sıra: duplicate-id → author-self → duplicate-key → duplicate-actor.
-/// Claim-binding (event.claim == artifact claim) bu fonksiyonun DEĞİL resume
-/// fence'inin işidir (`ResumeHeldError::ClaimBindingMismatch`).
+/// Claim-binding (event.claim == değerlendirilen claim) bu fonksiyonun işi
+/// DEĞİLDİR — iki katmanda zorlanır (#216): resume fence'i artefakt bağlamlı
+/// ilk katman (`ResumeHeldError::ClaimBindingMismatch`), `evaluate` girişindeki
+/// `validate_claim_binding` core ikinci katman.
 pub fn validate_external_evidence(
     events: &[EvidenceEvent],
     author: AgentId,
@@ -1460,7 +1526,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                WitnessNumericsError::NonFiniteWeight { event_id: 1, .. }
+                WitnessEvaluationError::Numerics(WitnessNumericsError::NonFiniteWeight {
+                    event_id: 1,
+                    ..
+                })
             ),
             "got {err:?}"
         );
@@ -1633,5 +1702,170 @@ mod tests {
         let canon = omega.canonicalize_for(999).unwrap();
         assert_eq!(canon.approver_count(), 2);
         assert!((canon.support() - 1.0).abs() < 1e-9);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // #216 — fail-closed claim-binding (plan-v0 K-1/K-2 probe'ları;
+    // kimlik alanları TAM eşitlik — "is_err değil, DOĞRU ret kimliği")
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn foreign_claim_event_rejected() {
+        // K-1 CE1 (#216 asıl ihlali — issue reviewer tablosu birebir): actor 200'ün
+        // yabancı-claim MergeCommit 1.0'ı eskiden actor-eksenli seçimle temsil olup
+        // support'u 1.8'e şişiriyordu (Satisfied); artık operational fault.
+        // Referans: yalnız-C=1 kanıtları Held(1.2) ÜRETİRDİ — kirli omega ise Err.
+        let claim = claim_with_author(100); // id = 1
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "PR#1", WitnessKind::CoAuthored, 200, 1, 0.4),
+            ev_w(2, "merge-xyz", WitnessKind::MergeCommit, 200, 2, 1.0), // yabancı C=2!
+            ev_w(3, "PR#2", WitnessKind::PRMerged, 300, 1, 0.8),
+        ]);
+        let err = evaluate(&claim, &omega).unwrap_err();
+        assert_eq!(
+            err,
+            WitnessEvaluationError::ForeignClaimEvidence {
+                event_id: 2,
+                evidence_claim: 2,
+                expected_claim: 1,
+            },
+            "kimlik alanları TAM eşitlik"
+        );
+    }
+
+    #[test]
+    fn author_foreign_claim_also_rejected() {
+        // K-1 CE2 (iki-aşamalı): (a) önkoşül — canonicalize_for author'un olayını
+        // inv #1 ile dışlar (Q1/Q2'ye GİRMEZ); (b) evaluate YİNE DE RED —
+        // küme-özellik: author-filtre kaçışı DEĞİL.
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "self-foreign", WitnessKind::MergeCommit, 100, 2, 1.0), // author + yabancı
+            ev_w(2, "PR#1", WitnessKind::MergeCommit, 200, 1, 1.0),
+            ev_w(3, "PR#2", WitnessKind::MergeCommit, 300, 1, 1.0),
+        ]);
+        // (a) önkoşül kanıtı: author olayı kanonik kümede YOK (inv #1).
+        let canon = omega.canonicalize_for(100).unwrap();
+        assert!(!canon.events().iter().any(|e| e.actor == 100));
+        assert_eq!(canon.approver_count(), 2);
+        // (b) evaluate → RED — dışlanmış olay bile omega sözleşmesini ihlal eder.
+        let err = evaluate(&claim, &omega).unwrap_err();
+        assert_eq!(
+            err,
+            WitnessEvaluationError::ForeignClaimEvidence {
+                event_id: 1,
+                evidence_claim: 2,
+                expected_claim: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn dedup_doomed_foreign_claim_rejected() {
+        // K-1 CE3 (iki-aşamalı — pilotun en güçlü testi): (a) önkoşül — B,
+        // actor-eksenli seçimle GERÇEKTEN elenir (Canonicalize(Ω) ∌ e_foreign);
+        // (b) evaluate YİNE DE RED — olayın sonuç kümesinde olmaması, ham kümedeki
+        // protokol ihlalini geçersiz KILMAZ.
+        let a = ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, 1.0);
+        let b = ev_w(2, "PR#1", WitnessKind::CoAuthored, 200, 2, 0.4); // yabancı + zayıf
+        let c = ev_w(3, "PR#2", WitnessKind::PRMerged, 300, 1, 0.8);
+        let omega = WitnessSet::new(vec![a, b, c]);
+        // (a) önkoşül kanıtı: dedup B'yi eleyip A'yı korur (weight 1.0 > 0.4).
+        let canon = omega.canonicalize_for(100).unwrap();
+        assert!(canon.events().iter().any(|e| e.id == 1), "A korunur");
+        assert!(!canon.events().iter().any(|e| e.id == 2), "B elenir");
+        // (b) evaluate → RED.
+        let err = evaluate(&claim_with_author(100), &omega).unwrap_err();
+        assert_eq!(
+            err,
+            WitnessEvaluationError::ForeignClaimEvidence {
+                event_id: 2,
+                evidence_claim: 2,
+                expected_claim: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn foreign_claim_precedes_invalid_numerics() {
+        // K-1 CE4 (tur-1 P1-1): sıra sözleşmesi binding → numerics. Tek omega'da
+        // HEM yabancı claim HEM NaN weight; İKİ girdi sıralamasında da aynı
+        // ForeignClaimEvidence (Numerics DEĞİL; kimlik sıralamadan bağımsız).
+        let foreign = ev_w(7, "PR#7", WitnessKind::MergeCommit, 300, 2, 1.0);
+        let nan = ev_w(1, "PR#1", WitnessKind::MergeCommit, 200, 1, f64::NAN);
+        for events in [vec![foreign.clone(), nan.clone()], vec![nan, foreign]] {
+            let omega = WitnessSet::new(events);
+            let err = evaluate(&claim_with_author(100), &omega).unwrap_err();
+            assert_eq!(
+                err,
+                WitnessEvaluationError::ForeignClaimEvidence {
+                    event_id: 7,
+                    evidence_claim: 2,
+                    expected_claim: 1,
+                },
+                "binding numerics'ten ÖNCE — girdi sırasından bağımsız"
+            );
+        }
+    }
+
+    #[test]
+    fn claim_bound_reference_held_semantics() {
+        // K-2 CE1 (bilinçli-geçerli — issue referans satırı): yalnız C=1 kanıtları
+        // → Held(QuorumInsufficient); support = 0.4 + 0.8 ≈ 1.2 (f64: tam 1.2
+        // DEĞİL — 1e-9 tolerans).
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![
+            ev_w(1, "PR#1", WitnessKind::CoAuthored, 200, 1, 0.4),
+            ev_w(3, "PR#2", WitnessKind::PRMerged, 300, 1, 0.8),
+        ]);
+        match evaluate(&claim, &omega).unwrap() {
+            WitnessDisposition::Held { reason, snapshot } => {
+                assert!(
+                    matches!(
+                        &reason,
+                        WitnessHoldReason::QuorumInsufficient { support, threshold }
+                            if (support - 1.2).abs() < 1e-9 && *threshold == 1.5
+                    ),
+                    "got {reason:?}"
+                );
+                assert_eq!(snapshot.approvers, 2);
+                assert_eq!(snapshot.required_approvers, 2);
+                assert!((snapshot.support - 1.2).abs() < 1e-9);
+            }
+            other => panic!("Held bekleniyordu (referans semantiği): {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_omega_default_quorum_held() {
+        // K-2 CE2 (bilinçli-geçerli — Production yolu): boş küme vacuous-bound;
+        // default quorum (2, 1.5) → Held(MinApproversNotMet). Navigator üretim
+        // commit'i boş set verir — davranış DEĞİŞMEZ.
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![]);
+        let result = evaluate(&claim, &omega).unwrap();
+        assert!(matches!(
+            result,
+            WitnessDisposition::Held {
+                reason: WitnessHoldReason::MinApproversNotMet {
+                    distinct: 0,
+                    required: 2
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn empty_omega_zero_quorum_satisfied() {
+        // K-2 CE3 (bilinçli-geçerli — HarnessAutoApprove): boş küme + (0, 0.0)
+        // → Satisfied (#217 harness_zero_quorum_remains_valid sürekliliği —
+        // claim-binding boş kümeyi engelleMEZ).
+        let claim = claim_with_author(100);
+        let omega = WitnessSet::new(vec![]).with_quorum(0, 0.0);
+        assert!(matches!(
+            evaluate(&claim, &omega).unwrap(),
+            WitnessDisposition::Satisfied { .. }
+        ));
     }
 }
